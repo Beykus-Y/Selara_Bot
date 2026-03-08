@@ -165,6 +165,43 @@ async def test_repository_lists_user_admin_and_activity_chats() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_repository_lists_user_manageable_game_chats() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    user = UserSnapshot(telegram_user_id=777, username="u777", first_name="Game", last_name="Host", is_bot=False)
+    game_chat = ChatSnapshot(telegram_chat_id=-11001, chat_type="group", title="Game Chat")
+    settings_chat = ChatSnapshot(telegram_chat_id=-11002, chat_type="group", title="Settings Chat")
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=game_chat, user=user, event_at=datetime(2026, 2, 12, 13, 0, tzinfo=timezone.utc))
+        await repo.upsert_activity(chat=settings_chat, user=user, event_at=datetime(2026, 2, 12, 14, 0, tzinfo=timezone.utc))
+
+        await repo.set_bot_role(chat=game_chat, target=user, role="senior_admin", assigned_by_user_id=user.telegram_user_id)
+        await repo.set_bot_role(chat=settings_chat, target=user, role="helper", assigned_by_user_id=user.telegram_user_id)
+
+        manageable_game_chats = await repo.list_user_manageable_game_chats(user_id=user.telegram_user_id)
+        assert len(manageable_game_chats) == 1
+        assert manageable_game_chats[0].chat_id == game_chat.telegram_chat_id
+        assert manageable_game_chats[0].bot_role == "senior_admin"
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repository_pair_to_marriage_transition_and_action_usage() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:

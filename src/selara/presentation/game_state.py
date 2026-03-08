@@ -1612,7 +1612,12 @@ class GameStore:
             candidates = [
                 game
                 for game in self._by_id.values()
-                if game.kind in {"spy", "mafia", "whoami"} and game.roles and user_id in game.roles
+                if (
+                    game.kind in {"spy", "mafia", "whoami"}
+                    and game.status == "started"
+                    and game.roles
+                    and user_id in game.roles
+                )
             ]
             if not candidates:
                 return None, None

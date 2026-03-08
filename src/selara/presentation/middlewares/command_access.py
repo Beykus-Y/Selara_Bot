@@ -49,7 +49,7 @@ class CommandAccessMiddleware(BaseMiddleware):
             last_name=event.from_user.last_name,
             is_bot=bool(event.from_user.is_bot),
             command_key=command_key,
-            bootstrap_if_missing_owner=True,
+            bootstrap_if_missing_owner=False,
         )
         if allowed:
             return await handler(event, data)

@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from selara.application.use_cases.economy.grant_game_rewards import execute as grant_game_rewards
 from selara.core.chat_settings import ChatSettings
-from selara.domain.entities import ChatSnapshot
+from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.presentation.auth import has_permission
 from selara.presentation.game_state import (
     GAME_DEFINITIONS,
@@ -128,6 +128,96 @@ def _chat_settings_to_values(chat_settings: ChatSettings) -> dict[str, object]:
         "economy_negative_event_chance_percent": chat_settings.economy_negative_event_chance_percent,
         "economy_negative_event_loss_percent": chat_settings.economy_negative_event_loss_percent,
     }
+
+
+async def _actor_can_manage_games(
+    activity_repo,
+    *,
+    chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+    user: UserSnapshot,
+    bootstrap_if_missing_owner: bool = False,
+) -> bool:
+    allowed, _, _ = await has_permission(
+        activity_repo,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        chat_title=chat_title,
+        user_id=user.telegram_user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        is_bot=user.is_bot,
+        permission="manage_games",
+        bootstrap_if_missing_owner=bootstrap_if_missing_owner,
+    )
+    return allowed
+
+
+async def _actor_can_start_game(
+    activity_repo,
+    *,
+    game: GroupGame,
+    chat_type: str,
+    chat_title: str | None,
+    user: UserSnapshot,
+    bootstrap_if_missing_owner: bool = False,
+) -> bool:
+    if game.owner_user_id == user.telegram_user_id:
+        return True
+    return await _actor_can_manage_games(
+        activity_repo,
+        chat_id=game.chat_id,
+        chat_type=chat_type,
+        chat_title=chat_title,
+        user=user,
+        bootstrap_if_missing_owner=bootstrap_if_missing_owner,
+    )
+
+
+async def _persist_mafia_reveal_default(
+    activity_repo,
+    *,
+    chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+    chat_settings: ChatSettings,
+    reveal_eliminated_role: bool,
+) -> None:
+    values = _chat_settings_to_values(chat_settings)
+    values["mafia_reveal_eliminated_role"] = reveal_eliminated_role
+    chat = ChatSnapshot(
+        telegram_chat_id=chat_id,
+        chat_type=chat_type,
+        title=chat_title,
+    )
+    try:
+        await activity_repo.upsert_chat_settings(chat=chat, values=values)
+    except Exception:
+        logger.exception(
+            "Failed to persist lobby mafia setting",
+            extra={"chat_id": chat_id},
+        )
+
+
+def _build_private_delivery_warning_text(failed_dm: int) -> str:
+    return (
+        f"Не удалось отправить ЛС для {failed_dm} игрок(ов). "
+        "Им нужно открыть диалог с ботом через кнопку роли или карточки."
+    )
+
+
+async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_dm: int) -> None:
+    if failed_dm <= 0:
+        return
+    try:
+        await bot.send_message(chat_id=game.chat_id, text=_build_private_delivery_warning_text(failed_dm))
+    except Exception:
+        logger.exception(
+            "Failed to deliver private role warning",
+            extra={"chat_id": game.chat_id, "game_id": game.game_id, "failed_dm": failed_dm},
+        )
 
 
 def _user_label(user_id: int, username: str | None, first_name: str | None, last_name: str | None) -> str:
@@ -2785,6 +2875,25 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
     if message.from_user is None:
         return
 
+    actor = UserSnapshot(
+        telegram_user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+    can_manage_games = await _actor_can_manage_games(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user=actor,
+        bootstrap_if_missing_owner=False,
+    )
+    if not can_manage_games:
+        await message.answer("Недостаточно прав для запуска игр в этом чате.")
+        return
+
     explicit_kind = _parse_kind(command.args)
     if explicit_kind is None:
         await message.answer(
@@ -2862,6 +2971,25 @@ async def game_new_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         await query.answer("Эта игра больше недоступна для новых запусков.", show_alert=True)
         return
 
+    actor = UserSnapshot(
+        telegram_user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
+    can_manage_games = await _actor_can_manage_games(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+        user=actor,
+        bootstrap_if_missing_owner=False,
+    )
+    if not can_manage_games:
+        await query.answer("Недостаточно прав для запуска игр в этом чате.", show_alert=True)
+        return
+
     owner_label = await _resolve_chat_player_label(
         activity_repo,
         chat_id=query.message.chat.id,
@@ -2914,18 +3042,20 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     actor_id = query.from_user.id
-    allowed, _, _ = await has_permission(
-        activity_repo,
-        chat_id=game.chat_id,
-        chat_type=query.message.chat.type,
-        chat_title=query.message.chat.title,
-        user_id=actor_id,
+    actor = UserSnapshot(
+        telegram_user_id=query.from_user.id,
         username=query.from_user.username,
         first_name=query.from_user.first_name,
         last_name=query.from_user.last_name,
         is_bot=bool(query.from_user.is_bot),
-        permission="manage_games",
-        bootstrap_if_missing_owner=True,
+    )
+    allowed = await _actor_can_manage_games(
+        activity_repo,
+        chat_id=game.chat_id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+        user=actor,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
@@ -2947,18 +3077,14 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
             await query.answer(error, show_alert=False)
             return
 
-        values = _chat_settings_to_values(chat_settings)
-        values["mafia_reveal_eliminated_role"] = updated_game.reveal_eliminated_role
-        chat = ChatSnapshot(
-            telegram_chat_id=query.message.chat.id,
+        await _persist_mafia_reveal_default(
+            activity_repo,
+            chat_id=query.message.chat.id,
             chat_type=query.message.chat.type,
-            title=query.message.chat.title,
+            chat_title=query.message.chat.title,
+            chat_settings=chat_settings,
+            reveal_eliminated_role=updated_game.reveal_eliminated_role,
         )
-
-        try:
-            await activity_repo.upsert_chat_settings(chat=chat, values=values)
-        except Exception:
-            logger.exception("Failed to persist lobby mafia setting", extra={"chat_id": game.chat_id, "game_id": game.game_id})
 
         await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
         mode = "показывать" if updated_game.reveal_eliminated_role else "скрывать"
@@ -3097,6 +3223,13 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     actor_id = query.from_user.id
+    actor = UserSnapshot(
+        telegram_user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
     actor_label = await _resolve_chat_player_label(
         activity_repo,
         chat_id=game.chat_id,
@@ -3124,40 +3257,27 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     if action in {"cancel", "advance", "reveal"}:
-        allowed, _, _ = await has_permission(
+        allowed = await _actor_can_manage_games(
             activity_repo,
             chat_id=game.chat_id,
             chat_type=query.message.chat.type,
             chat_title=query.message.chat.title,
-            user_id=actor_id,
-            username=query.from_user.username,
-            first_name=query.from_user.first_name,
-            last_name=query.from_user.last_name,
-            is_bot=bool(query.from_user.is_bot),
-            permission="manage_games",
-            bootstrap_if_missing_owner=True,
+            user=actor,
+            bootstrap_if_missing_owner=False,
         )
         if not allowed:
             await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
             return
 
     if action == "start":
-        can_start = actor_id == game.owner_user_id
-        if not can_start:
-            allowed, _, _ = await has_permission(
-                activity_repo,
-                chat_id=game.chat_id,
-                chat_type=query.message.chat.type,
-                chat_title=query.message.chat.title,
-                user_id=actor_id,
-                username=query.from_user.username,
-                first_name=query.from_user.first_name,
-                last_name=query.from_user.last_name,
-                is_bot=bool(query.from_user.is_bot),
-                permission="manage_games",
-                bootstrap_if_missing_owner=True,
-            )
-            can_start = allowed
+        can_start = await _actor_can_start_game(
+            activity_repo,
+            game=game,
+            chat_type=query.message.chat.type,
+            chat_title=query.message.chat.title,
+            user=actor,
+            bootstrap_if_missing_owner=False,
+        )
         if not can_start:
             await query.answer("Старт может нажать создатель лобби или участник с правом управления играми.", show_alert=True)
             return
@@ -3179,10 +3299,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if started_game.kind in {"spy", "mafia", "bunker", "whoami"}:
             failed_dm = await _send_roles_to_private(bot, started_game)
             if failed_dm > 0:
-                await query.message.answer(
-                    f"Не удалось отправить ЛС для {failed_dm} игрок(ов). "
-                    "Им нужно открыть диалог с ботом через кнопку роли или карточки."
-                )
+                await _notify_private_delivery_warning(bot, started_game, failed_dm)
 
         if started_game.kind == "mafia":
             _schedule_phase_timer(bot, started_game, chat_settings)

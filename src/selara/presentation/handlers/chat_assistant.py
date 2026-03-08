@@ -445,7 +445,7 @@ async def _require_manage_settings(message: Message, activity_repo) -> bool:
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_settings",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав для управления этой функцией.")

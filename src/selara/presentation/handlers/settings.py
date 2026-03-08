@@ -55,7 +55,7 @@ async def setcfg_command(
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_settings",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав для изменения настроек этой группы.")
@@ -116,7 +116,7 @@ async def setrank_command(message: Message, command: CommandObject, activity_rep
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_command_access",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав для настройки рангов команд.")
@@ -210,7 +210,7 @@ async def ranks_command(message: Message, activity_repo) -> None:
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_command_access",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав для просмотра рангов команд.")

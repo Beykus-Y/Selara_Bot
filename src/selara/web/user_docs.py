@@ -164,6 +164,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             ),
             triggers=("игра",),
             notes=(
+                "Для запуска нужен доступ `manage_games` в конкретном чате.",
                 "Для новых запусков доступны `spy`, `whoami`, `mafia`, `dice`, `quiz`, `bredovukha`, `bunker`.",
                 "Режим `number` больше не запускается заново, но может встретиться как уже идущая старая партия.",
             ),

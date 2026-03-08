@@ -2029,7 +2029,12 @@ class SqlAlchemyActivityRepository:
         items.sort(key=lambda item: (-role_ranks.get(item[1], -10_000), item[0].telegram_user_id))
         return items
 
-    async def list_user_admin_chats(self, *, user_id: int) -> list[UserChatOverview]:
+    async def _list_user_role_based_chats(
+        self,
+        *,
+        user_id: int,
+        required_permissions: set[str],
+    ) -> list[UserChatOverview]:
         stmt = (
             select(
                 ChatModel.telegram_chat_id,
@@ -2069,11 +2074,7 @@ class SqlAlchemyActivityRepository:
             if role_def is None:
                 continue
             permissions = set(role_def.permissions)
-            can_manage = any(
-                perm in permissions
-                for perm in ("manage_settings", "manage_command_access", "manage_roles", "manage_role_templates")
-            )
-            if not can_manage:
+            if not required_permissions.intersection(permissions):
                 continue
             items.append(
                 (
@@ -2097,6 +2098,18 @@ class SqlAlchemyActivityRepository:
             )
         )
         return [item[1] for item in items]
+
+    async def list_user_admin_chats(self, *, user_id: int) -> list[UserChatOverview]:
+        return await self._list_user_role_based_chats(
+            user_id=user_id,
+            required_permissions={"manage_settings", "manage_command_access", "manage_roles", "manage_role_templates"},
+        )
+
+    async def list_user_manageable_game_chats(self, *, user_id: int) -> list[UserChatOverview]:
+        return await self._list_user_role_based_chats(
+            user_id=user_id,
+            required_permissions={"manage_games"},
+        )
 
     async def list_user_activity_chats(self, *, user_id: int, limit: int = 50) -> list[UserChatOverview]:
         normalized_limit = max(1, min(int(limit), 200))

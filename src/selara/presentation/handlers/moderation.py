@@ -326,7 +326,7 @@ async def _apply_moderation_action(
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         command_key=command_name,
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not command_allowed:
         actor_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=actor_role_code)
@@ -352,7 +352,7 @@ async def _apply_moderation_action(
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="moderate_users",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed or actor_role is None:
         await message.answer("Недостаточно прав для модерации.")

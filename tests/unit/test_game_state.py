@@ -169,6 +169,39 @@ async def test_list_active_games_filters_finished_and_chat_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_latest_role_game_ignores_finished_secret_role_games() -> None:
+    store = GameStore()
+    game, error = await store.create_lobby(
+        kind="whoami",
+        chat_id=303,
+        chat_title="whoami",
+        owner_user_id=1,
+        owner_label="u1",
+        reveal_eliminated_role=True,
+    )
+    assert error is None
+    assert game is not None
+
+    joined_game, status = await store.join(game_id=game.game_id, user_id=2, user_label="u2")
+    assert joined_game is not None
+    assert status == "joined"
+    joined_game, status = await store.join(game_id=game.game_id, user_id=3, user_label="u3")
+    assert joined_game is not None
+    assert status == "joined"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    assert started_game is not None
+    assert started_game.roles.get(1)
+
+    await store.finish(game_id=game.game_id, winner_text="done")
+
+    latest_game, role = await store.get_latest_role_game_for_user(user_id=1)
+    assert latest_game is None
+    assert role is None
+
+
+@pytest.mark.asyncio
 async def test_mafia_role_assignment_uses_extended_role_pool() -> None:
     store = GameStore()
     game, error = await store.create_lobby(

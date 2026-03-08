@@ -1579,7 +1579,7 @@ async def _enforce_command_access(message: Message, activity_repo, *, command_ke
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         command_key=command_key,
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if allowed:
         return True
@@ -1619,7 +1619,7 @@ async def _handle_command_rank_phrase(message: Message, activity_repo, text: str
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_command_access",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав. Нужен доступ к настройке рангов команд.")
@@ -1700,7 +1700,7 @@ async def _send_announcement(message: Message, activity_repo, body: str, bot: Bo
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="announce",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if not allowed:
         await message.answer("Недостаточно прав для отправки объявления.")

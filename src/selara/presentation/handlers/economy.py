@@ -1463,7 +1463,7 @@ async def auction_command(
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         permission="manage_settings",
-        bootstrap_if_missing_owner=True,
+        bootstrap_if_missing_owner=False,
     )
     if action == "cancel":
         if not allowed_manage:

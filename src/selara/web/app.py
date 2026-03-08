@@ -475,11 +475,71 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         activity_groups = await activity_repo.list_user_activity_chats(user_id=user_id, limit=200)
         return admin_groups, activity_groups
 
-    def _merge_visible_groups(*, admin_groups: list[UserChatOverview], activity_groups: list[UserChatOverview]) -> dict[int, UserChatOverview]:
-        merged: dict[int, UserChatOverview] = {group.chat_id: group for group in activity_groups}
-        for group in admin_groups:
-            merged[group.chat_id] = group
+    def _merge_visible_groups(*groups: list[UserChatOverview]) -> dict[int, UserChatOverview]:
+        merged: dict[int, UserChatOverview] = {}
+        for group_list in groups:
+            for group in group_list:
+                merged[group.chat_id] = group
         return merged
+
+    def _group_overview_from_game(game: GroupGame) -> UserChatOverview:
+        return UserChatOverview(
+            chat_id=game.chat_id,
+            chat_type="group",
+            chat_title=game.chat_title,
+            bot_role=None,
+            message_count=None,
+            last_seen_at=None,
+        )
+
+    def _attach_games_to_visible_groups(
+        *,
+        visible_groups: dict[int, UserChatOverview],
+        games: list[GroupGame],
+        user_id: int,
+        manageable_chat_ids: set[int],
+    ) -> None:
+        for game in games:
+            if game.chat_id in visible_groups:
+                continue
+            if game.chat_id in manageable_chat_ids or game.owner_user_id == user_id or user_id in game.players:
+                visible_groups[game.chat_id] = _group_overview_from_game(game)
+
+    async def _collect_game_groups(
+        activity_repo: SqlAlchemyActivityRepository,
+        *,
+        user: UserSnapshot,
+        extra_games: tuple[GroupGame, ...] = (),
+        recent_limit: int = 6,
+    ) -> tuple[dict[int, UserChatOverview], list[UserChatOverview], set[int], list[GroupGame], list[GroupGame]]:
+        activity_groups = await activity_repo.list_user_activity_chats(user_id=user.telegram_user_id, limit=200)
+        manageable_chats = await activity_repo.list_user_manageable_game_chats(user_id=user.telegram_user_id)
+        manageable_chat_ids = {chat.chat_id for chat in manageable_chats}
+        active_games = await GAME_STORE.list_active_games()
+        recent_games = await GAME_STORE.list_recent_games_for_user(
+            user_id=user.telegram_user_id,
+            limit=max(1, recent_limit),
+        )
+        visible_groups = _merge_visible_groups(activity_groups, manageable_chats)
+        _attach_games_to_visible_groups(
+            visible_groups=visible_groups,
+            games=active_games,
+            user_id=user.telegram_user_id,
+            manageable_chat_ids=manageable_chat_ids,
+        )
+        _attach_games_to_visible_groups(
+            visible_groups=visible_groups,
+            games=recent_games,
+            user_id=user.telegram_user_id,
+            manageable_chat_ids=manageable_chat_ids,
+        )
+        _attach_games_to_visible_groups(
+            visible_groups=visible_groups,
+            games=[game for game in extra_games if game is not None],
+            user_id=user.telegram_user_id,
+            manageable_chat_ids=manageable_chat_ids,
+        )
+        return visible_groups, manageable_chats, manageable_chat_ids, active_games, recent_games
 
     async def _can_manage_games(
         activity_repo: SqlAlchemyActivityRepository,
@@ -487,20 +547,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         user: UserSnapshot,
         chat: UserChatOverview,
     ) -> bool:
-        allowed, _, _ = await has_permission(
+        return await game_router_module._actor_can_manage_games(
             activity_repo,
             chat_id=chat.chat_id,
             chat_type=chat.chat_type,
             chat_title=chat.chat_title,
-            user_id=user.telegram_user_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            is_bot=user.is_bot,
-            permission="manage_games",
-            bootstrap_if_missing_owner=True,
+            user=user,
+            bootstrap_if_missing_owner=False,
         )
-        return allowed
 
     async def _chat_settings_for_game(activity_repo: SqlAlchemyActivityRepository, *, chat_id: int):
         return await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
@@ -1532,18 +1586,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     async def _collect_manageable_game_chats(
         activity_repo: SqlAlchemyActivityRepository,
         *,
-        user: UserSnapshot,
-        visible_groups: dict[int, UserChatOverview],
+        user_id: int,
     ) -> list[UserChatOverview]:
-        manageable: list[UserChatOverview] = []
-        ordered_chats = sorted(
-            visible_groups.values(),
-            key=lambda chat: ((chat.chat_title or f"chat:{chat.chat_id}").lower(), chat.chat_id),
-        )
-        for chat in ordered_chats:
-            if await _can_manage_games(activity_repo, user=user, chat=chat):
-                manageable.append(chat)
-        return manageable
+        return await activity_repo.list_user_manageable_game_chats(user_id=user_id)
 
     def _build_bred_reveal_card(game: GroupGame) -> dict[str, str] | None:
         if game.kind != "bredovukha":
@@ -1901,17 +1946,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         *,
         user: UserSnapshot,
         visible_groups: dict[int, UserChatOverview],
+        active_games: list[GroupGame],
+        manageable_chat_ids: set[int],
     ) -> list[dict[str, object]]:
-        active_games = await GAME_STORE.list_active_games(chat_ids=set(visible_groups.keys()))
         cards: list[dict[str, object]] = []
         for game in active_games:
-            chat = visible_groups.get(game.chat_id)
-            if chat is None:
-                continue
-            can_manage_games = await _can_manage_games(activity_repo, user=user, chat=chat)
-            current_chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
             is_member = user.telegram_user_id in game.players
             is_owner = game.owner_user_id == user.telegram_user_id
+            can_manage_games = game.chat_id in manageable_chat_ids
+            if not (is_member or is_owner or can_manage_games):
+                continue
+            chat = visible_groups.get(game.chat_id) or _group_overview_from_game(game)
+            current_chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
             board_buttons = _keyboard_to_buttons(
                 game_router_module._build_game_controls(game=game, bot_username=bot_username),
                 game=game,
@@ -2043,22 +2089,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         *,
         user: UserSnapshot,
     ) -> dict[str, object]:
-        admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-        visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
-        manageable_chats = await _collect_manageable_game_chats(
+        visible_groups, manageable_chats, manageable_chat_ids, active_games, recent_games_raw = await _collect_game_groups(
             activity_repo,
             user=user,
-            visible_groups=visible_groups,
+            recent_limit=6,
         )
         game_cards = await _build_active_game_cards(
             activity_repo,
             user=user,
             visible_groups=visible_groups,
-        )
-        recent_games_raw = await GAME_STORE.list_recent_games_for_user(
-            user_id=user.telegram_user_id,
-            chat_ids=set(visible_groups.keys()),
-            limit=6,
+            active_games=active_games,
+            manageable_chat_ids=manageable_chat_ids,
         )
         recent_game_cards: list[dict[str, object]] = []
         for game in recent_games_raw:
@@ -2150,7 +2191,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         *,
         bot: Bot,
         game: GroupGame,
+        chat: UserChatOverview,
         user: UserSnapshot,
+        activity_repo: SqlAlchemyActivityRepository,
         chat_settings,
         actor_label: str,
         can_manage_games: bool,
@@ -2176,6 +2219,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return False, "Игра не найдена."
                 if error:
                     return False, error
+                await game_router_module._persist_mafia_reveal_default(
+                    activity_repo,
+                    chat_id=chat.chat_id,
+                    chat_type=chat.chat_type,
+                    chat_title=chat.chat_title,
+                    chat_settings=chat_settings,
+                    reveal_eliminated_role=updated_game.reveal_eliminated_role,
+                )
                 await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
                 return True, "Режим показа роли выбывшего обновлён."
 
@@ -2244,7 +2295,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return True, "Вы присоединились к игре."
 
             if action == "start":
-                can_start = can_manage_games or game.owner_user_id == user.telegram_user_id
+                can_start = await game_router_module._actor_can_start_game(
+                    activity_repo,
+                    game=game,
+                    chat_type=chat.chat_type,
+                    chat_title=chat.chat_title,
+                    user=user,
+                    bootstrap_if_missing_owner=False,
+                )
                 if not can_start:
                     return False, "Старт доступен создателю лобби или ведущему с правом manage_games."
                 started_game, error = await GAME_STORE.start(
@@ -2257,8 +2315,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return False, error
 
                 await game_router_module._safe_edit_or_send_game_board(bot, started_game, chat_settings)
+                success_message = "Игра запущена."
                 if started_game.kind in {"spy", "mafia", "bunker", "whoami"}:
-                    await game_router_module._send_roles_to_private(bot, started_game)
+                    failed_dm = await game_router_module._send_roles_to_private(bot, started_game)
+                    if failed_dm > 0:
+                        await game_router_module._notify_private_delivery_warning(bot, started_game, failed_dm)
+                        success_message = (
+                            f"{success_message} {game_router_module._build_private_delivery_warning_text(failed_dm)}"
+                        )
                 if started_game.kind == "mafia":
                     game_router_module._schedule_phase_timer(bot, started_game, chat_settings)
                     await game_router_module._notify_mafia_night_actions(bot, started_game)
@@ -2270,25 +2334,31 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             night_seconds=chat_settings.mafia_night_seconds,
                         ),
                     )
-                elif started_game.kind == "spy":
+                    return True, success_message
+                if started_game.kind == "spy":
                     await game_router_module._send_game_feed_event(
                         bot,
                         started_game,
                         text=game_router_module.build_spy_start_text(category=_spy_category_label(started_game)),
                     )
-                elif started_game.kind == "whoami":
+                    return True, success_message
+                if started_game.kind == "whoami":
                     await game_router_module._send_game_feed_event(
                         bot,
                         started_game,
                         text=game_router_module.build_whoami_start_text(category=started_game.whoami_category or "случайная"),
                     )
-                elif started_game.kind == "number":
+                    return True, success_message
+                if started_game.kind == "number":
                     await game_router_module._send_game_feed_event(bot, started_game, text=game_router_module.build_number_start_text())
-                elif started_game.kind == "dice":
+                    return True, success_message
+                if started_game.kind == "dice":
                     await game_router_module._send_game_feed_event(bot, started_game, text=game_router_module.build_dice_start_text())
-                elif started_game.kind == "quiz":
+                    return True, success_message
+                if started_game.kind == "quiz":
                     await game_router_module._sync_quiz_feed_message(bot, started_game, question_no=1)
-                elif started_game.kind == "bunker":
+                    return True, success_message
+                if started_game.kind == "bunker":
                     await game_router_module._send_game_feed_event(bot, started_game, text=game_router_module.build_bunker_start_text())
                     actor = started_game.players.get(started_game.bunker_current_actor_user_id or 0, "-")
                     await game_router_module._safe_edit_or_send_game_board(
@@ -2298,7 +2368,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         note=f"<b>Первый ход раскрытия:</b> {escape(actor)} раскрывает характеристику в ЛС.",
                     )
                     await game_router_module._notify_bunker_reveal_turn(bot, started_game)
-                return True, "Игра запущена."
+                    return True, success_message
+                return True, success_message
 
             if action in {"cancel", "advance", "reveal"} and not can_manage_games:
                 return False, "Недостаточно прав для управления игрой."
@@ -3067,22 +3138,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             activity_repo = SqlAlchemyActivityRepository(session)
-            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
-            chat = visible_groups.get(chat_id)
+            manageable_chats = await _collect_manageable_game_chats(
+                activity_repo,
+                user_id=user.telegram_user_id,
+            )
+            chat = next((item for item in manageable_chats if item.chat_id == chat_id), None)
             if chat is None:
                 await session.commit()
-                redirect_path = _with_message("/app/games", key="error", text="Этот чат недоступен вашему аккаунту.")
+                redirect_path = _with_message(
+                    "/app/games",
+                    key="error",
+                    text="Недостаточно прав для запуска игры в этом чате.",
+                )
                 if prefers_json:
-                    return _json_result(ok=False, message="Этот чат недоступен вашему аккаунту.", status_code=403, redirect=redirect_path)
-                return _redirect(redirect_path)
-
-            can_manage_games = await _can_manage_games(activity_repo, user=user, chat=chat)
-            if not can_manage_games:
-                await session.commit()
-                redirect_path = _with_message("/app/games", key="error", text="Недостаточно прав для запуска игры в этом чате.")
-                if prefers_json:
-                    return _json_result(ok=False, message="Недостаточно прав для запуска игры в этом чате.", status_code=403, redirect=redirect_path)
+                    return _json_result(
+                        ok=False,
+                        message="Недостаточно прав для запуска игры в этом чате.",
+                        status_code=403,
+                        redirect=redirect_path,
+                    )
                 return _redirect(redirect_path)
 
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
@@ -3153,8 +3227,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
 
             game = await GAME_STORE.get_game(game_id)
             if game is None or game.status == "finished":
@@ -3164,15 +3236,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return _json_result(ok=False, message="Игра не найдена или уже завершена.", status_code=404, redirect=redirect_path)
                 return _redirect(redirect_path)
 
-            chat = visible_groups.get(game.chat_id)
-            if chat is None:
+            visible_groups, _manageable_chats, manageable_chat_ids, _active_games, _recent_games = await _collect_game_groups(
+                activity_repo,
+                user=user,
+                extra_games=(game,),
+                recent_limit=6,
+            )
+            chat = visible_groups.get(game.chat_id) or _group_overview_from_game(game)
+            can_manage_games = game.chat_id in manageable_chat_ids
+            is_member = user.telegram_user_id in game.players or game.owner_user_id == user.telegram_user_id
+            if not (is_member or can_manage_games):
                 await session.commit()
                 redirect_path = _with_message("/app/games", key="error", text="Эта игра недоступна вашему аккаунту.")
                 if prefers_json:
                     return _json_result(ok=False, message="Эта игра недоступна вашему аккаунту.", status_code=403, redirect=redirect_path)
                 return _redirect(redirect_path)
 
-            can_manage_games = await _can_manage_games(activity_repo, user=user, chat=chat)
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=game.chat_id)
             actor_label = await game_router_module._resolve_chat_player_label(
                 activity_repo,
@@ -3192,7 +3271,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     callback_data,
                     bot=bot,
                     game=game,
+                    chat=chat,
                     user=user,
+                    activity_repo=activity_repo,
                     chat_settings=chat_settings,
                     actor_label=actor_label,
                     can_manage_games=can_manage_games,
@@ -3567,7 +3648,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if chat_id is not None:
                 activity_repo = SqlAlchemyActivityRepository(session)
                 admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-                visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
+                visible_groups = _merge_visible_groups(admin_groups, activity_groups)
                 chat = visible_groups.get(chat_id)
             await session.commit()
 
@@ -3595,7 +3676,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if chat_id is not None:
                 activity_repo = SqlAlchemyActivityRepository(session)
                 admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-                visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
+                visible_groups = _merge_visible_groups(admin_groups, activity_groups)
                 chat = visible_groups.get(chat_id)
             await session.commit()
 
@@ -3621,7 +3702,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
+            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
@@ -3668,7 +3749,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
+            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
@@ -3749,7 +3830,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups=admin_groups, activity_groups=activity_groups)
+            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
