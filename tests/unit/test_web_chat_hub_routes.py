@@ -1,0 +1,237 @@
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from selara.core.chat_settings import ChatSettings, default_chat_settings
+from selara.core.config import Settings
+from selara.domain.entities import ChatActivitySummary, LeaderboardItem, UserChatOverview, UserSnapshot
+from selara.web import app as web_app_module
+
+
+def _settings() -> Settings:
+    return Settings.model_validate(
+        {
+            "BOT_TOKEN": "123456:TEST",
+            "DATABASE_URL": "postgresql+asyncpg://user:pass@localhost:5432/selara_test",
+            "BOT_USERNAME": "selara_test_bot",
+            "WEB_AUTH_SECRET": "secret",
+            "WEB_BASE_URL": "http://127.0.0.1:8080",
+        }
+    )
+
+
+def _overview(chat_id: int, title: str) -> UserChatOverview:
+    return UserChatOverview(
+        chat_id=chat_id,
+        chat_type="group",
+        chat_title=title,
+        bot_role=None,
+        message_count=None,
+        last_seen_at=None,
+    )
+
+
+@dataclass
+class ChatHubState:
+    settings: Settings
+    user: UserSnapshot
+    activity_groups: list[UserChatOverview] = field(default_factory=list)
+    admin_groups: list[UserChatOverview] = field(default_factory=list)
+    chat_settings_by_chat: dict[int, ChatSettings] = field(default_factory=dict)
+    summaries: dict[int, ChatActivitySummary] = field(default_factory=dict)
+    leaderboards: dict[tuple[int, str, str], list[LeaderboardItem]] = field(default_factory=dict)
+    daily_activity: list[dict[str, object]] = field(default_factory=list)
+    richest_payload: dict[str, object] | None = None
+
+
+class FakeActivityRepo:
+    def __init__(self, state: ChatHubState) -> None:
+        self._state = state
+
+    async def list_user_admin_chats(self, *, user_id: int):
+        return list(self._state.admin_groups)
+
+    async def list_user_activity_chats(self, *, user_id: int, limit: int = 50):
+        return list(self._state.activity_groups)
+
+    async def get_chat_settings(self, *, chat_id: int):
+        return self._state.chat_settings_by_chat.get(chat_id)
+
+    async def get_chat_activity_summary(self, *, chat_id: int):
+        return self._state.summaries[chat_id]
+
+    async def get_leaderboard(
+        self,
+        *,
+        chat_id: int,
+        mode: str,
+        period: str,
+        since,
+        limit: int,
+        karma_weight: float,
+        activity_weight: float,
+    ):
+        _ = since, limit, karma_weight, activity_weight
+        return list(self._state.leaderboards.get((chat_id, mode, period), []))
+
+
+class FakeEconomyRepo:
+    def __init__(self, state: ChatHubState) -> None:
+        self._state = state
+
+    async def resolve_scope(self, *, mode: str, chat_id: int | None, user_id: int):
+        _ = mode, user_id
+        if chat_id is None:
+            return None, "chat_id is required"
+        return SimpleNamespace(scope_id=f"chat:{chat_id}"), None
+
+
+class FakeWebAuthRepo:
+    def __init__(self, state: ChatHubState) -> None:
+        self._state = state
+
+    async def get_user_by_session(self, *, session_digest: str, now, touch: bool):
+        _ = session_digest, now, touch
+        return self._state.user
+
+
+class DummySession:
+    async def commit(self) -> None:
+        return None
+
+    async def execute(self, stmt):
+        raise AssertionError(f"Unexpected raw SQL execution in test: {stmt!r}")
+
+
+class DummySessionFactory:
+    def __call__(self):
+        session = DummySession()
+
+        class _Manager:
+            async def __aenter__(self_inner):
+                return session
+
+            async def __aexit__(self_inner, exc_type, exc, tb):
+                return False
+
+        return _Manager()
+
+
+@asynccontextmanager
+async def _web_client(monkeypatch, state: ChatHubState):
+    async def _daily_activity(session, *, chat_id: int, days: int = 7):
+        _ = session, chat_id, days
+        return state.daily_activity
+
+    async def _richest_payload(session, *, scope_id: str, chat_id: int):
+        _ = session, scope_id, chat_id
+        return state.richest_payload
+
+    monkeypatch.setattr(web_app_module, "SqlAlchemyActivityRepository", lambda session: FakeActivityRepo(state))
+    monkeypatch.setattr(web_app_module, "SqlAlchemyEconomyRepository", lambda session: FakeEconomyRepo(state))
+    monkeypatch.setattr(web_app_module, "SqlAlchemyWebAuthRepository", lambda session: FakeWebAuthRepo(state))
+    monkeypatch.setattr(web_app_module, "_build_chat_daily_activity_series", _daily_activity)
+    monkeypatch.setattr(web_app_module, "_build_richest_user_payload", _richest_payload)
+
+    app = web_app_module.create_web_app(settings=state.settings, session_factory=DummySessionFactory())
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(state.settings.web_session_cookie_name, "session-token")
+    try:
+        yield client
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+
+def _leaderboard_item(user_id: int, name: str, *, username: str | None, activity: int, karma: int, score: float) -> LeaderboardItem:
+    return LeaderboardItem(
+        user_id=user_id,
+        username=username,
+        first_name=name,
+        last_name=None,
+        activity_value=activity,
+        karma_value=karma,
+        hybrid_score=score,
+        last_seen_at=datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc),
+        chat_display_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_overview_api_returns_live_summary(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        summaries={
+            -1001: ChatActivitySummary(
+                chat_id=-1001,
+                participants_count=12,
+                total_messages=345,
+                last_activity_at=datetime(2026, 3, 9, 10, 30, tzinfo=timezone.utc),
+            )
+        },
+        leaderboards={
+            (-1001, "activity", "day"): [
+                _leaderboard_item(101, "Hero", username="hero", activity=18, karma=4, score=18.0),
+            ]
+        },
+        daily_activity=[
+            {"date": "2026-03-03", "label": "03.03", "messages": 11},
+            {"date": "2026-03-04", "label": "04.03", "messages": 21},
+        ],
+        richest_payload={"label": "Rich User", "balance": 999},
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get("/api/chat/-1001/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["participants_count"] == 12
+    assert payload["daily_activity"][0]["messages"] == 11
+    assert payload["hero_of_day"]["messages"] == 18
+    assert payload["richest_of_day"]["balance"] == 999
+
+
+@pytest.mark.asyncio
+async def test_chat_leaderboard_api_supports_find_me_and_search(monkeypatch) -> None:
+    settings = _settings()
+    rows = [
+        _leaderboard_item(user_id=index, name=f"User{index}", username=f"user{index}", activity=100 - index, karma=index % 7, score=float(100 - index))
+        for index in range(1, 55)
+    ]
+    rows[52] = _leaderboard_item(user_id=77, name="Viewer", username="viewer", activity=42, karma=5, score=42.5)
+    rows[10] = _leaderboard_item(user_id=500, name="Alpha", username="alpha", activity=88, karma=9, score=91.0)
+
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        leaderboards={(-1001, "mix", "all"): rows},
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        find_me_response = await client.get("/api/chat/-1001/leaderboard", params={"mode": "mix", "find_me": "1"})
+        search_response = await client.get("/api/chat/-1001/leaderboard", params={"mode": "mix", "q": "alpha"})
+
+    assert find_me_response.status_code == 200
+    find_me_payload = find_me_response.json()
+    assert find_me_payload["ok"] is True
+    assert find_me_payload["page"] == 2
+    assert find_me_payload["my_rank"] == 53
+    assert any(row["user_id"] == 77 and row["is_me"] for row in find_me_payload["rows"])
+
+    assert search_response.status_code == 200
+    search_payload = search_response.json()
+    assert search_payload["total_rows"] == 1
+    assert search_payload["rows"][0]["user_id"] == 500

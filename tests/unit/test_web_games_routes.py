@@ -328,6 +328,45 @@ async def test_games_page_and_action_work_for_active_member_without_activity(mon
 
 
 @pytest.mark.asyncio
+async def test_games_page_and_join_work_for_visible_chat_member_before_join(monkeypatch) -> None:
+    settings = _settings()
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=111, username="viewer", first_name="View", last_name="Only", is_bot=False),
+        activity_groups=[_overview(-3301, "Visible Lobby Chat")],
+    )
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        game, error = await store.create_lobby(
+            kind="dice",
+            chat_id=-3301,
+            chat_title="Visible Lobby Chat",
+            owner_user_id=1,
+            owner_label="owner",
+            reveal_eliminated_role=True,
+        )
+        assert error is None
+        assert game is not None
+
+        page = await client.get("/app/games")
+        action = await client.post(
+            "/app/games/action",
+            data={"callback_data": f"game:join:{game.game_id}"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(game.game_id)
+
+    assert page.status_code == 200
+    assert "Visible Lobby Chat" in page.text
+    assert action.status_code == 200
+    assert action.json()["ok"] is True
+    assert "присоединились" in action.json()["message"]
+    assert updated_game is not None
+    assert updated_game.players[111] == "@viewer"
+    safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_web_reveal_elim_persists_chat_default(monkeypatch) -> None:
     settings = _settings()
     state = WebRepoState(

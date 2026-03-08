@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -195,6 +196,10 @@ _SOCIAL_ACTION_CANONICAL: dict[str, str] = {
     "praise": "похвалить",
     "fistbump": "дать кулак",
 }
+_INLINE_RP_QUERY_ACTIONS: dict[str, str] = {
+    **_SOCIAL_ACTION_ALIASES,
+    **{action_key: action_key for action_key in _SOCIAL_ACTION_CANONICAL},
+}
 _SOCIAL_ACTION_18_PLUS: set[str] = {"fuck", "seduce", "makeout", "night"}
 _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
     "slap": (
@@ -332,6 +337,8 @@ _INLINE_PM_BOT_USERNAME_CACHE: str | None = None
 _INLINE_PM_PENDING_TTL_SECONDS = 1800
 _INLINE_PM_HISTORY_LIMIT = 10
 _INLINE_PM_RESULTS_LIMIT = 20
+_INLINE_RP_PENDING_TTL_SECONDS = 1800
+_INLINE_RP_HISTORY_LIMIT = 12
 
 
 @dataclass(frozen=True)
@@ -344,6 +351,8 @@ class _InlinePrivatePendingMessage:
 
 
 _INLINE_PM_PENDING: dict[str, _InlinePrivatePendingMessage] = {}
+_INLINE_RP_PENDING: dict[str, tuple[int, UserSnapshot, datetime]] = {}
+_INLINE_RP_RECENT_TARGETS: dict[int, list[UserSnapshot]] = {}
 
 
 @dataclass(frozen=True)
@@ -356,6 +365,12 @@ class _CustomAliasMatch:
 class _InlinePrivatePayload:
     receiver_usernames: tuple[str, ...]
     text: str
+
+
+@dataclass(frozen=True)
+class _InlineRpPayload:
+    action_key: str
+    search_text: str
 
 
 def _now_utc() -> datetime:
@@ -445,6 +460,33 @@ def _parse_inline_private_payload(raw_query: str, *, bot_username: str) -> _Inli
     return _InlinePrivatePayload(receiver_usernames=tuple(receiver_usernames), text=text)
 
 
+def _parse_inline_rp_payload(raw_query: str) -> _InlineRpPayload | None:
+    tokens = [token for token in raw_query.split() if token]
+    if not tokens:
+        return None
+
+    if tokens[0].lower() == "rp":
+        tokens = tokens[1:]
+        if not tokens:
+            return None
+
+    for trigger, action_key in sorted(
+        _INLINE_RP_QUERY_ACTIONS.items(),
+        key=lambda item: (-len(item[0].split()), -len(item[0])),
+    ):
+        trigger_width = len(trigger.split())
+        if len(tokens) < trigger_width:
+            continue
+        prefix = normalize_text_command(" ".join(tokens[:trigger_width]))
+        if prefix != trigger:
+            continue
+        return _InlineRpPayload(
+            action_key=action_key,
+            search_text=" ".join(tokens[trigger_width:]).strip(),
+        )
+    return None
+
+
 async def _resolve_inline_private_receivers(
     activity_repo,
     *,
@@ -506,6 +548,86 @@ def _inline_private_history_mention(user: UserSnapshot) -> str:
         return f"@{user.username}"
     label = _inline_private_history_label(user)
     return f'<a href="tg://user?id={user.telegram_user_id}">{escape(label)}</a>'
+
+
+def _inline_rp_result_title(*, action_key: str, target: UserSnapshot) -> str:
+    canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, action_key)
+    target_label = _social_action_display_name(target)
+    if len(target_label) > 32:
+        target_label = f"{target_label[:29]}..."
+    return f"{canonical} {target_label}"
+
+
+def _inline_rp_result_description(*, action_key: str, target: UserSnapshot) -> str:
+    canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, action_key)
+    return f"{canonical} -> {_social_action_display_name(target)}"
+
+
+def _inline_rp_render_message(*, action_key: str, actor: UserSnapshot, target: UserSnapshot) -> str:
+    templates = _SOCIAL_ACTION_TEMPLATES.get(action_key) or ("{actor} {target}",)
+    seed = f"{action_key}:{actor.telegram_user_id}:{target.telegram_user_id}"
+    template = templates[int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16) % len(templates)]
+    return template.format(actor=_social_action_mention(actor), target=_social_action_mention(target))
+
+
+def _inline_rp_matches_search(user: UserSnapshot, *, search_text: str) -> bool:
+    normalized = normalize_text_command(search_text)
+    if not normalized:
+        return True
+    haystack = " ".join(
+        str(part).lower()
+        for part in (
+            user.username,
+            user.first_name,
+            user.last_name,
+            user.chat_display_name,
+            user.telegram_user_id,
+        )
+        if part is not None
+    )
+    return normalized in haystack
+
+
+async def _resolve_inline_rp_targets(
+    activity_repo,
+    *,
+    sender_user_id: int,
+    search_text: str,
+) -> list[UserSnapshot]:
+    candidates: list[UserSnapshot] = []
+    seen_user_ids: set[int] = set()
+    normalized_search = normalize_text_command(search_text)
+
+    if normalized_search.startswith("@"):
+        explicit = await activity_repo.find_shared_group_user_by_username(
+            sender_user_id=sender_user_id,
+            username=normalized_search,
+        )
+        if explicit is not None and explicit.telegram_user_id != sender_user_id:
+            seen_user_ids.add(explicit.telegram_user_id)
+            candidates.append(explicit)
+
+    recent_targets = _INLINE_RP_RECENT_TARGETS.get(sender_user_id, [])
+    for user in recent_targets:
+        if user.telegram_user_id == sender_user_id or user.telegram_user_id in seen_user_ids:
+            continue
+        if not _inline_rp_matches_search(user, search_text=search_text):
+            continue
+        seen_user_ids.add(user.telegram_user_id)
+        candidates.append(user)
+
+    for user in await activity_repo.list_recent_inline_private_receivers(
+        sender_user_id=sender_user_id,
+        limit=_INLINE_RP_HISTORY_LIMIT,
+    ):
+        if user.telegram_user_id == sender_user_id or user.telegram_user_id in seen_user_ids:
+            continue
+        if not _inline_rp_matches_search(user, search_text=search_text):
+            continue
+        seen_user_ids.add(user.telegram_user_id)
+        candidates.append(user)
+
+    return candidates[:_INLINE_RP_HISTORY_LIMIT]
 
 
 def _inline_private_usernames_preview(usernames: tuple[str, ...]) -> str:
@@ -582,6 +704,14 @@ def _cleanup_inline_private_pending(*, now: datetime) -> None:
     ]
     for page_key in expired_page_keys:
         _INLINE_PM_ALERT_PAGE.pop(page_key, None)
+
+    expired_rp_ids = [
+        result_id
+        for result_id, (_, _, created_at) in _INLINE_RP_PENDING.items()
+        if (now - created_at).total_seconds() > _INLINE_RP_PENDING_TTL_SECONDS
+    ]
+    for result_id in expired_rp_ids:
+        _INLINE_RP_PENDING.pop(result_id, None)
 
 
 def _split_inline_private_text(text: str, *, max_len: int = _INLINE_PM_ALERT_CHUNK_LEN) -> list[str]:
@@ -702,6 +832,95 @@ def _command_object_from_args(raw_args: str | None):
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _menu_owner_suffix(owner_user_id: int | None) -> str:
+    return f":u{owner_user_id}" if owner_user_id is not None else ""
+
+
+def _menu_callback(screen: str, *, owner_user_id: int | None) -> str:
+    return f"menu:{screen}{_menu_owner_suffix(owner_user_id)}"
+
+
+def _parse_menu_callback(data: str | None) -> tuple[str | None, int | None]:
+    if not data or not data.startswith("menu:"):
+        return None, None
+    parts = data.split(":")
+    if len(parts) < 2:
+        return None, None
+    owner_user_id = None
+    if parts[-1].startswith("u") and parts[-1][1:].isdigit():
+        owner_user_id = int(parts[-1][1:])
+        parts = parts[:-1]
+    return ":".join(parts[1:]) or None, owner_user_id
+
+
+def _menu_keyboard(
+    *,
+    screen: str,
+    owner_user_id: int | None,
+    mode: str,
+    web_base_url: str | None,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    mode_short = "l" if mode == "local" else "g"
+    if screen == "main":
+        builder.button(text="💰 Экономика", callback_data=_menu_callback("economy", owner_user_id=owner_user_id))
+        builder.button(text="🎮 Игры", callback_data=_menu_callback("games", owner_user_id=owner_user_id))
+        builder.button(text="💞 Отношения", callback_data=_menu_callback("relations", owner_user_id=owner_user_id))
+        builder.adjust(1)
+        return builder.as_markup()
+
+    if screen == "economy":
+        builder.button(text="Панель", callback_data=f"eco:dash:{mode_short}{_menu_owner_suffix(owner_user_id)}")
+        builder.button(text="Ферма", callback_data=f"farm:ov:{mode_short}{_menu_owner_suffix(owner_user_id)}")
+        builder.button(text="Рынок", callback_data=f"mkt:ov:{mode_short}{_menu_owner_suffix(owner_user_id)}")
+        builder.button(text="Магазин", callback_data=f"shop:ov:{mode_short}{_menu_owner_suffix(owner_user_id)}")
+        builder.button(text="⬅️ Назад", callback_data=_menu_callback("main", owner_user_id=owner_user_id))
+        builder.adjust(2, 2, 1)
+        return builder.as_markup()
+
+    if screen == "games":
+        if web_base_url:
+            builder.button(text="🌐 Игровой центр", url=f"{web_base_url}/app/games")
+        builder.button(text="⬅️ Назад", callback_data=_menu_callback("main", owner_user_id=owner_user_id))
+        builder.adjust(1)
+        return builder.as_markup()
+
+    if screen == "relations":
+        if web_base_url:
+            builder.button(text="🌐 Профиль", url=f"{web_base_url}/app")
+        builder.button(text="⬅️ Назад", callback_data=_menu_callback("main", owner_user_id=owner_user_id))
+        builder.adjust(1)
+        return builder.as_markup()
+
+    builder.button(text="⬅️ Назад", callback_data=_menu_callback("main", owner_user_id=owner_user_id))
+    return builder.as_markup()
+
+
+def _menu_text(*, screen: str, mode: str) -> str:
+    if screen == "economy":
+        return (
+            "<b>/menu • Экономика</b>\n"
+            f"Режим: <code>{escape(mode)}</code>\n"
+            "Здесь собраны быстрые кнопки к панели, ферме, рынку и магазину без лишних slash-команд."
+        )
+    if screen == "games":
+        return (
+            "<b>/menu • Игры</b>\n"
+            "Создание лобби осталось в Telegram: используйте <code>/game whoami</code>, <code>/game spy</code>, "
+            "<code>/game mafia</code> или откройте веб-центр игр."
+        )
+    if screen == "relations":
+        return (
+            "<b>/menu • Отношения</b>\n"
+            "Быстрые точки входа: <code>/relation</code>, <code>/pair</code>, <code>/marry</code>, "
+            "<code>/family</code> и reply-действия вроде <code>обнять</code>."
+        )
+    return (
+        "<b>/menu</b>\n"
+        "Один вход вместо россыпи slash-команд. Выберите раздел ниже."
+    )
 
 
 def _extract_zhmyh_level(text: str) -> tuple[bool, int | None, str | None]:
@@ -1831,7 +2050,55 @@ async def inline_private_query_handler(inline_query: InlineQuery, activity_repo,
         return
 
     bot_username = await _get_bot_username(bot)
-    payload = _parse_inline_private_payload(inline_query.query or "", bot_username=bot_username)
+    raw_query = (inline_query.query or "").strip()
+    raw_tokens = [token for token in raw_query.split() if token]
+
+    if raw_tokens and raw_tokens[0].lower() != "pm":
+        rp_payload = _parse_inline_rp_payload(raw_query)
+        if rp_payload is not None:
+            now = _now_utc()
+            _cleanup_inline_private_pending(now=now)
+            actor = UserSnapshot(
+                telegram_user_id=int(inline_query.from_user.id),
+                username=inline_query.from_user.username,
+                first_name=inline_query.from_user.first_name,
+                last_name=inline_query.from_user.last_name,
+                is_bot=bool(inline_query.from_user.is_bot),
+            )
+            rp_targets = await _resolve_inline_rp_targets(
+                activity_repo,
+                sender_user_id=actor.telegram_user_id,
+                search_text=rp_payload.search_text,
+            )
+            if not rp_targets:
+                await _answer_inline_private_empty(inline_query)
+                return
+
+            results: list[InlineQueryResultArticle] = []
+            for target in rp_targets:
+                result_id = f"rp:{rp_payload.action_key}:{target.telegram_user_id}"
+                _INLINE_RP_PENDING[result_id] = (actor.telegram_user_id, target, now)
+                results.append(
+                    InlineQueryResultArticle(
+                        id=result_id,
+                        title=_inline_rp_result_title(action_key=rp_payload.action_key, target=target),
+                        description=_inline_rp_result_description(action_key=rp_payload.action_key, target=target),
+                        input_message_content=InputTextMessageContent(
+                            message_text=_inline_rp_render_message(
+                                action_key=rp_payload.action_key,
+                                actor=actor,
+                                target=target,
+                            ),
+                            parse_mode="HTML",
+                            disable_web_page_preview=True,
+                        ),
+                    )
+                )
+            await _safe_inline_query_answer(inline_query, results, cache_time=0, is_personal=True)
+            return
+
+    pm_query = " ".join(raw_tokens[1:]) if raw_tokens and raw_tokens[0].lower() == "pm" else raw_query
+    payload = _parse_inline_private_payload(pm_query, bot_username=bot_username)
     if payload is None:
         await _answer_inline_private_empty(inline_query)
         return
@@ -2014,6 +2281,23 @@ async def inline_private_chosen_handler(chosen_result: ChosenInlineResult, activ
         return
 
     message_id = (chosen_result.result_id or "").strip()
+    if message_id.startswith("rp:"):
+        now = _now_utc()
+        _cleanup_inline_private_pending(now=now)
+        pending_rp = _INLINE_RP_PENDING.pop(message_id, None)
+        if pending_rp is None:
+            return
+        sender_id, target, _ = pending_rp
+        if sender_id != int(chosen_result.from_user.id):
+            return
+        recent_targets = [
+            user
+            for user in _INLINE_RP_RECENT_TARGETS.get(sender_id, [])
+            if user.telegram_user_id != target.telegram_user_id
+        ]
+        _INLINE_RP_RECENT_TARGETS[sender_id] = [target, *recent_targets][: _INLINE_RP_HISTORY_LIMIT]
+        return
+
     if not _is_uuid_string(message_id):
         return
 
@@ -2154,6 +2438,57 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
     next_index = page_index + 1 if page_index + 1 < len(chunks) else 0
     _INLINE_PM_ALERT_PAGE[page_key] = (next_index, now)
     await _safe_callback_answer(query, chunks[page_index], show_alert=True)
+
+
+@router.message(Command("menu"))
+async def menu_command(message: Message, settings: Settings, chat_settings: ChatSettings) -> None:
+    if message.from_user is None:
+        return
+    mode = chat_settings.economy_mode if message.chat.type in {"group", "supergroup"} else "global"
+    web_base_url = settings.resolved_web_base_url if settings.web_enabled else None
+    owner_user_id = message.from_user.id if message.chat.type in {"group", "supergroup"} else None
+    await message.answer(
+        _menu_text(screen="main", mode=mode),
+        parse_mode="HTML",
+        reply_markup=_menu_keyboard(
+            screen="main",
+            owner_user_id=owner_user_id,
+            mode=mode,
+            web_base_url=web_base_url,
+        ),
+        disable_notification=message.chat.type in {"group", "supergroup"},
+    )
+
+
+@router.callback_query(F.data.startswith("menu:"))
+async def menu_callback(query: CallbackQuery, settings: Settings, chat_settings: ChatSettings) -> None:
+    screen, owner_user_id = _parse_menu_callback(query.data)
+    if screen is None:
+        await _safe_callback_answer(query)
+        return
+    if query.from_user is None or query.message is None:
+        await _safe_callback_answer(query)
+        return
+    if query.message.chat.type in {"group", "supergroup"} and owner_user_id not in {None, query.from_user.id}:
+        await _safe_callback_answer(query, "Это меню открыто другим пользователем.", show_alert=True)
+        return
+
+    mode = chat_settings.economy_mode if query.message.chat.type in {"group", "supergroup"} else "global"
+    web_base_url = settings.resolved_web_base_url if settings.web_enabled else None
+    try:
+        await query.message.edit_text(
+            _menu_text(screen=screen, mode=mode),
+            parse_mode="HTML",
+            reply_markup=_menu_keyboard(
+                screen=screen,
+                owner_user_id=owner_user_id,
+                mode=mode,
+                web_base_url=web_base_url,
+            ),
+        )
+    except TelegramBadRequest:
+        pass
+    await _safe_callback_answer(query)
 
 
 @router.message(F.photo)

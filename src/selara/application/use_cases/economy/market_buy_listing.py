@@ -140,6 +140,13 @@ async def execute(
     qty_left = listing.qty_left - quantity
     status = "closed" if qty_left <= 0 else "open"
     await repo.update_market_listing_qty_and_status(listing_id=listing.id, qty_left=max(0, qty_left), status=status)
+    await repo.create_market_trade(
+        listing=listing,
+        buyer_user_id=buyer_user_id,
+        quantity=quantity,
+        total_price=total_cost,
+        created_at=now,
+    )
 
     await repo.add_ledger(
         account_id=buyer_account.id,

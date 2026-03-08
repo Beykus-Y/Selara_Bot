@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Экономика группы</span>
+      <h1>{{ chat_title }}</h1>
+      <p class="lead">Drag & drop инвентарь, визуальная ферма и рынок без копирования ID в чат.</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">{{ scope_id }}</div>
+      <div class="hero-chip">баланс {{ dashboard.account.balance }}</div>
+      <div class="hero-chip">последняя культура: {{ last_crop_label }}</div>
+    </div>
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Ферма</h2>
+          <p class="panel-subtitle">Перекидывайте семена на пустые грядки, расходники на занятые.</p>
+        </div>
+      </div>
+      <div class="economy-plot-grid" data-plot-grid>
+        {% for plot in plot_cards %}
+          <button
+            type="button"
+            class="economy-plot-card state-{{ plot.state }}"
+            data-drop-target
+            data-target-type="{{ 'plot-empty' if plot.state == 'empty' else 'plot-occupied' }}"
+            data-plot-no="{{ plot.plot_no }}"
+          >
+            <span class="plot-no">#{{ plot.plot_no }}</span>
+            <strong>{{ plot.crop_label }}</strong>
+            <span>{{ plot.note }}</span>
+          </button>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Инвентарь</h2>
+          <p class="panel-subtitle">На телефоне сначала тапните по предмету, затем по цели применения.</p>
+        </div>
+      </div>
+      <div class="economy-inventory-grid" data-inventory-grid>
+        {% for item in inventory_items %}
+          <button
+            type="button"
+            class="inventory-card"
+            draggable="true"
+            data-item-code="{{ item.item_code }}"
+            data-target="{{ item.target }}"
+          >
+            <strong>{{ item.label }}</strong>
+            <span>{{ item.quantity }} шт</span>
+          </button>
+        {% endfor %}
+      </div>
+      <button type="button" class="panel economy-self-card" data-drop-target data-target-type="self">
+        <strong>Персонаж</strong>
+        <span>Сюда применяются self-use предметы.</span>
+      </button>
+    </article>
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Выставить лот</h2>
+          <p class="panel-subtitle">Полностью веб-интерфейс: фильтры, покупка и снятие лотов с рынка.</p>
+        </div>
+      </div>
+      <form class="stack-form" data-market-create-form>
+        <select name="item_code">
+          {% for item in inventory_items %}
+            <option value="{{ item.item_code }}">{{ item.label }} ({{ item.quantity }})</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="quantity" placeholder="Количество">
+        <input type="text" name="unit_price" placeholder="Цена за штуку">
+        <button type="submit" class="button primary">Выставить на рынок</button>
+      </form>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>История цен</h2>
+          <p class="panel-subtitle">Сделки за последние 7 дней.</p>
+        </div>
+      </div>
+      <div class="controls-row">
+        <select id="trade-item-select"></select>
+      </div>
+      <canvas id="trade-chart" height="160"></canvas>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Рынок</h2>
+        <p class="panel-subtitle">Фильтруйте семена и расходники, сортируйте предложения по цене.</p>
+      </div>
+      <div class="top-actions">
+        <button type="button" class="button subtle small" data-market-filter="all">Все</button>
+        <button type="button" class="button ghost small" data-market-filter="seeds">Только семена</button>
+        <button type="button" class="button ghost small" data-market-filter="consumables">Только расходники</button>
+        <button type="button" class="button ghost small" data-market-sort="asc">Цена ↑</button>
+        <button type="button" class="button ghost small" data-market-sort="desc">Цена ↓</button>
+      </div>
+    </div>
+    <div class="economy-market-grid" id="market-grid">
+      {% for row in market_rows %}
+        <article
+          class="setting-card market-row"
+          data-market-row
+          data-filter-group="{{ row.filter_group }}"
+          data-unit-price="{{ row.unit_price }}"
+        >
+          <div class="setting-head">
+            <strong>{{ row.label }}</strong>
+            <code>#{{ row.id }}</code>
+          </div>
+          <p class="helper-text">Осталось {{ row.qty_left }}/{{ row.qty_total }} • {{ row.unit_price }} / шт</p>
+          {% if row.is_own %}
+            <button type="button" class="button danger small" data-market-cancel="{{ row.id }}">Снять лот</button>
+          {% else %}
+            <button type="button" class="button primary small" data-market-buy="{{ row.id }}">Купить x1</button>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const applyUrl = "/api/chat/{{ chat_id }}/economy/apply";
+      const marketCreateUrl = "/api/chat/{{ chat_id }}/economy/market/create";
+      const marketBuyUrl = "/api/chat/{{ chat_id }}/economy/market/buy";
+      const marketCancelUrl = "/api/chat/{{ chat_id }}/economy/market/cancel";
+      const marketRows = {{ market_rows_json|safe }};
+      const tradePoints = {{ trade_points_json|safe }};
+      const toastRegion = document.getElementById("toast-region");
+      let selectedItem = null;
+
+      const showToast = (message, tone = "ok") => {
+        if (!toastRegion || !message) return;
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.dataset.tone = tone;
+        toast.textContent = message;
+        toastRegion.appendChild(toast);
+        window.setTimeout(() => toast.remove(), 2600);
+      };
+
+      const postForm = async (url, payload) => {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Accept": "application/json", "X-Requested-With": "fetch" },
+          credentials: "same-origin",
+          body: payload,
+        });
+        const data = await response.json().catch(() => null);
+        return { ok: Boolean(response.ok && data && data.ok), data };
+      };
+
+      const applyItem = async ({ itemCode, targetType, plotNo }) => {
+        const payload = new URLSearchParams();
+        payload.set("item_code", itemCode);
+        payload.set("target_type", targetType);
+        if (plotNo) payload.set("plot_no", String(plotNo));
+        const result = await postForm(applyUrl, payload);
+        showToast(result.data?.message || "Не удалось применить предмет.", result.ok ? "ok" : "error");
+        if (result.ok) window.location.reload();
+      };
+
+      document.querySelectorAll("[data-item-code]").forEach((card) => {
+        card.addEventListener("dragstart", (event) => {
+          event.dataTransfer?.setData("text/item-code", card.dataset.itemCode || "");
+          event.dataTransfer?.setData("text/target", card.dataset.target || "");
+        });
+        card.addEventListener("click", () => {
+          document.querySelectorAll("[data-item-code].is-selected").forEach((node) => node.classList.remove("is-selected"));
+          card.classList.add("is-selected");
+          selectedItem = { itemCode: card.dataset.itemCode, target: card.dataset.target };
+        });
+      });
+
+      document.querySelectorAll("[data-drop-target]").forEach((target) => {
+        target.addEventListener("dragover", (event) => event.preventDefault());
+        target.addEventListener("drop", async (event) => {
+          event.preventDefault();
+          const itemCode = event.dataTransfer?.getData("text/item-code");
+          const expectedTarget = event.dataTransfer?.getData("text/target");
+          if (!itemCode || !expectedTarget || expectedTarget !== target.dataset.targetType) return;
+          await applyItem({
+            itemCode,
+            targetType: target.dataset.targetType,
+            plotNo: target.dataset.plotNo,
+          });
+        });
+        target.addEventListener("click", async () => {
+          if (!selectedItem || selectedItem.target !== target.dataset.targetType) return;
+          await applyItem({
+            itemCode: selectedItem.itemCode,
+            targetType: target.dataset.targetType,
+            plotNo: target.dataset.plotNo,
+          });
+        });
+      });
+
+      document.querySelector("[data-market-create-form]")?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = new URLSearchParams(new FormData(event.currentTarget));
+        const result = await postForm(marketCreateUrl, payload);
+        showToast(result.data?.message || "Не удалось выставить лот.", result.ok ? "ok" : "error");
+        if (result.ok) window.location.reload();
+      });
+
+      document.querySelectorAll("[data-market-buy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const payload = new URLSearchParams();
+          payload.set("listing_id", button.dataset.marketBuy || "");
+          payload.set("quantity", "1");
+          const result = await postForm(marketBuyUrl, payload);
+          showToast(result.data?.message || "Не удалось купить лот.", result.ok ? "ok" : "error");
+          if (result.ok) window.location.reload();
+        });
+      });
+
+      document.querySelectorAll("[data-market-cancel]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const payload = new URLSearchParams();
+          payload.set("listing_id", button.dataset.marketCancel || "");
+          const result = await postForm(marketCancelUrl, payload);
+          showToast(result.data?.message || "Не удалось снять лот.", result.ok ? "ok" : "error");
+          if (result.ok) window.location.reload();
+        });
+      });
+
+      let activeFilter = "all";
+      let activeSort = null;
+      const renderMarket = () => {
+        const rows = [...document.querySelectorAll("[data-market-row]")];
+        rows.sort((a, b) => {
+          if (!activeSort) return 0;
+          const left = Number(a.dataset.unitPrice || 0);
+          const right = Number(b.dataset.unitPrice || 0);
+          return activeSort === "asc" ? left - right : right - left;
+        });
+        const grid = document.getElementById("market-grid");
+        rows.forEach((row) => {
+          const visible = activeFilter === "all" || row.dataset.filterGroup === activeFilter || row.dataset.filterGroup === "all";
+          row.hidden = !visible;
+          grid?.appendChild(row);
+        });
+      };
+
+      document.querySelectorAll("[data-market-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          activeFilter = button.dataset.marketFilter || "all";
+          renderMarket();
+        });
+      });
+      document.querySelectorAll("[data-market-sort]").forEach((button) => {
+        button.addEventListener("click", () => {
+          activeSort = button.dataset.marketSort || null;
+          renderMarket();
+        });
+      });
+      renderMarket();
+
+      const chartCanvas = document.getElementById("trade-chart");
+      const chartSelect = document.getElementById("trade-item-select");
+      const tradeKeys = Object.keys(tradePoints);
+      for (const key of tradeKeys) {
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = key;
+        chartSelect?.appendChild(option);
+      }
+
+      const drawChart = (itemCode) => {
+        if (!(chartCanvas instanceof HTMLCanvasElement)) return;
+        const ctx = chartCanvas.getContext("2d");
+        if (!ctx) return;
+        const points = tradePoints[itemCode] || [];
+        ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
+        ctx.fillStyle = "rgba(7, 13, 24, 0.84)";
+        ctx.fillRect(0, 0, chartCanvas.width, chartCanvas.height);
+        if (!points.length) {
+          ctx.fillStyle = "#9bb5c7";
+          ctx.fillText("Нет сделок за 7 дней", 16, 24);
+          return;
+        }
+        const prices = points.map((point) => point.unit_price);
+        const min = Math.min(...prices);
+        const max = Math.max(...prices);
+        const span = Math.max(1, max - min);
+        ctx.strokeStyle = "#58d8ff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        points.forEach((point, index) => {
+          const x = 18 + ((chartCanvas.width - 36) / Math.max(1, points.length - 1)) * index;
+          const y = chartCanvas.height - 18 - ((point.unit_price - min) / span) * (chartCanvas.height - 40);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+
+      if (tradeKeys.length) {
+        chartSelect.value = tradeKeys[0];
+        drawChart(tradeKeys[0]);
+        chartSelect?.addEventListener("change", () => drawChart(chartSelect.value));
+      } else {
+        drawChart("");
+      }
+    })();
+  </script>
+{% endblock %}

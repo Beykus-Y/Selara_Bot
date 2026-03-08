@@ -7,6 +7,7 @@ from aiogram.types import BotCommand
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.db.session import create_engine, create_session_factory
+from selara.presentation.game_state import GAME_STORE
 from selara.presentation.routers import build_router
 
 logger = logging.getLogger(__name__)
@@ -144,12 +145,14 @@ async def run() -> None:
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
+    GAME_STORE.configure_runtime(redis_url=settings.redis_url, ttl_hours=settings.game_state_ttl_hours)
 
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_run_bot(settings, session_factory))
             tg.create_task(_run_web_panel(settings, session_factory))
     finally:
+        await GAME_STORE.close()
         await engine.dispose()
 
 

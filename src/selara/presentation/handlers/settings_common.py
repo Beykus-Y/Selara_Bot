@@ -22,6 +22,7 @@ CFG_BOOL_KEYS: set[str] = {
     "craft_enabled",
     "auctions_enabled",
     "economy_enabled",
+    "cleanup_economy_commands",
 }
 
 CFG_ENUM_VALUES: dict[str, tuple[str, ...]] = {
@@ -326,6 +327,12 @@ SETTING_META: dict[str, SettingMeta] = {
         description_ru="Какую часть урожая игрок теряет при негативном событии.",
         value_hint_ru="Целое число 0..100 (%).",
     ),
+    "cleanup_economy_commands": SettingMeta(
+        title_ru="Чистить успешные команды экономики",
+        short_ru="Чистка экономики",
+        description_ru="Удалять успешную эконом-команду пользователя и ответ бота через короткую задержку, чтобы чат не захламлялся.",
+        value_hint_ru="true/false.",
+    ),
 }
 
 
@@ -400,6 +407,7 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "economy_market_fee_percent",
             "economy_negative_event_chance_percent",
             "economy_negative_event_loss_percent",
+            "cleanup_economy_commands",
         ),
     ),
 )
@@ -486,6 +494,7 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "economy_market_fee_percent": value.economy_market_fee_percent,
         "economy_negative_event_chance_percent": value.economy_negative_event_chance_percent,
         "economy_negative_event_loss_percent": value.economy_negative_event_loss_percent,
+        "cleanup_economy_commands": value.cleanup_economy_commands,
     }
 
 

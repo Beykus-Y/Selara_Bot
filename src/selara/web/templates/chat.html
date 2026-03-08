@@ -9,11 +9,21 @@
     </div>
     <div class="hero-side">
       <div class="hero-chip">chat id {{ chat_id }}</div>
-      <div class="hero-chip">ranked insights</div>
-      <div class="hero-chip">settings control</div>
+      <div class="hero-chip">{{ "overview" if active_tab == "overview" else "settings" }}</div>
+      <div class="hero-chip">family + economy</div>
     </div>
   </section>
 
+  <section class="panel section-tabs">
+    <a class="button {% if active_tab == 'overview' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=overview">Обзор</a>
+    {% if can_manage_settings %}
+      <a class="button {% if active_tab == 'settings' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=settings">Настройки</a>
+    {% endif %}
+    <a class="button ghost" href="/app/chat/{{ chat_id }}/economy">Экономика</a>
+    <a class="button ghost" href="/app/family/{{ chat_id }}">Моя семья</a>
+  </section>
+
+  {% if active_tab == "overview" %}
   <section class="metrics-grid">
     {% for metric in metrics %}
       <article class="metric-card tone-{{ metric.tone }}">
@@ -22,6 +32,116 @@
         <span class="metric-note">{{ metric.note }}</span>
       </article>
     {% endfor %}
+  </section>
+
+  <section class="overview-live-grid">
+    <article class="panel overview-activity-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Активность по дням</h2>
+          <p class="panel-subtitle">Живой срез за последние 7 дней без ручного обновления страницы.</p>
+        </div>
+      </div>
+      <div class="activity-chart" data-chat-activity-chart>
+        {% for _ in range(7) %}
+          <div class="activity-bar is-skeleton">
+            <span class="skeleton skeleton-bar"></span>
+            <strong class="skeleton skeleton-text short"></strong>
+            <small class="skeleton skeleton-text tiny"></small>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel overview-callout-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Герой дня</h2>
+          <p class="panel-subtitle">Самый активный участник за 24 часа.</p>
+        </div>
+      </div>
+      <div class="overview-callout" data-hero-of-day>
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </article>
+
+    <article class="panel overview-callout-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Богач дня</h2>
+          <p class="panel-subtitle">Самый крупный баланс в активном режиме экономики чата.</p>
+        </div>
+      </div>
+      <div class="overview-callout" data-richest-of-day>
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="panel chat-hub-panel" data-chat-overview-root data-chat-id="{{ chat_id }}">
+    <div class="panel-head">
+      <div>
+        <h2>Полный лидерборд</h2>
+        <p class="panel-subtitle">Пагинация по 50 строк, поиск по имени, username и Telegram ID.</p>
+      </div>
+      <button type="button" class="button ghost small" data-lb-find-me>Найти меня</button>
+    </div>
+
+    <div class="chat-hub-toolbar">
+      <div class="mode-switch" role="tablist" aria-label="Режим рейтинга">
+        <button type="button" class="is-active" data-lb-mode="mix">Гибрид</button>
+        <button type="button" data-lb-mode="activity">Сообщения</button>
+        <button type="button" data-lb-mode="karma">Карма</button>
+      </div>
+
+      <form class="chat-hub-search" data-lb-search-form>
+        <input
+          type="search"
+          name="q"
+          placeholder="Имя, @username или Telegram ID"
+          autocomplete="off"
+          data-lb-search
+        >
+        <button type="submit" class="button subtle small">Поиск</button>
+      </form>
+    </div>
+
+    <p class="helper-text chat-hub-status" data-lb-status>Загружаем рейтинг...</p>
+
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Участник</th>
+            <th class="lb-mobile-hide">Username</th>
+            <th>Сообщения</th>
+            <th>Карма</th>
+            <th>Рейтинг</th>
+            <th class="lb-mobile-hide">Активность</th>
+          </tr>
+        </thead>
+        <tbody data-lb-body>
+          {% for _ in range(6) %}
+            <tr>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text"></span></td>
+              <td class="lb-mobile-hide"><span class="skeleton skeleton-text short"></span></td>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text short"></span></td>
+              <td class="lb-mobile-hide"><span class="skeleton skeleton-text short"></span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="chat-hub-pager" data-lb-pager></div>
   </section>
 
   <section class="grid two-col">
@@ -131,7 +251,9 @@
       </article>
     {% endfor %}
   </section>
+  {% endif %}
 
+  {% if active_tab == "settings" and can_manage_settings %}
   <section class="panel settings-panel">
     <div class="panel-head">
       <div>
@@ -176,7 +298,16 @@
               {% if item.editable %}
                 <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
                   <input type="hidden" name="key" value="{{ item.key }}">
-                  {% if item.input_kind == "select" %}
+                  {% if item.input_kind == "toggle" %}
+                    <label class="setting-toggle">
+                      <input type="checkbox" data-setting-toggle {% if item.current_value|lower == "true" %}checked{% endif %}>
+                      <input type="hidden" name="value" value="{{ item.current_value|lower }}">
+                      <span class="setting-toggle-track"></span>
+                      <span class="setting-toggle-copy" data-toggle-label>
+                        {{ "Включено" if item.current_value|lower == "true" else "Выключено" }}
+                      </span>
+                    </label>
+                  {% elif item.input_kind == "select" %}
                     <select name="value">
                       {% for option in item.options %}
                         <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
@@ -201,6 +332,7 @@
       </section>
     {% endfor %}
   </section>
+  {% endif %}
 
   <section class="grid two-col">
     <article class="panel">
@@ -228,6 +360,7 @@
       {% endif %}
     </article>
 
+    {% if active_tab == "settings" and can_manage_settings %}
     <article class="panel">
       <div class="panel-head">
         <div>
@@ -273,8 +406,10 @@
         <p class="empty-text">Кастомные алиасы пока не заданы.</p>
       {% endif %}
     </article>
+    {% endif %}
   </section>
 
+  {% if active_tab == "settings" and can_manage_settings %}
   <section class="panel">
     <div class="panel-head">
       <div>
@@ -359,6 +494,7 @@
       <p class="empty-text">Смарт-триггеры ещё не созданы.</p>
     {% endif %}
   </section>
+  {% endif %}
 
   <dialog class="docs-guard-dialog" id="docs-guard-dialog">
     <form method="dialog" class="docs-guard-card">
@@ -382,6 +518,248 @@
 {% endblock %}
 
 {% block scripts %}
+  <script>
+    (() => {
+      const root = document.querySelector("[data-chat-overview-root]");
+      if (!root) {
+        return;
+      }
+
+      const chatId = root.dataset.chatId;
+      const activityChart = document.querySelector("[data-chat-activity-chart]");
+      const heroCard = document.querySelector("[data-hero-of-day]");
+      const richestCard = document.querySelector("[data-richest-of-day]");
+      const status = root.querySelector("[data-lb-status]");
+      const tableBody = root.querySelector("[data-lb-body]");
+      const pager = root.querySelector("[data-lb-pager]");
+      const searchForm = root.querySelector("[data-lb-search-form]");
+      const searchInput = root.querySelector("[data-lb-search]");
+      const findMeButton = root.querySelector("[data-lb-find-me]");
+      const modeButtons = [...root.querySelectorAll("[data-lb-mode]")];
+      let liveSource = null;
+      let refreshTimer = 0;
+      let searchTimer = 0;
+      const state = {
+        mode: "mix",
+        page: 1,
+        query: "",
+      };
+
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (symbol) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+      }[symbol] || symbol));
+
+      const fetchJson = async (url) => {
+        const response = await fetch(url, {
+          headers: {
+            "Accept": "application/json",
+            "X-Requested-With": "fetch",
+          },
+          credentials: "same-origin",
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.ok) {
+          if (data?.redirect) {
+            window.location.assign(data.redirect);
+          }
+          throw new Error(data?.message || "Не удалось загрузить данные.");
+        }
+        return data;
+      };
+
+      const renderActivityChart = (series) => {
+        if (!activityChart) {
+          return;
+        }
+        if (!Array.isArray(series) || !series.length) {
+          activityChart.innerHTML = '<p class="empty-text">Пока нет данных по активности.</p>';
+          return;
+        }
+        const maxValue = Math.max(...series.map((item) => Number(item.messages) || 0), 1);
+        activityChart.innerHTML = series.map((item) => {
+          const value = Number(item.messages) || 0;
+          const height = Math.max(10, Math.round((value / maxValue) * 100));
+          return `
+            <div class="activity-bar">
+              <span class="activity-bar-fill" style="height:${height}%"></span>
+              <strong>${value}</strong>
+              <small>${escapeHtml(item.label)}</small>
+            </div>
+          `;
+        }).join("");
+      };
+
+      const renderHeroCard = (target, payload, emptyText, formatter) => {
+        if (!target) {
+          return;
+        }
+        if (!payload) {
+          target.innerHTML = `<p class="empty-text">${escapeHtml(emptyText)}</p>`;
+          return;
+        }
+        target.innerHTML = formatter(payload);
+      };
+
+      const renderTableRows = (rows) => {
+        if (!tableBody) {
+          return;
+        }
+        if (!Array.isArray(rows) || !rows.length) {
+          tableBody.innerHTML = '<tr><td colspan="7" class="empty-text">Ничего не найдено.</td></tr>';
+          return;
+        }
+        tableBody.innerHTML = rows.map((row) => `
+          <tr class="${row.is_me ? "leaderboard-row-me" : ""}">
+            <td>${row.position}</td>
+            <td>
+              <strong>${escapeHtml(row.name)}</strong>
+              ${row.is_me ? '<span class="leaderboard-me-badge">это вы</span>' : ""}
+            </td>
+            <td class="lb-mobile-hide">${escapeHtml(row.username || "—")}</td>
+            <td>${row.activity}</td>
+            <td>${row.karma}</td>
+            <td>${Number(row.hybrid_score).toFixed(3)}</td>
+            <td class="lb-mobile-hide">${escapeHtml(row.last_seen_at)}</td>
+          </tr>
+        `).join("");
+      };
+
+      const renderPager = (payload) => {
+        if (!pager) {
+          return;
+        }
+        const page = Number(payload.page) || 1;
+        const totalPages = Number(payload.total_pages) || 1;
+        pager.innerHTML = `
+          <button type="button" class="button ghost small" data-page-target="${Math.max(1, page - 1)}" ${page <= 1 ? "disabled" : ""}>Назад</button>
+          <span class="helper-text">Страница ${page} / ${totalPages}</span>
+          <button type="button" class="button ghost small" data-page-target="${Math.min(totalPages, page + 1)}" ${page >= totalPages ? "disabled" : ""}>Вперёд</button>
+        `;
+        for (const button of pager.querySelectorAll("[data-page-target]")) {
+          button.addEventListener("click", () => {
+            state.page = Number(button.dataset.pageTarget || "1");
+            loadLeaderboard();
+          });
+        }
+      };
+
+      const renderLeaderboard = (payload) => {
+        renderTableRows(payload.rows);
+        renderPager(payload);
+        if (status) {
+          const base = `Записей: ${payload.total_rows}. Ваш ранг: ${payload.my_rank ?? "нет"}.`;
+          status.textContent = payload.truncated ? `${base} Показаны только первые 500 участников.` : base;
+        }
+      };
+
+      const loadOverview = async () => {
+        const data = await fetchJson(`/api/chat/${chatId}/overview`);
+        renderActivityChart(data.daily_activity);
+        renderHeroCard(
+          heroCard,
+          data.hero_of_day,
+          "За последние 24 часа ещё не набралось активности.",
+          (payload) => `
+            <strong>${escapeHtml(payload.label)}</strong>
+            <p>${payload.messages} сообщений за сутки</p>
+            <p class="helper-text">Карма: ${payload.karma}</p>
+          `,
+        );
+        renderHeroCard(
+          richestCard,
+          data.richest_of_day,
+          "Экономика пока не выдала лидера.",
+          (payload) => `
+            <strong>${escapeHtml(payload.label)}</strong>
+            <p>${payload.balance} монет на счету</p>
+            <p class="helper-text">Срез по активному экономическому контуру чата</p>
+          `,
+        );
+      };
+
+      const syncModeButtons = () => {
+        for (const button of modeButtons) {
+          button.classList.toggle("is-active", button.dataset.lbMode === state.mode);
+        }
+      };
+
+      const loadLeaderboard = async ({ findMe = false } = {}) => {
+        syncModeButtons();
+        if (status) {
+          status.textContent = "Обновляем лидерборд...";
+        }
+        const params = new URLSearchParams({
+          mode: state.mode,
+          page: String(state.page),
+        });
+        if (state.query) {
+          params.set("q", state.query);
+        }
+        if (findMe) {
+          params.set("find_me", "1");
+        }
+        const data = await fetchJson(`/api/chat/${chatId}/leaderboard?${params.toString()}`);
+        state.page = Number(data.page) || 1;
+        renderLeaderboard(data);
+      };
+
+      const scheduleRefresh = () => {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          loadOverview().catch(() => null);
+          loadLeaderboard().catch(() => null);
+        }, 180);
+      };
+
+      for (const button of modeButtons) {
+        button.addEventListener("click", () => {
+          state.mode = button.dataset.lbMode || "mix";
+          state.page = 1;
+          loadLeaderboard().catch(() => null);
+        });
+      }
+
+      searchForm?.addEventListener("submit", (event) => {
+        event.preventDefault();
+        state.query = (searchInput?.value || "").trim();
+        state.page = 1;
+        loadLeaderboard().catch(() => null);
+      });
+
+      searchInput?.addEventListener("input", () => {
+        window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => {
+          state.query = (searchInput.value || "").trim();
+          state.page = 1;
+          loadLeaderboard().catch(() => null);
+        }, 260);
+      });
+
+      findMeButton?.addEventListener("click", () => {
+        state.query = (searchInput?.value || "").trim();
+        loadLeaderboard({ findMe: true }).catch(() => null);
+      });
+
+      if ("EventSource" in window) {
+        liveSource = new EventSource(`/api/live/stream?scope=chat&chat_id=${chatId}`);
+        for (const eventName of ["chat_activity", "new_vote", "chat_refresh"]) {
+          liveSource.addEventListener(eventName, scheduleRefresh);
+        }
+      }
+
+      window.addEventListener("beforeunload", () => {
+        liveSource?.close();
+      });
+
+      loadOverview().catch(() => null);
+      loadLeaderboard().catch(() => null);
+    })();
+  </script>
+
   <script>
     (() => {
       const forms = [...document.querySelectorAll(".setting-form, .setting-reset")];
@@ -418,6 +796,24 @@
       };
 
       const getEditableField = (card) => card?.querySelector(".setting-form [name='value']");
+
+      const bindToggleControl = (card) => {
+        const toggle = card?.querySelector("[data-setting-toggle]");
+        const hidden = getEditableField(card);
+        const label = card?.querySelector("[data-toggle-label]");
+        if (!(toggle instanceof HTMLInputElement) || !(hidden instanceof HTMLInputElement)) {
+          return;
+        }
+        const sync = () => {
+          hidden.value = toggle.checked ? "true" : "false";
+          if (label) {
+            label.textContent = toggle.checked ? "Включено" : "Выключено";
+          }
+          syncDirtyState(card);
+        };
+        toggle.addEventListener("change", sync);
+        sync();
+      };
 
       const normalizeValue = (field, value) => {
         const normalized = String(value ?? "");
@@ -544,6 +940,16 @@
           input.defaultValue = setting.current_value;
         }
 
+        const toggle = card.querySelector("[data-setting-toggle]");
+        const toggleLabel = card.querySelector("[data-toggle-label]");
+        if (toggle instanceof HTMLInputElement) {
+          const enabled = String(setting.current_value).toLowerCase() === "true";
+          toggle.checked = enabled;
+          if (toggleLabel) {
+            toggleLabel.textContent = enabled ? "Включено" : "Выключено";
+          }
+        }
+
         syncDirtyState(card);
       };
 
@@ -643,6 +1049,7 @@
       };
 
       for (const card of settingCards) {
+        bindToggleControl(card);
         const field = getEditableField(card);
         if (!field) {
           continue;

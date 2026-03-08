@@ -3,7 +3,17 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Protocol
 
-from selara.domain.economy_entities import ChatAuction, EconomyAccount, EconomyScope, FarmState, InventoryItem, MarketListing, PlotState
+from selara.domain.economy_entities import (
+    ChatAuction,
+    ChatBoost,
+    EconomyAccount,
+    EconomyScope,
+    FarmState,
+    InventoryItem,
+    MarketListing,
+    MarketTrade,
+    PlotState,
+)
 
 
 class EconomyRepository(Protocol):
@@ -101,6 +111,8 @@ class EconomyRepository(Protocol):
 
     async def get_farm_state(self, *, account_id: int) -> FarmState | None: ...
 
+    async def set_last_planted_crop_code(self, *, account_id: int, crop_code: str | None) -> None: ...
+
     async def set_negative_event_streak(self, *, account_id: int, value: int) -> None: ...
 
     async def set_upgrade_level(self, *, account_id: int, upgrade_code: str, new_level: int) -> None: ...
@@ -142,6 +154,44 @@ class EconomyRepository(Protocol):
     ) -> None: ...
 
     async def count_open_market_listings_for_seller(self, *, scope: EconomyScope, seller_user_id: int) -> int: ...
+
+    async def create_market_trade(
+        self,
+        *,
+        listing: MarketListing,
+        buyer_user_id: int,
+        quantity: int,
+        total_price: int,
+        created_at: datetime,
+    ) -> MarketTrade: ...
+
+    async def list_market_trades(
+        self,
+        *,
+        scope: EconomyScope,
+        item_code: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[MarketTrade]: ...
+
+    async def create_chat_boost(
+        self,
+        *,
+        chat_id: int,
+        scope: EconomyScope,
+        boost_code: str,
+        value_percent: int,
+        starts_at: datetime,
+        ends_at: datetime,
+        created_by_user_id: int,
+    ) -> ChatBoost: ...
+
+    async def list_active_chat_boosts(
+        self,
+        *,
+        chat_id: int,
+        as_of: datetime | None = None,
+    ) -> list[ChatBoost]: ...
 
     async def touch_transfer_daily(
         self,

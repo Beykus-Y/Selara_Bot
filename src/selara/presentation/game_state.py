@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import random
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from pathlib import Path
-from typing import Literal
+from typing import Any, AsyncIterator, Callable, Literal, Protocol
 from uuid import uuid4
 
 GameStatus = Literal["lobby", "started", "finished"]
@@ -4588,5 +4589,538 @@ class GameStore:
 
         return None
 
+InMemoryGameStore = GameStore
 
-GAME_STORE = GameStore()
+
+@dataclass(frozen=True)
+class LiveEvent:
+    event_type: str
+    scope: str
+    revision: str
+    chat_id: int | None = None
+    game_id: str | None = None
+
+    def to_payload(self) -> dict[str, str | int | None]:
+        return {
+            "type": self.event_type,
+            "scope": self.scope,
+            "revision": self.revision,
+            "chat_id": self.chat_id,
+            "game_id": self.game_id,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_payload(), ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str) -> "LiveEvent":
+        payload = json.loads(raw)
+        return cls(
+            event_type=str(payload.get("type") or "game_updated"),
+            scope=str(payload.get("scope") or "games"),
+            revision=str(payload.get("revision") or ""),
+            chat_id=int(payload["chat_id"]) if payload.get("chat_id") is not None else None,
+            game_id=str(payload["game_id"]) if payload.get("game_id") is not None else None,
+        )
+
+
+class LiveEventBroker(Protocol):
+    async def publish(self, event: LiveEvent) -> None: ...
+    async def subscribe(
+        self,
+        *,
+        scope: str,
+        chat_id: int | None = None,
+        game_id: str | None = None,
+    ) -> AsyncIterator[LiveEvent | None]: ...
+    async def close(self) -> None: ...
+
+
+class GameStateCodec:
+    _TYPE_KEY = "$type"
+    _CLASS_KEY = "class"
+    _FIELDS_KEY = "fields"
+    _ITEMS_KEY = "items"
+    _VALUE_KEY = "value"
+
+    def __init__(self) -> None:
+        self._dataclass_registry: dict[str, type[Any]] = {}
+        self._load_registry()
+
+    def _load_registry(self) -> None:
+        for value in globals().values():
+            if inspect.isclass(value) and is_dataclass(value):
+                self._dataclass_registry[value.__name__] = value
+
+    def dumps(self, game: GroupGame) -> str:
+        return json.dumps(self._encode(game), ensure_ascii=False, separators=(",", ":"))
+
+    def loads(self, raw: str) -> GroupGame:
+        decoded = self._decode(json.loads(raw))
+        if not isinstance(decoded, GroupGame):
+            raise ValueError("Decoded game payload is not GroupGame")
+        return decoded
+
+    def _encode(self, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, datetime):
+            return {
+                self._TYPE_KEY: "datetime",
+                self._VALUE_KEY: value.isoformat(),
+            }
+        if is_dataclass(value):
+            return {
+                self._TYPE_KEY: "dataclass",
+                self._CLASS_KEY: type(value).__name__,
+                self._FIELDS_KEY: {
+                    field_info.name: self._encode(getattr(value, field_info.name))
+                    for field_info in fields(value)
+                },
+            }
+        if isinstance(value, tuple):
+            return {
+                self._TYPE_KEY: "tuple",
+                self._ITEMS_KEY: [self._encode(item) for item in value],
+            }
+        if isinstance(value, list):
+            return [self._encode(item) for item in value]
+        if isinstance(value, set):
+            return {
+                self._TYPE_KEY: "set",
+                self._ITEMS_KEY: [self._encode(item) for item in sorted(value, key=repr)],
+            }
+        if isinstance(value, dict):
+            return {
+                self._TYPE_KEY: "dict",
+                self._ITEMS_KEY: [
+                    [self._encode(key), self._encode(item)]
+                    for key, item in value.items()
+                ],
+            }
+        raise TypeError(f"Unsupported game state value: {type(value)!r}")
+
+    def _decode(self, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, list):
+            return [self._decode(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        marker = value.get(self._TYPE_KEY)
+        if marker == "datetime":
+            return datetime.fromisoformat(str(value[self._VALUE_KEY]))
+        if marker == "tuple":
+            return tuple(self._decode(item) for item in value.get(self._ITEMS_KEY, []))
+        if marker == "set":
+            return set(self._decode(item) for item in value.get(self._ITEMS_KEY, []))
+        if marker == "dict":
+            return {
+                self._decode(item[0]): self._decode(item[1])
+                for item in value.get(self._ITEMS_KEY, [])
+                if isinstance(item, list) and len(item) == 2
+            }
+        if marker == "dataclass":
+            class_name = str(value.get(self._CLASS_KEY) or "")
+            dataclass_type = self._dataclass_registry.get(class_name)
+            if dataclass_type is None:
+                raise ValueError(f"Unknown dataclass in game payload: {class_name}")
+            payload = value.get(self._FIELDS_KEY, {})
+            if not isinstance(payload, dict):
+                raise ValueError(f"Invalid dataclass payload for {class_name}")
+            kwargs = {
+                field_info.name: self._decode(payload.get(field_info.name))
+                for field_info in fields(dataclass_type)
+            }
+            return dataclass_type(**kwargs)
+        return {
+            key: self._decode(item)
+            for key, item in value.items()
+        }
+
+
+class RedisGameStateRepository:
+    _GAME_KEY_PREFIX = "selara:game"
+    _ACTIVE_KEY_PREFIX = "selara:chat_active"
+    _RECENT_KEY_PREFIX = "selara:user_recent_games"
+
+    def __init__(self, *, client, codec: GameStateCodec, ttl: timedelta) -> None:
+        self._client = client
+        self._codec = codec
+        self._ttl = max(timedelta(minutes=5), ttl)
+
+    @classmethod
+    def from_url(cls, *, redis_url: str, codec: GameStateCodec, ttl: timedelta) -> "RedisGameStateRepository":
+        try:
+            from redis.asyncio import Redis
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Redis support requires the `redis` package to be installed.") from exc
+        client = Redis.from_url(redis_url, decode_responses=True)
+        return cls(client=client, codec=codec, ttl=ttl)
+
+    @property
+    def ttl_seconds(self) -> int:
+        return max(300, int(self._ttl.total_seconds()))
+
+    def _game_key(self, game_id: str) -> str:
+        return f"{self._GAME_KEY_PREFIX}:{game_id}"
+
+    def _active_key(self, chat_id: int) -> str:
+        return f"{self._ACTIVE_KEY_PREFIX}:{chat_id}"
+
+    def _recent_key(self, user_id: int) -> str:
+        return f"{self._RECENT_KEY_PREFIX}:{user_id}"
+
+    async def load_game(self, game_id: str) -> GroupGame | None:
+        raw = await self._client.get(self._game_key(game_id))
+        if not raw:
+            return None
+        game = self._codec.loads(raw)
+        await self._client.expire(self._game_key(game_id), self.ttl_seconds)
+        return game
+
+    async def save_game(self, game: GroupGame, *, is_active: bool) -> None:
+        await self._client.set(self._game_key(game.game_id), self._codec.dumps(game), ex=self.ttl_seconds)
+        active_key = self._active_key(game.chat_id)
+        if is_active and game.status != "finished":
+            await self._client.set(active_key, game.game_id, ex=self.ttl_seconds)
+            return
+
+        current_active = await self._client.get(active_key)
+        if current_active == game.game_id:
+            await self._client.delete(active_key)
+
+        if game.status != "finished":
+            return
+
+        score = int((game.started_at or game.created_at).timestamp())
+        pipe = self._client.pipeline()
+        for user_id in game.players:
+            recent_key = self._recent_key(user_id)
+            pipe.zadd(recent_key, {game.game_id: score})
+            pipe.expire(recent_key, self.ttl_seconds)
+        await pipe.execute()
+
+    async def load_active_game_id(self, chat_id: int) -> str | None:
+        value = await self._client.get(self._active_key(chat_id))
+        if value is not None:
+            await self._client.expire(self._active_key(chat_id), self.ttl_seconds)
+        return value
+
+    async def list_active_game_ids(self, *, chat_ids: set[int] | None = None) -> list[str]:
+        if chat_ids:
+            game_ids: list[str] = []
+            for chat_id in sorted(chat_ids):
+                value = await self.load_active_game_id(chat_id)
+                if value:
+                    game_ids.append(value)
+            return game_ids
+
+        seen: list[str] = []
+        async for key in self._client.scan_iter(match=f"{self._ACTIVE_KEY_PREFIX}:*"):
+            value = await self._client.get(key)
+            if value:
+                seen.append(value)
+        return seen
+
+    async def list_recent_game_ids_for_user(self, *, user_id: int, limit: int = 6) -> list[str]:
+        return [str(value) for value in await self._client.zrevrange(self._recent_key(user_id), 0, max(0, limit - 1))]
+
+    async def close(self) -> None:
+        close = getattr(self._client, "aclose", None) or getattr(self._client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+class RedisLiveEventBroker:
+    _BASE_CHANNEL = "selara:live"
+
+    def __init__(self, *, client) -> None:
+        self._client = client
+
+    @classmethod
+    def from_url(cls, *, redis_url: str) -> "RedisLiveEventBroker":
+        try:
+            from redis.asyncio import Redis
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Redis support requires the `redis` package to be installed.") from exc
+        return cls(client=Redis.from_url(redis_url, decode_responses=True))
+
+    def _channel(self, *, scope: str, chat_id: int | None = None, game_id: str | None = None) -> str:
+        if game_id is not None:
+            return f"{self._BASE_CHANNEL}:game:{game_id}"
+        if chat_id is not None:
+            return f"{self._BASE_CHANNEL}:chat:{chat_id}"
+        return f"{self._BASE_CHANNEL}:{scope}"
+
+    async def publish(self, event: LiveEvent) -> None:
+        channels = {
+            self._channel(scope=event.scope),
+        }
+        if event.chat_id is not None:
+            channels.add(self._channel(scope=event.scope, chat_id=event.chat_id))
+        if event.game_id is not None:
+            channels.add(self._channel(scope=event.scope, game_id=event.game_id))
+        payload = event.to_json()
+        for channel in channels:
+            await self._client.publish(channel, payload)
+
+    async def subscribe(
+        self,
+        *,
+        scope: str,
+        chat_id: int | None = None,
+        game_id: str | None = None,
+    ) -> AsyncIterator[LiveEvent | None]:
+        pubsub = self._client.pubsub()
+        channels = [self._channel(scope=scope)]
+        if chat_id is not None:
+            channels.append(self._channel(scope=scope, chat_id=chat_id))
+        if game_id is not None:
+            channels.append(self._channel(scope=scope, game_id=game_id))
+        await pubsub.subscribe(*channels)
+        try:
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is None or message.get("data") is None:
+                    yield None
+                    continue
+                yield LiveEvent.from_json(str(message["data"]))
+        finally:
+            await pubsub.unsubscribe(*channels)
+            close = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+
+    async def close(self) -> None:
+        close = getattr(self._client, "aclose", None) or getattr(self._client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+_READ_ONLY_GAMESTORE_METHODS: set[str] = {
+    "get_game",
+    "get_active_game_for_chat",
+    "list_active_games",
+    "list_recent_games_for_user",
+    "get_role",
+    "get_latest_role_game_for_user",
+    "get_latest_bunker_game_for_user",
+    "get_latest_bred_submission_game_for_user",
+    "quiz_get_answer_snapshot",
+    "spy_get_vote_snapshot",
+    "bred_get_vote_snapshot",
+    "bred_get_category_snapshot",
+    "bunker_get_reveal_snapshot",
+    "bunker_get_vote_snapshot",
+    "mafia_is_night_ready",
+    "mafia_get_vote_snapshot",
+    "mafia_get_execution_confirm_snapshot",
+}
+_ACTIVE_CHAT_HYDRATION_METHODS: set[str] = {
+    "set_player_label",
+    "get_active_game_for_chat",
+}
+
+
+def _collect_group_games(value: Any) -> list[GroupGame]:
+    if isinstance(value, GroupGame):
+        return [value]
+    if isinstance(value, tuple | list | set):
+        games: list[GroupGame] = []
+        for item in value:
+            games.extend(_collect_group_games(item))
+        return games
+    if isinstance(value, dict):
+        games: list[GroupGame] = []
+        for item in value.values():
+            games.extend(_collect_group_games(item))
+        return games
+    return []
+
+
+def _event_type_for_method(name: str) -> str:
+    if "vote" in name:
+        return "new_vote"
+    if name in {
+        "start",
+        "finish",
+        "mafia_resolve_night",
+        "mafia_open_day_vote",
+        "mafia_resolve_day_vote",
+        "mafia_resolve_execution_confirm",
+        "quiz_resolve_round",
+        "bred_resolve_round",
+        "bunker_resolve_vote",
+        "bunker_force_advance_reveal",
+        "spy_guess_location",
+        "whoami_guess_identity",
+    }:
+        return "phase_change"
+    return "game_updated"
+
+
+class RuntimeGameStore:
+    def __init__(self, backend: InMemoryGameStore | None = None) -> None:
+        self._backend = backend or InMemoryGameStore()
+        self._codec = GameStateCodec()
+        self._state_repo: RedisGameStateRepository | None = None
+        self._broker: LiveEventBroker | None = None
+
+    @property
+    def backend(self) -> InMemoryGameStore:
+        return self._backend
+
+    @property
+    def live_broker(self) -> LiveEventBroker | None:
+        return self._broker
+
+    def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
+        ttl = timedelta(hours=max(1, ttl_hours))
+        self._backend = InMemoryGameStore()
+        self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
+        self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
+
+    def use_in_memory(self) -> None:
+        self._backend = InMemoryGameStore()
+        self._state_repo = None
+        self._broker = None
+
+    async def close(self) -> None:
+        if self._broker is not None:
+            await self._broker.close()
+        if self._state_repo is not None:
+            await self._state_repo.close()
+
+    async def publish_event(
+        self,
+        *,
+        event_type: str,
+        scope: str,
+        chat_id: int | None = None,
+        game_id: str | None = None,
+    ) -> None:
+        if self._broker is None:
+            return
+        revision = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        await self._broker.publish(
+            LiveEvent(
+                event_type=event_type,
+                scope=scope,
+                revision=revision,
+                chat_id=chat_id,
+                game_id=game_id,
+            )
+        )
+
+    async def _hydrate_game(self, game_id: str) -> None:
+        if self._state_repo is None or game_id in self._backend._by_id:
+            return
+        game = await self._state_repo.load_game(game_id)
+        if game is None:
+            return
+        self._backend._by_id[game_id] = game
+        if game.status != "finished":
+            self._backend._active_by_chat[game.chat_id] = game.game_id
+
+    async def _hydrate_active_for_chat(self, chat_id: int) -> None:
+        if self._state_repo is None:
+            return
+        game_id = await self._state_repo.load_active_game_id(chat_id)
+        if game_id:
+            await self._hydrate_game(game_id)
+
+    async def _hydrate_active_games(self, *, chat_ids: set[int] | None = None) -> None:
+        if self._state_repo is None:
+            return
+        for game_id in await self._state_repo.list_active_game_ids(chat_ids=chat_ids):
+            await self._hydrate_game(game_id)
+
+    async def _hydrate_recent_games_for_user(self, *, user_id: int, chat_ids: set[int] | None = None, limit: int = 6) -> None:
+        if self._state_repo is None:
+            return
+        loaded = 0
+        for game_id in await self._state_repo.list_recent_game_ids_for_user(user_id=user_id, limit=max(limit * 3, limit)):
+            await self._hydrate_game(game_id)
+            game = self._backend._by_id.get(game_id)
+            if game is None:
+                continue
+            if chat_ids is not None and game.chat_id not in chat_ids:
+                continue
+            loaded += 1
+            if loaded >= max(1, limit):
+                break
+
+    async def _hydrate_for_call(self, name: str, kwargs: dict[str, Any]) -> None:
+        if self._state_repo is None:
+            return
+        if name == "list_active_games":
+            await self._hydrate_active_games(chat_ids=kwargs.get("chat_ids"))
+            return
+        if name == "list_recent_games_for_user":
+            await self._hydrate_recent_games_for_user(
+                user_id=int(kwargs["user_id"]),
+                chat_ids=kwargs.get("chat_ids"),
+                limit=int(kwargs.get("limit", 6)),
+            )
+            return
+        game_id = kwargs.get("game_id")
+        if isinstance(game_id, str) and game_id:
+            await self._hydrate_game(game_id)
+            return
+        if name in _ACTIVE_CHAT_HYDRATION_METHODS:
+            chat_id = kwargs.get("chat_id")
+            if isinstance(chat_id, int):
+                await self._hydrate_active_for_chat(chat_id)
+
+    async def _sync_cached_state(self) -> None:
+        if self._state_repo is None:
+            return
+        active_ids = set(self._backend._active_by_chat.values())
+        for game in self._backend._by_id.values():
+            await self._state_repo.save_game(game, is_active=game.game_id in active_ids)
+
+    async def _publish_after_call(self, name: str, result: Any, kwargs: dict[str, Any]) -> None:
+        if self._broker is None:
+            return
+        games = _collect_group_games(result)
+        if not games:
+            game_id = kwargs.get("game_id")
+            if isinstance(game_id, str):
+                current = self._backend._by_id.get(game_id)
+                if current is not None:
+                    games = [current]
+        if not games:
+            return
+        event_type = _event_type_for_method(name)
+        for game in {game.game_id: game for game in games}.values():
+            await self.publish_event(
+                event_type=event_type,
+                scope="games",
+                chat_id=game.chat_id,
+                game_id=game.game_id,
+            )
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._backend, name)
+        if not callable(attr) or not inspect.iscoroutinefunction(attr):
+            return attr
+
+        async def _wrapped(*args, **kwargs):
+            await self._hydrate_for_call(name, kwargs)
+            result = await attr(*args, **kwargs)
+            if name not in _READ_ONLY_GAMESTORE_METHODS:
+                await self._sync_cached_state()
+                await self._publish_after_call(name, result, kwargs)
+            return result
+
+        return _wrapped
+
+
+GAME_STORE: RuntimeGameStore = RuntimeGameStore()

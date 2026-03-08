@@ -11,6 +11,8 @@ from selara.domain.entities import (
     ChatTextAlias,
     ChatTextAliasUpsertResult,
     ChatSnapshot,
+    FamilyBundle,
+    FamilyGraph,
     GraphRelationType,
     GraphRelationship,
     InlinePrivateMessage,
@@ -309,6 +311,13 @@ class ActivityRepository(Protocol):
         relation_type: GraphRelationType,
         actor_user_id: int | None,
     ) -> GraphRelationship: ...
+    async def validate_parent_link(
+        self,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        target_user_id: int,
+    ) -> str | None: ...
     async def remove_graph_relationship(
         self,
         *,
@@ -318,6 +327,8 @@ class ActivityRepository(Protocol):
         relation_type: GraphRelationType,
     ) -> bool: ...
     async def list_graph_relationships(self, *, chat_id: int, user_id: int | None = None) -> list[GraphRelationship]: ...
+    async def list_family_bundle(self, *, chat_id: int, user_id: int) -> FamilyBundle: ...
+    async def list_family_graph(self, *, chat_id: int, user_id: int) -> FamilyGraph: ...
     async def add_audit_log(
         self,
         *,

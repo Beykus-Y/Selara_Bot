@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Моя семья</span>
+      <h1>{{ chat_title }}</h1>
+      <p class="lead">Интерактивное дерево отношений вокруг выбранного участника.</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">focus {{ focus_user_id }}</div>
+      <div class="hero-chip">{{ focus_label }}</div>
+      <div class="hero-chip">family graph</div>
+    </div>
+  </section>
+
+  <section class="metrics-grid">
+    {% for item in bundle_summary %}
+      <article class="metric-card tone-cyan">
+        <span class="metric-label">{{ item.label }}</span>
+        <strong class="metric-value">{{ item.value }}</strong>
+        <span class="metric-note">текущее окно вокруг фокуса</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col family-layout">
+    <article class="panel family-scene-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Граф связей</h2>
+          <p class="panel-subtitle">Клик по узлу обновляет правую панель. Клик по имени переводит фокус на этого участника.</p>
+        </div>
+      </div>
+      <div class="family-scene" id="family-scene"></div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Связи узла</h2>
+          <p class="panel-subtitle">Роли и связи относительно текущего фокуса.</p>
+        </div>
+      </div>
+      <div class="list-stack compact" id="family-side-list"></div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Участники в графе</h2>
+        <p class="panel-subtitle">Быстрый переход на другой центр дерева.</p>
+      </div>
+    </div>
+    <div class="token-cloud">
+      {% for node in family_nodes %}
+        <a class="token-chip" href="{{ node.href }}">{{ node.label }}</a>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const nodes = {{ family_nodes_json|safe }};
+      const edges = {{ family_edges_json|safe }};
+      const scene = document.getElementById("family-scene");
+      const sideList = document.getElementById("family-side-list");
+      if (!scene || !sideList) return;
+
+      const roleOrder = ["grandparent", "parent", "step_parent", "sibling", "subject", "spouse", "child", "pet", "relative"];
+      const grouped = new Map();
+      for (const role of roleOrder) grouped.set(role, []);
+      for (const node of nodes) {
+        const role = grouped.has(node.role) ? node.role : "relative";
+        grouped.get(role).push(node);
+      }
+
+      const width = 980;
+      const height = 620;
+      scene.style.setProperty("--scene-width", `${width}px`);
+      scene.style.setProperty("--scene-height", `${height}px`);
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.classList.add("family-svg");
+      scene.appendChild(svg);
+
+      const positionMap = new Map();
+      const placeRow = (items, y, startX, stepX) => {
+        const centered = startX - ((Math.max(0, items.length - 1) * stepX) / 2);
+        items.forEach((node, index) => {
+          positionMap.set(node.id, { x: centered + index * stepX, y });
+        });
+      };
+
+      placeRow(grouped.get("grandparent"), 86, width / 2, 180);
+      placeRow([...grouped.get("parent"), ...grouped.get("step_parent")], 190, width / 2, 170);
+      placeRow([...grouped.get("sibling")], 308, width / 2 - 260, 150);
+      placeRow([...grouped.get("subject"), ...grouped.get("spouse")], 308, width / 2 + 90, 190);
+      placeRow([...grouped.get("child")], 442, width / 2, 170);
+      placeRow([...grouped.get("pet")], 540, width / 2, 150);
+      placeRow([...grouped.get("relative")], 308, width / 2, 150);
+
+      edges.forEach((edge) => {
+        const source = positionMap.get(edge.source);
+        const target = positionMap.get(edge.target);
+        if (!source || !target) return;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", String(source.x));
+        line.setAttribute("y1", String(source.y));
+        line.setAttribute("x2", String(target.x));
+        line.setAttribute("y2", String(target.y));
+        line.setAttribute("class", `family-edge edge-${edge.relation_type}`);
+        if (!edge.is_direct) line.setAttribute("stroke-dasharray", "8 6");
+        svg.appendChild(line);
+      });
+
+      const renderSideList = (nodeId) => {
+        sideList.innerHTML = "";
+        const node = nodes.find((item) => item.id === nodeId);
+        if (!node) return;
+
+        const title = document.createElement("div");
+        title.className = "stat-row";
+        title.innerHTML = `<div><strong>${node.label}</strong><p>роль: ${node.role}</p></div><span>#${node.id}</span>`;
+        sideList.appendChild(title);
+
+        const related = edges.filter((edge) => edge.source === nodeId || edge.target === nodeId);
+        if (!related.length) {
+          const empty = document.createElement("p");
+          empty.className = "empty-text";
+          empty.textContent = "Для этого узла связи не найдены.";
+          sideList.appendChild(empty);
+          return;
+        }
+
+        related.forEach((edge) => {
+          const otherId = edge.source === nodeId ? edge.target : edge.source;
+          const otherNode = nodes.find((item) => item.id === otherId);
+          const row = document.createElement("div");
+          row.className = "stat-row";
+          row.innerHTML = `<div><strong>${otherNode?.label || otherId}</strong><p>${edge.label}</p></div><span>${edge.relation_type}</span>`;
+          sideList.appendChild(row);
+        });
+      };
+
+      nodes.forEach((node) => {
+        const pos = positionMap.get(node.id);
+        if (!pos) return;
+        const anchor = document.createElement("a");
+        anchor.href = node.href;
+        anchor.className = `family-node role-${node.role}`;
+        anchor.style.left = `${pos.x}px`;
+        anchor.style.top = `${pos.y}px`;
+        anchor.innerHTML = `<strong>${node.label}</strong><span>#${node.id}</span>`;
+        anchor.addEventListener("mouseenter", () => renderSideList(node.id));
+        anchor.addEventListener("focus", () => renderSideList(node.id));
+        scene.appendChild(anchor);
+      });
+
+      renderSideList({{ focus_user_id }});
+    })();
+  </script>
+{% endblock %}

@@ -304,7 +304,7 @@ def build_settings_sections(
         current_value = current_map[key]
         default_value = default_map[key]
         if key in CFG_BOOL_KEYS:
-            input_kind = "select"
+            input_kind = "toggle"
             options = [
                 {"value": "true", "label": "true", "selected": str(current_value).lower() == "true"},
                 {"value": "false", "label": "false", "selected": str(current_value).lower() == "false"},

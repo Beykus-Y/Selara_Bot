@@ -10,6 +10,7 @@ from selara.presentation.handlers.text_commands import (
     _extract_inline_private_usernames,
     _inline_private_callback_data,
     _parse_inline_private_payload,
+    _parse_inline_rp_payload,
     _inline_private_result_title,
     _resolve_inline_private_receivers,
     _split_inline_private_text,
@@ -44,6 +45,24 @@ def test_parse_inline_private_payload_allows_text_without_receivers() -> None:
     assert payload is not None
     assert payload.receiver_usernames == ()
     assert payload.text == "РїСЂРёРІРµС‚ Р±РµР· С‚РµРіРѕРІ"
+
+
+def test_parse_inline_rp_payload_detects_plain_action() -> None:
+    payload = _parse_inline_rp_payload("hug maria")
+    assert payload is not None
+    assert payload.action_key == "hug"
+    assert payload.search_text == "maria"
+
+
+def test_parse_inline_rp_payload_supports_explicit_rp_prefix() -> None:
+    payload = _parse_inline_rp_payload("rp hug @maria")
+    assert payload is not None
+    assert payload.action_key == "hug"
+    assert payload.search_text == "@maria"
+
+
+def test_parse_inline_rp_payload_does_not_capture_pm_mode() -> None:
+    assert _parse_inline_rp_payload("pm @user1 secret text") is None
 
 
 def test_split_inline_private_text_respects_180_limit_and_words() -> None:

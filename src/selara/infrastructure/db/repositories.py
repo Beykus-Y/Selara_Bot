@@ -33,6 +33,9 @@ from selara.domain.entities import (
     ChatTextAlias,
     ChatTextAliasUpsertResult,
     ChatSnapshot,
+    FamilyBundle,
+    FamilyGraph,
+    FamilyGraphEdge,
     GraphRelationType,
     GraphRelationship,
     InlinePrivateMessage,
@@ -52,11 +55,22 @@ from selara.domain.entities import (
     UserChatOverview,
     UserSnapshot,
 )
-from selara.domain.economy_entities import ChatAuction, EconomyAccount, EconomyScope, FarmState, InventoryItem, MarketListing, PlotState
+from selara.domain.economy_entities import (
+    ChatAuction,
+    ChatBoost,
+    EconomyAccount,
+    EconomyScope,
+    FarmState,
+    InventoryItem,
+    MarketListing,
+    MarketTrade,
+    PlotState,
+)
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
     ChatAuditLogModel,
     ChatAuctionModel,
+    ChatGlobalBoostModel,
     ChatCommandAccessRuleModel,
     ChatCustomSocialActionModel,
     ChatModel,
@@ -70,6 +84,7 @@ from selara.infrastructure.db.models import (
     EconomyInventoryModel,
     EconomyLedgerModel,
     EconomyMarketListingModel,
+    EconomyMarketTradeModel,
     EconomyPlotModel,
     EconomyPrivateContextModel,
     EconomyTransferDailyModel,
@@ -305,6 +320,7 @@ class SqlAlchemyActivityRepository:
             economy_market_fee_percent=int(row.economy_market_fee_percent),
             economy_negative_event_chance_percent=int(row.economy_negative_event_chance_percent),
             economy_negative_event_loss_percent=int(row.economy_negative_event_loss_percent),
+            cleanup_economy_commands=bool(row.cleanup_economy_commands),
         )
 
     async def upsert_chat_settings(
@@ -676,6 +692,14 @@ class SqlAlchemyActivityRepository:
             left, right = user_b, user_a
         if normalized_type == "spouse" and left.telegram_user_id > right.telegram_user_id:
             left, right = right, left
+        if normalized_type == "parent":
+            error = await self.validate_parent_link(
+                chat_id=chat.telegram_chat_id,
+                actor_user_id=left.telegram_user_id,
+                target_user_id=right.telegram_user_id,
+            )
+            if error:
+                raise ValueError(error)
 
         await self._upsert_chat(chat)
         await self._upsert_user(left)
@@ -756,6 +780,185 @@ class SqlAlchemyActivityRepository:
         stmt = stmt.order_by(RelationshipGraphModel.created_at.asc(), RelationshipGraphModel.id.asc())
         rows = (await self._session.execute(stmt)).scalars().all()
         return [self._to_graph_relationship(row) for row in rows]
+
+    async def validate_parent_link(
+        self,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        target_user_id: int,
+    ) -> str | None:
+        if int(actor_user_id) == int(target_user_id):
+            return "Нельзя усыновить самого себя."
+
+        parent_rows = (
+            await self._session.execute(
+                select(RelationshipGraphModel.id, RelationshipGraphModel.user_a)
+                .where(
+                    RelationshipGraphModel.chat_id == chat_id,
+                    RelationshipGraphModel.relation_type == "parent",
+                    RelationshipGraphModel.user_b == target_user_id,
+                )
+                .with_for_update()
+            )
+        ).all()
+        current_parents = {int(parent_id) for _row_id, parent_id in parent_rows}
+        if actor_user_id in current_parents:
+            return "Эта семейная связь уже существует."
+        if len(parent_rows) >= 2:
+            return "У ребёнка уже есть два родителя."
+
+        descendants = (
+            select(RelationshipGraphModel.user_b.label("user_id"))
+            .where(
+                RelationshipGraphModel.chat_id == chat_id,
+                RelationshipGraphModel.relation_type == "parent",
+                RelationshipGraphModel.user_a == target_user_id,
+            )
+            .cte(name="family_descendants", recursive=True)
+        )
+        descendants_step = aliased(RelationshipGraphModel)
+        descendants = descendants.union_all(
+            select(descendants_step.user_b.label("user_id")).where(
+                descendants_step.chat_id == chat_id,
+                descendants_step.relation_type == "parent",
+                descendants_step.user_a == descendants.c.user_id,
+            )
+        )
+        cycle_found = (
+            await self._session.execute(
+                select(descendants.c.user_id).where(descendants.c.user_id == actor_user_id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if cycle_found is not None:
+            return "Нельзя замкнуть семейное древо в цикл."
+        return None
+
+    async def list_family_bundle(self, *, chat_id: int, user_id: int) -> FamilyBundle:
+        relations = await self.list_graph_relationships(chat_id=chat_id)
+        parent_edges = [item for item in relations if item.relation_type == "parent"]
+        pet_edges = [item for item in relations if item.relation_type == "pet"]
+        parents = sorted({item.user_a for item in parent_edges if item.user_b == user_id})
+        children = sorted({item.user_b for item in parent_edges if item.user_a == user_id})
+        pets = sorted({item.user_b for item in pet_edges if item.user_a == user_id})
+        grandparents = sorted({item.user_a for item in parent_edges if item.user_b in parents})
+        siblings = sorted(
+            {
+                item.user_b
+                for item in parent_edges
+                if item.user_a in parents and item.user_b != user_id
+            }
+        )
+
+        marriage = await self.get_active_marriage(user_id=user_id, chat_id=chat_id)
+        spouse_user_id = None
+        if marriage is not None:
+            spouse_user_id = (
+                marriage.user_high_id if marriage.user_low_id == user_id else marriage.user_low_id
+            )
+
+        parent_marriages_stmt = select(MarriageModel).where(
+            MarriageModel.chat_id == chat_id,
+            or_(
+                MarriageModel.user_low_id.in_(parents or [-1]),
+                MarriageModel.user_high_id.in_(parents or [-1]),
+            ),
+        )
+        parent_marriages = (await self._session.execute(parent_marriages_stmt)).scalars().all()
+        step_parents: set[int] = set()
+        for row in parent_marriages:
+            low_id = int(row.user_low_id)
+            high_id = int(row.user_high_id)
+            if low_id in parents and high_id not in parents and high_id != user_id:
+                step_parents.add(high_id)
+            if high_id in parents and low_id not in parents and low_id != user_id:
+                step_parents.add(low_id)
+
+        return FamilyBundle(
+            subject_user_id=user_id,
+            spouse_user_id=spouse_user_id,
+            parents=tuple(parents),
+            grandparents=tuple(grandparents),
+            step_parents=tuple(sorted(step_parents)),
+            siblings=tuple(siblings),
+            children=tuple(children),
+            pets=tuple(pets),
+        )
+
+    async def list_family_graph(self, *, chat_id: int, user_id: int) -> FamilyGraph:
+        bundle = await self.list_family_bundle(chat_id=chat_id, user_id=user_id)
+        relations = await self.list_graph_relationships(chat_id=chat_id)
+        parent_edges = [item for item in relations if item.relation_type == "parent"]
+        pet_edges = [item for item in relations if item.relation_type == "pet"]
+
+        node_ids: set[int] = {
+            user_id,
+            *bundle.parents,
+            *bundle.grandparents,
+            *bundle.step_parents,
+            *bundle.siblings,
+            *bundle.children,
+            *bundle.pets,
+        }
+        if bundle.spouse_user_id is not None:
+            node_ids.add(bundle.spouse_user_id)
+
+        edges: list[FamilyGraphEdge] = []
+        for edge in parent_edges:
+            if edge.user_a in node_ids and edge.user_b in node_ids:
+                edges.append(
+                    FamilyGraphEdge(
+                        source_user_id=edge.user_a,
+                        target_user_id=edge.user_b,
+                        relation_type="parent",
+                        label="parent",
+                    )
+                )
+        for edge in pet_edges:
+            if edge.user_a in node_ids and edge.user_b in node_ids:
+                edges.append(
+                    FamilyGraphEdge(
+                        source_user_id=edge.user_a,
+                        target_user_id=edge.user_b,
+                        relation_type="pet",
+                        label="pet",
+                    )
+                )
+        if bundle.spouse_user_id is not None:
+            edges.append(
+                FamilyGraphEdge(
+                    source_user_id=user_id,
+                    target_user_id=bundle.spouse_user_id,
+                    relation_type="spouse",
+                    label="spouse",
+                )
+            )
+        for step_parent_id in bundle.step_parents:
+            edges.append(
+                FamilyGraphEdge(
+                    source_user_id=step_parent_id,
+                    target_user_id=user_id,
+                    relation_type="step_parent",
+                    label="step-parent",
+                    is_direct=False,
+                )
+            )
+        for sibling_id in bundle.siblings:
+            edges.append(
+                FamilyGraphEdge(
+                    source_user_id=user_id,
+                    target_user_id=sibling_id,
+                    relation_type="sibling",
+                    label="sibling",
+                    is_direct=False,
+                )
+            )
+
+        return FamilyGraph(
+            focus_user_id=user_id,
+            node_user_ids=tuple(sorted(node_ids)),
+            edges=tuple(edges),
+        )
 
     async def add_audit_log(
         self,
@@ -1173,6 +1376,8 @@ class SqlAlchemyActivityRepository:
                 chat_id=chat.telegram_chat_id,
                 user_id=user.telegram_user_id,
                 description_text=normalized,
+                avatar_frame_code=None,
+                emoji_status_code=None,
             )
             self._session.add(row)
         else:
@@ -3138,6 +3343,8 @@ class SqlAlchemyActivityRepository:
             chat_id=int(row.chat_id),
             user_id=int(row.user_id),
             description=(row.description_text or "").strip() or None,
+            avatar_frame_code=(row.avatar_frame_code or "").strip() or None,
+            emoji_status_code=(row.emoji_status_code or "").strip() or None,
             updated_at=row.updated_at,
         )
 
@@ -3354,7 +3561,13 @@ class SqlAlchemyEconomyRepository:
 
         farm_row = await self._session.get(EconomyFarmModel, account_row.id)
         if farm_row is None:
-            farm_row = EconomyFarmModel(account_id=account_row.id, farm_level=1, size_tier="small", negative_event_streak=0)
+            farm_row = EconomyFarmModel(
+                account_id=account_row.id,
+                farm_level=1,
+                size_tier="small",
+                negative_event_streak=0,
+                last_planted_crop_code=None,
+            )
             self._session.add(farm_row)
             await self._session.flush()
 
@@ -3566,7 +3779,12 @@ class SqlAlchemyEconomyRepository:
     async def update_farm_level(self, *, account_id: int, farm_level: int) -> None:
         row = await self._session.get(EconomyFarmModel, account_id)
         if row is None:
-            row = EconomyFarmModel(account_id=account_id, farm_level=max(1, int(farm_level)), size_tier="small")
+            row = EconomyFarmModel(
+                account_id=account_id,
+                farm_level=max(1, int(farm_level)),
+                size_tier="small",
+                last_planted_crop_code=None,
+            )
             self._session.add(row)
         else:
             row.farm_level = max(1, int(farm_level))
@@ -3576,7 +3794,12 @@ class SqlAlchemyEconomyRepository:
     async def update_farm_size_tier(self, *, account_id: int, size_tier: str) -> None:
         row = await self._session.get(EconomyFarmModel, account_id)
         if row is None:
-            row = EconomyFarmModel(account_id=account_id, farm_level=1, size_tier=size_tier)
+            row = EconomyFarmModel(
+                account_id=account_id,
+                farm_level=1,
+                size_tier=size_tier,
+                last_planted_crop_code=None,
+            )
             self._session.add(row)
         else:
             row.size_tier = size_tier
@@ -3589,10 +3812,32 @@ class SqlAlchemyEconomyRepository:
             return None
         return self._to_farm_state(row)
 
+    async def set_last_planted_crop_code(self, *, account_id: int, crop_code: str | None) -> None:
+        row = await self._session.get(EconomyFarmModel, account_id)
+        if row is None:
+            row = EconomyFarmModel(
+                account_id=account_id,
+                farm_level=1,
+                size_tier="small",
+                negative_event_streak=0,
+                last_planted_crop_code=crop_code,
+            )
+            self._session.add(row)
+        else:
+            row.last_planted_crop_code = crop_code
+            row.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+
     async def set_negative_event_streak(self, *, account_id: int, value: int) -> None:
         row = await self._session.get(EconomyFarmModel, account_id)
         if row is None:
-            row = EconomyFarmModel(account_id=account_id, farm_level=1, size_tier="small", negative_event_streak=max(0, value))
+            row = EconomyFarmModel(
+                account_id=account_id,
+                farm_level=1,
+                size_tier="small",
+                negative_event_streak=max(0, value),
+                last_planted_crop_code=None,
+            )
             self._session.add(row)
         else:
             row.negative_event_streak = max(0, int(value))
@@ -3711,6 +3956,112 @@ class SqlAlchemyEconomyRepository:
             EconomyMarketListingModel.status == "open",
         )
         return int((await self._session.execute(stmt)).scalar_one() or 0)
+
+    async def create_market_trade(
+        self,
+        *,
+        listing: MarketListing,
+        buyer_user_id: int,
+        quantity: int,
+        total_price: int,
+        created_at: datetime,
+    ) -> MarketTrade:
+        await self._upsert_user(
+            UserSnapshot(
+                telegram_user_id=buyer_user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+            )
+        )
+        row = EconomyMarketTradeModel(
+            listing_id=listing.id,
+            scope_id=listing.scope_id,
+            scope_type=listing.scope_type,
+            chat_id=listing.chat_id,
+            seller_user_id=listing.seller_user_id,
+            buyer_user_id=buyer_user_id,
+            item_code=listing.item_code,
+            quantity=max(1, int(quantity)),
+            unit_price=max(1, int(listing.unit_price)),
+            total_price=max(1, int(total_price)),
+            created_at=created_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return self._to_market_trade(row)
+
+    async def list_market_trades(
+        self,
+        *,
+        scope: EconomyScope,
+        item_code: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[MarketTrade]:
+        stmt = select(EconomyMarketTradeModel).where(EconomyMarketTradeModel.scope_id == scope.scope_id)
+        if item_code:
+            stmt = stmt.where(EconomyMarketTradeModel.item_code == item_code)
+        if since is not None:
+            stmt = stmt.where(EconomyMarketTradeModel.created_at >= since)
+        stmt = stmt.order_by(EconomyMarketTradeModel.created_at.desc()).limit(max(1, int(limit)))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [self._to_market_trade(row) for row in rows]
+
+    async def create_chat_boost(
+        self,
+        *,
+        chat_id: int,
+        scope: EconomyScope,
+        boost_code: str,
+        value_percent: int,
+        starts_at: datetime,
+        ends_at: datetime,
+        created_by_user_id: int,
+    ) -> ChatBoost:
+        await self._upsert_chat(ChatSnapshot(telegram_chat_id=chat_id, chat_type="group", title=None))
+        await self._upsert_user(
+            UserSnapshot(
+                telegram_user_id=created_by_user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+            )
+        )
+        row = ChatGlobalBoostModel(
+            chat_id=chat_id,
+            scope_id=scope.scope_id,
+            scope_type=scope.scope_type,
+            boost_code=boost_code,
+            value_percent=max(1, int(value_percent)),
+            starts_at=starts_at,
+            ends_at=ends_at,
+            created_by_user_id=created_by_user_id,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return self._to_chat_boost(row)
+
+    async def list_active_chat_boosts(
+        self,
+        *,
+        chat_id: int,
+        as_of: datetime | None = None,
+    ) -> list[ChatBoost]:
+        point = as_of or datetime.now(timezone.utc)
+        stmt = (
+            select(ChatGlobalBoostModel)
+            .where(
+                ChatGlobalBoostModel.chat_id == chat_id,
+                ChatGlobalBoostModel.starts_at <= point,
+                ChatGlobalBoostModel.ends_at >= point,
+            )
+            .order_by(ChatGlobalBoostModel.created_at.desc(), ChatGlobalBoostModel.id.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [self._to_chat_boost(row) for row in rows]
 
     async def create_chat_auction(
         self,
@@ -3998,6 +4349,7 @@ class SqlAlchemyEconomyRepository:
             farm_level=int(row.farm_level),
             size_tier=row.size_tier,
             negative_event_streak=int(row.negative_event_streak),
+            last_planted_crop_code=row.last_planted_crop_code,
         )
 
     @staticmethod
@@ -4036,6 +4388,38 @@ class SqlAlchemyEconomyRepository:
             fee_paid=int(row.fee_paid),
             status=row.status,  # type: ignore[arg-type]
             expires_at=row.expires_at,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_market_trade(row: EconomyMarketTradeModel) -> MarketTrade:
+        return MarketTrade(
+            id=int(row.id),
+            listing_id=int(row.listing_id),
+            scope_id=row.scope_id,
+            scope_type=row.scope_type,  # type: ignore[arg-type]
+            chat_id=int(row.chat_id) if row.chat_id is not None else None,
+            seller_user_id=int(row.seller_user_id),
+            buyer_user_id=int(row.buyer_user_id),
+            item_code=row.item_code,
+            quantity=int(row.quantity),
+            unit_price=int(row.unit_price),
+            total_price=int(row.total_price),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_chat_boost(row: ChatGlobalBoostModel) -> ChatBoost:
+        return ChatBoost(
+            id=int(row.id),
+            chat_id=int(row.chat_id),
+            scope_id=row.scope_id,
+            scope_type=row.scope_type,  # type: ignore[arg-type]
+            boost_code=row.boost_code,
+            value_percent=int(row.value_percent),
+            starts_at=row.starts_at,
+            ends_at=row.ends_at,
+            created_by_user_id=int(row.created_by_user_id),
             created_at=row.created_at,
         )
 

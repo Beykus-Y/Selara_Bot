@@ -57,9 +57,10 @@ def test_chat_template_renders_settings_sections_items_key() -> None:
         ],
         trigger_template_docs_url="/app/docs/admin?chat_id=123#docs-trigger-variables",
         audit_rows=[],
-        can_manage_settings=False,
+        can_manage_settings=True,
         manage_settings_tone="ok",
         manage_settings_note="Настройки доступны.",
+        active_tab="settings",
         settings_sections=[
             {
                 "title": "Основное",

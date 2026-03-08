@@ -89,6 +89,8 @@ class UserChatProfile:
     chat_id: int
     user_id: int
     description: str | None
+    avatar_frame_code: str | None = None
+    emoji_status_code: str | None = None
     updated_at: datetime | None = None
 
 
@@ -276,6 +278,34 @@ class GraphRelationship:
     created_by_user_id: int | None
     created_at: datetime
     updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class FamilyBundle:
+    subject_user_id: int
+    spouse_user_id: int | None
+    parents: tuple[int, ...]
+    grandparents: tuple[int, ...]
+    step_parents: tuple[int, ...]
+    siblings: tuple[int, ...]
+    children: tuple[int, ...]
+    pets: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class FamilyGraphEdge:
+    source_user_id: int
+    target_user_id: int
+    relation_type: str
+    label: str
+    is_direct: bool = True
+
+
+@dataclass(frozen=True)
+class FamilyGraph:
+    focus_user_id: int
+    node_user_ids: tuple[int, ...]
+    edges: tuple[FamilyGraphEdge, ...]
 
 
 @dataclass(frozen=True)

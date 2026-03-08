@@ -5,7 +5,7 @@ import re
 from datetime import date, datetime, timezone
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -36,10 +36,12 @@ from selara.application.use_cases.economy.growth import effective_growth_stress_
 from selara.application.use_cases.economy.growth import get_profile as get_growth_profile
 from selara.application.use_cases.economy.growth import perform_action as perform_growth_action
 from selara.application.use_cases.economy.get_dashboard import execute as get_dashboard
+from selara.application.use_cases.economy.harvest_all_ready import execute as harvest_all_ready
 from selara.application.use_cases.economy.harvest import execute as harvest_crop
 from selara.application.use_cases.economy.market_buy_listing import execute as market_buy_listing
 from selara.application.use_cases.economy.market_cancel_listing import execute as market_cancel_listing
 from selara.application.use_cases.economy.market_create_listing import execute as market_create_listing
+from selara.application.use_cases.economy.plant_all_last_crop import execute as plant_all_last_crop
 from selara.application.use_cases.economy.plant_crop import execute as plant_crop
 from selara.application.use_cases.economy.tap import execute as tap
 from selara.application.use_cases.economy.transfer_coins import execute as transfer_coins
@@ -73,6 +75,7 @@ _RUSSIAN_ITEM_ALIASES = {
     "чипсы": "item:corn_chips",
 }
 _AUCTION_TASKS: dict[int, asyncio.Task[None]] = {}
+_ECONOMY_CLEANUP_DELAY_SECONDS = 20
 
 
 def _mode_to_short(mode: str) -> str:
@@ -367,6 +370,7 @@ def _farm_text(dashboard) -> str:
         "<b>Ферма</b>",
         f"<b>Баланс:</b> <code>{account.balance}</code>",
         f"<b>Уровень:</b> <code>{farm.farm_level}</code> | <b>Размер:</b> <code>{escape(localize_size_tier(farm.size_tier))}</code>",
+        f"<b>Последняя культура:</b> <code>{escape(localize_crop_code(farm.last_planted_crop_code))}</code>",
         "",
         "<b>Грядки:</b>",
     ]
@@ -415,7 +419,9 @@ def _farm_text(dashboard) -> str:
     lines.append("<b>Предметы:</b>")
     lines.extend(items or ["- пусто"])
     lines.append("")
-    lines.append("<b>Быстро:</b> /farm plant редис 1, /farm harvest 1, /farm upfarm, /farm upsize средний")
+    lines.append(
+        "<b>Быстро:</b> /farm plant редис 1, /farm harvest 1, /farm harvestall, /farm plantall, /farm upfarm, /farm upsize средний"
+    )
     return "\n".join(lines)
 
 
@@ -593,14 +599,24 @@ def _build_farm_keyboard(mode: str, dashboard, *, owner_user_id: int | None) -> 
             text=f"Посадить редис #{first_empty}",
             callback_data=_with_owner_suffix(f"farm:p:{m}:radish:{first_empty}", owner_user_id),
         )
+    if first_empty is not None and dashboard.farm.last_planted_crop_code:
+        builder.button(
+            text=f"Засадить всё: {localize_crop_code(dashboard.farm.last_planted_crop_code)}",
+            callback_data=_with_owner_suffix(f"farm:pa:{m}", owner_user_id),
+        )
 
     now = datetime.now(timezone.utc)
+    ready_count = 0
     for no in range(1, slots + 1):
         plot = by_no.get(no)
         if plot is None or plot.crop_code is None or plot.ready_at is None:
             continue
         if plot.ready_at <= now:
+            ready_count += 1
             builder.button(text=f"Собрать #{no}", callback_data=_with_owner_suffix(f"farm:h:{m}:{no}", owner_user_id))
+
+    if ready_count > 1:
+        builder.button(text="Собрать всё", callback_data=_with_owner_suffix(f"farm:ha:{m}", owner_user_id))
 
     builder.button(text="↩️ Панель", callback_data=_with_owner_suffix(f"eco:dash:{m}", owner_user_id))
     builder.adjust(1)
@@ -730,11 +746,34 @@ async def _answer_message(
     *,
     parse_mode: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
+    cleanup_bot: Bot | None = None,
+    cleanup_enabled: bool = False,
 ) -> Message:
     kwargs = {}
     if message.chat.type in _GROUP_CHAT_TYPES:
         kwargs["disable_notification"] = True
-    return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs)
+    reply = await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs)
+    if cleanup_enabled and cleanup_bot is not None and reply_markup is None:
+        _schedule_economy_cleanup(
+            cleanup_bot,
+            chat_id=message.chat.id,
+            message_ids=(message.message_id, reply.message_id),
+        )
+    return reply
+
+
+def _schedule_economy_cleanup(bot: Bot, *, chat_id: int, message_ids: tuple[int, ...]) -> None:
+    async def _runner() -> None:
+        await asyncio.sleep(_ECONOMY_CLEANUP_DELAY_SECONDS)
+        for message_id in message_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except TelegramBadRequest:
+                continue
+            except Exception:
+                continue
+
+    asyncio.create_task(_runner())
 
 
 async def _edit_or_answer(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
@@ -811,7 +850,7 @@ async def eco_command(message: Message, command: CommandObject, economy_repo, ch
 
 
 @router.message(Command("tap"))
-async def tap_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def tap_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -833,13 +872,16 @@ async def tap_command(message: Message, command: CommandObject, economy_repo, ch
         return
 
     proc = " x4!" if result.proc_x4 else ""
-    await _answer_message(message, 
-        f"Тап засчитан: +{result.reward}{proc}. Баланс: {result.new_balance}. Серия: {result.tap_streak}."
+    await _answer_message(
+        message,
+        f"Тап засчитан: +{result.reward}{proc}. Баланс: {result.new_balance}. Серия: {result.tap_streak}.",
+        cleanup_bot=bot,
+        cleanup_enabled=chat_settings.cleanup_economy_commands,
     )
 
 
 @router.message(Command("daily"))
-async def daily_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def daily_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -862,13 +904,16 @@ async def daily_command(message: Message, command: CommandObject, economy_repo, 
         return
 
     bonus_ticket = " +билет" if result.granted_lottery_ticket else ""
-    await _answer_message(message, 
-        f"Daily: +{result.reward}{bonus_ticket}. Серия: {result.streak}. Баланс: {result.new_balance}."
+    await _answer_message(
+        message,
+        f"Daily: +{result.reward}{bonus_ticket}. Серия: {result.streak}. Баланс: {result.new_balance}.",
+        cleanup_bot=bot,
+        cleanup_enabled=chat_settings.cleanup_economy_commands,
     )
 
 
 @router.message(Command("farm"))
-async def farm_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def farm_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -910,8 +955,32 @@ async def farm_command(message: Message, command: CommandObject, economy_repo, c
         if not result.accepted:
             await _answer_message(message, result.reason or "Не удалось посадить")
             return
-        await _answer_message(message, 
-            f"Посадка успешна: {localize_crop_code(result.crop_code)} в грядку #{result.plot_no}. Готово: {result.ready_at}. Баланс: {result.new_balance}"
+        await _answer_message(
+            message,
+            f"Посадка успешна: {localize_crop_code(result.crop_code)} в грядку #{result.plot_no}. Готово: {result.ready_at}. Баланс: {result.new_balance}",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
+        return
+
+    if action in {"plantall", "plant_all"}:
+        crop_code = _normalize_crop_input_or_raw(tokens[1]) if len(tokens) >= 2 else None
+        result = await plant_all_last_crop(
+            economy_repo,
+            economy_mode=mode,
+            chat_id=chat_id,
+            user_id=message.from_user.id,
+            crop_code=crop_code,
+        )
+        if not result.accepted:
+            await _answer_message(message, result.reason or "Не удалось засадить грядки")
+            return
+        crop_label = localize_crop_code(result.crop_code)
+        await _answer_message(
+            message,
+            f"Засажено грядок: {len(result.planted_plots)}. Культура: {crop_label}. Баланс: {result.new_balance}.",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
         )
         return
 
@@ -932,7 +1001,33 @@ async def farm_command(message: Message, command: CommandObject, economy_repo, c
             await _answer_message(message, result.reason or "Не удалось собрать урожай")
             return
         event_text = f" | событие: {result.event}" if result.event else ""
-        await _answer_message(message, f"Собрано: {result.amount} x {localize_crop_code(result.crop_code)}{event_text}")
+        await _answer_message(
+            message,
+            f"Собрано: {result.amount} x {localize_crop_code(result.crop_code)}{event_text}",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
+        return
+
+    if action in {"harvestall", "harvest_all"}:
+        result = await harvest_all_ready(
+            economy_repo,
+            economy_mode=mode,
+            chat_id=chat_id,
+            user_id=message.from_user.id,
+            negative_event_chance_percent=chat_settings.economy_negative_event_chance_percent,
+            negative_event_loss_percent=chat_settings.economy_negative_event_loss_percent,
+        )
+        if not result.accepted:
+            await _answer_message(message, result.reason or "Нет готовых грядок")
+            return
+        summary = ", ".join(f"{localize_crop_code(code)} x{qty}" for code, qty in result.crop_totals)
+        await _answer_message(
+            message,
+            f"Собрано со всех готовых грядок: {summary}. Всего: {result.total_amount}.",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
         return
 
     if action == "upfarm":
@@ -960,7 +1055,12 @@ async def farm_command(message: Message, command: CommandObject, economy_repo, c
             reason="farm_upgrade_level",
             meta_json=f'{{"to": {next_level}}}',
         )
-        await _answer_message(message, f"Ферма улучшена до уровня {next_level}.")
+        await _answer_message(
+            message,
+            f"Ферма улучшена до уровня {next_level}.",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
         return
 
     if action == "upsize":
@@ -998,7 +1098,12 @@ async def farm_command(message: Message, command: CommandObject, economy_repo, c
             reason="farm_upgrade_size",
             meta_json=f'{{"to": "{target}"}}',
         )
-        await _answer_message(message, f"Размер фермы обновлён до {localize_size_tier(target)}.")
+        await _answer_message(
+            message,
+            f"Размер фермы обновлён до {localize_size_tier(target)}.",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
         return
 
     if action == "sell":
@@ -1034,14 +1139,19 @@ async def farm_command(message: Message, command: CommandObject, economy_repo, c
             reason="crop_sell",
             meta_json=f'{{"crop": "{crop_code}", "qty": {qty}}}',
         )
-        await _answer_message(message, f"Продано {qty} x {crop.title} за {revenue}. Баланс: {balance}")
+        await _answer_message(
+            message,
+            f"Продано {qty} x {crop.title} за {revenue}. Баланс: {balance}",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
         return
 
-    await _answer_message(message, "Действия: plant, harvest, upfarm, upsize, sell")
+    await _answer_message(message, "Действия: plant, plantall, harvest, harvestall, upfarm, upsize, sell")
 
 
 @router.message(Command("shop"))
-async def shop_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def shop_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1095,8 +1205,11 @@ async def shop_command(message: Message, command: CommandObject, economy_repo, c
             await _answer_message(message, result.reason or "Покупка не выполнена")
             return
 
-        await _answer_message(message, 
-            f"Покупка успешна: {result.offer.title if result.offer else '-'} | Баланс: {result.new_balance}"
+        await _answer_message(
+            message,
+            f"Покупка успешна: {result.offer.title if result.offer else '-'} | Баланс: {result.new_balance}",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
         )
         return
 
@@ -1108,7 +1221,7 @@ async def shop_command(message: Message, command: CommandObject, economy_repo, c
 
 
 @router.message(Command("inventory"))
-async def inventory_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def inventory_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1135,7 +1248,12 @@ async def inventory_command(message: Message, command: CommandObject, economy_re
         if not result.accepted:
             await _answer_message(message, result.reason or "Не удалось использовать предмет")
             return
-        await _answer_message(message, result.details or "Предмет применён")
+        await _answer_message(
+            message,
+            result.details or "Предмет применён",
+            cleanup_bot=bot,
+            cleanup_enabled=chat_settings.cleanup_economy_commands,
+        )
         return
 
     dashboard, error = await get_dashboard(economy_repo, economy_mode=mode, chat_id=chat_id, user_id=message.from_user.id)
@@ -1151,7 +1269,7 @@ async def inventory_command(message: Message, command: CommandObject, economy_re
 
 
 @router.message(Command("lottery"))
-async def lottery_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def lottery_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1196,13 +1314,16 @@ async def lottery_command(message: Message, command: CommandObject, economy_repo
         if result.item_rewards
         else "-"
     )
-    await _answer_message(message, 
-        f"Лотерея ({result.ticket_type}): монеты +{result.coin_reward}; предметы: {reward_items}; баланс: {result.new_balance}"
+    await _answer_message(
+        message,
+        f"Лотерея ({result.ticket_type}): монеты +{result.coin_reward}; предметы: {reward_items}; баланс: {result.new_balance}",
+        cleanup_bot=bot,
+        cleanup_enabled=chat_settings.cleanup_economy_commands,
     )
 
 
 @router.message(Command("market"))
-async def market_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def market_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1237,7 +1358,12 @@ async def market_command(message: Message, command: CommandObject, economy_repo,
             if not result.accepted:
                 await _answer_message(message, result.reason or "Не удалось создать лот")
                 return
-            await _answer_message(message, f"Лот создан: #{result.listing.id}")
+            await _answer_message(
+                message,
+                f"Лот создан: #{result.listing.id}",
+                cleanup_bot=bot,
+                cleanup_enabled=chat_settings.cleanup_economy_commands,
+            )
             return
 
         if action == "buy":
@@ -1256,8 +1382,11 @@ async def market_command(message: Message, command: CommandObject, economy_repo,
             if not result.accepted:
                 await _answer_message(message, result.reason or "Не удалось купить лот")
                 return
-            await _answer_message(message, 
-                f"Покупка успешна: лот #{result.listing_id}, кол-во={result.quantity}, цена={result.total_cost}, баланс={result.buyer_balance}"
+            await _answer_message(
+                message,
+                f"Покупка успешна: лот #{result.listing_id}, кол-во={result.quantity}, цена={result.total_cost}, баланс={result.buyer_balance}",
+                cleanup_bot=bot,
+                cleanup_enabled=chat_settings.cleanup_economy_commands,
             )
             return
 
@@ -1275,7 +1404,12 @@ async def market_command(message: Message, command: CommandObject, economy_repo,
             if not result.accepted:
                 await _answer_message(message, result.reason or "Не удалось отменить лот")
                 return
-            await _answer_message(message, f"Лот #{result.listing_id} отменён")
+            await _answer_message(
+                message,
+                f"Лот #{result.listing_id} отменён",
+                cleanup_bot=bot,
+                cleanup_enabled=chat_settings.cleanup_economy_commands,
+            )
             return
 
     listings = await economy_repo.list_market_open(scope=scope, limit=20)
@@ -1288,7 +1422,7 @@ async def market_command(message: Message, command: CommandObject, economy_repo,
 
 
 @router.message(Command("pay"))
-async def pay_command(message: Message, command: CommandObject, economy_repo, activity_repo, chat_settings: ChatSettings) -> None:
+async def pay_command(message: Message, command: CommandObject, bot: Bot, economy_repo, activity_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1359,13 +1493,16 @@ async def pay_command(message: Message, command: CommandObject, economy_repo, ac
         target_user_id=target_user_id,
         meta_json={"amount": result.amount, "tax": result.tax_amount},
     )
-    await _answer_message(message, 
-        f"Перевод выполнен: {result.amount} (налог {result.tax_amount}). Баланс отправителя: {result.sender_balance}"
+    await _answer_message(
+        message,
+        f"Перевод выполнен: {result.amount} (налог {result.tax_amount}). Баланс отправителя: {result.sender_balance}",
+        cleanup_bot=bot,
+        cleanup_enabled=chat_settings.cleanup_economy_commands,
     )
 
 
 @router.message(Command("craft"))
-async def craft_command(message: Message, command: CommandObject, economy_repo, chat_settings: ChatSettings) -> None:
+async def craft_command(message: Message, command: CommandObject, bot: Bot, economy_repo, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1395,6 +1532,8 @@ async def craft_command(message: Message, command: CommandObject, economy_repo, 
         message,
         f"Скрафчено: <code>{escape(localize_item_code(result.crafted_item_code or ''))}</code> × <code>{result.crafted_quantity}</code>",
         parse_mode="HTML",
+        cleanup_bot=bot,
+        cleanup_enabled=chat_settings.cleanup_economy_commands,
     )
 
 
@@ -1612,7 +1751,7 @@ async def bid_command(message: Message, command: CommandObject, bot, economy_rep
 
 
 @router.message(Command("growth"))
-async def growth_command(message: Message, command: CommandObject, economy_repo, activity_repo, settings: Settings, chat_settings: ChatSettings) -> None:
+async def growth_command(message: Message, command: CommandObject, bot: Bot, economy_repo, activity_repo, settings: Settings, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
         return
     if not chat_settings.economy_enabled:
@@ -1652,6 +1791,8 @@ async def growth_command(message: Message, command: CommandObject, economy_repo,
                     f"Рост: {status}. Размер {delta_sign}{_format_size_mm(result.size_delta_mm)} см, "
                     f"стресс +{result.stress_delta_pct}%, монеты +{result.reward}."
                 ),
+                cleanup_bot=bot,
+                cleanup_enabled=chat_settings.cleanup_economy_commands,
             )
         else:
             await _answer_message(message, result.reason or "Сейчас действие недоступно.")
@@ -1767,6 +1908,18 @@ async def farm_callback(query: CallbackQuery, economy_repo, chat_settings: ChatS
         else:
             await _safe_query_answer(query, "Посадка выполнена", show_alert=False)
 
+    if action == "pa":
+        result = await plant_all_last_crop(
+            economy_repo,
+            economy_mode=mode,
+            chat_id=chat_id,
+            user_id=query.from_user.id,
+        )
+        if not result.accepted:
+            await _safe_query_answer(query, result.reason or "Ошибка посадки", show_alert=True)
+        else:
+            await _safe_query_answer(query, f"Засажено грядок: {len(result.planted_plots)}", show_alert=False)
+
     if action == "h" and len(parts) >= 4 and parts[3].isdigit():
         result = await harvest_crop(
             economy_repo,
@@ -1781,6 +1934,20 @@ async def farm_callback(query: CallbackQuery, economy_repo, chat_settings: ChatS
             await _safe_query_answer(query, result.reason or "Ошибка сбора", show_alert=True)
         else:
             await _safe_query_answer(query, f"Собрано {result.amount}", show_alert=False)
+
+    if action == "ha":
+        result = await harvest_all_ready(
+            economy_repo,
+            economy_mode=mode,
+            chat_id=chat_id,
+            user_id=query.from_user.id,
+            negative_event_chance_percent=chat_settings.economy_negative_event_chance_percent,
+            negative_event_loss_percent=chat_settings.economy_negative_event_loss_percent,
+        )
+        if not result.accepted:
+            await _safe_query_answer(query, result.reason or "Нет готовых грядок", show_alert=True)
+        else:
+            await _safe_query_answer(query, f"Собрано всего: {result.total_amount}", show_alert=False)
 
     dashboard, error = await get_dashboard(economy_repo, economy_mode=mode, chat_id=chat_id, user_id=query.from_user.id)
     if dashboard is None:

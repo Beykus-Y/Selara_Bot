@@ -35,9 +35,10 @@
       const indicator = document.querySelector("[data-live-indicator]");
       const manualRefreshButton = document.querySelector("[data-manual-refresh]");
       const toastRegion = document.getElementById("toast-region");
-      const AUTO_REFRESH_MS = 7000;
       let liveSignature = dashboardRoot.dataset.liveSignature || "";
       let refreshPromise = null;
+      let liveEventSource = null;
+      const gameSockets = new Map();
 
       const setLiveState = (state, text) => {
         if (!indicator) {
@@ -425,6 +426,7 @@
           dashboardRoot.dataset.liveSignature = signature;
           liveSignature = signature;
           restoreForms(dashboardRoot, snapshot);
+          connectGameSockets();
           window.scrollTo({ top: previousScrollY });
           window.requestAnimationFrame(() => {
             dashboardRoot.style.minHeight = "";
@@ -484,18 +486,53 @@
         return refreshPromise;
       };
 
-      const canAutoRefresh = () => {
-        if (document.visibilityState !== "visible") {
-          return false;
+      const closeGameSockets = () => {
+        for (const socket of gameSockets.values()) {
+          try {
+            socket.close();
+          } catch (error) {
+            // ignore close race
+          }
         }
-        if (refreshPromise || dashboardRoot.querySelector(".is-pending")) {
-          return false;
+        gameSockets.clear();
+      };
+
+      const connectGameSockets = () => {
+        closeGameSockets();
+        for (const panel of dashboardRoot.querySelectorAll("[data-game-panel][data-game-id]")) {
+          const gameId = panel.dataset.gameId || "";
+          if (!gameId) {
+            continue;
+          }
+          const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+          const socket = new WebSocket(`${protocol}://${window.location.host}/api/live/ws/game/${encodeURIComponent(gameId)}`);
+          socket.addEventListener("message", () => {
+            refreshDashboard({ silent: true });
+          });
+          socket.addEventListener("error", () => {
+            setLiveState("error", "offline");
+          });
+          gameSockets.set(gameId, socket);
         }
-        const activeElement = document.activeElement;
-        if (!activeElement || !dashboardRoot.contains(activeElement)) {
-          return true;
+      };
+
+      const connectLiveStream = () => {
+        if (liveEventSource) {
+          liveEventSource.close();
         }
-        return !isInteractiveField(activeElement);
+        liveEventSource = new EventSource("/api/live/stream?scope=games");
+        liveEventSource.addEventListener("new_vote", () => {
+          refreshDashboard({ silent: true });
+        });
+        liveEventSource.addEventListener("phase_change", () => {
+          refreshDashboard({ silent: true });
+        });
+        liveEventSource.addEventListener("game_updated", () => {
+          refreshDashboard({ silent: true });
+        });
+        liveEventSource.onerror = () => {
+          setLiveState("error", "offline");
+        };
       };
 
       document.addEventListener("click", (event) => {
@@ -614,11 +651,14 @@
         manualRefreshButton.setAttribute("aria-label", "Обновить сцену");
       }
       setLiveState("ready", "обновить сцену");
-      window.setInterval(() => {
-        if (canAutoRefresh()) {
-          refreshDashboard({ silent: true });
+      connectGameSockets();
+      connectLiveStream();
+      window.addEventListener("beforeunload", () => {
+        if (liveEventSource) {
+          liveEventSource.close();
         }
-      }, AUTO_REFRESH_MS);
+        closeGameSockets();
+      });
     })();
   </script>
 {% endblock %}

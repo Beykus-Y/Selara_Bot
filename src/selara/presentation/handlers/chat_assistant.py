@@ -990,27 +990,18 @@ async def family_command(message: Message, command: CommandObject, activity_repo
         chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
     )
 
-    relations = await activity_repo.list_graph_relationships(chat_id=message.chat.id)
-    parents = [item.user_a for item in relations if item.relation_type == "parent" and item.user_b == subject.telegram_user_id]
-    children = [item.user_b for item in relations if item.relation_type == "parent" and item.user_a == subject.telegram_user_id]
-    pets = [item.user_b for item in relations if item.relation_type == "pet" and item.user_a == subject.telegram_user_id]
-    spouse = next(
-        (
-            item.user_b if item.user_a == subject.telegram_user_id else item.user_a
-            for item in relations
-            if item.relation_type == "spouse" and subject.telegram_user_id in {item.user_a, item.user_b}
-        ),
-        None,
-    )
-    grandparents: list[int] = []
-    for parent_id in parents:
-        grandparents.extend(
-            item.user_a
-            for item in relations
-            if item.relation_type == "parent" and item.user_b == parent_id
-        )
-
-    if not any([parents, children, pets, spouse, grandparents]):
+    bundle = await activity_repo.list_family_bundle(chat_id=message.chat.id, user_id=subject.telegram_user_id)
+    if not any(
+        [
+            bundle.parents,
+            bundle.step_parents,
+            bundle.children,
+            bundle.pets,
+            bundle.spouse_user_id,
+            bundle.grandparents,
+            bundle.siblings,
+        ]
+    ):
         await message.answer("Для этого пользователя семейные связи пока не найдены.")
         return
 
@@ -1020,14 +1011,20 @@ async def family_command(message: Message, command: CommandObject, activity_repo
         user_id=subject.telegram_user_id,
         fallback_user=subject,
     )
-    spouse_label = None if spouse is None else await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=spouse)
+    spouse_label = (
+        None
+        if bundle.spouse_user_id is None
+        else await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=bundle.spouse_user_id)
+    )
     image_bytes = build_family_tree_image(
         subject_label=subject_label,
-        grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=grandparents),
-        parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=parents),
+        grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.grandparents)),
+        parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.parents)),
+        step_parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.step_parents)),
         spouse=spouse_label,
-        children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=children),
-        pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=pets),
+        siblings=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.siblings)),
+        children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.children)),
+        pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.pets)),
     )
     await message.answer_photo(BufferedInputFile(image_bytes, filename="family_tree.png"))
 
@@ -1275,6 +1272,15 @@ async def family_request_callback(query: CallbackQuery, activity_repo) -> None:
         )
         text = "Связь сохранена: теперь питомец официально закреплён."
     else:
+        error = await activity_repo.validate_parent_link(
+            chat_id=query.message.chat.id,
+            actor_user_id=pending.actor_user_id,
+            target_user_id=pending.target_user_id,
+        )
+        if error:
+            await query.message.edit_text(error)
+            await query.answer("Связь отклонена", show_alert=True)
+            return
         relation = await activity_repo.upsert_graph_relationship(
             chat=ChatSnapshot(query.message.chat.id, query.message.chat.type, query.message.chat.title),
             user_a=actor,

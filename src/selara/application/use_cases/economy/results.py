@@ -57,6 +57,24 @@ class HarvestResult:
 
 
 @dataclass(frozen=True)
+class HarvestAllResult:
+    accepted: bool
+    reason: str | None
+    harvested_plots: tuple[int, ...]
+    total_amount: int
+    crop_totals: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class PlantAllResult:
+    accepted: bool
+    reason: str | None
+    crop_code: str | None
+    planted_plots: tuple[int, ...]
+    new_balance: int | None
+
+
+@dataclass(frozen=True)
 class BuyShopResult:
     accepted: bool
     reason: str | None

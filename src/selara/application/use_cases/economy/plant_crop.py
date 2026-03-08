@@ -109,6 +109,7 @@ async def execute(
         yield_boost_pct=0,
         shield_active=False,
     )
+    await repo.set_last_planted_crop_code(account_id=account.id, crop_code=crop.code)
 
     await repo.add_ledger(
         account_id=account.id,

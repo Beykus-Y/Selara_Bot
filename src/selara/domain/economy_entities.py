@@ -52,6 +52,7 @@ class FarmState:
     farm_level: int
     size_tier: str
     negative_event_streak: int
+    last_planted_crop_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,36 @@ class MarketListing:
     fee_paid: int
     status: MarketListingStatus
     expires_at: datetime
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class MarketTrade:
+    id: int
+    listing_id: int
+    scope_id: str
+    scope_type: EconomyScopeType
+    chat_id: int | None
+    seller_user_id: int
+    buyer_user_id: int
+    item_code: str
+    quantity: int
+    unit_price: int
+    total_price: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ChatBoost:
+    id: int
+    chat_id: int
+    scope_id: str
+    scope_type: EconomyScopeType
+    boost_code: str
+    value_percent: int
+    starts_at: datetime
+    ends_at: datetime
+    created_by_user_id: int
     created_at: datetime
 
 

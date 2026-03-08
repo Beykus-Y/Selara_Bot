@@ -80,6 +80,8 @@ class UserChatProfileModel(Base):
         primary_key=True,
     )
     description_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    avatar_frame_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    emoji_status_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -600,6 +602,7 @@ class ChatSettingsModel(Base):
     economy_market_fee_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=2, server_default="2")
     economy_negative_event_chance_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=22, server_default="22")
     economy_negative_event_loss_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=30, server_default="30")
+    cleanup_economy_commands: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -907,6 +910,7 @@ class EconomyFarmModel(Base):
     farm_level: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
     size_tier: Mapped[str] = mapped_column(String(16), nullable=False, default="small", server_default="small")
     negative_event_streak: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    last_planted_crop_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1057,6 +1061,84 @@ class EconomyMarketListingModel(Base):
 
 Index("idx_economy_market_scope_status_created", EconomyMarketListingModel.scope_id, EconomyMarketListingModel.status, EconomyMarketListingModel.created_at)
 Index("idx_economy_market_seller_status", EconomyMarketListingModel.seller_user_id, EconomyMarketListingModel.status)
+
+
+class EconomyMarketTradeModel(Base):
+    __tablename__ = "economy_market_trades"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    listing_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("economy_market_listings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    seller_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    buyer_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    item_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unit_price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total_price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("scope_type IN ('global', 'chat')", name="ck_economy_market_trades_scope_type"),
+        CheckConstraint("quantity > 0", name="ck_economy_market_trades_qty_positive"),
+        CheckConstraint("unit_price > 0", name="ck_economy_market_trades_unit_price_positive"),
+        CheckConstraint("total_price > 0", name="ck_economy_market_trades_total_price_positive"),
+    )
+
+
+Index("idx_economy_market_trades_scope_created", EconomyMarketTradeModel.scope_id, EconomyMarketTradeModel.created_at)
+Index("idx_economy_market_trades_item_created", EconomyMarketTradeModel.item_code, EconomyMarketTradeModel.created_at)
+Index("idx_economy_market_trades_buyer_created", EconomyMarketTradeModel.buyer_user_id, EconomyMarketTradeModel.created_at)
+
+
+class ChatGlobalBoostModel(Base):
+    __tablename__ = "chat_global_boosts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    boost_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    value_percent: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("scope_type IN ('global', 'chat')", name="ck_chat_global_boosts_scope_type"),
+        CheckConstraint("value_percent > 0", name="ck_chat_global_boosts_value_positive"),
+        CheckConstraint("ends_at > starts_at", name="ck_chat_global_boosts_interval"),
+    )
+
+
+Index("idx_chat_global_boosts_chat_ends", ChatGlobalBoostModel.chat_id, ChatGlobalBoostModel.ends_at)
+Index("idx_chat_global_boosts_scope_ends", ChatGlobalBoostModel.scope_id, ChatGlobalBoostModel.ends_at)
 
 
 class EconomyPrivateContextModel(Base):

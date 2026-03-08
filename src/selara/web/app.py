@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import logging
 from html import escape
 from importlib import import_module
@@ -10,14 +11,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote
 
 from aiogram import Bot
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.use_cases.economy.results import EconomyDashboard
+from selara.application.use_cases.economy.catalog import localize_crop_code, localize_item_code
+from selara.application.use_cases.economy.market_buy_listing import execute as market_buy_listing
+from selara.application.use_cases.economy.market_cancel_listing import execute as market_cancel_listing
+from selara.application.use_cases.economy.market_create_listing import execute as market_create_listing
+from selara.application.use_cases.economy.plant_crop import execute as plant_crop
+from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import default_chat_settings
@@ -28,8 +36,9 @@ from selara.core.web_auth import (
     generate_session_token,
     normalize_login_code,
 )
-from selara.domain.entities import ChatSnapshot, UserChatOverview, UserSnapshot
+from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.domain.economy_entities import FarmState
+from selara.infrastructure.db.models import EconomyAccountModel, UserChatActivityDailyModel, UserChatActivityModel, UserModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.presentation.auth import has_permission
@@ -43,18 +52,147 @@ from selara.presentation.game_state import (
     GAME_LAUNCHABLE_KINDS,
     GAME_STORE,
     GroupGame,
+    LiveEvent,
     WHOAMI_CARDS_BY_CATEGORY,
     WHOAMI_CATEGORIES,
 )
 from selara.presentation.handlers.settings_common import apply_setting_update, setting_title_ru, settings_to_dict
 from selara.web.admin_docs import build_admin_docs_context
-from selara.web.presenters import build_chat_context, build_home_context, build_landing_context, format_datetime
+from selara.web.presenters import build_chat_context, build_home_context, build_landing_context, format_datetime, user_label
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
 
 _UTC = timezone.utc
+_CHAT_HUB_PAGE_SIZE = 50
+_CHAT_HUB_MAX_ROWS = 500
 game_router_module = import_module("selara.presentation.handlers.game.router")
 logger = logging.getLogger(__name__)
+
+
+def _chat_hub_mode(raw_value: str | None) -> str:
+    value = (raw_value or "mix").strip().lower()
+    if value in {"mix", "activity", "karma"}:
+        return value
+    return "mix"
+
+
+def _leaderboard_item_search_text(item: LeaderboardItem) -> str:
+    return " ".join(
+        str(part).lower()
+        for part in (
+            item.user_id,
+            item.username,
+            item.first_name,
+            item.last_name,
+            item.chat_display_name,
+        )
+        if part is not None
+    )
+
+
+def _leaderboard_row_payload(
+    *,
+    position: int,
+    item: LeaderboardItem,
+    viewer_user_id: int,
+) -> dict[str, object]:
+    return {
+        "position": position,
+        "user_id": item.user_id,
+        "name": user_label(item),
+        "username": f"@{item.username}" if item.username else "",
+        "activity": item.activity_value,
+        "karma": item.karma_value,
+        "hybrid_score": round(item.hybrid_score, 3),
+        "last_seen_at": format_datetime(item.last_seen_at),
+        "is_me": item.user_id == viewer_user_id,
+    }
+
+
+async def _build_chat_daily_activity_series(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    days: int = 7,
+) -> list[dict[str, object]]:
+    window_days = max(1, days)
+    today = datetime.now(_UTC).date()
+    start_date = today - timedelta(days=window_days - 1)
+    stmt = (
+        select(
+            UserChatActivityDailyModel.activity_date,
+            func.coalesce(func.sum(UserChatActivityDailyModel.message_count), 0),
+        )
+        .where(
+            UserChatActivityDailyModel.chat_id == chat_id,
+            UserChatActivityDailyModel.activity_date >= start_date,
+        )
+        .group_by(UserChatActivityDailyModel.activity_date)
+        .order_by(UserChatActivityDailyModel.activity_date.asc())
+    )
+    rows = (await session.execute(stmt)).all()
+    counts_by_day = {
+        activity_date: int(message_count or 0)
+        for activity_date, message_count in rows
+    }
+
+    series: list[dict[str, object]] = []
+    for offset in range(window_days):
+        day = start_date + timedelta(days=offset)
+        series.append(
+            {
+                "date": day.isoformat(),
+                "label": day.strftime("%d.%m"),
+                "messages": counts_by_day.get(day, 0),
+            }
+        )
+    return series
+
+
+async def _build_richest_user_payload(
+    session: AsyncSession,
+    *,
+    scope_id: str,
+    chat_id: int,
+) -> dict[str, object] | None:
+    stmt = (
+        select(
+            EconomyAccountModel.balance,
+            UserModel.telegram_user_id,
+            UserModel.username,
+            UserModel.first_name,
+            UserModel.last_name,
+            UserChatActivityModel.display_name_override,
+        )
+        .join(UserModel, UserModel.telegram_user_id == EconomyAccountModel.user_id)
+        .outerjoin(
+            UserChatActivityModel,
+            and_(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.user_id == EconomyAccountModel.user_id,
+            ),
+        )
+        .where(EconomyAccountModel.scope_id == scope_id)
+        .order_by(EconomyAccountModel.balance.desc(), EconomyAccountModel.user_id.asc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+
+    balance, user_id, username, first_name, last_name, display_name = row
+    snapshot = UserSnapshot(
+        telegram_user_id=int(user_id),
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        is_bot=False,
+        chat_display_name=display_name,
+    )
+    return {
+        "label": user_label(snapshot),
+        "balance": int(balance or 0),
+    }
 
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
@@ -81,6 +219,54 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if game_bot is not None:
             await game_bot.session.close()
             game_bot = None
+        store_close = getattr(GAME_STORE, "close", None)
+        if callable(store_close):
+            try:
+                await store_close()
+            except Exception:
+                logger.exception("Failed to close shared game store")
+
+    async def _load_user_from_websocket(session: AsyncSession, websocket: WebSocket, *, touch: bool) -> UserSnapshot | None:
+        token = websocket.cookies.get(settings.web_session_cookie_name)
+        if not token:
+            return None
+        auth_repo = SqlAlchemyWebAuthRepository(session)
+        return await auth_repo.get_user_by_session(
+            session_digest=digest_session_token(secret=settings.resolved_web_auth_secret, token=token),
+            now=_now_utc(),
+            touch=touch,
+        )
+
+    async def _ensure_chat_visible_or_none(
+        activity_repo: SqlAlchemyActivityRepository,
+        *,
+        user_id: int,
+        chat_id: int,
+    ) -> UserChatOverview | None:
+        admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user_id)
+        visible = _merge_visible_groups(admin_groups, activity_groups)
+        return visible.get(chat_id)
+
+    async def _stream_live_events(
+        *,
+        scope: str,
+        chat_id: int | None = None,
+        game_id: str | None = None,
+    ):
+        live_broker = getattr(GAME_STORE, "live_broker", None)
+        if live_broker is None:
+            raise StarletteHTTPException(status_code=503, detail="Live updates are not configured.")
+
+        async def _iterator():
+            async for event in live_broker.subscribe(scope=scope, chat_id=chat_id, game_id=game_id):
+                if event is None:
+                    yield ": ping\n\n"
+                    continue
+                if not isinstance(event, LiveEvent):
+                    continue
+                yield f"event: {event.event_type}\ndata: {event.to_json()}\n\n"
+
+        return StreamingResponse(_iterator(), media_type="text/event-stream")
 
     def _render_template(template_name: str, *, response_status_code: int = 200, **context) -> HTMLResponse:
         content = template_environment.get_template(template_name).render(**context)
@@ -159,6 +345,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "top_links": _top_links(
                 ("/app", "К кабинетам", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
+                (f"/app/chat/{chat_id}/economy", "Экономика", "ghost"),
+                (f"/app/family/{chat_id}", "Моя семья", "ghost"),
                 (f"/app/docs/user?chat_id={chat_id}", "Справка пользователя", "ghost"),
                 (f"/app/chat/{chat_id}/audit", "Журнал", "ghost"),
                 (f"/app/chat/{chat_id}", "Обновить", "subtle"),
@@ -558,6 +746,36 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     async def _chat_settings_for_game(activity_repo: SqlAlchemyActivityRepository, *, chat_id: int):
         return await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+
+    async def _resolve_chat_member_label(activity_repo: SqlAlchemyActivityRepository, *, chat_id: int, user_id: int) -> str:
+        label = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)
+        if label:
+            return label
+        snapshot = await activity_repo.get_user_snapshot(user_id=user_id)
+        if snapshot is None:
+            return f"user:{user_id}"
+        return snapshot.chat_display_name or snapshot.username or snapshot.first_name or f"user:{user_id}"
+
+    def _market_filter_group(item_code: str) -> str:
+        if item_code.startswith("seed:"):
+            return "seeds"
+        if item_code.startswith("item:"):
+            return "consumables"
+        return "all"
+
+    def _economy_inventory_target(item_code: str) -> str:
+        if item_code.startswith("seed:"):
+            return "plot-empty"
+        if item_code.startswith("item:"):
+            if item_code in {
+                "item:fertilizer_fast",
+                "item:fertilizer_rich",
+                "item:pesticide",
+                "item:crop_insurance",
+            }:
+                return "plot-occupied"
+            return "self"
+        return "none"
 
     def _game_id_from_callback_data(callback_data: str) -> str | None:
         parts = callback_data.split(":")
@@ -1975,7 +2193,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             is_member = user.telegram_user_id in game.players
             is_owner = game.owner_user_id == user.telegram_user_id
             can_manage_games = game.chat_id in manageable_chat_ids
-            if not (is_member or is_owner or can_manage_games):
+            can_view_game = game.chat_id in visible_groups or is_owner or can_manage_games
+            if not can_view_game:
                 continue
             chat = visible_groups.get(game.chat_id) or _group_overview_from_game(game)
             current_chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
@@ -2206,6 +2425,88 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     def _games_live_signature(fragment_html: str) -> str:
         return hashlib.sha1(fragment_html.encode("utf-8")).hexdigest()[:16]
+
+    async def _publish_chat_live_event(chat_id: int, *, event_type: str = "chat_refresh") -> None:
+        try:
+            await GAME_STORE.publish_event(event_type=event_type, scope="chat", chat_id=chat_id)
+        except Exception:
+            logger.exception("Failed to publish chat live event", extra={"chat_id": chat_id, "event_type": event_type})
+
+    @app.get("/api/live/stream")
+    async def live_stream(request: Request):
+        scope = (request.query_params.get("scope") or "games").strip().lower()
+        chat_id_raw = (request.query_params.get("chat_id") or "").strip()
+        chat_id = int(chat_id_raw) if chat_id_raw.lstrip("-").isdigit() else None
+
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                raise StarletteHTTPException(status_code=401, detail="Сессия истекла. Войдите снова.")
+
+            if scope not in {"games", "chat"}:
+                await session.commit()
+                raise StarletteHTTPException(status_code=400, detail="Неизвестная live-область.")
+
+            if scope == "chat":
+                if chat_id is None:
+                    await session.commit()
+                    raise StarletteHTTPException(status_code=400, detail="Для chat-live нужен chat_id.")
+                activity_repo = SqlAlchemyActivityRepository(session)
+                chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+                await session.commit()
+                if chat is None:
+                    raise StarletteHTTPException(status_code=403, detail="Нет доступа к этой группе.")
+                return await _stream_live_events(scope="chat", chat_id=chat_id)
+
+            await session.commit()
+            return await _stream_live_events(scope="games")
+
+    @app.websocket("/api/live/ws/game/{game_id}")
+    async def live_game_socket(websocket: WebSocket, game_id: str):
+        await websocket.accept()
+        live_broker = getattr(GAME_STORE, "live_broker", None)
+        if live_broker is None:
+            await websocket.send_json({"ok": False, "message": "Live updates are not configured."})
+            await websocket.close(code=1013)
+            return
+
+        async with session_factory() as session:
+            user = await _load_user_from_websocket(session, websocket, touch=True)
+            if user is None:
+                await session.commit()
+                await websocket.send_json({"ok": False, "message": "Сессия истекла. Войдите снова."})
+                await websocket.close(code=4401)
+                return
+
+            game = await GAME_STORE.get_game(game_id=game_id)
+            if game is None:
+                await session.commit()
+                await websocket.send_json({"ok": False, "message": "Игра не найдена."})
+                await websocket.close(code=4404)
+                return
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=game.chat_id)
+            allowed = (
+                chat is not None
+                or user.telegram_user_id == game.owner_user_id
+                or user.telegram_user_id in game.players
+            )
+            await session.commit()
+            if not allowed:
+                await websocket.send_json({"ok": False, "message": "Нет доступа к этой игре."})
+                await websocket.close(code=4403)
+                return
+
+        try:
+            async for event in live_broker.subscribe(scope="games", chat_id=game.chat_id, game_id=game_id):
+                if event is None:
+                    await websocket.send_json({"type": "ping"})
+                    continue
+                await websocket.send_json(event.to_payload())
+        except WebSocketDisconnect:
+            return
 
     async def _execute_web_callback(
         callback_data: str,
@@ -3256,9 +3557,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 recent_limit=6,
             )
             chat = visible_groups.get(game.chat_id) or _group_overview_from_game(game)
+            can_view_game = game.chat_id in visible_groups
             can_manage_games = game.chat_id in manageable_chat_ids
             is_member = user.telegram_user_id in game.players or game.owner_user_id == user.telegram_user_id
-            if not (is_member or can_manage_games):
+            if not (can_view_game or is_member or can_manage_games):
                 await session.commit()
                 redirect_path = _with_message("/app/games", key="error", text="Эта игра недоступна вашему аккаунту.")
                 if prefers_json:
@@ -3506,6 +3808,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.get("/app/chat/{chat_id}", response_class=HTMLResponse)
     async def chat_page(chat_id: int, request: Request):
+        requested_tab = (request.query_params.get("tab") or "overview").strip().lower()
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
@@ -3633,6 +3936,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             flash=request.query_params.get("flash"),
             error=request.query_params.get("error"),
         )
+        if requested_tab == "settings" and not can_manage_settings:
+            requested_tab = "overview"
+        page_context["active_tab"] = "settings" if requested_tab == "settings" else "overview"
         page_context.update(
             _chat_layout_context(
                 chat_id=chat_id,
@@ -3641,6 +3947,593 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
         )
         return _render_template("chat.html", **page_context)
+
+    @app.get("/api/chat/{chat_id}/overview")
+    async def chat_overview_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            summary = await activity_repo.get_chat_activity_summary(chat_id=chat_id)
+            activity_series = await _build_chat_daily_activity_series(session, chat_id=chat_id, days=7)
+            hero_candidates = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="activity",
+                period="day",
+                since=_now_utc() - timedelta(days=1),
+                limit=1,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+
+            richest_payload: dict[str, object] | None = None
+            if current_settings.economy_enabled:
+                scope, _ = await economy_repo.resolve_scope(
+                    mode=current_settings.economy_mode,
+                    chat_id=chat_id,
+                    user_id=user.telegram_user_id,
+                )
+                if scope is not None:
+                    richest_payload = await _build_richest_user_payload(session, scope_id=scope.scope_id, chat_id=chat_id)
+
+            await session.commit()
+
+        hero = hero_candidates[0] if hero_candidates else None
+        return JSONResponse(
+            content={
+                "ok": True,
+                "summary": {
+                    "participants_count": summary.participants_count,
+                    "total_messages": summary.total_messages,
+                    "last_activity_at": format_datetime(summary.last_activity_at),
+                },
+                "daily_activity": activity_series,
+                "hero_of_day": (
+                    {
+                        "label": user_label(hero),
+                        "messages": hero.activity_value,
+                        "karma": hero.karma_value,
+                    }
+                    if hero is not None
+                    else None
+                ),
+                "richest_of_day": richest_payload,
+            }
+        )
+
+    @app.get("/api/chat/{chat_id}/leaderboard")
+    async def chat_leaderboard_api(chat_id: int, request: Request):
+        mode = _chat_hub_mode(request.query_params.get("mode"))
+        page_raw = (request.query_params.get("page") or "1").strip()
+        query = (request.query_params.get("q") or "").strip()
+        find_me = (request.query_params.get("find_me") or "").strip().lower() in {"1", "true", "yes", "on"}
+        page = int(page_raw) if page_raw.isdigit() else 1
+        page = max(1, page)
+
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            leaderboard_items = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode=mode,
+                period="all",
+                since=None,
+                limit=_CHAT_HUB_MAX_ROWS,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            await session.commit()
+
+        ranked_items = list(enumerate(leaderboard_items, start=1))
+        if query:
+            query_norm = normalize_text_command(query)
+            ranked_items = [
+                (position, item)
+                for position, item in ranked_items
+                if query_norm in _leaderboard_item_search_text(item)
+            ]
+
+        if find_me and ranked_items:
+            for index, (_, item) in enumerate(ranked_items):
+                if item.user_id == user.telegram_user_id:
+                    page = (index // _CHAT_HUB_PAGE_SIZE) + 1
+                    break
+
+        total_rows = len(ranked_items)
+        total_pages = max(1, (total_rows + _CHAT_HUB_PAGE_SIZE - 1) // _CHAT_HUB_PAGE_SIZE)
+        page = min(page, total_pages)
+        start_index = (page - 1) * _CHAT_HUB_PAGE_SIZE
+        page_rows = ranked_items[start_index:start_index + _CHAT_HUB_PAGE_SIZE]
+
+        my_rank = next(
+            (position for position, item in ranked_items if item.user_id == user.telegram_user_id),
+            None,
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "mode": mode,
+                "query": query,
+                "page": page,
+                "page_size": _CHAT_HUB_PAGE_SIZE,
+                "total_rows": total_rows,
+                "total_pages": total_pages,
+                "my_rank": my_rank,
+                "truncated": len(leaderboard_items) >= _CHAT_HUB_MAX_ROWS,
+                "rows": [
+                    _leaderboard_row_payload(
+                        position=position,
+                        item=item,
+                        viewer_user_id=user.telegram_user_id,
+                    )
+                    for position, item in page_rows
+                ],
+            }
+        )
+
+    @app.get("/app/family/{chat_id}", response_class=HTMLResponse)
+    async def family_page(chat_id: int, request: Request, user_id: int | None = None):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
+            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
+            chat = visible_groups.get(chat_id)
+            if chat is None:
+                await session.commit()
+                return _render_template(
+                    "error.html",
+                    response_status_code=403,
+                    **_error_context(
+                        status_code=403,
+                        headline="Нет доступа",
+                        message="Эта группа недоступна для вашего аккаунта.",
+                        user=user,
+                    ),
+                )
+
+            focus_user_id = int(user_id or user.telegram_user_id)
+            bundle = await activity_repo.list_family_bundle(chat_id=chat_id, user_id=focus_user_id)
+            graph = await activity_repo.list_family_graph(chat_id=chat_id, user_id=focus_user_id)
+            role_map: dict[int, str] = {focus_user_id: "subject"}
+            for relation_name, user_ids in (
+                ("spouse", (bundle.spouse_user_id,) if bundle.spouse_user_id is not None else ()),
+                ("parent", bundle.parents),
+                ("grandparent", bundle.grandparents),
+                ("step_parent", bundle.step_parents),
+                ("sibling", bundle.siblings),
+                ("child", bundle.children),
+                ("pet", bundle.pets),
+            ):
+                for related_user_id in user_ids:
+                    role_map[int(related_user_id)] = relation_name
+
+            nodes: list[dict[str, object]] = []
+            for node_user_id in graph.node_user_ids:
+                nodes.append(
+                    {
+                        "id": int(node_user_id),
+                        "label": await _resolve_chat_member_label(activity_repo, chat_id=chat_id, user_id=int(node_user_id)),
+                        "role": role_map.get(int(node_user_id), "relative"),
+                        "href": f"/app/family/{chat_id}?user_id={int(node_user_id)}",
+                    }
+                )
+            edges = [
+                {
+                    "source": int(edge.source_user_id),
+                    "target": int(edge.target_user_id),
+                    "label": edge.label,
+                    "relation_type": edge.relation_type,
+                    "is_direct": edge.is_direct,
+                }
+                for edge in graph.edges
+            ]
+            await session.commit()
+
+        return _render_template(
+            "family.html",
+            page_title=f"Selara Family • {chat.chat_title or chat.chat_id}",
+            page_name="family",
+            chat_id=chat.chat_id,
+            chat_title=chat.chat_title or f"chat:{chat.chat_id}",
+            focus_user_id=focus_user_id,
+            focus_label=next((node["label"] for node in nodes if node["id"] == focus_user_id), f"user:{focus_user_id}"),
+            family_nodes=nodes,
+            family_nodes_json=json.dumps(nodes, ensure_ascii=False),
+            family_edges_json=json.dumps(edges, ensure_ascii=False),
+            bundle_summary=[
+                {"label": "Родители", "value": str(len(bundle.parents))},
+                {"label": "Супруг(а)", "value": "есть" if bundle.spouse_user_id is not None else "нет"},
+                {"label": "Дети", "value": str(len(bundle.children))},
+                {"label": "Питомцы", "value": str(len(bundle.pets))},
+            ],
+            **_chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+        )
+
+    @app.get("/app/chat/{chat_id}/economy", response_class=HTMLResponse)
+    async def chat_economy_page(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
+            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
+            chat = visible_groups.get(chat_id)
+            if chat is None:
+                await session.commit()
+                return _render_template(
+                    "error.html",
+                    response_status_code=403,
+                    **_error_context(
+                        status_code=403,
+                        headline="Нет доступа",
+                        message="Эта группа недоступна для вашего аккаунта.",
+                        user=user,
+                    ),
+                )
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _render_template(
+                    "error.html",
+                    response_status_code=403,
+                    **_error_context(
+                        status_code=403,
+                        headline="Экономика отключена",
+                        message="Для этой группы веб-экономика сейчас выключена.",
+                        user=user,
+                    ),
+                )
+
+            mode = current_settings.economy_mode
+            dashboard, error = await _load_dashboard_if_exists(
+                economy_repo,
+                mode=mode,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+            )
+            scope, scope_error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=user.telegram_user_id)
+            listings = [] if scope is None else await economy_repo.list_market_open(scope=scope, limit=100)
+            trades = [] if scope is None else await economy_repo.list_market_trades(
+                scope=scope,
+                since=_now_utc() - timedelta(days=7),
+                limit=200,
+            )
+            await session.commit()
+
+        if dashboard is None or scope is None:
+            return _render_template(
+                "error.html",
+                response_status_code=400,
+                **_error_context(
+                    status_code=400,
+                    headline="Экономика недоступна",
+                    message=error or scope_error or "Не удалось открыть экономический кабинет.",
+                    user=user,
+                ),
+            )
+
+        now = _now_utc()
+        plots = []
+        for plot in dashboard.plots:
+            state = "empty"
+            note = "Пусто"
+            if plot.crop_code is not None:
+                if plot.ready_at is not None and plot.ready_at <= now:
+                    state = "ready"
+                    note = "Готово к сбору"
+                elif plot.ready_at is not None:
+                    state = "growing"
+                    note = f"Созреет: {format_datetime(plot.ready_at)}"
+                else:
+                    state = "growing"
+                    note = "Растёт"
+            plots.append(
+                {
+                    "plot_no": plot.plot_no,
+                    "state": state,
+                    "crop_code": plot.crop_code,
+                    "crop_label": localize_crop_code(plot.crop_code),
+                    "note": note,
+                }
+            )
+
+        inventory_items = [
+            {
+                "item_code": item.item_code,
+                "label": localize_item_code(item.item_code),
+                "quantity": item.quantity,
+                "target": _economy_inventory_target(item.item_code),
+            }
+            for item in dashboard.inventory
+            if item.quantity > 0
+        ]
+
+        trade_points: dict[str, list[dict[str, object]]] = defaultdict(list)
+        for trade in reversed(trades):
+            trade_points[trade.item_code].append(
+                {
+                    "when": format_datetime(trade.created_at),
+                    "quantity": trade.quantity,
+                    "unit_price": trade.unit_price,
+                    "total_price": trade.total_price,
+                }
+            )
+
+        market_rows = []
+        for listing in listings:
+            market_rows.append(
+                {
+                    "id": listing.id,
+                    "label": localize_item_code(listing.item_code),
+                    "item_code": listing.item_code,
+                    "qty_left": listing.qty_left,
+                    "qty_total": listing.qty_total,
+                    "unit_price": listing.unit_price,
+                    "seller_label": str(listing.seller_user_id),
+                    "filter_group": _market_filter_group(listing.item_code),
+                    "is_own": listing.seller_user_id == user.telegram_user_id,
+                }
+            )
+
+        return _render_template(
+            "economy.html",
+            page_title=f"Selara Economy • {chat.chat_title or chat.chat_id}",
+            page_name="economy",
+            chat_id=chat.chat_id,
+            chat_title=chat.chat_title or f"chat:{chat.chat_id}",
+            scope_id=scope.scope_id,
+            economy_mode=mode,
+            dashboard=dashboard,
+            plot_cards=plots,
+            inventory_items=inventory_items,
+            market_rows=market_rows,
+            market_rows_json=json.dumps(market_rows, ensure_ascii=False),
+            trade_points_json=json.dumps(trade_points, ensure_ascii=False),
+            last_crop_label=localize_crop_code(dashboard.farm.last_planted_crop_code),
+            **_chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+        )
+
+    @app.get("/api/chat/{chat_id}/economy/market")
+    async def market_data_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            scope, error = await economy_repo.resolve_scope(mode=current_settings.economy_mode, chat_id=chat_id, user_id=user.telegram_user_id)
+            if scope is None:
+                await session.commit()
+                return _json_result(ok=False, message=error or "Не удалось открыть рынок.", status_code=400)
+
+            listings = await economy_repo.list_market_open(scope=scope, limit=100)
+            trades = await economy_repo.list_market_trades(scope=scope, since=_now_utc() - timedelta(days=7), limit=200)
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "listings": [
+                    {
+                        "id": listing.id,
+                        "item_code": listing.item_code,
+                        "label": localize_item_code(listing.item_code),
+                        "qty_left": listing.qty_left,
+                        "qty_total": listing.qty_total,
+                        "unit_price": listing.unit_price,
+                        "filter_group": _market_filter_group(listing.item_code),
+                        "is_own": listing.seller_user_id == user.telegram_user_id,
+                    }
+                    for listing in listings
+                ],
+                "trades": [
+                    {
+                        "item_code": trade.item_code,
+                        "when": format_datetime(trade.created_at),
+                        "quantity": trade.quantity,
+                        "unit_price": trade.unit_price,
+                        "total_price": trade.total_price,
+                    }
+                    for trade in trades
+                ],
+            }
+        )
+
+    @app.post("/api/chat/{chat_id}/economy/apply")
+    async def apply_economy_item_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            form = await _parse_form(request)
+            item_code = (form.get("item_code") or "").strip().lower()
+            target_type = (form.get("target_type") or "").strip().lower()
+            plot_no = int(form["plot_no"]) if (form.get("plot_no") or "").isdigit() else None
+
+            if item_code.startswith("seed:") and target_type == "plot-empty" and plot_no is not None:
+                result = await plant_crop(
+                    economy_repo,
+                    economy_mode=current_settings.economy_mode,
+                    chat_id=chat_id,
+                    user_id=user.telegram_user_id,
+                    crop_code=item_code.removeprefix("seed:"),
+                    plot_no=plot_no,
+                )
+                await session.commit()
+                if not result.accepted:
+                    return _json_result(ok=False, message=result.reason or "Не удалось посадить культуру.", status_code=400)
+                await _publish_chat_live_event(chat_id)
+                return _json_result(ok=True, message="Культура посажена.", status_code=200)
+
+            if item_code.startswith("item:"):
+                if target_type not in {"plot-occupied", "self"}:
+                    await session.commit()
+                    return _json_result(ok=False, message="Этот предмет нельзя применить к выбранной цели.", status_code=400)
+                result = await use_item(
+                    economy_repo,
+                    economy_mode=current_settings.economy_mode,
+                    chat_id=chat_id,
+                    user_id=user.telegram_user_id,
+                    item_code=item_code,
+                    plot_no=plot_no if target_type == "plot-occupied" else None,
+                )
+                await session.commit()
+                if not result.accepted:
+                    return _json_result(ok=False, message=result.reason or "Не удалось применить предмет.", status_code=400)
+                await _publish_chat_live_event(chat_id)
+                return _json_result(ok=True, message=result.details or "Предмет применён.", status_code=200)
+
+            await session.commit()
+            return _json_result(ok=False, message="Неподдерживаемое действие.", status_code=400)
+
+    @app.post("/api/chat/{chat_id}/economy/market/create")
+    async def create_market_listing_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            form = await _parse_form(request)
+            item_code = (form.get("item_code") or "").strip().lower()
+            quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
+            unit_price = int(form["unit_price"]) if (form.get("unit_price") or "").isdigit() else 0
+            result = await market_create_listing(
+                economy_repo,
+                economy_mode=current_settings.economy_mode,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+                item_code=item_code,
+                quantity=quantity,
+                unit_price=unit_price,
+                market_fee_percent=current_settings.economy_market_fee_percent,
+            )
+            await session.commit()
+            if not result.accepted or result.listing is None:
+                return _json_result(ok=False, message=result.reason or "Не удалось создать лот.", status_code=400)
+            await _publish_chat_live_event(chat_id)
+            return _json_result(ok=True, message=f"Лот #{result.listing.id} создан.", status_code=200)
+
+    @app.post("/api/chat/{chat_id}/economy/market/buy")
+    async def buy_market_listing_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            form = await _parse_form(request)
+            listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
+            quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
+            result = await market_buy_listing(
+                economy_repo,
+                economy_mode=current_settings.economy_mode,
+                chat_id=chat_id,
+                buyer_user_id=user.telegram_user_id,
+                listing_id=listing_id,
+                quantity=quantity,
+                seller_tax_percent=current_settings.economy_transfer_tax_percent,
+            )
+            await session.commit()
+            if not result.accepted:
+                return _json_result(ok=False, message=result.reason or "Не удалось купить лот.", status_code=400)
+            await _publish_chat_live_event(chat_id)
+            return _json_result(ok=True, message="Покупка выполнена.", status_code=200)
+
+    @app.post("/api/chat/{chat_id}/economy/market/cancel")
+    async def cancel_market_listing_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            form = await _parse_form(request)
+            listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            result = await market_cancel_listing(
+                economy_repo,
+                economy_mode=current_settings.economy_mode,
+                chat_id=chat_id,
+                seller_user_id=user.telegram_user_id,
+                listing_id=listing_id,
+            )
+            await session.commit()
+            if not result.accepted:
+                return _json_result(ok=False, message=result.reason or "Не удалось снять лот.", status_code=400)
+            await _publish_chat_live_event(chat_id)
+            return _json_result(ok=True, message="Лот снят с рынка.", status_code=200)
 
     @app.get("/app/docs/admin", response_class=HTMLResponse)
     async def admin_docs_page(request: Request, chat_id: int | None = None):

@@ -52,6 +52,7 @@ class ChatSettings:
     economy_market_fee_percent: int
     economy_negative_event_chance_percent: int
     economy_negative_event_loss_percent: int
+    cleanup_economy_commands: bool = False
     leaderboard_hybrid_buttons_enabled: bool = False
 
 
@@ -103,6 +104,7 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "economy_market_fee_percent",
     "economy_negative_event_chance_percent",
     "economy_negative_event_loss_percent",
+    "cleanup_economy_commands",
 )
 
 
@@ -155,6 +157,7 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         economy_market_fee_percent=settings.economy_market_fee_percent,
         economy_negative_event_chance_percent=settings.economy_negative_event_chance_percent,
         economy_negative_event_loss_percent=settings.economy_negative_event_loss_percent,
+        cleanup_economy_commands=settings.cleanup_economy_commands,
     )
 
 
@@ -228,6 +231,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "titles_enabled",
         "craft_enabled",
         "auctions_enabled",
+        "cleanup_economy_commands",
     }:
         lowered = value.lower()
         if lowered in {"true", "1", "yes", "on"}:

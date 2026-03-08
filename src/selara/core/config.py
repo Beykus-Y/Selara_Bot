@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     database_url: str = Field(..., validation_alias="DATABASE_URL")
     db_pool_size: int = Field(default=10, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
+    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
 
     top_limit_default: int = Field(default=10, validation_alias="TOP_LIMIT_DEFAULT")
     top_limit_max: int = Field(default=50, validation_alias="TOP_LIMIT_MAX")
@@ -76,6 +78,7 @@ class Settings(BaseSettings):
     economy_market_fee_percent: int = Field(default=2, validation_alias="ECONOMY_MARKET_FEE_PERCENT")
     economy_negative_event_chance_percent: int = Field(default=22, validation_alias="ECONOMY_NEGATIVE_EVENT_CHANCE_PERCENT")
     economy_negative_event_loss_percent: int = Field(default=30, validation_alias="ECONOMY_NEGATIVE_EVENT_LOSS_PERCENT")
+    cleanup_economy_commands: bool = Field(default=False, validation_alias="CLEANUP_ECONOMY_COMMANDS")
 
     web_enabled: bool = Field(default=True, validation_alias="WEB_ENABLED")
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")

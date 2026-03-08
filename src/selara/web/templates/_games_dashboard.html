@@ -172,7 +172,7 @@
 <section id="games-list" class="grid games-grid">
   {% if game_cards %}
     {% for game in game_cards %}
-      <article class="panel game-panel game-panel-{{ game.kind }}" data-game-panel>
+      <article class="panel game-panel game-panel-{{ game.kind }}" data-game-panel data-game-id="{{ game.game_id }}">
         {% set compat = namespace(main_buttons=game.main_buttons or [], private_buttons=game.private_buttons or []) %}
         {% if not compat.main_buttons and game.board_rows %}
           {% for row in game.board_rows %}

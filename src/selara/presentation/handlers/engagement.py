@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import F, Router
 from aiogram.types import Message
 
@@ -5,8 +7,10 @@ from selara.application.use_cases.vote_karma import execute as vote_karma
 from selara.core.chat_settings import ChatSettings
 from selara.domain.entities import UserSnapshot
 from selara.presentation.handlers.activity import format_user_label
+from selara.presentation.game_state import GAME_STORE
 
 router = Router(name="engagement")
+logger = logging.getLogger(__name__)
 
 
 def _vote_value(text: str) -> int | None:
@@ -73,6 +77,10 @@ async def vote_message_handler(message: Message, activity_repo, chat_settings: C
     if not target_label:
         target_label = format_user_label(target_user)
     sign = "+" if vote_value > 0 else "-"
+    try:
+        await GAME_STORE.publish_event(event_type="new_vote", scope="chat", chat_id=message.chat.id)
+    except Exception:
+        logger.exception("Failed to publish vote live event", extra={"chat_id": message.chat.id})
     await message.answer(
         f"Голос {sign} засчитан для {target_label}. "
         f"Карма за всё время: {result.target_karma_all_time}; за 7 дней: {result.target_karma_7d}"

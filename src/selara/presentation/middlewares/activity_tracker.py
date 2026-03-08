@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -7,6 +8,9 @@ from aiogram.types import Message
 from selara.application.use_cases.track_activity import execute as track_activity
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.filters import is_trackable_message
+from selara.presentation.game_state import GAME_STORE
+
+logger = logging.getLogger(__name__)
 
 
 def _is_profile_lookup_message(message: Message) -> bool:
@@ -50,5 +54,13 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                     is_bot=event.from_user.is_bot,
                     event_at=event.date,
                 )
+                try:
+                    await GAME_STORE.publish_event(
+                        event_type="chat_activity",
+                        scope="chat",
+                        chat_id=event.chat.id,
+                    )
+                except Exception:
+                    logger.exception("Failed to publish chat activity live event", extra={"chat_id": event.chat.id})
 
         return await handler(event, data)
