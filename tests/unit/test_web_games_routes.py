@@ -141,6 +141,7 @@ async def _web_client(monkeypatch, state: WebRepoState):
     store = GameStore()
     safe_edit_mock = AsyncMock()
     send_roles_mock = AsyncMock(return_value=0)
+    grant_rewards_mock = AsyncMock(return_value=None)
 
     FakeBot.instances = []
     FakeBot.sent_messages = []
@@ -156,6 +157,7 @@ async def _web_client(monkeypatch, state: WebRepoState):
     monkeypatch.setattr(web_app_module.game_router_module, "_sync_quiz_feed_message", AsyncMock())
     monkeypatch.setattr(web_app_module.game_router_module, "_notify_mafia_night_actions", AsyncMock())
     monkeypatch.setattr(web_app_module.game_router_module, "_notify_bunker_reveal_turn", AsyncMock())
+    monkeypatch.setattr(web_app_module.game_router_module, "_grant_game_rewards_if_needed", grant_rewards_mock)
     monkeypatch.setattr(web_app_module.game_router_module, "_schedule_phase_timer", lambda bot, game, chat_settings: None)
 
     app = web_app_module.create_web_app(settings=settings, session_factory=DummySessionFactory())
@@ -168,6 +170,37 @@ async def _web_client(monkeypatch, state: WebRepoState):
     finally:
         await client.aclose()
         await app.router.shutdown()
+
+
+async def _create_started_whoami_game(store: GameStore, *, owner_user_id: int, owner_label: str, chat_id: int, chat_title: str):
+    game, error = await store.create_lobby(
+        kind="whoami",
+        chat_id=chat_id,
+        chat_title=chat_title,
+        owner_user_id=owner_user_id,
+        owner_label=owner_label,
+        reveal_eliminated_role=True,
+    )
+    assert error is None
+    assert game is not None
+
+    for user_id in [303, 404]:
+        joined_game, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
+        assert joined_game is not None
+        assert status == "joined"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    assert started_game is not None
+    assert started_game.kind == "whoami"
+    assert started_game.status == "started"
+
+    started_game.roles = {
+        owner_user_id: "Любовница",
+        303: "Чайник",
+        404: "Ложка",
+    }
+    return started_game
 
 
 @pytest.mark.asyncio
@@ -369,4 +402,132 @@ async def test_web_start_returns_warning_and_notifies_chat_on_failed_dm(monkeypa
         item["chat_id"] == -5001 and "Не удалось отправить ЛС" in str(item["text"])
         for item in FakeBot.sent_messages
     )
+    safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_whoami_midgame_guess_updates_board_without_group_feed(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=202, username="owner", first_name="Owner", last_name=None, is_bot=False)
+    state = WebRepoState(settings=settings, user=user)
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        started_game = await _create_started_whoami_game(
+            store,
+            owner_user_id=user.telegram_user_id,
+            owner_label="owner",
+            chat_id=-5101,
+            chat_title="Whoami Chat",
+        )
+        started_game.whoami_turn_order = [user.telegram_user_id, 303, 404]
+        started_game.whoami_current_actor_index = 0
+        started_game.whoami_current_actor_user_id = user.telegram_user_id
+        started_game.phase = "whoami_ask"
+
+        feed_mock = web_app_module.game_router_module._send_game_feed_event
+        response = await client.post(
+            "/app/games/action",
+            data={"action": "whoami_guess", "game_id": started_game.game_id, "guess_text": "любовница"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(started_game.game_id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "Карточка разгадана" in response.json()["message"]
+    assert updated_game is not None
+    assert updated_game.status == "started"
+    assert updated_game.whoami_solved_user_ids == {user.telegram_user_id}
+    feed_mock.assert_not_awaited()
+    safe_edit_mock.assert_awaited()
+    note = safe_edit_mock.await_args_list[-1].kwargs["note"]
+    assert "<b>Результат:</b> карточка разгадана." in note
+    assert "Любовница" not in note
+    assert "Догадка:" not in note
+
+
+@pytest.mark.asyncio
+async def test_web_whoami_final_guess_sends_group_feed_once(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=202, username="owner", first_name="Owner", last_name=None, is_bot=False)
+    state = WebRepoState(settings=settings, user=user)
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        started_game = await _create_started_whoami_game(
+            store,
+            owner_user_id=user.telegram_user_id,
+            owner_label="owner",
+            chat_id=-5102,
+            chat_title="Whoami Chat Final",
+        )
+        started_game.whoami_turn_order = [303, 404, user.telegram_user_id]
+        started_game.whoami_current_actor_index = 2
+        started_game.whoami_current_actor_user_id = user.telegram_user_id
+        started_game.whoami_solved_user_ids = {303, 404}
+        started_game.whoami_finish_order = [303, 404]
+        started_game.phase = "whoami_ask"
+
+        feed_mock = web_app_module.game_router_module._send_game_feed_event
+        response = await client.post(
+            "/app/games/action",
+            data={"action": "whoami_guess", "game_id": started_game.game_id, "guess_text": "любовница"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(started_game.game_id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "Все карточки разгаданы" in response.json()["message"]
+    assert updated_game is not None
+    assert updated_game.status == "finished"
+    assert updated_game.whoami_finish_order == [303, 404, user.telegram_user_id]
+    safe_edit_mock.assert_awaited()
+    feed_mock.assert_awaited_once()
+    assert "Все карточки разгаданы" in feed_mock.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_web_bred_category_pick_uses_board_only_and_refreshes_label(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=707, username=None, first_name="Host", last_name=None, is_bot=False)
+    state = WebRepoState(
+        settings=settings,
+        user=user,
+        display_names={(-5201, 707): "Ведущий с сайта"},
+    )
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        game, error = await store.create_lobby(
+            kind="bredovukha",
+            chat_id=-5201,
+            chat_title="Bred Chat",
+            owner_user_id=user.telegram_user_id,
+            owner_label="user:707",
+            reveal_eliminated_role=True,
+        )
+        assert error is None
+        assert game is not None
+        await store.join(game_id=game.game_id, user_id=808, user_label="u808")
+        await store.join(game_id=game.game_id, user_id=909, user_label="u909")
+        started_game, start_error = await store.start(game_id=game.game_id)
+        assert start_error is None
+        assert started_game is not None
+        assert started_game.phase == "category_pick"
+        started_game.bred_current_selector_user_id = user.telegram_user_id
+
+        feed_mock = web_app_module.game_router_module._send_game_feed_event
+        response = await client.post(
+            "/app/games/action",
+            data={"callback_data": f"gbredcat:{game.game_id}:0"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(game.game_id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "Категория выбрана" in response.json()["message"]
+    assert updated_game is not None
+    assert updated_game.phase == "private_answers"
+    assert updated_game.players[user.telegram_user_id] == "Ведущий с сайта"
+    feed_mock.assert_not_awaited()
     safe_edit_mock.assert_awaited()

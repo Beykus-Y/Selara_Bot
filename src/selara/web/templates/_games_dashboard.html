@@ -278,17 +278,81 @@
         {% endif %}
 
         {% if game.whoami_view %}
+          <section class="game-action-section whoami-status-section whoami-status-section-{{ game.whoami_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.whoami_view.status_title }}</strong>
+              <p>{{ game.whoami_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.whoami_view.action_buttons %}
+            <section class="game-action-section whoami-action-section">
+              <div class="section-caption">
+                <strong>Ответ стола</strong>
+                <p>Первый ответ кнопкой фиксирует вердикт для текущего вопроса.</p>
+              </div>
+              <div class="choice-grid whoami-choice-grid">
+                {% for button in game.whoami_view.action_buttons %}
+                  <form method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.whoami_view.question_form or game.whoami_view.guess_form %}
+            <section class="whoami-form-grid">
+              {% if game.whoami_view.question_form %}
+                <section class="game-action-section whoami-form-section">
+                  <div class="section-caption">
+                    <strong>Вопрос о себе</strong>
+                    <p>Задайте один точный вопрос, на который стол может ответить коротко.</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_ask">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.question_form.game_id }}">
+                    <label class="field">
+                      <span>Ваш вопрос</span>
+                      <input type="text" name="question_text" placeholder="{{ game.whoami_view.question_form.placeholder }}" maxlength="180" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.question_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+
+              {% if game.whoami_view.guess_form %}
+                <section class="game-action-section whoami-form-section whoami-guess-section">
+                  <div class="section-caption">
+                    <strong>Догадка о карточке</strong>
+                    <p>Верная догадка выводит вас из круга вопросов, но партия идёт дальше.</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_guess">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.guess_form.game_id }}">
+                    <label class="field">
+                      <span>Кто вы?</span>
+                      <input type="text" name="guess_text" placeholder="{{ game.whoami_view.guess_form.placeholder }}" maxlength="120" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.guess_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+            </section>
+          {% endif %}
+
           <section class="whoami-stage-layout">
             <article class="game-action-section whoami-roster-card">
               <div class="section-caption">
                 <strong>Карточки за столом</strong>
-                <p>Свою карточку вы не видите, остальные лежат перед глазами как в party-экране.</p>
+                <p>Свою карточку вы не видите, остальные лежат перед глазами как на столе.</p>
               </div>
               <div class="whoami-roster-grid">
                 {% for row in game.whoami_view.table_rows %}
-                  <div class="whoami-player-row whoami-player-row-{{ row.tone }}">
+                  <div class="whoami-player-row whoami-player-row-{{ row.tone }}" title="{{ row.title }}">
                     <div class="whoami-player-head">
-                      <strong>{{ row.label }}</strong>
+                      <strong title="{{ row.title }}">{{ row.label }}</strong>
                       <div class="whoami-player-badges">
                         {% for badge in row.badges %}
                           <span class="whoami-badge whoami-badge-{{ badge.tone }}">{{ badge.label }}</span>
@@ -304,7 +368,7 @@
             <article class="game-action-section whoami-history-card">
               <div class="section-caption">
                 <strong>Ход сцены</strong>
-                <p>Здесь остаются последние вопросы, ответы стола и все рискованные догадки.</p>
+                <p>Здесь остаются последние вопросы, ответы и статусы догадок без спойлеров.</p>
               </div>
               {% if game.whoami_view.pending_question %}
                 <div class="whoami-pending-card">
@@ -327,70 +391,6 @@
               {% endif %}
             </article>
           </section>
-
-          <section class="game-action-section whoami-status-section whoami-status-section-{{ game.whoami_view.status_tone }}">
-            <div class="section-caption">
-              <strong>{{ game.whoami_view.status_title }}</strong>
-              <p>{{ game.whoami_view.status_text }}</p>
-            </div>
-          </section>
-
-          {% if game.whoami_view.action_buttons %}
-            <section class="game-action-section whoami-action-section">
-              <div class="section-caption">
-                <strong>Ответ стола</strong>
-                <p>Ответ фиксируется первым игроком, который нажмёт кнопку. После «да» ход остаётся у спрашивающего.</p>
-              </div>
-              <div class="choice-grid whoami-choice-grid">
-                {% for button in game.whoami_view.action_buttons %}
-                  <form method="post" action="/app/games/action" data-game-action-form>
-                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
-                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
-                  </form>
-                {% endfor %}
-              </div>
-            </section>
-          {% endif %}
-
-          {% if game.whoami_view.question_form or game.whoami_view.guess_form %}
-            <section class="whoami-form-grid">
-              {% if game.whoami_view.question_form %}
-                <section class="game-action-section whoami-form-section">
-                  <div class="section-caption">
-                    <strong>Вопрос о себе</strong>
-                    <p>Спросите что-то, на что стол может ответить только «да», «нет», «не знаю» или «неважно».</p>
-                  </div>
-                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
-                    <input type="hidden" name="action" value="whoami_ask">
-                    <input type="hidden" name="game_id" value="{{ game.whoami_view.question_form.game_id }}">
-                    <label class="field">
-                      <span>Ваш вопрос</span>
-                      <input type="text" name="question_text" placeholder="{{ game.whoami_view.question_form.placeholder }}" maxlength="180" required>
-                    </label>
-                    <button type="submit" class="button primary">{{ game.whoami_view.question_form.button_label }}</button>
-                  </form>
-                </section>
-              {% endif %}
-
-              {% if game.whoami_view.guess_form %}
-                <section class="game-action-section whoami-form-section whoami-guess-section">
-                  <div class="section-caption">
-                    <strong>Финальная догадка</strong>
-                    <p>В любой момент своего хода можно назвать карточку. Если мимо, ход уходит следующему игроку.</p>
-                  </div>
-                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
-                    <input type="hidden" name="action" value="whoami_guess">
-                    <input type="hidden" name="game_id" value="{{ game.whoami_view.guess_form.game_id }}">
-                    <label class="field">
-                      <span>Кто вы?</span>
-                      <input type="text" name="guess_text" placeholder="{{ game.whoami_view.guess_form.placeholder }}" maxlength="120" required>
-                    </label>
-                    <button type="submit" class="button primary">{{ game.whoami_view.guess_form.button_label }}</button>
-                  </form>
-                </section>
-              {% endif %}
-            </section>
-          {% endif %}
         {% endif %}
 
         {% if game.spy_view %}
@@ -586,17 +586,51 @@
           {% endif %}
         {% endif %}
 
+        {% if game.kind == "bredovukha" and game.category_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>Выбери тему</strong>
+              <p>Сначала выбирается тема текущего раунда.</p>
+            </div>
+            <div class="choice-grid">
+              {% for button in game.category_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.kind == "bredovukha" and game.vote_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>Где правда?</strong>
+              <p>Сейчас важен только выбор варианта.</p>
+            </div>
+            <div class="choice-grid">
+              {% for button in game.vote_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
         {% if game.bred_submission_rows or game.show_bred_answer %}
           <section class="game-action-section game-form-section">
             <div class="section-caption">
               <strong>Сбор ответов</strong>
-              <p>Сначала видно, кто уже сдал фальшивку, а табло ниже не отвлекает от текущего хода.</p>
+              <p>Здесь видно прогресс сдачи и поле для вашей лжи.</p>
             </div>
             {% if game.bred_submission_rows %}
               <div class="submission-grid">
                 {% for row in game.bred_submission_rows %}
-                  <div class="submission-row submission-row-{{ row.state }}">
-                    <strong>{{ row.label }}</strong>
+                  <div class="submission-row submission-row-{{ row.state }}" title="{{ row.label }}">
+                    <strong title="{{ row.label }}">{{ row.label }}</strong>
                     <span class="submission-state submission-state-{{ row.state }}">{{ row.state_label }}</span>
                   </div>
                 {% endfor %}
@@ -620,15 +654,15 @@
           <section class="game-action-section reveal-section">
             <div class="section-caption">
               <strong>Кто придумал варианты</strong>
-              <p>После раунда видно, какая формулировка была правдой и кто автор каждой лжи.</p>
+              <p>После раунда видно, где была правда и кто автор каждой лжи.</p>
             </div>
             <div class="reveal-grid">
               {% for row in game.bred_reveal_rows %}
-                <div class="reveal-row reveal-row-{{ row.tone }}">
+                <div class="reveal-row reveal-row-{{ row.tone }}" title="{{ row.text }}">
                   <span class="reveal-slot">{{ row.slot }}</span>
                   <div class="reveal-copy">
-                    <strong>{{ row.text }}</strong>
-                    <span>{{ row.author }}</span>
+                    <strong title="{{ row.text }}">{{ row.text }}</strong>
+                    <span title="{{ row.author }}">{{ row.author }}</span>
                   </div>
                   <span class="reveal-votes">{{ row.votes }}</span>
                 </div>
@@ -641,14 +675,14 @@
           <section class="game-scoreboard">
             <div class="section-caption">
               <strong>{% if game.kind == "bredovukha" %}Табло раунда{% else %}Текущий счёт{% endif %}</strong>
-              <p>{% if game.kind == "bredovukha" %}Очки выглядят как в party-show, а не как сухой список.{% else %}Лидеры обновляются после каждого раунда.{% endif %}</p>
+              <p>{% if game.kind == "bredovukha" %}Очки после каждого раунда видны сразу.{% else %}Лидеры обновляются после каждого раунда.{% endif %}</p>
             </div>
             <div class="game-score-grid">
               {% for row in game.score_rows %}
-                <div class="game-score-row">
+                <div class="game-score-row" title="{{ row.label }}">
                   <span class="rank-no">{{ row.position }}</span>
                   <div class="rank-copy">
-                    <strong>{{ row.label }}</strong>
+                    <strong title="{{ row.label }}">{{ row.label }}</strong>
                   </div>
                   <span class="rank-value">{{ row.value }}</span>
                 </div>
@@ -678,10 +712,10 @@
             </div>
             <div class="reveal-grid role-reveal-grid">
               {% for row in game.role_reveal_rows %}
-                <div class="reveal-row reveal-row-{{ row.tone }}">
+                <div class="reveal-row reveal-row-{{ row.tone }}" title="{{ row.player }}">
                   <div class="reveal-copy">
-                    <strong>{{ row.player }}</strong>
-                    <span>{{ row.role }}</span>
+                    <strong title="{{ row.player }}">{{ row.player }}</strong>
+                    <span title="{{ row.role }}">{{ row.role }}</span>
                   </div>
                   <span class="reveal-slot">{{ row.team }}</span>
                   <span class="reveal-votes">{% if row.winner %}победа{% else %}финал{% endif %}</span>
@@ -691,7 +725,7 @@
           </section>
         {% endif %}
 
-        {% if game.category_buttons %}
+        {% if game.category_buttons and game.kind != "bredovukha" %}
           <section class="game-action-section">
             <div class="section-caption">
               <strong>{% if game.kind == "bredovukha" %}Выбери тему{% else %}Категории раунда{% endif %}</strong>
@@ -708,7 +742,7 @@
           </section>
         {% endif %}
 
-        {% if game.vote_buttons %}
+        {% if game.vote_buttons and game.kind != "bredovukha" %}
           <section class="game-action-section">
             <div class="section-caption">
               <strong>{% if game.kind == "bredovukha" %}Где правда?{% else %}Выбор ответа{% endif %}</strong>

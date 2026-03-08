@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 import selara.presentation.game_state as game_state_module
 
@@ -12,6 +14,8 @@ from selara.presentation.game_state import (
     MAFIA_ROLE_MANIAC,
     GameStore,
 )
+
+game_router_module = importlib.import_module("selara.presentation.handlers.game.router")
 
 
 async def _create_started_mafia_game(store: GameStore):
@@ -102,6 +106,43 @@ async def _open_bred_private_answers(store: GameStore, game_id: str):
     assert opened_game.bred_question_prompt
     assert opened_game.bred_correct_answer
     return opened_game
+
+
+async def _create_started_whoami_game(store: GameStore):
+    game, error = await store.create_lobby(
+        kind="whoami",
+        chat_id=550,
+        chat_title="whoami-chat",
+        owner_user_id=1,
+        owner_label="u1",
+        reveal_eliminated_role=True,
+    )
+    assert error is None
+    assert game is not None
+
+    for user_id in [2, 3]:
+        joined_game, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
+        assert joined_game is not None
+        assert status == "joined"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    assert started_game is not None
+    assert started_game.kind == "whoami"
+    assert started_game.status == "started"
+    assert started_game.phase == "whoami_ask"
+
+    started_game.roles = {
+        1: "Лампа",
+        2: "Чайник",
+        3: "Ложка",
+    }
+    started_game.whoami_turn_order = [1, 2, 3]
+    started_game.whoami_current_actor_index = 0
+    started_game.whoami_current_actor_user_id = 1
+    started_game.whoami_solved_user_ids.clear()
+    started_game.whoami_finish_order.clear()
+    return started_game
 
 
 @pytest.mark.asyncio
@@ -1079,6 +1120,142 @@ async def test_bunker_field_uniqueness_and_overflow_fallback(monkeypatch) -> Non
             has_duplicates = True
             break
     assert has_duplicates is True
+
+
+@pytest.mark.asyncio
+async def test_whoami_correct_guess_marks_player_solved_and_continues_game() -> None:
+    store = GameStore()
+    started = await _create_started_whoami_game(store)
+
+    game, resolution, error = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=1,
+        guess_text="лампа",
+    )
+
+    assert error is None
+    assert game is not None
+    assert resolution is not None
+    assert resolution.guessed_correctly is True
+    assert resolution.finished is False
+    assert resolution.actual_identity is None
+    assert game.status == "started"
+    assert game.phase == "whoami_ask"
+    assert game.whoami_solved_user_ids == {1}
+    assert game.whoami_finish_order == [1]
+    assert game.whoami_current_actor_user_id == 2
+    assert game.winner_text is None
+
+
+@pytest.mark.asyncio
+async def test_whoami_solved_player_cannot_ask_or_guess_but_can_answer() -> None:
+    store = GameStore()
+    started = await _create_started_whoami_game(store)
+
+    solved_game, solved_resolution, solved_error = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=1,
+        guess_text="лампа",
+    )
+    assert solved_error is None
+    assert solved_game is not None
+    assert solved_resolution is not None
+    assert solved_game.whoami_current_actor_user_id == 2
+
+    solved_game.whoami_current_actor_user_id = 1
+    solved_game.whoami_current_actor_index = 0
+
+    ask_game, ask_result, ask_error = await store.whoami_submit_question(
+        game_id=started.game_id,
+        actor_user_id=1,
+        question_text="Я предмет?",
+    )
+    assert ask_game is not None
+    assert ask_result is None
+    assert ask_error == "Вы уже разгадали карточку и больше не задаёте вопросы"
+
+    guess_game, guess_result, guess_error = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=1,
+        guess_text="лампа",
+    )
+    assert guess_game is not None
+    assert guess_result is None
+    assert guess_error == "Вы уже разгадали карточку и больше не ходите"
+
+    solved_game.whoami_current_actor_user_id = 2
+    solved_game.whoami_current_actor_index = 1
+
+    game, question_result, error = await store.whoami_submit_question(
+        game_id=started.game_id,
+        actor_user_id=2,
+        question_text="Я кухонный предмет?",
+    )
+    assert error is None
+    assert game is not None
+    assert question_result is not None
+    assert game.phase == "whoami_answer"
+
+    answered_game, answer_resolution, answer_error = await store.whoami_answer_question(
+        game_id=started.game_id,
+        responder_user_id=1,
+        answer_code="no",
+    )
+    assert answer_error is None
+    assert answered_game is not None
+    assert answer_resolution is not None
+    assert answer_resolution.responder_user_id == 1
+    assert answer_resolution.answer_label == "Нет"
+    assert answered_game.phase == "whoami_ask"
+    assert answered_game.whoami_current_actor_user_id == 3
+
+
+@pytest.mark.asyncio
+async def test_whoami_finishes_only_after_all_players_solve_and_preserves_finish_order() -> None:
+    store = GameStore()
+    started = await _create_started_whoami_game(store)
+
+    game, resolution1, error1 = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=1,
+        guess_text="лампа",
+    )
+    assert error1 is None
+    assert game is not None
+    assert resolution1 is not None
+    assert resolution1.finished is False
+    assert game.whoami_current_actor_user_id == 2
+
+    game, resolution2, error2 = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=2,
+        guess_text="чайник",
+    )
+    assert error2 is None
+    assert game is not None
+    assert resolution2 is not None
+    assert resolution2.finished is False
+    assert game.whoami_current_actor_user_id == 3
+
+    game, resolution3, error3 = await store.whoami_guess_identity(
+        game_id=started.game_id,
+        actor_user_id=3,
+        guess_text="ложка",
+    )
+
+    assert error3 is None
+    assert game is not None
+    assert resolution3 is not None
+    assert resolution3.guessed_correctly is True
+    assert resolution3.finished is True
+    assert resolution3.actual_identity == "Ложка"
+    assert game.status == "finished"
+    assert game.phase == "finished"
+    assert game.whoami_current_actor_user_id is None
+    assert game.whoami_solved_user_ids == {1, 2, 3}
+    assert game.whoami_finish_order == [1, 2, 3]
+    assert game.winner_text == "Все карточки разгаданы. Порядок финиша: u1, u2, u3."
+    assert game_router_module._winner_ids_for_whoami(game) == {1, 2, 3}
 
 
 @pytest.mark.asyncio

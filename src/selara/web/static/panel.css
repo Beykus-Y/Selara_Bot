@@ -1121,6 +1121,9 @@ code {
 .submission-row strong,
 .reveal-copy strong {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .submission-state,
@@ -1141,11 +1144,15 @@ code {
 .reveal-copy {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .reveal-copy span {
   color: var(--muted);
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .role-reveal-grid .reveal-row {
@@ -2036,8 +2043,11 @@ body.page-games::before {
 }
 
 .page-games .rank-value {
+  border: 3px solid #1d2340;
+  background: #fff9eb;
   color: #1d2340;
   font-family: "Arial Black", "Bahnschrift", sans-serif;
+  box-shadow: 0 4px 0 #1d2340;
 }
 
 .page-games .section-caption strong,
@@ -2224,6 +2234,9 @@ body.page-games.is-route-transition .panel {
 
 .mafia-player-row strong {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mafia-player-badges {
@@ -2521,6 +2534,9 @@ body.page-games.is-route-transition .panel {
 
 .spy-suspect-head strong {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .spy-vote-track {
@@ -2874,6 +2890,12 @@ body.page-games.is-route-transition .panel {
   color: #1d2340;
 }
 
+.whoami-player-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .page-games .whoami-badge {
   border: 3px solid #1d2340;
   background: #fff8eb;
@@ -3119,9 +3141,21 @@ body.page-games.is-route-transition .panel {
   gap: 4px;
 }
 
+.rank-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rank-value {
   grid-area: value;
   color: var(--cyan-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: 6px 10px;
+  border-radius: 999px;
   font-weight: 700;
   text-align: right;
   justify-self: end;

@@ -570,7 +570,7 @@ class WhoamiGuessResolution:
     actor_user_id: int
     actor_user_label: str | None
     guess_text: str
-    actual_identity: str
+    actual_identity: str | None
     guessed_correctly: bool
     finished: bool
     next_actor_user_id: int | None
@@ -909,6 +909,8 @@ class GroupGame:
     whoami_pending_question_text: str | None = None
     whoami_pending_question_user_id: int | None = None
     whoami_history: list[WhoamiHistoryEntry] = field(default_factory=list)
+    whoami_solved_user_ids: set[int] = field(default_factory=set)
+    whoami_finish_order: list[int] = field(default_factory=list)
     whoami_winner_user_id: int | None = None
     bred_rounds: int = BRED_DEFAULT_ROUNDS
     bred_current_category: str | None = None
@@ -1431,6 +1433,8 @@ class GameStore:
                 game.whoami_pending_question_text = None
                 game.whoami_pending_question_user_id = None
                 game.whoami_history.clear()
+                game.whoami_solved_user_ids.clear()
+                game.whoami_finish_order.clear()
                 game.whoami_winner_user_id = None
                 game.phase = "whoami_ask"
                 game.round_no = 1
@@ -1898,6 +1902,8 @@ class GameStore:
                 return game, None, "Вы не участник этой игры"
             if actor_user_id != game.whoami_current_actor_user_id:
                 return game, None, "Сейчас ход другого игрока"
+            if actor_user_id in game.whoami_solved_user_ids:
+                return game, None, "Вы уже разгадали карточку и больше не задаёте вопросы"
 
             question = re.sub(r"\s+", " ", question_text.strip())
             if len(question) < WHOAMI_MIN_QUESTION_LEN:
@@ -2012,6 +2018,8 @@ class GameStore:
                 return game, None, "Вы не участник этой игры"
             if actor_user_id != game.whoami_current_actor_user_id:
                 return game, None, "Сейчас ход другого игрока"
+            if actor_user_id in game.whoami_solved_user_ids:
+                return game, None, "Вы уже разгадали карточку и больше не ходите"
 
             guess = re.sub(r"\s+", " ", guess_text.strip())
             if not guess:
@@ -2039,14 +2047,33 @@ class GameStore:
 
             if guessed_correctly:
                 actor_label = game.players.get(actor_user_id, f"user:{actor_user_id}")
-                winner_text = f"Победа {actor_label}: карточка «{actual_identity}» разгадана."
-                game.status = "finished"
-                game.phase = "finished"
-                game.winner_text = winner_text
-                game.whoami_winner_user_id = actor_user_id
                 game.whoami_pending_question_text = None
                 game.whoami_pending_question_user_id = None
-                self._active_by_chat.pop(game.chat_id, None)
+                game.whoami_solved_user_ids.add(actor_user_id)
+                if actor_user_id not in game.whoami_finish_order:
+                    game.whoami_finish_order.append(actor_user_id)
+                if game.whoami_winner_user_id is None:
+                    game.whoami_winner_user_id = actor_user_id
+
+                if len(game.whoami_solved_user_ids) >= len(game.players):
+                    finish_labels = ", ".join(
+                        game.players.get(user_id, f"user:{user_id}") for user_id in game.whoami_finish_order
+                    )
+                    winner_text = (
+                        "Все карточки разгаданы. "
+                        f"Порядок финиша: {finish_labels}."
+                    )
+                    game.status = "finished"
+                    game.phase = "finished"
+                    game.winner_text = winner_text
+                    game.whoami_current_actor_user_id = None
+                    self._active_by_chat.pop(game.chat_id, None)
+                else:
+                    self._advance_whoami_turn(game)
+                    game.phase = "whoami_ask"
+                    game.phase_started_at = datetime.now(timezone.utc)
+                    next_actor_user_id = game.whoami_current_actor_user_id
+                    next_actor_label = game.players.get(next_actor_user_id) if next_actor_user_id is not None else None
             else:
                 self._advance_whoami_turn(game)
                 game.phase = "whoami_ask"
@@ -2060,9 +2087,9 @@ class GameStore:
                     actor_user_id=actor_user_id,
                     actor_user_label=game.players.get(actor_user_id),
                     guess_text=guess,
-                    actual_identity=actual_identity,
+                    actual_identity=actual_identity if game.status == "finished" else None,
                     guessed_correctly=guessed_correctly,
-                    finished=guessed_correctly,
+                    finished=game.status == "finished",
                     next_actor_user_id=next_actor_user_id,
                     next_actor_label=next_actor_label,
                     winner_text=winner_text,
@@ -4373,11 +4400,25 @@ class GameStore:
             game.whoami_current_actor_index = 0
             return
 
-        next_index = (game.whoami_current_actor_index + 1) % len(game.whoami_turn_order)
-        if next_index == 0:
-            game.round_no += 1
-        game.whoami_current_actor_index = next_index
-        game.whoami_current_actor_user_id = game.whoami_turn_order[next_index]
+        if len(game.whoami_solved_user_ids) >= len(game.whoami_turn_order):
+            game.whoami_current_actor_user_id = None
+            game.whoami_current_actor_index = 0
+            return
+
+        total_players = len(game.whoami_turn_order)
+        current_index = game.whoami_current_actor_index
+        for offset in range(1, total_players + 1):
+            next_index = (current_index + offset) % total_players
+            candidate_user_id = game.whoami_turn_order[next_index]
+            if candidate_user_id in game.whoami_solved_user_ids:
+                continue
+            if current_index + offset >= total_players:
+                game.round_no += 1
+            game.whoami_current_actor_index = next_index
+            game.whoami_current_actor_user_id = candidate_user_id
+            return
+
+        game.whoami_current_actor_user_id = None
 
     @staticmethod
     def _trim_whoami_history(game: GroupGame) -> None:

@@ -248,6 +248,29 @@ async def _resolve_chat_player_label(
     return _user_label(user_id=user_id, username=username, first_name=first_name, last_name=last_name)
 
 
+async def _refresh_game_player_label(
+    activity_repo,
+    *,
+    game: GroupGame | None,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> str:
+    label = await _resolve_chat_player_label(
+        activity_repo,
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    if game is not None and user_id in game.players:
+        await GAME_STORE.set_player_label(chat_id=chat_id, user_id=user_id, user_label=label)
+    return label
+
+
 def _mention(user_id: int, label: str) -> str:
     return f'<a href="tg://user?id={user_id}">{escape(label)}</a>'
 
@@ -792,7 +815,7 @@ def _render_whoami_history(game: GroupGame, *, limit: int = 6) -> str:
             continue
         if entry.guessed_correctly is not None and entry.guess_text:
             verdict = "угадал" if entry.guessed_correctly else "мимо"
-            lines.append(f"- {escape(actor_label)} думает, что он <code>{escape(entry.guess_text)}</code> → {verdict}")
+            lines.append(f"- {escape(actor_label)} делает догадку → {verdict}")
     return "\n".join(lines)
 
 
@@ -808,10 +831,14 @@ def _render_whoami_status(game: GroupGame) -> str:
     lines = [
         f"<b>Категория:</b> {escape(_whoami_category_label(game))}",
         f"<b>Ходит:</b> {actor_line}",
+        f"<b>Разгадали себя:</b> {len(game.whoami_solved_user_ids)}/{len(game.players)}",
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> текущий игрок задаёт вопрос сообщением в чат или делает догадку.")
-        lines.append("<i>Если стол отвечает «да», игрок может спросить ещё раз. После «нет / не знаю / неважно» ход переходит дальше.</i>")
+        lines.append(
+            "<i>Если игрок разгадал себя, он выходит из круга вопросов, "
+            "но остаётся частью стола. После «нет / не знаю / неважно» ход переходит дальше.</i>"
+        )
     elif game.phase == "whoami_answer":
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<b>Сейчас:</b> стол выбирает ответ кнопками «да / нет / не знаю / неважно».")
@@ -1011,6 +1038,8 @@ def _winner_ids_for_spy(game: GroupGame) -> set[int]:
 def _winner_ids_for_whoami(game: GroupGame) -> set[int]:
     if game.kind != "whoami":
         return set()
+    if game.whoami_finish_order:
+        return set(game.whoami_finish_order)
     if game.whoami_winner_user_id is None:
         return set()
     return {game.whoami_winner_user_id}
@@ -1395,14 +1424,18 @@ def _format_whoami_guess_resolution(game: GroupGame, resolution: WhoamiGuessReso
     lines = [
         "<b>Кто я • проверка догадки</b>",
         f"<b>Игрок:</b> {escape(actor_label)}",
-        f"<b>Догадка:</b> <code>{escape(resolution.guess_text)}</code>",
     ]
     if resolution.guessed_correctly:
-        lines.append(f"<b>Верно:</b> <code>{escape(resolution.actual_identity)}</code>")
-        if resolution.winner_text:
-            lines.append(f"<b>Победа:</b> {escape(resolution.winner_text)}")
+        lines.append("<b>Результат:</b> карточка разгадана.")
+        lines.append(f"<b>Прогресс:</b> {len(game.whoami_solved_user_ids)}/{len(game.players)}")
+        if resolution.finished and resolution.winner_text:
+            lines.append(f"<b>Финал:</b> {escape(resolution.winner_text)}")
+        else:
+            lines.append("<b>Статус:</b> игрок больше не задаёт вопросы, но может отвечать столу.")
+            if resolution.next_actor_label:
+                lines.append(f"<b>Следующий ход:</b> {escape(resolution.next_actor_label)}")
     else:
-        lines.append(f"<b>Мимо:</b> это была карточка <code>{escape(resolution.actual_identity)}</code>")
+        lines.append("<b>Результат:</b> мимо.")
         if resolution.next_actor_label:
             lines.append(f"<b>Следующий ход:</b> {escape(resolution.next_actor_label)}")
     return "\n".join(lines)
@@ -1512,7 +1545,7 @@ def _render_game_text(
 
     if game.kind == "whoami" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
-        lines.append("<i>Свою карточку вы не видите. Остальные карточки лежат в личке и на сайте.</i>")
+        lines.append("<i>Свою карточку вы не видите. Угадавший игрок больше не ходит, но продолжает отвечать столу.</i>")
         lines.append("")
         lines.append(_render_whoami_status(game))
 
@@ -2649,7 +2682,6 @@ async def _resolve_bred_round(
             game,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
-            winner_user_ids_override=set(resolution.winner_user_ids),
         )
         note = round_text
         if reward_line:
@@ -2659,11 +2691,10 @@ async def _resolve_bred_round(
         await _send_game_feed_event(
             bot,
             game,
-            text=f"<b>Ведущий:</b> Раунд завершён.\n{round_text}" + (f"\n{reward_line}" if reward_line else ""),
+            text=f"<b>Ведущий:</b> Игра «Бредовуха» завершена.\n{round_text}" + (f"\n{reward_line}" if reward_line else ""),
         )
     else:
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note=round_text)
-        await _send_game_feed_event(bot, game, text=f"<b>Ведущий:</b> Раунд завершён.\n{round_text}")
 
     if triggered_by_auto:
         logger.debug("Bredovukha resolved automatically", extra={"game_id": game.game_id})
@@ -3061,6 +3092,16 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
         return
 
+    await _refresh_game_player_label(
+        activity_repo,
+        game=game,
+        chat_id=game.chat_id,
+        user_id=actor_id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+    )
+
     if option == "reveal_elim":
         if game.kind != "mafia" or game.status != "lobby":
             await query.answer("Настройку можно менять только в лобби мафии", show_alert=False)
@@ -3230,8 +3271,9 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         last_name=query.from_user.last_name,
         is_bot=bool(query.from_user.is_bot),
     )
-    actor_label = await _resolve_chat_player_label(
+    actor_label = await _refresh_game_player_label(
         activity_repo,
+        game=game,
         chat_id=game.chat_id,
         user_id=actor_id,
         username=query.from_user.username,
@@ -3403,15 +3445,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     chat_settings,
                     note="\n".join(note_parts),
                 )
-                await _send_game_feed_event(
-                    bot,
-                    opened_game,
-                    text=(
-                        "<b>Ведущий:</b> Для раунда выбрана случайная тема.\n"
-                        f"<b>Категория:</b> {escape(category or '-')}\n"
-                        "<b>Этап:</b> сдайте фальшивые ответы в ЛС или на сайте."
-                    ),
-                )
                 return
 
             if game.phase == "private_answers":
@@ -3429,14 +3462,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     opened_game,
                     chat_settings,
                     note="<b>Этап:</b> сбор ответов завершён, открыто голосование.",
-                )
-                await _send_game_feed_event(
-                    bot,
-                    opened_game,
-                    text=(
-                        "<b>Ведущий:</b> Сбор ответов закрыт.\n"
-                        "<b>Этап:</b> открыто голосование за настоящий вариант."
-                    ),
                 )
                 return
 
@@ -3735,7 +3760,7 @@ async def dice_roll_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
 
 
 @router.callback_query(F.data.startswith("gbredcat:"))
-async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings) -> None:
+async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
     if query.data is None or query.from_user is None:
         await query.answer()
         return
@@ -3774,6 +3799,17 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     option_index = int(payload)
+    existing_game = await GAME_STORE.get_game(game_id)
+    if existing_game is not None:
+        await _refresh_game_player_label(
+            activity_repo,
+            game=existing_game,
+            chat_id=existing_game.chat_id,
+            user_id=query.from_user.id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+        )
     game, category, error = await GAME_STORE.bred_choose_category(
         game_id=game_id,
         actor_user_id=query.from_user.id,
@@ -3806,20 +3842,10 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         chat_settings,
         note="\n".join(note_lines),
     )
-    await _send_game_feed_event(
-        bot,
-        game,
-        text=(
-            f"<b>Ведущий:</b> Тема раунда выбрана.\n"
-            f"<b>Категория:</b> {escape(category or '-')}\n"
-            f"<b>Выбирал:</b> {escape(selector_label)}\n"
-            "<b>Этап:</b> сдайте фальшивые ответы в ЛС или на сайте."
-        ),
-    )
 
 
 @router.callback_query(F.data.startswith("gbred:"))
-async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, economy_repo) -> None:
+async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, economy_repo, activity_repo) -> None:
     if query.data is None or query.from_user is None:
         await query.answer()
         return
@@ -3864,6 +3890,17 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     option_index = int(payload)
+    existing_game = await GAME_STORE.get_game(game_id)
+    if existing_game is not None:
+        await _refresh_game_player_label(
+            activity_repo,
+            game=existing_game,
+            chat_id=existing_game.chat_id,
+            user_id=query.from_user.id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+        )
     game, result, error = await GAME_STORE.bred_register_vote(
         game_id=game_id,
         voter_user_id=query.from_user.id,
@@ -4110,7 +4147,7 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
 
 
 @router.callback_query(F.data.startswith("gwho:"))
-async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings) -> None:
+async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
     if query.data is None or query.from_user is None:
         await query.answer()
         return
@@ -4124,6 +4161,20 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
     if answer_code not in {"yes", "no", "unknown", "irrelevant"}:
         await query.answer("Некорректный ответ", show_alert=False)
         return
+
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    await _refresh_game_player_label(
+        activity_repo,
+        game=current_game,
+        chat_id=current_game.chat_id,
+        user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+    )
 
     game, resolution, error = await GAME_STORE.whoami_answer_question(
         game_id=game_id,
@@ -4491,7 +4542,7 @@ async def mafia_execution_confirm_callback(query: CallbackQuery, bot: Bot, chat_
 
 
 @router.message(F.chat.type.in_(("group", "supergroup")), F.text, ~F.text.startswith("/"))
-async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings: ChatSettings, economy_repo) -> None:
+async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings: ChatSettings, economy_repo, activity_repo) -> None:
     text = (message.text or "").strip()
     active_game = await GAME_STORE.get_active_game_for_chat(chat_id=message.chat.id)
     if not _should_handle_whoami_group_text(
@@ -4500,6 +4551,16 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
         text=text,
     ):
         raise SkipHandler()
+
+    actor_label = await _refresh_game_player_label(
+        activity_repo,
+        game=active_game,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+    )
 
     guess = _extract_whoami_guess(text)
     if guess is not None:
@@ -4520,16 +4581,16 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
                 game,
                 economy_repo=economy_repo,
                 chat_settings=chat_settings,
-                winner_user_ids_override={resolution.actor_user_id},
             )
             if reward_line:
                 note = f"{note}\n{reward_line}"
             await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
-            await _send_game_feed_event(
-                bot,
-                game,
-                text=note + "\n" + _render_roles_reveal(game),
-            )
+            if resolution.finished:
+                await _send_game_feed_event(
+                    bot,
+                    game,
+                    text=note + "\n" + _render_roles_reveal(game),
+                )
             return
 
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
@@ -4551,7 +4612,7 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
         game,
         chat_settings,
         note=(
-            f"<b>Вопрос от:</b> {_mention(result.actor_user_id, result.actor_user_label or '-')}\n"
+            f"<b>Вопрос от:</b> {_mention(result.actor_user_id, result.actor_user_label or actor_label or '-')}\n"
             f"<b>Текст:</b> {escape(result.question_text)}"
         ),
     )
@@ -4636,7 +4697,7 @@ async def number_guess_handler(message: Message, bot: Bot, chat_settings: ChatSe
 
 
 @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings: ChatSettings) -> None:
+async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
     text = (message.text or "").strip()
     if message.from_user is None:
         raise SkipHandler()
@@ -4644,6 +4705,16 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
     game = await GAME_STORE.get_latest_bred_submission_game_for_user(user_id=message.from_user.id)
     if not _should_handle_bred_private_answer(game, text=text):
         raise SkipHandler()
+
+    await _refresh_game_player_label(
+        activity_repo,
+        game=game,
+        chat_id=game.chat_id,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+    )
 
     updated_game, result, error = await GAME_STORE.bred_submit_lie(
         game_id=game.game_id,
@@ -4671,14 +4742,6 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
             updated_game,
             chat_settings,
             note="<b>Этап:</b> все ответы получены, открыто голосование.",
-        )
-        await _send_game_feed_event(
-            bot,
-            updated_game,
-            text=(
-                "<b>Ведущий:</b> Все ложные ответы собраны.\n"
-                "<b>Этап:</b> открыто голосование за правдивый вариант."
-            ),
         )
         return
 

@@ -1277,6 +1277,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
 
         winner_user_ids = game_router_module._winner_ids_for_whoami(game) if game.status == "finished" else set()
+        solved_user_ids = set(game.whoami_solved_user_ids)
         current_actor_user_id = game.whoami_current_actor_user_id
         current_actor_label = _player_label(game, current_actor_user_id) if current_actor_user_id is not None else "-"
         action_buttons = [
@@ -1292,6 +1293,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 badges.append({"label": "вы", "tone": "self"})
             if current_actor_user_id == player_user_id and game.status == "started":
                 badges.append({"label": "ходит", "tone": "turn"})
+            if player_user_id in solved_user_ids and game.status == "started":
+                badges.append({"label": "разгадал", "tone": "winner"})
             if player_user_id in winner_user_ids:
                 badges.append({"label": "победа", "tone": "winner"})
 
@@ -1301,12 +1304,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             elif not is_member:
                 identity = "скрыто до финала"
                 tone = "locked"
+            elif player_user_id == user_id and player_user_id in solved_user_ids:
+                identity = "разгадано"
+                tone = "winner"
             elif player_user_id == user_id:
                 identity = "???"
                 tone = "self"
             else:
                 identity = game.roles.get(player_user_id, "-")
-                tone = "known"
+                tone = "winner" if player_user_id in solved_user_ids else "known"
 
             table_rows.append(
                 {
@@ -1314,6 +1320,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "identity": identity,
                     "tone": tone,
                     "badges": badges,
+                    "title": label,
                 }
             )
 
@@ -1335,18 +1342,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 history_rows.append(
                     {
                         "title": f"{actor_label} сделал догадку",
-                        "text": entry.guess_text,
-                        "meta": "попал" if entry.guessed_correctly else "мимо",
+                        "text": "Проверка карточки без публичного раскрытия.",
+                        "meta": "угадал" if entry.guessed_correctly else "мимо",
                         "tone": "guess-hit" if entry.guessed_correctly else "guess-miss",
                     }
                 )
 
         status_title = "Сцена игры"
-        status_text = f"Категория: {game.whoami_category or 'случайная'}. Ходит {current_actor_label}."
+        status_text = (
+            f"Категория: {game.whoami_category or 'случайная'}. "
+            f"Ходит {current_actor_label}. Разгадано {len(solved_user_ids)}/{len(game.players)}."
+        )
         status_tone = "observer"
         question_form: dict[str, str] | None = None
         guess_form: dict[str, str] | None = None
         pending_question = game.whoami_pending_question_text
+        user_is_solved = user_id in solved_user_ids
 
         if game.status == "finished":
             status_title = "Партия завершена"
@@ -1356,6 +1367,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             status_title = "Режим наблюдения"
             status_text = "Во время партии чужие карточки скрыты для наблюдателей. Открыты только ход, история вопросов и статус сцены."
             status_tone = "observer"
+        elif user_is_solved and game.phase == "whoami_answer" and user_id != current_actor_user_id:
+            status_title = "Карточка уже разгадана"
+            status_text = "Свой круг вы закончили. Сейчас можно помочь столу и зафиксировать ответ на чужой вопрос."
+            status_tone = "ready"
+        elif user_is_solved:
+            status_title = "Карточка уже разгадана"
+            status_text = "Свой круг вы закончили. Дальше можно следить за партией и отвечать столу, когда открыт вопрос."
+            status_tone = "locked"
         elif user_id == current_actor_user_id and game.phase == "whoami_ask":
             status_title = "Ваш ход"
             status_text = "Задайте вопрос о себе или сразу попробуйте угадать карточку. Если стол ответит «да», ход останется у вас."
@@ -1387,6 +1406,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "category": game.whoami_category or "случайная",
             "current_actor": current_actor_label,
             "pending_question": pending_question,
+            "solved_count": str(len(solved_user_ids)),
+            "players_total": str(len(game.players)),
             "table_rows": table_rows,
             "history_rows": history_rows,
             "status_title": status_title,
@@ -1773,20 +1794,20 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return {
                 "eyebrow": "Party round",
                 "title": "Кто я?",
-                "description": "Свою карточку вы не видите. Спрашивайте только то, на что стол может ответить «да» или «нет».",
+                "description": "Свою карточку вы не видите. Угадавший игрок выходит из круга вопросов, но остаётся отвечать столу.",
                 "prompt_title": prompt_title,
                 "prompt_text": prompt_text,
                 "metrics": [
                     {"label": "Категория", "value": game.whoami_category or "случайная"},
                     {"label": "Ходит", "value": current_actor},
-                    {"label": "Раунд", "value": str(max(1, game.round_no))},
+                    {"label": "Разгадано", "value": f"{len(game.whoami_solved_user_ids)}/{len(game.players)}"},
                 ],
             }
         if game.kind == "whoami" and game.status == "finished":
             winners = game_router_module._winner_ids_for_whoami(game)
             return {
                 "eyebrow": "Финал",
-                "title": "Карточка разгадана",
+                "title": "Все карточки раскрыты",
                 "description": game.winner_text or "Партия завершена. Ниже остался reveal всех карточек.",
                 "prompt_title": None,
                 "prompt_text": None,
@@ -2662,14 +2683,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_settings,
                 note=note,
             )
-            await game_router_module._send_game_feed_event(
-                bot,
-                current,
-                text=(
-                    f"<b>Стол:</b> {escape(resolution.answer_label)}\n"
-                    f"<b>На вопрос:</b> {escape(resolution.question_text)}"
-                ),
-            )
             return True, f"Ответ: {resolution.answer_label}"
 
         if prefix == "gbredcat":
@@ -3261,6 +3274,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 first_name=user.first_name,
                 last_name=user.last_name,
             )
+            await GAME_STORE.set_player_label(
+                chat_id=game.chat_id,
+                user_id=user.telegram_user_id,
+                user_label=actor_label,
+            )
             bot = await _get_game_bot()
 
             success = False
@@ -3409,15 +3427,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         f"<b>Текст:</b> {escape(result.question_text)}"
                     )
                     await game_router_module._safe_edit_or_send_game_board(bot, current, chat_settings, note=note)
-                    await game_router_module._send_game_feed_event(
-                        bot,
-                        current,
-                        text=(
-                            f"<b>Кто я • вопрос</b>\n"
-                            f"<b>Игрок:</b> {escape(result.actor_user_label or actor_label)}\n"
-                            f"<b>Текст:</b> {escape(result.question_text)}"
-                        ),
-                    )
                     success, message = True, "Вопрос отправлен."
             elif form_action == "whoami_guess":
                 guess_text = (form.get("guess_text") or "").strip()
@@ -3437,24 +3446,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             current,
                             economy_repo=economy_repo,
                             chat_settings=chat_settings,
-                            winner_user_ids_override={resolution.actor_user_id},
                         )
                         if reward_line:
                             note = f"{note}\n{reward_line}"
                         await game_router_module._safe_edit_or_send_game_board(bot, current, chat_settings, note=note)
-                        await game_router_module._send_game_feed_event(
-                            bot,
-                            current,
-                            text=note + "\n" + game_router_module._render_roles_reveal(current),
-                        )
-                        success, message = True, "Карточка угадана. Партия завершена."
+                        if resolution.finished:
+                            await game_router_module._send_game_feed_event(
+                                bot,
+                                current,
+                                text=note + "\n" + game_router_module._render_roles_reveal(current),
+                            )
+                            success, message = True, "Все карточки разгаданы. Партия завершена."
+                        else:
+                            success, message = True, "Карточка разгадана. Вы выходите из круга вопросов."
                     else:
                         await game_router_module._safe_edit_or_send_game_board(bot, current, chat_settings, note=note)
-                        await game_router_module._send_game_feed_event(
-                            bot,
-                            current,
-                            text=note,
-                        )
                         success, message = True, "Догадка принята. Ход перешёл дальше."
             elif form_action == "bred_submit":
                 lie_text = (form.get("lie_text") or "").strip()

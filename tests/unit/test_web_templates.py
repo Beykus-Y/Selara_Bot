@@ -3,9 +3,32 @@ from pathlib import Path
 from selara.web.rendering import create_template_environment
 
 
-def test_chat_template_renders_settings_sections_items_key() -> None:
+def _template_environment():
     template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    return create_template_environment(template_dir=template_dir)
+
+
+def _render_games_dashboard(**overrides) -> str:
+    environment = _template_environment()
+    context = {
+        "metrics": [],
+        "game_catalog": [],
+        "spy_category_options": [],
+        "whoami_category_options": [],
+        "default_create_kind": "whoami",
+        "default_create_game": None,
+        "create_chat_options": [],
+        "busy_create_chat_options": [],
+        "has_manageable_chats": False,
+        "game_cards": [],
+        "recent_game_cards": [],
+    }
+    context.update(overrides)
+    return environment.get_template("_games_dashboard.html").render(**context)
+
+
+def test_chat_template_renders_settings_sections_items_key() -> None:
+    environment = _template_environment()
 
     html = environment.get_template("chat.html").render(
         page_title="Selara",
@@ -64,8 +87,7 @@ def test_chat_template_renders_settings_sections_items_key() -> None:
 
 
 def test_landing_template_renders_core_sections() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("landing.html").render(
         top_links=[],
@@ -144,8 +166,7 @@ def test_landing_template_renders_core_sections() -> None:
 
 
 def test_login_template_renders_bot_username_and_steps() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("login.html").render(
         page_title="Selara • Вход",
@@ -167,8 +188,7 @@ def test_login_template_renders_bot_username_and_steps() -> None:
 
 
 def test_error_template_renders_status_actions() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("error.html").render(
         page_title="Selara • 404",
@@ -195,8 +215,7 @@ def test_error_template_renders_status_actions() -> None:
 
 
 def test_admin_docs_template_renders_trigger_variables() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("admin_docs.html").render(
         page_title="Selara • Документация администратора",
@@ -235,8 +254,7 @@ def test_admin_docs_template_renders_trigger_variables() -> None:
 
 
 def test_audit_template_renders_rows() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("audit.html").render(
         page_title="Selara Audit",
@@ -263,8 +281,7 @@ def test_audit_template_renders_rows() -> None:
 
 
 def test_games_template_renders_active_cards() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
+    environment = _template_environment()
 
     html = environment.get_template("games.html").render(
         page_title="Selara",
@@ -315,10 +332,7 @@ def test_games_template_renders_active_cards() -> None:
 
 
 def test_games_dashboard_template_renders_whoami_theme_picker() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
-
-    html = environment.get_template("_games_dashboard.html").render(
+    html = _render_games_dashboard(
         metrics=[],
         game_catalog=[
             {
@@ -366,10 +380,7 @@ def test_games_dashboard_template_renders_whoami_theme_picker() -> None:
 
 
 def test_games_dashboard_template_renders_safe_only_whoami_lobby_picker() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
-
-    html = environment.get_template("_games_dashboard.html").render(
+    html = _render_games_dashboard(
         metrics=[],
         game_catalog=[],
         spy_category_options=[],
@@ -425,10 +436,7 @@ def test_games_dashboard_template_renders_safe_only_whoami_lobby_picker() -> Non
 
 
 def test_games_dashboard_template_hides_create_whoami_theme_when_other_game_selected() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
-
-    html = environment.get_template("_games_dashboard.html").render(
+    html = _render_games_dashboard(
         metrics=[],
         game_catalog=[
             {
@@ -482,10 +490,7 @@ def test_games_dashboard_template_hides_create_whoami_theme_when_other_game_sele
 
 
 def test_games_dashboard_template_renders_spy_theme_picker() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
-
-    html = environment.get_template("_games_dashboard.html").render(
+    html = _render_games_dashboard(
         metrics=[],
         game_catalog=[
             {
@@ -529,10 +534,7 @@ def test_games_dashboard_template_renders_spy_theme_picker() -> None:
 
 
 def test_games_dashboard_template_renders_spy_lobby_picker() -> None:
-    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
-    environment = create_template_environment(template_dir=template_dir)
-
-    html = environment.get_template("_games_dashboard.html").render(
+    html = _render_games_dashboard(
         metrics=[],
         game_catalog=[],
         spy_category_options=[],
@@ -586,3 +588,167 @@ def test_games_dashboard_template_renders_spy_lobby_picker() -> None:
     assert "Для «Шпиона» тема определяет пул локаций раунда." in html
     assert 'name="spy_category"' in html
     assert 'data-spy-category-picker' in html
+
+
+def test_games_dashboard_template_places_whoami_status_and_actions_before_table() -> None:
+    html = _render_games_dashboard(
+        game_cards=[
+            {
+                "game_id": "who-test",
+                "kind": "whoami",
+                "title": "Кто я",
+                "description": "Карточки на лбу и вопросы.",
+                "status": "Идёт игра",
+                "status_badge": "active",
+                "chat_title": "Тестовый чат",
+                "chat_id": "123",
+                "players_count": 3,
+                "round_no": "2",
+                "created_at": "2026-03-08 10:00 UTC",
+                "started_at": "2026-03-08 10:05 UTC",
+                "players_preview": [],
+                "players_hidden": 0,
+                "winner_text": None,
+                "spotlight": {
+                    "eyebrow": "Состояние игры",
+                    "title": "Кто я",
+                    "description": "Проверка раскладки.",
+                    "prompt_title": None,
+                    "prompt_text": None,
+                    "metrics": [],
+                    "reveal_card": None,
+                },
+                "main_buttons": [],
+                "manage_buttons": [],
+                "category_buttons": [],
+                "vote_buttons": [],
+                "telegram_buttons": [],
+                "private_buttons": [],
+                "show_number_guess": False,
+                "show_bred_answer": False,
+                "bred_submission_rows": [],
+                "bred_reveal_rows": [],
+                "spy_view": None,
+                "mafia_view": None,
+                "secret_lines": [],
+                "score_rows": [],
+                "role_reveal_rows": [],
+                "role_reveal_note": "",
+                "spy_theme_picker": None,
+                "whoami_theme_picker": None,
+                "whoami_view": {
+                    "status_tone": "ready",
+                    "status_title": "Ваш статус",
+                    "status_text": "Сейчас ваш ход.",
+                    "action_buttons": [
+                        {"callback_data": "gwho:who-test:yes", "variant": "primary", "label": "Да"}
+                    ],
+                    "question_form": {
+                        "game_id": "who-test",
+                        "placeholder": "Я человек?",
+                        "button_label": "Отправить вопрос",
+                    },
+                    "guess_form": {
+                        "game_id": "who-test",
+                        "placeholder": "Чайник",
+                        "button_label": "Проверить",
+                    },
+                    "table_rows": [
+                        {
+                            "label": "user:5062275341",
+                            "title": "user:5062275341",
+                            "identity": "???",
+                            "tone": "self",
+                            "badges": [{"label": "вы", "tone": "self"}],
+                        }
+                    ],
+                    "pending_question": None,
+                    "history_rows": [
+                        {
+                            "tone": "miss",
+                            "title": "Проверка догадки",
+                            "text": "Без публичного спойлера.",
+                            "meta": "мимо",
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert html.index("Ответ стола") < html.index("Карточки за столом")
+    assert html.index("Вопрос о себе") < html.index("Карточки за столом")
+    assert html.index("Догадка о карточке") < html.index("Карточки за столом")
+    assert html.index("Карточки за столом") < html.index("Ход сцены")
+    assert 'title="user:5062275341"' in html
+
+
+def test_games_dashboard_template_places_bred_active_block_before_scoreboard_and_reveal() -> None:
+    html = _render_games_dashboard(
+        game_cards=[
+            {
+                "game_id": "bred-test",
+                "kind": "bredovukha",
+                "title": "Бредовуха",
+                "description": "Блеф, ложь и угадывание правды.",
+                "status": "Раунд продолжается",
+                "status_badge": "active",
+                "chat_title": "Тестовый чат",
+                "chat_id": "321",
+                "players_count": 5,
+                "round_no": "3",
+                "created_at": "2026-03-08 18:17 UTC",
+                "started_at": "2026-03-08 18:20 UTC",
+                "players_preview": ["u1", "u2", "u3"],
+                "players_hidden": 2,
+                "winner_text": None,
+                "spotlight": {
+                    "eyebrow": "Раунд продолжается",
+                    "title": "Голосование",
+                    "description": "Проверка приоритета активного действия.",
+                    "prompt_title": "Факт с пропуском",
+                    "prompt_text": "В Британии украли ____ с участка соседа.",
+                    "metrics": [],
+                    "reveal_card": None,
+                },
+                "main_buttons": [],
+                "manage_buttons": [
+                    {"callback_data": "game:advance:bred-test", "variant": "danger", "label": "Закрыть раунд"}
+                ],
+                "category_buttons": [
+                    {"callback_data": "gbredcat:bred-test:0", "variant": "primary", "label": "Реальные новости"}
+                ],
+                "vote_buttons": [],
+                "telegram_buttons": [],
+                "private_buttons": [],
+                "show_number_guess": False,
+                "show_bred_answer": False,
+                "bred_submission_rows": [],
+                "bred_reveal_rows": [
+                    {
+                        "slot": "A",
+                        "text": "Очень длинный вариант ответа",
+                        "author": "user:933895807",
+                        "votes": "2",
+                        "tone": "truth",
+                    }
+                ],
+                "spy_view": None,
+                "whoami_view": None,
+                "mafia_view": None,
+                "secret_lines": [],
+                "score_rows": [
+                    {"position": "1", "label": "user:5062275341", "value": "5"}
+                ],
+                "role_reveal_rows": [],
+                "role_reveal_note": "",
+                "spy_theme_picker": None,
+                "whoami_theme_picker": None,
+            }
+        ]
+    )
+
+    assert html.index("Выбери тему") < html.index("Табло раунда")
+    assert html.index("Выбери тему") < html.index("Кто придумал варианты")
+    assert 'title="user:5062275341"' in html
+    assert 'title="Очень длинный вариант ответа"' in html
