@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Документация</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+      {% if origin_chat %}
+        <div class="hero-cta-row">
+          <a class="button primary" href="{{ origin_chat.href }}">Вернуться в {{ origin_chat.label }}</a>
+        </div>
+      {% endif %}
+    </div>
+    <div class="hero-side">
+      {% for chip in hero_chips %}
+        <div class="hero-chip">{{ chip }}</div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="docs-layout">
+    <aside class="panel docs-nav">
+      <div class="panel-head">
+        <h2>Навигация</h2>
+      </div>
+      <div class="docs-nav-stack">
+        <div class="docs-nav-group">
+          <strong>Разделы справки</strong>
+          {% for section in docs_sections %}
+            <a href="#{{ section.anchor }}">{{ section.title }}</a>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+
+    <div class="docs-content">
+      {% for section in docs_sections %}
+        <section class="panel docs-section" id="{{ section.anchor }}">
+          <div class="panel-head">
+            <div>
+              <h2>{{ section.title }}</h2>
+              <p class="panel-subtitle">{{ section.summary }}</p>
+            </div>
+          </div>
+          <div class="docs-card-grid">
+            {% for item in section["items"] %}
+              <article class="docs-card">
+                <div class="docs-card-head">
+                  <div class="docs-card-title-stack">
+                    <strong>{{ item.title }}</strong>
+                    {% if item.get("badges") %}
+                      <div class="docs-chip-row">
+                        {% for badge in item["badges"] %}
+                          <span class="docs-chip">{{ badge }}</span>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </div>
+                </div>
+                <p class="docs-copy">{{ item.text }}</p>
+
+                {% if item.get("commands") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Команды</span>
+                    <ul class="docs-bullet-list docs-code-list">
+                      {% for command in item["commands"] %}
+                        <li><code>{{ command }}</code></li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+
+                {% if item.get("triggers") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Триггеры</span>
+                    <ul class="docs-bullet-list docs-code-list">
+                      {% for trigger in item["triggers"] %}
+                        <li><code>{{ trigger }}</code></li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+
+                {% if item.get("examples") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Примеры</span>
+                    <ul class="docs-bullet-list docs-code-list">
+                      {% for example in item["examples"] %}
+                        <li><code>{{ example }}</code></li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+
+                {% if item.get("steps") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Как использовать</span>
+                    <ul class="docs-bullet-list">
+                      {% for step in item["steps"] %}
+                        <li>{{ step }}</li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+
+                {% if item.get("notes") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Важно</span>
+                    <ul class="docs-bullet-list">
+                      {% for note in item["notes"] %}
+                        <li>{{ note }}</li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

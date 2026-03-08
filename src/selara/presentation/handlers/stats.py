@@ -1,0 +1,1152 @@
+from html import escape
+
+import asyncio
+from functools import partial
+from datetime import datetime, timezone
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from sqlalchemy.exc import SQLAlchemyError
+
+from selara.application.use_cases.get_last_seen import execute as get_last_seen
+from selara.application.use_cases.get_my_stats import execute as get_my_stats
+from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
+from selara.application.use_cases.get_top_users import execute as get_top_users
+from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
+from selara.domain.entities import ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
+from selara.domain.value_objects import display_name_from_parts
+from selara.presentation.audit import log_chat_action
+from selara.presentation.charts import build_daily_activity_chart, build_leaderboard_chart, build_profile_chart
+from selara.presentation.db_recovery import safe_rollback
+from selara.presentation.formatters import (
+    format_activity_pulse_line,
+    format_elapsed_compact,
+    format_last_seen,
+    format_leaderboard,
+    format_profile_karma_line,
+    format_me,
+    format_profile_positions_line,
+    format_rep_stats,
+)
+from selara.presentation.handlers.activity import format_user_label, resolve_last_seen_target
+
+router = Router(name="stats")
+
+_CAPTION_LIMIT_SAFE = 1000
+_ME_DAILY_CHART_DAYS = 14
+_PROFILE_DESCRIPTION_MAX_LEN = 280
+_AWARD_TITLE_MAX_LEN = 160
+_PROFILE_AWARDS_LIMIT = 20
+_PROFILE_CALLBACK_PREFIX = "profile"
+_ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N]"
+_ACTIVITY_TOP_PERIOD_ALIASES: dict[str, LeaderboardPeriod] = {
+    "week": "week",
+    "неделя": "week",
+    "day": "day",
+    "день": "day",
+    "сутки": "day",
+    "час": "hour",
+    "hour": "hour",
+    "месяц": "month",
+    "month": "month",
+}
+
+
+def _group_status_label(status: str) -> str:
+    mapping = {
+        "creator": "владелец группы",
+        "administrator": "администратор",
+        "member": "участник",
+        "restricted": "ограничен",
+        "left": "вышел",
+        "kicked": "заблокирован",
+    }
+    return mapping.get(status, status)
+
+
+def _relationship_partner_id(*, user_id: int, user_low_id: int, user_high_id: int) -> int:
+    return user_high_id if user_low_id == user_id else user_low_id
+
+
+async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, cache: dict[int, str]) -> str:
+    cached = cache.get(user_id)
+    if cached is not None:
+        return cached
+
+    display_name = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)
+    if display_name:
+        cache[user_id] = display_name
+        return display_name
+
+    user = await activity_repo.get_user_snapshot(user_id=user_id)
+    if user is not None:
+        label = display_name_from_parts(
+            user_id=user.telegram_user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            chat_display_name=user.chat_display_name,
+        )
+    else:
+        label = f"user:{user_id}"
+
+    cache[user_id] = label
+    return label
+
+
+def _join_profile_sections(sections: list[str]) -> str:
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def _profile_callback_data(*, action: str, user_id: int) -> str:
+    return f"{_PROFILE_CALLBACK_PREFIX}:{action}:{user_id}"
+
+
+def _build_profile_actions_markup(*, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Награды",
+                    callback_data=_profile_callback_data(action="awards", user_id=user_id),
+                ),
+                InlineKeyboardButton(
+                    text="О себе",
+                    callback_data=_profile_callback_data(action="about", user_id=user_id),
+                ),
+            ]
+        ]
+    )
+
+
+def _parse_profile_callback_data(data: str | None) -> tuple[str | None, int | None]:
+    if data is None or not data.startswith(f"{_PROFILE_CALLBACK_PREFIX}:"):
+        return None, None
+    parts = data.split(":")
+    if len(parts) != 3:
+        return None, None
+    _, action, raw_user_id = parts
+    if action not in {"awards", "about"} or not raw_user_id.lstrip("-").isdigit():
+        return None, None
+    return action, int(raw_user_id)
+
+
+async def _resolve_stats_target_user(
+    message: Message,
+    *,
+    command: CommandObject,
+    activity_repo,
+) -> tuple[UserSnapshot | None, str | None]:
+    if message.reply_to_message and message.reply_to_message.from_user is not None:
+        reply_user = message.reply_to_message.from_user
+        return (
+            UserSnapshot(
+                telegram_user_id=reply_user.id,
+                username=reply_user.username,
+                first_name=reply_user.first_name,
+                last_name=reply_user.last_name,
+                is_bot=bool(reply_user.is_bot),
+                chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=reply_user.id),
+            ),
+            None,
+        )
+
+    raw = (command.args or "").strip()
+    if not raw:
+        return None, "Не удалось определить пользователя."
+
+    token, _, _tail = raw.partition(" ")
+    token = token.strip(" ,.;!?")
+    if token.startswith("@"):
+        if message.chat.type not in {"group", "supergroup"}:
+            return None, "В личке поиск по @username недоступен."
+        user = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=token)
+        if user is None:
+            return None, f"Пользователь {token} не найден в этом чате."
+        return user, None
+
+    if token.lstrip("-").isdigit():
+        user_id = int(token)
+        existing = await activity_repo.get_user_snapshot(user_id=user_id)
+        chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
+        if existing is not None:
+            return (
+                UserSnapshot(
+                    telegram_user_id=existing.telegram_user_id,
+                    username=existing.username,
+                    first_name=existing.first_name,
+                    last_name=existing.last_name,
+                    is_bot=existing.is_bot,
+                    chat_display_name=chat_display_name or existing.chat_display_name,
+                ),
+                None,
+            )
+        return (
+            UserSnapshot(
+                telegram_user_id=user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+                chat_display_name=chat_display_name,
+            ),
+            None,
+        )
+
+    return None, "Формат: reply или /команда @username или /команда user_id."
+
+async def _ensure_chat_admin(message: Message, bot: Bot) -> bool:
+    if message.from_user is None:
+        return False
+    try:
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    except TelegramNetworkError:
+        return False
+    except Exception:
+        await message.answer("Не удалось проверить права администратора.")
+        return False
+    if member.status not in {"creator", "administrator"}:
+        await message.answer("Награды в этом чате могут выдавать только админы.")
+        return False
+    return True
+
+
+async def _build_profile_about_message(*, activity_repo, chat_id: int, user_id: int) -> str:
+    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    profile = await activity_repo.get_user_chat_profile(chat_id=chat_id, user_id=user_id)
+    description = " ".join(((profile.description if profile is not None else "") or "").split()).strip()
+    if not description:
+        return f"У пользователя <b>{escape(target_label)}</b> пока пусто в разделе «О себе»."
+    return f"<b>О себе:</b> {escape(target_label)}\n{escape(description)}"
+
+
+async def _build_profile_awards_message(*, activity_repo, chat_id: int, user_id: int, timezone_name: str) -> str:
+    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    awards = await activity_repo.list_user_chat_awards(chat_id=chat_id, user_id=user_id, limit=_PROFILE_AWARDS_LIMIT)
+    if not awards:
+        return f"У пользователя <b>{escape(target_label)}</b> пока нет наград."
+
+    lines = [f"<b>Награды:</b> {escape(target_label)}"]
+    for award in awards:
+        lines.append(f"• {escape(award.title)} — {escape(format_elapsed_compact(award.created_at, timezone_name))}")
+    return "\n".join(lines)
+
+
+async def set_about_text_command(message: Message, activity_repo, *, about_text: str) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    normalized = " ".join((about_text or "").split()).strip()
+    if normalized.lower() in {"очистить", "удалить", "сброс"}:
+        normalized = ""
+    if len(normalized) > _PROFILE_DESCRIPTION_MAX_LEN:
+        await message.answer(
+            f"Текст «О себе» слишком длинный. Оставьте до <code>{_PROFILE_DESCRIPTION_MAX_LEN}</code> символов.",
+            parse_mode="HTML",
+        )
+        return
+
+    description_value = normalized or None
+    await activity_repo.set_user_chat_profile_description(
+        chat=ChatSnapshot(message.chat.id, message.chat.type, message.chat.title),
+        user=UserSnapshot(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+        ),
+        description=description_value,
+    )
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="profile_desc_set" if description_value else "profile_desc_clear",
+        description=(
+            f"Пользователь {message.from_user.id} обновил описание профиля."
+            if description_value
+            else f"Пользователь {message.from_user.id} очистил описание профиля."
+        ),
+        actor_user_id=message.from_user.id,
+        meta_json={"length": len(normalized)} if description_value else None,
+    )
+    if description_value is None:
+        await message.answer("Раздел «О себе» очищен.")
+        return
+    await message.answer("Раздел «О себе» обновлён.")
+
+
+async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *, title: str) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer('Нужно сделать reply на сообщение участника и написать <code>наградить текст</code>.', parse_mode="HTML")
+        return
+    if not await _ensure_chat_admin(message, bot):
+        return
+
+    target_user = message.reply_to_message.from_user
+    if target_user.id == message.from_user.id:
+        await message.answer("Себя награждать нельзя.")
+        return
+    if bool(target_user.is_bot):
+        await message.answer("Ботам награды не выдаются.")
+        return
+
+    normalized = " ".join((title or "").split()).strip()
+    if not normalized:
+        await message.answer('Формат: reply на сообщение и <code>наградить текст награды</code>.', parse_mode="HTML")
+        return
+    if len(normalized) > _AWARD_TITLE_MAX_LEN:
+        await message.answer(
+            f"Название награды слишком длинное. До <code>{_AWARD_TITLE_MAX_LEN}</code> символов.",
+            parse_mode="HTML",
+        )
+        return
+
+    target = UserSnapshot(
+        telegram_user_id=target_user.id,
+        username=target_user.username,
+        first_name=target_user.first_name,
+        last_name=target_user.last_name,
+        is_bot=bool(target_user.is_bot),
+        chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=target_user.id),
+    )
+    award = await activity_repo.add_user_chat_award(
+        chat=ChatSnapshot(message.chat.id, message.chat.type, message.chat.title),
+        target=target,
+        title=normalized,
+        granted_by_user_id=message.from_user.id,
+        created_at=datetime.now(timezone.utc),
+    )
+    target_label = await _resolve_profile_label(activity_repo, chat_id=message.chat.id, user_id=target.telegram_user_id, cache={})
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="profile_award_add",
+        description=f"Пользователь {message.from_user.id} выдал награду {target.telegram_user_id}: {normalized}.",
+        actor_user_id=message.from_user.id,
+        target_user_id=target.telegram_user_id,
+        meta_json={"award_id": award.id, "title": normalized},
+    )
+    await message.answer(
+        f"Награда выдана <b>{escape(target_label)}</b>: {escape(normalized)}",
+        parse_mode="HTML",
+    )
+
+
+async def _build_profile_social_lines(message: Message, activity_repo, *, user_id: int) -> list[str]:
+    lines: list[str] = []
+    label_cache: dict[int, str] = {}
+
+    try:
+        title_prefix = await activity_repo.get_chat_title_prefix(chat_id=message.chat.id, user_id=user_id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        title_prefix = None
+    if title_prefix:
+        lines.append(f"<b>Титул:</b> <code>[{escape(title_prefix)}]</code>")
+
+    try:
+        relationship = await activity_repo.get_active_relationship(user_id=user_id, chat_id=message.chat.id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        relationship = None
+
+    try:
+        relations = await activity_repo.list_graph_relationships(chat_id=message.chat.id, user_id=user_id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        relations = []
+
+    parents: set[int] = set()
+    children: set[int] = set()
+    pets: set[int] = set()
+    spouse_ids: set[int] = set()
+
+    for item in relations:
+        if item.relation_type == "parent":
+            if item.user_b == user_id:
+                parents.add(item.user_a)
+            elif item.user_a == user_id:
+                children.add(item.user_b)
+        elif item.relation_type == "pet" and item.user_a == user_id:
+            pets.add(item.user_b)
+        elif item.relation_type == "spouse":
+            spouse_ids.add(item.user_b if item.user_a == user_id else item.user_a)
+
+    family_parts: list[str] = []
+    if relationship is not None:
+        partner_id = _relationship_partner_id(
+            user_id=user_id,
+            user_low_id=relationship.user_low_id,
+            user_high_id=relationship.user_high_id,
+        )
+        partner_label = await _resolve_profile_label(
+            activity_repo,
+            chat_id=message.chat.id,
+            user_id=partner_id,
+            cache=label_cache,
+        )
+        relation_label = "брак" if relationship.kind == "marriage" else "пара"
+        family_parts.append(f"{relation_label} с {escape(partner_label)}")
+    elif spouse_ids:
+        spouse_id = min(spouse_ids)
+        spouse_label = await _resolve_profile_label(
+            activity_repo,
+            chat_id=message.chat.id,
+            user_id=spouse_id,
+            cache=label_cache,
+        )
+        family_parts.append(f"супруг(а) {escape(spouse_label)}")
+
+    if parents:
+        family_parts.append(f"родители {len(parents)}")
+    if children:
+        family_parts.append(f"дети {len(children)}")
+    if pets:
+        family_parts.append(f"питомцы {len(pets)}")
+
+    if family_parts:
+        lines.append(f"<b>Семья:</b> {' • '.join(family_parts)}")
+
+    return lines
+
+async def _build_profile_meta_lines(message: Message, activity_repo, bot: Bot, *, user_id: int) -> list[str]:
+    lines: list[str] = []
+    group_status: str | None = None
+    if message.chat.type in {"group", "supergroup"}:
+        try:
+            member = await bot.get_chat_member(message.chat.id, user_id)
+            group_status = _group_status_label(member.status)
+        except Exception:
+            pass
+
+    role_title: str | None = None
+    role_rank: int | None = None
+    try:
+        role = await activity_repo.get_bot_role(chat_id=message.chat.id, user_id=user_id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        role = None
+    if role is not None:
+        role_title = role
+        try:
+            role_definition = await activity_repo.get_chat_role_definition(chat_id=message.chat.id, role_code=role)
+            if role_definition is not None:
+                role_title = role_definition.title_ru
+                role_rank = role_definition.rank
+        except SQLAlchemyError:
+            await safe_rollback(activity_repo)
+            pass
+    status_parts: list[str] = []
+    if group_status:
+        status_parts.append(group_status)
+    if role_title:
+        role_part = escape(role_title)
+        if role_rank is not None:
+            role_part += f" <code>{role_rank}</code>"
+        status_parts.append(role_part)
+    if status_parts:
+        lines.append(f"<b>Статус:</b> {' • '.join(status_parts)}")
+
+    try:
+        moderation = await activity_repo.get_moderation_state(chat_id=message.chat.id, user_id=user_id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        moderation = None
+    if moderation is not None:
+        lines.append(
+            f"<b>Мод-статус:</b> преды <code>{moderation.pending_preds}/3</code>, "
+            f"варны <code>{moderation.warn_count}/3</code>, "
+            f"бан: <code>{'да' if moderation.is_banned else 'нет'}</code>"
+        )
+
+    return lines
+
+
+def parse_leaderboard_request(
+    raw_value: str | None,
+    *,
+    chat_settings: ChatSettings,
+    default_mode: LeaderboardMode,
+    allow_mode_switch: bool,
+) -> tuple[LeaderboardMode | None, int | None, str | None]:
+    tokens = [token for token in (raw_value or "").strip().split() if token]
+    mode = default_mode
+
+    if allow_mode_switch and tokens:
+        mode_aliases: dict[str, LeaderboardMode] = {
+            "mix": "mix",
+            "hybrid": "mix",
+            "гибрид": "mix",
+            "activity": "activity",
+            "актив": "activity",
+            "karma": "karma",
+            "карма": "karma",
+        }
+        candidate = mode_aliases.get(tokens[0].lower())
+        if candidate is not None:
+            mode = candidate
+            tokens = tokens[1:]
+
+    if not tokens:
+        return mode, chat_settings.top_limit_default, None
+    if len(tokens) > 1:
+        return None, None, "Формат: /top [karma|activity] [N] или /active [N]"
+    if not tokens[0].isdigit():
+        return None, None, "Лимит должен быть числом"
+
+    limit = int(tokens[0])
+    if not 1 <= limit <= chat_settings.top_limit_max:
+        return None, None, f"Лимит должен быть в диапазоне 1..{chat_settings.top_limit_max}"
+    return mode, limit, None
+
+
+def parse_activity_top_period_request(
+    raw_value: str | None,
+    *,
+    chat_settings: ChatSettings,
+) -> tuple[bool, LeaderboardPeriod | None, int | None, str | None]:
+    tokens = [token for token in (raw_value or "").strip().split() if token]
+    if not tokens:
+        return False, None, None, None
+
+    period = _ACTIVITY_TOP_PERIOD_ALIASES.get(tokens[0].lower())
+    if period is None:
+        return False, None, None, None
+
+    if len(tokens) == 1:
+        return True, period, chat_settings.top_limit_default, None
+
+    if len(tokens) > 2:
+        return True, None, None, _ACTIVITY_TOP_PERIOD_HELP
+
+    raw_limit = tokens[1]
+    if not raw_limit.isdigit():
+        return True, None, None, "Лимит должен быть числом"
+
+    limit = int(raw_limit)
+    if not 1 <= limit <= chat_settings.top_limit_max:
+        return True, None, None, f"Лимит должен быть в диапазоне 1..{chat_settings.top_limit_max}"
+
+    return True, period, limit, None
+
+
+def _build_leaderboard_keyboard(*, mode: LeaderboardMode, period: LeaderboardPeriod, limit: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    modes: list[tuple[LeaderboardMode, str]] = [
+        ("mix", "Гибрид"),
+        ("activity", "Актив"),
+        ("karma", "Карма"),
+    ]
+    periods: list[tuple[LeaderboardPeriod, str]] = [("all", "За всё время"), ("7d", "7 дней")]
+
+    for item_mode, title in modes:
+        marker = "*" if item_mode == mode else ""
+        builder.button(text=f"{title}{marker}", callback_data=f"lb:{item_mode}:{period}:{limit}")
+    builder.adjust(3)
+
+    for item_period, title in periods:
+        marker = "*" if item_period == period else ""
+        builder.button(text=f"{title}{marker}", callback_data=f"lb:{mode}:{item_period}:{limit}")
+    builder.adjust(3, 2)
+    return builder.as_markup()
+
+
+def should_include_hybrid_top_keyboard(
+    *,
+    chat_settings: ChatSettings,
+    mode: LeaderboardMode,
+    period: LeaderboardPeriod,
+) -> bool:
+    return bool(
+        chat_settings.leaderboard_hybrid_buttons_enabled
+        and mode == "mix"
+        and period in {"all", "7d"}
+    )
+
+
+async def _send_text_or_photo(
+    message: Message,
+    *,
+    html_text: str,
+    chart_bytes: bytes | None,
+    filename: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    if chart_bytes is not None and len(html_text) <= _CAPTION_LIMIT_SAFE:
+        await message.answer_photo(
+            BufferedInputFile(chart_bytes, filename=filename),
+            caption=html_text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return
+
+    await message.answer(html_text, parse_mode="HTML", reply_markup=reply_markup)
+    if chart_bytes is not None:
+        await message.answer_photo(BufferedInputFile(chart_bytes, filename=filename))
+
+
+async def _build_chart_async(builder, /, **kwargs) -> bytes | None:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(builder, **kwargs))
+
+
+async def send_user_stats(
+    message: Message,
+    activity_repo,
+    bot: Bot,
+    settings: Settings,
+    chat_settings: ChatSettings,
+    *,
+    user_id: int,
+) -> None:
+    stats = await get_my_stats(repo=activity_repo, chat_id=message.chat.id, user_id=user_id)
+
+    rep = await get_rep_stats(
+        repo=activity_repo,
+        chat_id=message.chat.id,
+        user_id=user_id,
+        limit=chat_settings.top_limit_max,
+        karma_weight=chat_settings.leaderboard_hybrid_karma_weight,
+        activity_weight=chat_settings.leaderboard_hybrid_activity_weight,
+        days=chat_settings.leaderboard_7d_days,
+    )
+    pulse = format_activity_pulse_line(
+        day=rep.activity_1d,
+        week=rep.activity_7d,
+        month=rep.activity_30d,
+        all_time=rep.activity_all,
+    )
+    text = format_me(
+        stats,
+        timezone_name=settings.bot_timezone,
+        fallback_user_id=user_id,
+        activity_pulse=pulse,
+    )
+
+    social_lines = await _build_profile_social_lines(message, activity_repo, user_id=user_id)
+    meta_lines = await _build_profile_meta_lines(message, activity_repo, bot, user_id=user_id)
+    extra_section = "\n".join(meta_lines + social_lines) if (meta_lines or social_lines) else None
+
+    text = _join_profile_sections(
+        [
+            text,
+            "\n".join(
+                [
+                    format_profile_positions_line(rank_all=rep.rank_all, rank_7d=rep.rank_7d),
+                    format_profile_karma_line(karma_all=rep.karma_all, karma_7d=rep.karma_7d),
+                ]
+            ),
+            extra_section,
+        ]
+    )
+
+    daily_series = await activity_repo.get_user_activity_daily_series(
+        chat_id=message.chat.id,
+        user_id=user_id,
+        days=_ME_DAILY_CHART_DAYS,
+    )
+    chart = await _build_chart_async(
+        build_daily_activity_chart,
+        points=[(day.strftime("%d.%m"), count) for day, count in daily_series],
+    )
+    await _send_text_or_photo(
+        message,
+        html_text=text,
+        chart_bytes=chart,
+        filename="me_stats.png",
+        reply_markup=_build_profile_actions_markup(user_id=user_id),
+    )
+
+
+async def send_me_stats(message: Message, activity_repo, bot: Bot, settings: Settings, chat_settings: ChatSettings) -> None:
+    if message.from_user is None:
+        return
+
+    await send_user_stats(
+        message,
+        activity_repo,
+        bot,
+        settings,
+        chat_settings,
+        user_id=message.from_user.id,
+    )
+
+
+async def send_top_stats(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    chat_settings: ChatSettings,
+    limit: int,
+    mode: LeaderboardMode = "mix",
+    period: LeaderboardPeriod = "all",
+    include_chart: bool = True,
+    include_keyboard: bool = False,
+) -> None:
+    leaderboard = await get_top_users(
+        repo=activity_repo,
+        chat_id=message.chat.id,
+        limit=limit,
+        mode=mode,
+        period=period,
+        days=chat_settings.leaderboard_7d_days,
+        week_start_weekday=chat_settings.leaderboard_week_start_weekday,
+        week_start_hour=chat_settings.leaderboard_week_start_hour,
+        karma_weight=chat_settings.leaderboard_hybrid_karma_weight,
+        activity_weight=chat_settings.leaderboard_hybrid_activity_weight,
+    )
+    text = format_leaderboard(
+        leaderboard,
+        mode=mode,
+        period=period,
+        limit=limit,
+        timezone_name=settings.bot_timezone,
+    )
+
+    chart = None
+    if include_chart:
+        chart = await _build_chart_async(build_leaderboard_chart, items=leaderboard, mode=mode)
+
+    keyboard = _build_leaderboard_keyboard(mode=mode, period=period, limit=limit) if include_keyboard else None
+    await _send_text_or_photo(
+        message,
+        html_text=text,
+        chart_bytes=chart,
+        filename="leaderboard.png",
+        reply_markup=keyboard,
+    )
+
+
+async def send_last_seen(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    target_user_id: int | None = None,
+    target_label: str | None = None,
+) -> None:
+    if target_user_id is None:
+        target_user_id, user_label = resolve_last_seen_target(message)
+    else:
+        user_label = target_label or f"user:{target_user_id}"
+
+    if target_user_id is None:
+        await message.answer("Не удалось определить пользователя")
+        return
+
+    chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=target_user_id)
+    if chat_display_name:
+        user_label = chat_display_name
+
+    last_seen_at = await get_last_seen(repo=activity_repo, chat_id=message.chat.id, user_id=target_user_id)
+    await message.answer(
+        format_last_seen(
+            user_label=user_label,
+            last_seen_at=last_seen_at,
+            timezone_name=settings.bot_timezone,
+        ),
+        parse_mode="HTML",
+    )
+
+
+async def _resolve_last_seen_command_target(
+    message: Message,
+    *,
+    command: CommandObject,
+    activity_repo,
+) -> tuple[int | None, str | None, str | None]:
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        return target.id, format_user_label(target), None
+
+    raw = (command.args or "").strip()
+    if not raw:
+        if message.from_user is None:
+            return None, None, "Не удалось определить пользователя"
+        return message.from_user.id, format_user_label(message.from_user), None
+
+    token = raw.split(maxsplit=1)[0].strip(" ,.;!?")
+    if token.startswith("@"):
+        if message.chat.type not in {"group", "supergroup"}:
+            return None, None, "В личке поиск по @username недоступен. Используйте user_id или reply."
+        user = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=token)
+        if user is None:
+            return None, None, f"Пользователь {token} не найден в этом чате."
+        label = token
+        if user.first_name or user.last_name:
+            full_name = " ".join(filter(None, [user.first_name, user.last_name])).strip()
+            if full_name:
+                label = full_name
+        return user.telegram_user_id, label, None
+
+    if token.lstrip("-").isdigit():
+        user_id = int(token)
+        snapshot = await activity_repo.get_user_snapshot(user_id=user_id)
+        if snapshot is not None:
+            label = display_name_from_parts(
+                user_id=snapshot.telegram_user_id,
+                username=snapshot.username,
+                first_name=snapshot.first_name,
+                last_name=snapshot.last_name,
+                chat_display_name=snapshot.chat_display_name,
+            )
+            return user_id, label, None
+        return user_id, f"user:{user_id}", None
+
+    return None, None, "Формат: /lastseen [@username|user_id] или reply на сообщение пользователя."
+
+
+async def send_rep_stats(message: Message, activity_repo, chat_settings: ChatSettings) -> None:
+    if message.from_user is None:
+        return
+
+    rep = await get_rep_stats(
+        repo=activity_repo,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        limit=chat_settings.top_limit_max,
+        karma_weight=chat_settings.leaderboard_hybrid_karma_weight,
+        activity_weight=chat_settings.leaderboard_hybrid_activity_weight,
+        days=chat_settings.leaderboard_7d_days,
+    )
+
+    chart = await _build_chart_async(
+        build_profile_chart,
+        activity_all=rep.activity_all,
+        activity_7d=rep.activity_7d,
+        karma_all=rep.karma_all,
+        karma_7d=rep.karma_7d,
+    )
+    user_label = format_user_label(message.from_user)
+    chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id)
+    if chat_display_name:
+        user_label = chat_display_name
+
+    await _send_text_or_photo(
+        message,
+        html_text=format_rep_stats(rep, user_label=user_label),
+        chart_bytes=chart,
+        filename="rep_stats.png",
+    )
+
+
+@router.message(Command("desc"))
+async def desc_command(message: Message) -> None:
+    await message.answer(
+        'Раздел «О себе» заполняется текстом: <code>добавить о себе "текст"</code>.',
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("award"))
+async def award_command(message: Message) -> None:
+    await message.answer(
+        'Награды выдаются только так: reply на сообщение участника и <code>наградить текст награды</code>.',
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("awards"))
+async def awards_command(message: Message, command: CommandObject, activity_repo, settings: Settings) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    if (command.args or "").strip() or message.reply_to_message is not None:
+        target, error = await _resolve_stats_target_user(message, command=command, activity_repo=activity_repo)
+        if target is None:
+            await message.answer(error or "Не удалось определить пользователя.")
+            return
+    else:
+        target = UserSnapshot(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
+        )
+
+    await message.answer(
+        await _build_profile_awards_message(
+            activity_repo=activity_repo,
+            chat_id=message.chat.id,
+            user_id=target.telegram_user_id,
+            timezone_name=settings.bot_timezone,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith(f"{_PROFILE_CALLBACK_PREFIX}:"))
+async def profile_card_callback(query: CallbackQuery, activity_repo, settings: Settings) -> None:
+    if query.message is None:
+        await query.answer()
+        return
+
+    action, target_user_id = _parse_profile_callback_data(query.data)
+    if action is None or target_user_id is None:
+        await query.answer("Некорректная кнопка", show_alert=False)
+        return
+
+    if action == "about":
+        text = await _build_profile_about_message(
+            activity_repo=activity_repo,
+            chat_id=query.message.chat.id,
+            user_id=target_user_id,
+        )
+    else:
+        text = await _build_profile_awards_message(
+            activity_repo=activity_repo,
+            chat_id=query.message.chat.id,
+            user_id=target_user_id,
+            timezone_name=settings.bot_timezone,
+        )
+
+    await query.message.answer(
+        text,
+        parse_mode="HTML",
+        disable_notification=query.message.chat.type in {"group", "supergroup"},
+    )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("lb:"))
+async def leaderboard_callback(query: CallbackQuery, activity_repo, settings: Settings, chat_settings: ChatSettings) -> None:
+    if query.message is None or not query.data:
+        await query.answer()
+        return
+
+    if not chat_settings.leaderboard_hybrid_buttons_enabled:
+        await query.answer("Кнопки гибридного топа отключены для этой группы", show_alert=False)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+
+    _, mode_value, period_value, limit_raw = parts
+    if mode_value not in {"mix", "activity", "karma"}:
+        await query.answer("Некорректный режим", show_alert=False)
+        return
+    if period_value not in {"all", "7d"}:
+        await query.answer("Некорректный период", show_alert=False)
+        return
+    if not limit_raw.isdigit():
+        await query.answer("Некорректный лимит", show_alert=False)
+        return
+
+    limit = int(limit_raw)
+    if not 1 <= limit <= chat_settings.top_limit_max:
+        await query.answer("Лимит вне диапазона", show_alert=False)
+        return
+
+    mode: LeaderboardMode = mode_value  # type: ignore[assignment]
+    period: LeaderboardPeriod = period_value  # type: ignore[assignment]
+
+    leaderboard = await get_top_users(
+        repo=activity_repo,
+        chat_id=query.message.chat.id,
+        limit=limit,
+        mode=mode,
+        period=period,
+        days=chat_settings.leaderboard_7d_days,
+        week_start_weekday=chat_settings.leaderboard_week_start_weekday,
+        week_start_hour=chat_settings.leaderboard_week_start_hour,
+        karma_weight=chat_settings.leaderboard_hybrid_karma_weight,
+        activity_weight=chat_settings.leaderboard_hybrid_activity_weight,
+    )
+    text = format_leaderboard(
+        leaderboard,
+        mode=mode,
+        period=period,
+        limit=limit,
+        timezone_name=settings.bot_timezone,
+    )
+    chart = await _build_chart_async(build_leaderboard_chart, items=leaderboard, mode=mode)
+    keyboard = _build_leaderboard_keyboard(mode=mode, period=period, limit=limit)
+    uses_caption = query.message.caption is not None and query.message.text is None
+
+    try:
+        if query.message.photo and chart is not None and len(text) <= _CAPTION_LIMIT_SAFE:
+            await query.message.edit_media(
+                media=InputMediaPhoto(
+                    media=BufferedInputFile(chart, filename="leaderboard.png"),
+                    caption=text,
+                    parse_mode="HTML",
+                ),
+                reply_markup=keyboard,
+            )
+        elif uses_caption:
+            await query.message.edit_caption(
+                caption=text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        else:
+            await query.message.edit_text(
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await query.answer()
+
+
+@router.message(Command("me"))
+async def me_command(message: Message, activity_repo, bot: Bot, settings: Settings, chat_settings: ChatSettings) -> None:
+    await send_me_stats(message, activity_repo, bot, settings, chat_settings)
+
+
+@router.message(Command("rep"))
+async def rep_command(message: Message, activity_repo, chat_settings: ChatSettings) -> None:
+    await send_rep_stats(message, activity_repo, chat_settings)
+
+
+@router.message(Command("top"))
+async def top_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    settings: Settings,
+    chat_settings: ChatSettings,
+) -> None:
+    period_matched, period, period_limit, period_error = parse_activity_top_period_request(
+        command.args,
+        chat_settings=chat_settings,
+    )
+    if period_matched:
+        if period_error:
+            await message.answer(period_error)
+            return
+        if period is None or period_limit is None:
+            await message.answer("Некорректные параметры команды")
+            return
+        await send_top_stats(
+            message,
+            activity_repo,
+            settings,
+            chat_settings,
+            limit=period_limit,
+            mode="activity",
+            period=period,
+            include_chart=False,
+            include_keyboard=False,
+        )
+        return
+
+    mode, limit, error = parse_leaderboard_request(
+        command.args,
+        chat_settings=chat_settings,
+        default_mode="mix",
+        allow_mode_switch=True,
+    )
+    if error:
+        await message.answer(error)
+        return
+    if mode is None or limit is None:
+        await message.answer("Некорректные параметры команды")
+        return
+
+    await send_top_stats(
+        message,
+        activity_repo,
+        settings,
+        chat_settings,
+        limit=limit,
+        mode=mode,
+        include_keyboard=should_include_hybrid_top_keyboard(
+            chat_settings=chat_settings,
+            mode=mode,
+            period="all",
+        ),
+    )
+
+
+@router.message(Command("active"))
+async def active_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    settings: Settings,
+    chat_settings: ChatSettings,
+) -> None:
+    mode, limit, error = parse_leaderboard_request(
+        command.args,
+        chat_settings=chat_settings,
+        default_mode="activity",
+        allow_mode_switch=False,
+    )
+    if error:
+        await message.answer(error)
+        return
+    if mode is None or limit is None:
+        await message.answer("Некорректные параметры команды")
+        return
+
+    await send_top_stats(
+        message,
+        activity_repo,
+        settings,
+        chat_settings,
+        limit=limit,
+        mode=mode,
+        include_keyboard=should_include_hybrid_top_keyboard(
+            chat_settings=chat_settings,
+            mode=mode,
+            period="all",
+        ),
+    )
+
+
+@router.message(Command("lastseen"))
+async def last_seen_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    settings: Settings,
+) -> None:
+    target_user_id, target_label, error = await _resolve_last_seen_command_target(
+        message,
+        command=command,
+        activity_repo=activity_repo,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await send_last_seen(
+        message,
+        activity_repo,
+        settings,
+        target_user_id=target_user_id,
+        target_label=target_label,
+    )

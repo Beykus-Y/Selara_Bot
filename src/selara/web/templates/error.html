@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero error-hero">
+    <div class="hero-copy error-copy">
+      <span class="eyebrow">Статус страницы</span>
+      <div class="error-meta">
+        <span class="status-chip">{{ status_label }}</span>
+        <span class="error-code">{{ status_code }}</span>
+      </div>
+      <h1>{{ headline }}</h1>
+      <p class="lead">{{ message }}</p>
+      <div class="hero-cta-row error-actions">
+        {% for link in action_links %}
+          <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="error-status-stack">
+      <article class="error-status-card">
+        <span class="landing-card-kicker">что произошло</span>
+        <strong>{{ status_code }} · {{ status_label }}</strong>
+        <p>
+          {% if status_code == "404" %}
+            Адрес не существует, был удалён или вы открыли устаревшую ссылку.
+          {% elif status_code == "403" %}
+            Раздел существует, но у текущего аккаунта нет нужного доступа.
+          {% elif status_code == "405" %}
+            Страница существует, но не поддерживает такой тип запроса.
+          {% else %}
+            Сервер сохранил управление и вернул страницу статуса вместо падения.
+          {% endif %}
+        </p>
+      </article>
+
+      <article class="error-status-card">
+        <span class="landing-card-kicker">что делать дальше</span>
+        <strong>Вернуться в рабочий маршрут</strong>
+        <p>
+          Используйте кнопки ниже, чтобы открыть главную, авторизацию или доступные кабинеты и продолжить работу без ручного ввода URL.
+        </p>
+      </article>
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero login-hero">
+    <div class="hero-copy login-copy">
+      <span class="eyebrow">Вход в Selara</span>
+      <h1 class="login-title">Веб-панель без пароля и лишней регистрации</h1>
+      <p class="lead login-lead">
+        Доступ выдаётся только через Telegram-бота
+        <a href="{{ bot_dm_url }}" target="_blank" rel="noreferrer">@{{ bot_username }}</a>.
+        Бот присылает одноразовый шестизначный код в личные сообщения, после чего браузер открывает обычную сессию.
+      </p>
+      <div class="landing-pill-row login-pill-row">
+        <span class="landing-pill landing-pill-soft">одноразовый код</span>
+        <span class="landing-pill landing-pill-soft">вход через Telegram</span>
+        <span class="landing-pill landing-pill-soft">cookie-сессия</span>
+      </div>
+    </div>
+
+    <div class="login-side">
+      <article class="login-side-card">
+        <span class="landing-card-kicker">бот</span>
+        <strong>@{{ bot_username }}</strong>
+        <p>Откройте личный чат, отправьте <code>/login</code> и получите новый код входа.</p>
+        <a class="button telegram" href="{{ bot_dm_url }}" target="_blank" rel="noreferrer">Открыть бота</a>
+      </article>
+
+      <article class="login-side-card">
+        <span class="landing-card-kicker">безопасность</span>
+        <strong>Код действует недолго</strong>
+        <p>Если код истёк, просто запросите новый. Пароль на сайте хранить и запоминать не нужно.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="grid two-col login-detail-grid">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Как войти</h2>
+          <p class="panel-subtitle">Три шага, чтобы зайти в кабинет и дальше работать уже из браузера.</p>
+        </div>
+      </div>
+      <div class="step-list">
+        <div class="step-card">
+          <strong>01</strong>
+          <span>Откройте бота <a href="{{ bot_dm_url }}" target="_blank" rel="noreferrer">@{{ bot_username }}</a>.</span>
+        </div>
+        <div class="step-card">
+          <strong>02</strong>
+          <span>Отправьте <code>/login</code> в личку и получите новый код.</span>
+        </div>
+        <div class="step-card">
+          <strong>03</strong>
+          <span>Введите код ниже. Он одноразовый и живёт несколько минут.</span>
+        </div>
+      </div>
+    </article>
+
+    <article class="panel panel-accent login-form-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Код доступа</h2>
+          <p class="panel-subtitle">Введите свежий код из Telegram. Если ошиблись, бот всегда может выдать новый.</p>
+        </div>
+      </div>
+      <form class="stack-form" method="post" action="/login">
+        <label class="field">
+          <span>Код из Telegram</span>
+          <input
+            class="code-input"
+            type="password"
+            name="code"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            autocomplete="one-time-code"
+            autofocus
+            required
+          >
+        </label>
+        <button type="submit" class="button primary">Войти</button>
+      </form>
+      <p class="helper-text">
+        Не пересылайте код. Если истёк, просто запросите новый через <code>/login</code>.
+      </p>
+      <div class="login-support-grid">
+        <div class="security-card">
+          <strong>Что будет после входа</strong>
+          <p>Откроется кабинет с группами, документацией, играми и быстрыми переходами.</p>
+        </div>
+        <div class="security-card">
+          <strong>Если доступа нет</strong>
+          <p>Страница группы откроется только если бот видит вашу активность или роль в этом чате.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+{% endblock %}

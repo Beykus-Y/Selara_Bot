@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero landing-hero">
+    <div class="hero-copy landing-hero-copy">
+      <span class="eyebrow">{{ hero_eyebrow }}</span>
+      {% if session_note %}
+        <div class="landing-session-note">{{ session_note }}</div>
+      {% endif %}
+      <h1 class="landing-display">
+        <span>{{ hero_title_primary }}</span>
+        <strong>{{ hero_title_secondary }}</strong>
+      </h1>
+      <p class="lead landing-lead">{{ hero_subtitle }}</p>
+      <div class="hero-cta-row landing-cta-row">
+        {% for cta in hero_ctas %}
+          <a class="button {{ cta.variant }}" href="{{ cta.href }}">{{ cta.label }}</a>
+        {% endfor %}
+      </div>
+      <div class="landing-credit">{{ developer_credit }}</div>
+    </div>
+
+    <div class="landing-signal-board">
+      {% for card in signal_cards %}
+        <article class="landing-signal-card tone-{{ card["tone"] }}">
+          <span class="landing-signal-label">{{ card["label"] }}</span>
+          <strong class="landing-signal-value">{{ card["value"] }}</strong>
+          <p>{{ card["note"] }}</p>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="metrics-grid landing-metrics">
+    {% for metric in metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col landing-overview" id="capabilities">
+    <article class="panel landing-copy-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Что внутри Selara</h2>
+          <p class="panel-subtitle">
+            Один бот закрывает пользовательский, игровой и админский слой чата без отдельного набора разрозненных сервисов.
+          </p>
+        </div>
+      </div>
+      <div class="landing-prose">
+        <p>{{ overview_text }}</p>
+        <div class="landing-pill-row">
+          {% for pill in overview_pills %}
+            <span class="landing-pill">{{ pill }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </article>
+
+    <article class="panel landing-step-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Как начать</h2>
+          <p class="panel-subtitle">Четыре шага, чтобы перейти от Telegram к панели и обратно без потери контекста.</p>
+        </div>
+      </div>
+      <div class="step-list">
+        {% for step in step_cards %}
+          <div class="step-card">
+            <strong>{{ step.step }}</strong>
+            <span>
+              <b>{{ step.title }}</b><br>
+              {{ step.text }}
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="landing-feature-grid">
+    {% for feature in feature_cards %}
+      <article class="panel landing-feature-card">
+        <span class="landing-card-kicker">{{ feature["kicker"] }}</span>
+        <h2>{{ feature["title"] }}</h2>
+        <p class="panel-subtitle">{{ feature["text"] }}</p>
+        <div class="landing-pill-row">
+          {% for item in feature["items"] %}
+            <span class="landing-pill landing-pill-soft">{{ item }}</span>
+          {% endfor %}
+        </div>
+        {% if feature["href"] %}
+          <a class="button subtle" href="{{ feature["href"] }}">{{ feature["link_label"] }}</a>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="panel landing-route-panel" id="routes">
+    <div class="panel-head">
+      <div>
+        <h2>Нужные ссылки</h2>
+        <p class="panel-subtitle">Все основные маршруты Selara в одном месте: вход, кабинет, документация, игры и Telegram.</p>
+      </div>
+    </div>
+
+    <div class="landing-route-grid">
+      {% for route in route_cards %}
+        <a class="landing-route-card" href="{{ route["href"] }}">
+          <div class="landing-route-head">
+            <span class="landing-route-note">{{ route["note"] }}</span>
+            <code>{{ route["display_href"] }}</code>
+          </div>
+          <strong>{{ route["title"] }}</strong>
+          <p>{{ route["description"] }}</p>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

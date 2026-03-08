@@ -1,0 +1,1003 @@
+<section class="metrics-grid">
+  {% for metric in metrics %}
+    <article class="metric-card tone-{{ metric.tone }}">
+      <span class="metric-label">{{ metric.label }}</span>
+      <strong class="metric-value">{{ metric.value }}</strong>
+      <span class="metric-note">{{ metric.note }}</span>
+    </article>
+  {% endfor %}
+</section>
+
+<section id="create-game" class="panel create-game-panel" data-create-game-panel>
+  <div class="panel-head game-panel-head">
+    <div>
+      <span class="eyebrow create-game-eyebrow">Game Factory</span>
+      <h2>Создать игру</h2>
+      <p class="panel-subtitle">Выберите режим и чат. Лобби сразу появится в Telegram, а дальше его можно вести отсюда.</p>
+    </div>
+    <div class="game-head-tags">
+      <span class="pill pill-active">{{ game_catalog|length }} режимов</span>
+      <span class="pill pill-user">{{ create_chat_options|length }} чатов готовы</span>
+    </div>
+  </div>
+
+  {% if has_manageable_chats %}
+    <form class="stack-form create-game-form" method="post" action="/app/games/create" data-game-action-form>
+      <div class="create-game-layout">
+        <section class="create-game-picker" data-kind-picker>
+          <input type="hidden" name="kind" value="{{ default_create_kind }}">
+          <div class="section-caption">
+            <strong>Выберите режим</strong>
+            <p>Полный каталог игр лежит здесь, а не прячется в Telegram-команде.</p>
+          </div>
+          <div class="game-kind-grid">
+            {% for item in game_catalog %}
+              <button
+                type="button"
+                class="game-kind-card game-kind-card-{{ item.tone }}{% if item.key == default_create_kind %} is-active{% endif %}"
+                data-kind-choice="{{ item.key }}"
+                data-kind-title="{{ item.title }}"
+                data-kind-description="{{ item.description }}"
+                data-kind-players="{{ item.min_players_label }}"
+                data-kind-mode="{{ item.mode_label }}"
+                data-kind-note="{{ item.note }}"
+                aria-pressed="{{ 'true' if item.key == default_create_kind else 'false' }}"
+              >
+                <span class="game-kind-meta">{{ item.mode_label }}</span>
+                <strong>{{ item.title }}</strong>
+                <span>{{ item.note }}</span>
+              </button>
+            {% endfor %}
+          </div>
+          <div class="create-game-preview">
+            <span class="game-meta-label">На сцене сейчас</span>
+            <strong data-kind-preview-title>{{ default_create_game.title if default_create_game else "Игра" }}</strong>
+            <p data-kind-preview-text>{{ default_create_game.description if default_create_game else "" }}</p>
+            <div class="create-game-preview-meta">
+              <span data-kind-preview-players>{{ default_create_game.min_players_label if default_create_game else "" }}</span>
+              <span data-kind-preview-mode>{{ default_create_game.mode_label if default_create_game else "" }}</span>
+            </div>
+          </div>
+
+          <section
+            class="create-whoami-theme-panel"
+            data-whoami-category-scope
+            data-create-whoami-panel
+            data-kind-sensitive="whoami"
+            aria-hidden="{{ 'false' if default_create_kind == 'whoami' else 'true' }}"
+            {% if default_create_kind != "whoami" %}hidden style="display: none;"{% endif %}
+          >
+            <input type="hidden" name="whoami_category" value="">
+            <div class="section-caption">
+              <strong>Тема для «Кто я»</strong>
+              <p>Можно сразу зафиксировать франшизу или оставить случайную тему на старт.</p>
+            </div>
+            <div class="whoami-category-picker" data-whoami-category-picker>
+              {% for option in whoami_category_options %}
+                <button
+                  type="button"
+                  class="whoami-category-card"
+                  data-whoami-category-choice="{{ option.value }}"
+                  data-whoami-category-label="{{ option.label }}"
+                  data-whoami-category-count="{{ option.count }}"
+                  data-whoami-category-explicit="{{ 'true' if option.is_18_plus else 'false' }}"
+                  aria-pressed="false"
+                >
+                  <strong>{{ option.label }}</strong>
+                  <span>
+                    {% if option.count %}
+                      {{ option.count }} карточек
+                    {% else %}
+                      Случайный набор при старте
+                    {% endif %}
+                  </span>
+                </button>
+              {% endfor %}
+            </div>
+            <p class="helper-text" data-whoami-category-summary>Тема не фиксируется заранее. На старте будет выбран случайный набор карточек.</p>
+          </section>
+
+          <section
+            class="create-whoami-theme-panel"
+            data-spy-category-scope
+            data-create-spy-panel
+            data-kind-sensitive="spy"
+            aria-hidden="{{ 'false' if default_create_kind == 'spy' else 'true' }}"
+            {% if default_create_kind != "spy" %}hidden style="display: none;"{% endif %}
+          >
+            <input type="hidden" name="spy_category" value="">
+            <div class="section-caption">
+              <strong>Тема для «Найди шпиона»</strong>
+              <p>Можно заранее зафиксировать набор локаций или оставить случайную тему на старт партии.</p>
+            </div>
+            <div class="whoami-category-picker" data-spy-category-picker>
+              {% for option in spy_category_options %}
+                <button
+                  type="button"
+                  class="whoami-category-card"
+                  data-spy-category-choice="{{ option.value }}"
+                  data-spy-category-label="{{ option.label }}"
+                  data-spy-category-count="{{ option.count }}"
+                  aria-pressed="false"
+                >
+                  <strong>{{ option.label }}</strong>
+                  <span>
+                    {% if option.count %}
+                      {{ option.count }} локаций
+                    {% else %}
+                      Случайная тема при старте
+                    {% endif %}
+                  </span>
+                </button>
+              {% endfor %}
+            </div>
+            <p class="helper-text" data-spy-category-summary>Тема не фиксируется заранее. На старте будет выбрана случайная группа локаций.</p>
+          </section>
+        </section>
+
+        <section class="create-chat-panel">
+          <div class="section-caption">
+            <strong>Куда отправить лобби</strong>
+            <p>Создание доступно только в чатах, где у вас есть <code>manage_games</code>.</p>
+          </div>
+
+          {% if create_chat_options %}
+            <div class="field">
+              <span>Чат для запуска</span>
+              <select name="chat_id" required data-create-chat-select>
+                {% for chat in create_chat_options %}
+                  <option value="{{ chat.chat_id }}" data-actions-18-enabled="{{ chat.actions_18_enabled }}">{{ chat.title }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <p class="helper-text">Бот сам отправит карточку лобби в выбранный чат.</p>
+            {% if busy_create_chat_options %}
+              <div class="busy-chat-note">
+                <strong>Сейчас занято:</strong>
+                <span>{% for chat in busy_create_chat_options %}{{ chat.title }}{% if not loop.last %} • {% endif %}{% endfor %}</span>
+              </div>
+            {% endif %}
+            <button type="submit" class="button primary">Создать игру</button>
+          {% else %}
+            <p class="empty-text">Во всех доступных чатах уже идут игры. Завершите одну из них или выберите другой чат.</p>
+          {% endif %}
+        </section>
+      </div>
+    </form>
+  {% else %}
+    <p class="empty-text">Пока нет чатов, где у вас есть право <code>manage_games</code>. Как только бот видит такую группу, запуск появится здесь.</p>
+  {% endif %}
+</section>
+
+<section id="games-list" class="grid games-grid">
+  {% if game_cards %}
+    {% for game in game_cards %}
+      <article class="panel game-panel game-panel-{{ game.kind }}" data-game-panel>
+        {% set compat = namespace(main_buttons=game.main_buttons or [], private_buttons=game.private_buttons or []) %}
+        {% if not compat.main_buttons and game.board_rows %}
+          {% for row in game.board_rows %}
+            {% for button in row %}
+              {% if button.kind == "action" %}
+                {% set compat.main_buttons = compat.main_buttons + [button] %}
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+        {% endif %}
+        {% if not compat.private_buttons and game.private_rows %}
+          {% for row in game.private_rows %}
+            {% for button in row %}
+              {% if button.kind == "action" %}
+                {% set compat.private_buttons = compat.private_buttons + [button] %}
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+        {% endif %}
+        <div class="panel-head game-panel-head">
+          <div>
+            <h2>{{ game.title }}</h2>
+            <p class="panel-subtitle">{{ game.description }}</p>
+          </div>
+          <div class="game-head-tags">
+            <span class="pill pill-{{ game.status_badge }}">{{ game.status }}</span>
+            {% if game.is_member %}
+              <span class="pill pill-user">в составе</span>
+            {% endif %}
+            {% if game.can_manage_games %}
+              <span class="pill pill-admin">ведущий</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="game-meta-grid">
+          <div class="game-meta-card">
+            <span class="game-meta-label">Чат</span>
+            <strong>{{ game.chat_title }}</strong>
+            <p>ID {{ game.chat_id }}</p>
+            <a class="button ghost small" href="/app/chat/{{ game.chat_id }}">Открыть чат</a>
+          </div>
+          <div class="game-meta-card">
+            <span class="game-meta-label">Состав</span>
+            <strong>{{ game.players_count }} участников</strong>
+            <p>{% if game.is_member %}Вы в игре{% else %}Режим наблюдения{% endif %}</p>
+            <span class="game-meta-note">Раунд {{ game.round_no }}</span>
+          </div>
+          <div class="game-meta-card">
+            <span class="game-meta-label">Время</span>
+            <strong>Старт {{ game.started_at }}</strong>
+            <p>Создана {{ game.created_at }}</p>
+            <span class="game-meta-note">{% if game.is_owner %}Вы создали лобби{% else %}Создатель в Telegram{% endif %}</span>
+          </div>
+        </div>
+
+        {% if game.players_preview and not game.mafia_view and not game.spy_view and not game.whoami_view %}
+          <h3 class="subheading">Состав</h3>
+          <div class="player-chips">
+            {% for player in game.players_preview %}
+              <span class="pill pill-user">{{ player }}</span>
+            {% endfor %}
+            {% if game.players_hidden %}
+              <span class="pill">+{{ game.players_hidden }}</span>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if game.spotlight %}
+          <section class="game-spotlight">
+            <div class="game-spotlight-copy">
+              <span class="game-spotlight-kicker">{{ game.spotlight.eyebrow }}</span>
+              <h3>{{ game.spotlight.title }}</h3>
+              <p class="panel-subtitle">{{ game.spotlight.description }}</p>
+            </div>
+            {% if game.spotlight.prompt_text %}
+              <div class="game-prompt-card">
+                {% if game.spotlight.prompt_title %}
+                  <strong>{{ game.spotlight.prompt_title }}</strong>
+                {% endif %}
+                <p>{{ game.spotlight.prompt_text }}</p>
+              </div>
+            {% endif %}
+            {% if game.spotlight.reveal_card %}
+              <div class="game-reveal-card">
+                <span class="game-reveal-kicker">{{ game.spotlight.reveal_card.eyebrow }}</span>
+                <strong>{{ game.spotlight.reveal_card.title }}</strong>
+                <p>{{ game.spotlight.reveal_card.text }}</p>
+                <span class="game-reveal-note">{{ game.spotlight.reveal_card.note }}</span>
+              </div>
+            {% endif %}
+            {% if game.spotlight.metrics %}
+              <div class="game-stage-metrics">
+                {% for metric in game.spotlight.metrics %}
+                  <div class="mini-stat">
+                    <span>{{ metric.label }}</span>
+                    <strong>{{ metric.value }}</strong>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </section>
+        {% endif %}
+
+        {% if game.whoami_view %}
+          <section class="whoami-stage-layout">
+            <article class="game-action-section whoami-roster-card">
+              <div class="section-caption">
+                <strong>Карточки за столом</strong>
+                <p>Свою карточку вы не видите, остальные лежат перед глазами как в party-экране.</p>
+              </div>
+              <div class="whoami-roster-grid">
+                {% for row in game.whoami_view.table_rows %}
+                  <div class="whoami-player-row whoami-player-row-{{ row.tone }}">
+                    <div class="whoami-player-head">
+                      <strong>{{ row.label }}</strong>
+                      <div class="whoami-player-badges">
+                        {% for badge in row.badges %}
+                          <span class="whoami-badge whoami-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                        {% endfor %}
+                      </div>
+                    </div>
+                    <div class="whoami-identity-tile">{{ row.identity }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+
+            <article class="game-action-section whoami-history-card">
+              <div class="section-caption">
+                <strong>Ход сцены</strong>
+                <p>Здесь остаются последние вопросы, ответы стола и все рискованные догадки.</p>
+              </div>
+              {% if game.whoami_view.pending_question %}
+                <div class="whoami-pending-card">
+                  <span>Активный вопрос</span>
+                  <strong>{{ game.whoami_view.pending_question }}</strong>
+                </div>
+              {% endif %}
+              {% if game.whoami_view.history_rows %}
+                <div class="whoami-history-grid">
+                  {% for row in game.whoami_view.history_rows %}
+                    <div class="whoami-history-row whoami-history-row-{{ row.tone }}">
+                      <strong>{{ row.title }}</strong>
+                      <p>{{ row.text }}</p>
+                      <span>{{ row.meta }}</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="whoami-empty-state">Партия только началась. Первый вопрос появится здесь, как только текущий игрок откроет ход.</div>
+              {% endif %}
+            </article>
+          </section>
+
+          <section class="game-action-section whoami-status-section whoami-status-section-{{ game.whoami_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.whoami_view.status_title }}</strong>
+              <p>{{ game.whoami_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.whoami_view.action_buttons %}
+            <section class="game-action-section whoami-action-section">
+              <div class="section-caption">
+                <strong>Ответ стола</strong>
+                <p>Ответ фиксируется первым игроком, который нажмёт кнопку. После «да» ход остаётся у спрашивающего.</p>
+              </div>
+              <div class="choice-grid whoami-choice-grid">
+                {% for button in game.whoami_view.action_buttons %}
+                  <form method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.whoami_view.question_form or game.whoami_view.guess_form %}
+            <section class="whoami-form-grid">
+              {% if game.whoami_view.question_form %}
+                <section class="game-action-section whoami-form-section">
+                  <div class="section-caption">
+                    <strong>Вопрос о себе</strong>
+                    <p>Спросите что-то, на что стол может ответить только «да», «нет», «не знаю» или «неважно».</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_ask">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.question_form.game_id }}">
+                    <label class="field">
+                      <span>Ваш вопрос</span>
+                      <input type="text" name="question_text" placeholder="{{ game.whoami_view.question_form.placeholder }}" maxlength="180" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.question_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+
+              {% if game.whoami_view.guess_form %}
+                <section class="game-action-section whoami-form-section whoami-guess-section">
+                  <div class="section-caption">
+                    <strong>Финальная догадка</strong>
+                    <p>В любой момент своего хода можно назвать карточку. Если мимо, ход уходит следующему игроку.</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_guess">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.guess_form.game_id }}">
+                    <label class="field">
+                      <span>Кто вы?</span>
+                      <input type="text" name="guess_text" placeholder="{{ game.whoami_view.guess_form.placeholder }}" maxlength="120" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.guess_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+            </section>
+          {% endif %}
+        {% endif %}
+
+        {% if game.spy_view %}
+          <section class="spy-stage-layout">
+            <article class="game-action-section spy-intel-card spy-intel-card-{{ game.spy_view.role_card.tone }}">
+              <div class="section-caption">
+                <strong>{% if game.is_member %}Ваше досье{% else %}Режим просмотра{% endif %}</strong>
+                <p>Вся важная информация по роли и локации лежит здесь, как в отдельном игровом экране.</p>
+              </div>
+              <div class="spy-intel-header">
+                <span class="spy-intel-team">{{ game.spy_view.role_card.team }}</span>
+                <strong>{{ game.spy_view.role_card.title }}</strong>
+              </div>
+              <div class="spy-intel-chip">
+                <span>{{ game.spy_view.role_card.intel_label }}</span>
+                <strong>{{ game.spy_view.role_card.intel_value }}</strong>
+              </div>
+              <div class="spy-intel-facts">
+                <div class="spy-intel-fact">
+                  <span>Цель</span>
+                  <p>{{ game.spy_view.role_card.objective }}</p>
+                </div>
+                <div class="spy-intel-fact">
+                  <span>Как играть</span>
+                  <p>{{ game.spy_view.role_card.ability }}</p>
+                </div>
+              </div>
+            </article>
+
+            <article class="game-action-section spy-suspect-card">
+              <div class="section-caption">
+                <strong>Доска подозрений</strong>
+                <p>Кого стол сейчас давит сильнее всего, сколько уже голосов и кто идёт к досрочному финалу.</p>
+              </div>
+              <div class="spy-summary-ribbon">
+                <span class="spy-summary-pill">Тема: {{ game.spy_view.summary.category }}</span>
+                <span class="spy-summary-pill">Голоса: {{ game.spy_view.summary.votes }}</span>
+                <span class="spy-summary-pill">Большинство: {{ game.spy_view.summary.majority }}</span>
+                <span class="spy-summary-pill">Лидер: {{ game.spy_view.summary.leader }}</span>
+              </div>
+              <div class="spy-suspect-grid">
+                {% for row in game.spy_view.suspect_rows %}
+                  <div class="spy-suspect-row spy-suspect-row-{{ row.tone }}">
+                    <div class="spy-suspect-head">
+                      <strong>{{ row.label }}</strong>
+                      <span class="spy-vote-count">{{ row.votes }}</span>
+                    </div>
+                    <div class="spy-vote-track">
+                      <span class="spy-vote-fill" style="width: {{ row.meter }}%;"></span>
+                    </div>
+                    <div class="spy-suspect-badges">
+                      {% for badge in row.badges %}
+                        <span class="spy-badge spy-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+          </section>
+
+          <section class="game-action-section spy-status-section spy-status-section-{{ game.spy_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.spy_view.status_title }}</strong>
+              <p>{{ game.spy_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.spy_view.action_title or game.spy_view.action_buttons %}
+            <section class="game-action-section spy-action-section">
+              <div class="section-caption">
+                <strong>{{ game.spy_view.action_title or "Подозрение" }}</strong>
+                <p>{{ game.spy_view.action_text or "Доска уже показывает полный ход дедукции." }}</p>
+              </div>
+              {% if game.spy_view.action_buttons %}
+                <div class="choice-grid spy-choice-grid">
+                  {% for button in game.spy_view.action_buttons %}
+                    <form method="post" action="/app/games/action" data-game-action-form>
+                      <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                      <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                    </form>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="spy-empty-state">Голосование уже закрыто. Ниже осталась финальная доска подозрений и раскрытие ролей.</div>
+              {% endif %}
+            </section>
+          {% endif %}
+
+          {% if game.spy_view.guess_form %}
+            <section class="game-action-section spy-guess-section">
+              <div class="section-caption">
+                <strong>Финальный риск шпиона</strong>
+                <p>Если вы уверены, что вычислили место, назовите его. Верный ответ сразу приносит победу шпиону, неверный закрывает раунд победой мирных.</p>
+              </div>
+              <form class="stack-form spy-guess-form" method="post" action="/app/games/action" data-game-action-form>
+                <input type="hidden" name="game_id" value="{{ game.spy_view.guess_form.game_id }}">
+                <input type="hidden" name="action" value="spy_guess">
+                <label class="field">
+                  <span>Локация</span>
+                  <input
+                    type="text"
+                    name="guess_location"
+                    list="spy-locations-{{ game.game_id }}"
+                    placeholder="{{ game.spy_view.guess_form.placeholder }}"
+                    autocomplete="off"
+                    required
+                  >
+                </label>
+                <datalist id="spy-locations-{{ game.game_id }}">
+                  {% for location in game.spy_view.guess_form.locations %}
+                    <option value="{{ location }}"></option>
+                  {% endfor %}
+                </datalist>
+                <button type="submit" class="button primary">{{ game.spy_view.guess_form.button_label }}</button>
+              </form>
+            </section>
+          {% endif %}
+        {% endif %}
+
+        {% if game.mafia_view %}
+          <section class="mafia-stage-layout">
+            <article class="game-action-section mafia-identity-card mafia-identity-card-{{ game.mafia_view.role_card.tone }}">
+              <div class="section-caption">
+                <strong>{% if game.is_member %}Ваша роль{% else %}Режим доступа{% endif %}</strong>
+                <p>Скрытая информация и краткий role briefing лежат прямо на сайте, без перехода в личку.</p>
+              </div>
+              <div class="mafia-role-title">
+                <span class="mafia-role-team">{{ game.mafia_view.role_card.team }}</span>
+                <strong>{{ game.mafia_view.role_card.title }}</strong>
+              </div>
+              <div class="mafia-role-facts">
+                <div class="mafia-role-fact">
+                  <span>Цель</span>
+                  <p>{{ game.mafia_view.role_card.objective }}</p>
+                </div>
+                <div class="mafia-role-fact">
+                  <span>Как играется</span>
+                  <p>{{ game.mafia_view.role_card.ability }}</p>
+                </div>
+              </div>
+              {% if game.mafia_view.report_html %}
+                <div class="mafia-report-card">{{ game.mafia_view.report_html | safe }}</div>
+              {% endif %}
+            </article>
+
+            <article class="game-action-section mafia-roster-card">
+              <div class="section-caption">
+                <strong>Стол и статусы</strong>
+                <p>Здесь видно, кто ещё в игре, кто уже выбыл и на кого сейчас завязан публичный этап.</p>
+              </div>
+              <div class="mafia-roster-grid">
+                {% for row in game.mafia_view.roster_rows %}
+                  <div class="mafia-player-row mafia-player-row-{{ row.tone }}">
+                    <strong>{{ row.label }}</strong>
+                    <div class="mafia-player-badges">
+                      {% for badge in row.badges %}
+                        <span class="mafia-badge mafia-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+          </section>
+
+          <section class="game-action-section mafia-status-section mafia-status-section-{{ game.mafia_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.mafia_view.status_title }}</strong>
+              <p>{{ game.mafia_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.mafia_view.action_title or game.mafia_view.action_buttons %}
+            <section class="game-action-section mafia-action-section">
+              <div class="section-caption">
+                <strong>{{ game.mafia_view.action_title or "Текущая фаза" }}</strong>
+                <p>{{ game.mafia_view.action_text or "Веб-карточка уже знает текущий шаг и отдаёт только актуальные действия." }}</p>
+              </div>
+              {% if game.mafia_view.action_buttons %}
+                <div class="choice-grid mafia-choice-grid">
+                  {% for button in game.mafia_view.action_buttons %}
+                    <form method="post" action="/app/games/action" data-game-action-form>
+                      <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                      <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                    </form>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="mafia-empty-state">На этой фазе вам не нужно делать скрытый ход. Следите за столом и ждите смену этапа.</div>
+              {% endif %}
+            </section>
+          {% endif %}
+        {% endif %}
+
+        {% if game.bred_submission_rows or game.show_bred_answer %}
+          <section class="game-action-section game-form-section">
+            <div class="section-caption">
+              <strong>Сбор ответов</strong>
+              <p>Сначала видно, кто уже сдал фальшивку, а табло ниже не отвлекает от текущего хода.</p>
+            </div>
+            {% if game.bred_submission_rows %}
+              <div class="submission-grid">
+                {% for row in game.bred_submission_rows %}
+                  <div class="submission-row submission-row-{{ row.state }}">
+                    <strong>{{ row.label }}</strong>
+                    <span class="submission-state submission-state-{{ row.state }}">{{ row.state_label }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+            {% if game.show_bred_answer %}
+              <form class="stack-form game-inline-form native-action-form" method="post" action="/app/games/action" data-game-action-form>
+                <input type="hidden" name="action" value="bred_submit">
+                <input type="hidden" name="game_id" value="{{ game.game_id }}">
+                <div class="field">
+                  <span>Введите ложный вариант</span>
+                  <input type="text" name="lie_text" maxlength="120" required>
+                </div>
+                <button type="submit" class="button primary small">Сохранить ответ</button>
+              </form>
+            {% endif %}
+          </section>
+        {% endif %}
+
+        {% if game.bred_reveal_rows %}
+          <section class="game-action-section reveal-section">
+            <div class="section-caption">
+              <strong>Кто придумал варианты</strong>
+              <p>После раунда видно, какая формулировка была правдой и кто автор каждой лжи.</p>
+            </div>
+            <div class="reveal-grid">
+              {% for row in game.bred_reveal_rows %}
+                <div class="reveal-row reveal-row-{{ row.tone }}">
+                  <span class="reveal-slot">{{ row.slot }}</span>
+                  <div class="reveal-copy">
+                    <strong>{{ row.text }}</strong>
+                    <span>{{ row.author }}</span>
+                  </div>
+                  <span class="reveal-votes">{{ row.votes }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.score_rows %}
+          <section class="game-scoreboard">
+            <div class="section-caption">
+              <strong>{% if game.kind == "bredovukha" %}Табло раунда{% else %}Текущий счёт{% endif %}</strong>
+              <p>{% if game.kind == "bredovukha" %}Очки выглядят как в party-show, а не как сухой список.{% else %}Лидеры обновляются после каждого раунда.{% endif %}</p>
+            </div>
+            <div class="game-score-grid">
+              {% for row in game.score_rows %}
+                <div class="game-score-row">
+                  <span class="rank-no">{{ row.position }}</span>
+                  <div class="rank-copy">
+                    <strong>{{ row.label }}</strong>
+                  </div>
+                  <span class="rank-value">{{ row.value }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.secret_lines %}
+          <h3 class="subheading">Моя скрытая информация</h3>
+          <div class="list-stack compact">
+            {% for line in game.secret_lines %}
+              <div class="security-card secret-row">{{ line }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% if game.winner_text %}
+          <div class="banner banner-ok">Итог: {{ game.winner_text }}</div>
+        {% endif %}
+
+        {% if game.role_reveal_rows %}
+          <section class="game-action-section reveal-section role-reveal-section">
+            <div class="section-caption">
+              <strong>Финальный reveal</strong>
+              <p>{{ game.role_reveal_note }}</p>
+            </div>
+            <div class="reveal-grid role-reveal-grid">
+              {% for row in game.role_reveal_rows %}
+                <div class="reveal-row reveal-row-{{ row.tone }}">
+                  <div class="reveal-copy">
+                    <strong>{{ row.player }}</strong>
+                    <span>{{ row.role }}</span>
+                  </div>
+                  <span class="reveal-slot">{{ row.team }}</span>
+                  <span class="reveal-votes">{% if row.winner %}победа{% else %}финал{% endif %}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.category_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>{% if game.kind == "bredovukha" %}Выбери тему{% else %}Категории раунда{% endif %}</strong>
+              <p>{% if game.kind == "bredovukha" %}Как в party-игре: темы лежат на сцене отдельными плитками.{% else %}Кнопки вынесены в отдельный блок вместо копии Telegram-сообщения.{% endif %}</p>
+            </div>
+            <div class="choice-grid">
+              {% for button in game.category_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.vote_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>{% if game.kind == "bredovukha" %}Где правда?{% else %}Выбор ответа{% endif %}</strong>
+              <p>{% if game.kind == "bredovukha" %}Ответы выглядят как яркие tiles, а не как служебные кнопки бота.{% else %}Голосование вынесено в нативную сетку, без дублирования текста вариантов сверху.{% endif %}</p>
+            </div>
+            <div class="choice-grid">
+              {% for button in game.vote_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.show_number_guess %}
+          <section class="game-action-section game-form-section">
+            <div class="section-caption">
+              <strong>Угадай число</strong>
+              <p>Ход можно сделать прямо из браузера.</p>
+            </div>
+            <form class="stack-form game-inline-form native-action-form" method="post" action="/app/games/action" data-game-action-form>
+              <input type="hidden" name="action" value="number_guess">
+              <input type="hidden" name="game_id" value="{{ game.game_id }}">
+              <div class="field">
+                <span>Введите число 1..100</span>
+                <input type="number" name="guess" min="1" max="100" required>
+              </div>
+              <button type="submit" class="button primary small">Отправить</button>
+            </form>
+          </section>
+        {% endif %}
+
+        {% if compat.private_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>Личный ход</strong>
+              <p>Скрытые и персональные действия сгруппированы отдельно.</p>
+            </div>
+            <div class="choice-grid">
+              {% for button in compat.private_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if compat.main_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>
+                {% if game.kind == "bredovukha" %}
+                  Что можно сделать
+                {% elif game.kind == "quiz" %}
+                  Варианты ответа
+                {% elif game.kind == "dice" %}
+                  Бросок раунда
+                {% else %}
+                  Быстрые действия
+                {% endif %}
+              </strong>
+              <p>
+                {% if game.kind == "bredovukha" %}
+                  Только актуальные ходы, как в party-flow между экранами.
+                {% elif game.kind == "quiz" %}
+                  Вопрос вынесен выше в spotlight, а здесь остаются только варианты ответа на текущий раунд.
+                {% elif game.kind == "dice" %}
+                  Каждый игрок кидает только один раз, после чего ждём остальных и следим за табло.
+                {% else %}
+                  Только то, что доступно вам на текущем этапе.
+                {% endif %}
+              </p>
+            </div>
+            <div class="action-flow">
+              {% for button in compat.main_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.whoami_theme_picker %}
+          <section class="game-action-section whoami-theme-section">
+            <div class="section-caption">
+              <strong>Тема партии</strong>
+              <p>Для веба выбор сделан прямым: нажмите нужную тему, и лобби сразу обновится без перебора по кругу.</p>
+            </div>
+            <form class="stack-form native-action-form whoami-theme-form" method="post" action="/app/games/action" data-game-action-form data-whoami-category-scope>
+              <input type="hidden" name="action" value="whoami_set_category">
+              <input type="hidden" name="game_id" value="{{ game.whoami_theme_picker.game_id }}">
+              <input type="hidden" name="whoami_category" value="{{ game.whoami_theme_picker.current_value }}">
+              <div class="whoami-category-picker whoami-category-picker-compact" data-whoami-category-picker data-auto-submit="true">
+                {% for option in game.whoami_theme_picker.options %}
+                  <button
+                    type="button"
+                    class="whoami-category-card whoami-category-card-compact"
+                    data-whoami-category-choice="{{ option.value }}"
+                    data-whoami-category-label="{{ option.label }}"
+                    data-whoami-category-count="{{ option.count }}"
+                    data-whoami-category-explicit="{{ 'true' if option.is_18_plus else 'false' }}"
+                    aria-pressed="false"
+                  >
+                    <strong>{{ option.label }}</strong>
+                    <span>
+                      {% if option.count %}
+                        {{ option.count }} карточек
+                      {% else %}
+                        Случайный набор
+                      {% endif %}
+                    </span>
+                  </button>
+                {% endfor %}
+              </div>
+              <p class="helper-text" data-whoami-category-summary>Сейчас: {{ game.whoami_theme_picker.current_label }}.</p>
+            </form>
+          </section>
+        {% endif %}
+
+        {% if game.spy_theme_picker %}
+          <section class="game-action-section whoami-theme-section">
+            <div class="section-caption">
+              <strong>Тема партии</strong>
+              <p>Для «Шпиона» тема определяет пул локаций раунда. Выбор применяется сразу и не требует перебора через Telegram-кнопку.</p>
+            </div>
+            <form class="stack-form native-action-form whoami-theme-form" method="post" action="/app/games/action" data-game-action-form data-spy-category-scope>
+              <input type="hidden" name="action" value="spy_set_category">
+              <input type="hidden" name="game_id" value="{{ game.spy_theme_picker.game_id }}">
+              <input type="hidden" name="spy_category" value="{{ game.spy_theme_picker.current_value }}">
+              <div class="whoami-category-picker whoami-category-picker-compact" data-spy-category-picker data-auto-submit="true">
+                {% for option in game.spy_theme_picker.options %}
+                  <button
+                    type="button"
+                    class="whoami-category-card whoami-category-card-compact"
+                    data-spy-category-choice="{{ option.value }}"
+                    data-spy-category-label="{{ option.label }}"
+                    data-spy-category-count="{{ option.count }}"
+                    aria-pressed="false"
+                  >
+                    <strong>{{ option.label }}</strong>
+                    <span>
+                      {% if option.count %}
+                        {{ option.count }} локаций
+                      {% else %}
+                        Случайная тема
+                      {% endif %}
+                    </span>
+                  </button>
+                {% endfor %}
+              </div>
+              <p class="helper-text" data-spy-category-summary>Сейчас: {{ game.spy_theme_picker.current_label }}.</p>
+            </form>
+          </section>
+        {% endif %}
+
+        {% if game.manage_buttons %}
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>{% if game.kind in ("bredovukha", "mafia", "spy") %}Пульт ведущего{% else %}Управление фазой{% endif %}</strong>
+              <p>{% if game.kind in ("bredovukha", "mafia", "spy") %}Служебные ходы собраны отдельно от игровых, чтобы карточка выглядела как сцена, а не как клавиатура бота.{% else %}Служебные действия отделены от игровых, чтобы карточка не выглядела как raw inline-keyboard.{% endif %}</p>
+            </div>
+            <div class="action-flow manage-flow">
+              {% for button in game.manage_buttons %}
+                <form method="post" action="/app/games/action" data-game-action-form>
+                  <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                  <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                </form>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+
+        {% if game.telegram_buttons %}
+          <section class="telegram-handoff">
+            <div>
+              <strong>Продолжить в Telegram</strong>
+              <p>Оставлено только там, где веб не может заменить приватный flow.</p>
+            </div>
+            <div class="action-flow">
+              {% for button in game.telegram_buttons %}
+                <a class="button {{ button.variant }} small" href="{{ button.url }}" target="_blank" rel="noopener">{{ button.label }}</a>
+              {% endfor %}
+            </div>
+          </section>
+        {% endif %}
+      </article>
+    {% endfor %}
+  {% else %}
+    <article class="panel">
+      <p class="empty-text">Сейчас нет активных игр в группах, к которым у вас есть доступ. Создайте лобби кнопкой выше или через <code>/game</code> в Telegram.</p>
+    </article>
+  {% endif %}
+</section>
+
+{% if recent_game_cards %}
+  <section class="panel recent-games-panel">
+    <div class="panel-head game-panel-head">
+      <div>
+        <span class="eyebrow create-game-eyebrow">Afterparty</span>
+        <h2>Последние партии</h2>
+        <p class="panel-subtitle">Архив последних игр, в которых вы участвовали. Здесь остаются финалы, reveal ролей и личный итог после завершения партии.</p>
+      </div>
+      <div class="game-head-tags">
+        <span class="pill pill-done">{{ recent_game_cards|length }} завершено</span>
+      </div>
+    </div>
+
+    <div class="recent-games-grid">
+      {% for game in recent_game_cards %}
+        <article class="recent-game-card recent-game-card-{{ game.kind }}">
+          <div class="recent-game-head">
+            <div>
+              <strong>{{ game.title }}</strong>
+              <p>{{ game.chat_title }} · старт {{ game.started_at }}</p>
+            </div>
+            <span class="pill pill-done">архив</span>
+          </div>
+
+          <div class="banner banner-ok recent-result-banner">{{ game.result_text }}</div>
+
+          {% if game.personal_notes %}
+            <div class="recent-note-list">
+              {% for note in game.personal_notes %}
+                <div class="security-card secret-row">{{ note }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if game.role_reveal_rows %}
+            <div class="section-caption recent-caption">
+              <strong>Финальный reveal</strong>
+              <p>{{ game.role_reveal_note }}</p>
+            </div>
+            <div class="reveal-grid role-reveal-grid compact-reveal-grid">
+              {% for row in game.role_reveal_rows %}
+                <div class="reveal-row reveal-row-{{ row.tone }}">
+                  <div class="reveal-copy">
+                    <strong>{{ row.player }}</strong>
+                    <span>{{ row.role }}</span>
+                  </div>
+                  <span class="reveal-slot">{{ row.team }}</span>
+                  <span class="reveal-votes">{% if row.winner %}победа{% else %}финал{% endif %}</span>
+                </div>
+              {% endfor %}
+            </div>
+          {% elif game.bred_reveal_rows %}
+            <div class="section-caption recent-caption">
+              <strong>Последний reveal раунда</strong>
+              <p>Финал Бредовухи и последняя раскладка вариантов.</p>
+            </div>
+            <div class="reveal-grid compact-reveal-grid">
+              {% for row in game.bred_reveal_rows %}
+                <div class="reveal-row reveal-row-{{ row.tone }}">
+                  <span class="reveal-slot">{{ row.slot }}</span>
+                  <div class="reveal-copy">
+                    <strong>{{ row.text }}</strong>
+                    <span>{{ row.author }}</span>
+                  </div>
+                  <span class="reveal-votes">{{ row.votes }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if game.score_rows %}
+            <div class="section-caption recent-caption">
+              <strong>Итоговое табло</strong>
+              <p>Лучшие результаты партии.</p>
+            </div>
+            <div class="game-score-grid compact-score-grid">
+              {% for row in game.score_rows %}
+                <div class="game-score-row">
+                  <span class="rank-no">{{ row.position }}</span>
+                  <div class="rank-copy">
+                    <strong>{{ row.label }}</strong>
+                  </div>
+                  <span class="rank-value">{{ row.value }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}

@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Документация</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+      {% if origin_chat %}
+        <div class="hero-cta-row">
+          <a class="button primary" href="{{ origin_chat.href }}">Вернуться в {{ origin_chat.label }}</a>
+        </div>
+      {% endif %}
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">admin manual</div>
+      <div class="hero-chip">settings guide</div>
+      <div class="hero-chip">panel workflows</div>
+    </div>
+  </section>
+
+  <section class="docs-layout">
+    <aside class="panel docs-nav">
+      <div class="panel-head">
+        <h2>Навигация</h2>
+      </div>
+      <div class="docs-nav-stack">
+        <div class="docs-nav-group">
+          <strong>Разделы панели</strong>
+          <a href="#docs-trigger-types">Типы совпадения триггеров</a>
+          <a href="#docs-trigger-variables">Переменные шаблонов</a>
+          {% for section in docs_sections %}
+            <a href="#{{ section.anchor }}">{{ section.title }}</a>
+          {% endfor %}
+        </div>
+        <div class="docs-nav-group">
+          <strong>Группы настроек</strong>
+          {% for section in settings_docs_sections %}
+            <a href="#{{ section.anchor }}">{{ section.title }}</a>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+
+    <div class="docs-content">
+      <section class="panel" id="docs-trigger-types">
+        <div class="panel-head">
+          <div>
+            <h2>Типы совпадения смарт-триггеров</h2>
+            <p class="panel-subtitle">Те же значения используются в формах панели, но показываются на русском.</p>
+          </div>
+        </div>
+        <div class="docs-card-grid">
+          {% for item in trigger_match_types %}
+            <article class="docs-card">
+              <div class="docs-card-head">
+                <strong>{{ item.label }}</strong>
+                <code>{{ item.code }}</code>
+              </div>
+              <p>{{ item.description }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel" id="docs-trigger-variables">
+        <div class="panel-head">
+          <div>
+            <h2>Переменные шаблонов</h2>
+            <p class="panel-subtitle">Этот список общий для смарт-триггеров и кастомных RP-действий. Для буквальных фигурных скобок используйте {{ '{{' }} и {{ '}}' }}.</p>
+          </div>
+        </div>
+        {% for group in trigger_template_variable_groups %}
+          <div class="panel-head">
+            <div>
+              <h3>{{ group.title }}</h3>
+            </div>
+          </div>
+          <div class="docs-card-grid">
+            {% for item in group["items"] %}
+              <article class="docs-card">
+                <div class="docs-card-head">
+                  <strong>{{ item.label }}</strong>
+                  <code>{{ item.token }}</code>
+                </div>
+                <p>{{ item.description }}</p>
+                <p class="helper-text">Доступность: {{ item.availability }}</p>
+                <p class="helper-text">Алиасы: {{ item.aliases }}</p>
+              </article>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </section>
+
+      {% for section in docs_sections %}
+        <section class="panel docs-section" id="{{ section.anchor }}">
+          <div class="panel-head">
+            <div>
+              <h2>{{ section.title }}</h2>
+              <p class="panel-subtitle">{{ section.summary }}</p>
+            </div>
+          </div>
+          <div class="docs-card-grid">
+            {% for item in section["items"] %}
+              <article class="docs-card">
+                <div class="docs-card-head">
+                  <strong>{{ item.title }}</strong>
+                </div>
+                <p>{{ item.text }}</p>
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+      {% endfor %}
+
+      {% for section in settings_docs_sections %}
+        <section class="panel docs-section docs-settings-section" id="{{ section.anchor }}">
+          <div class="docs-section-banner">
+            <div>
+              <span class="eyebrow docs-eyebrow">Группа настроек</span>
+              <h2>{{ section.title }}</h2>
+              <p class="panel-subtitle">Подробности по каждому ключу этой группы с быстрыми якорями и форматом значения.</p>
+            </div>
+            <div class="docs-section-stat">
+              <strong>{{ section["items"]|length }}</strong>
+              <span>ключей в группе</span>
+            </div>
+          </div>
+
+          <div class="docs-settings-layout">
+            <aside class="docs-settings-index">
+              <div class="docs-settings-index-head">
+                <strong>Быстрые ссылки</strong>
+                <span>Переход к нужной настройке</span>
+              </div>
+              <div class="docs-settings-index-grid">
+                {% for item in section["items"] %}
+                  <a class="docs-index-card" href="#{{ item.anchor }}">
+                    <span class="docs-index-no">{{ loop.index }}</span>
+                    <span class="docs-index-copy">
+                      <strong>{{ item.title }}</strong>
+                      <small>{{ item.key }}</small>
+                    </span>
+                  </a>
+                {% endfor %}
+              </div>
+            </aside>
+
+            <div class="docs-settings-grid">
+              {% for item in section["items"] %}
+                <article class="docs-setting-card" id="{{ item.anchor }}">
+                  <div class="docs-setting-kicker-row">
+                    <span class="docs-setting-kicker">Настройка</span>
+                    <span class="docs-setting-no">{{ loop.index }}</span>
+                  </div>
+                  <div class="docs-card-head docs-setting-head">
+                    <strong>{{ item.title }}</strong>
+                    <code>{{ item.key }}</code>
+                  </div>
+                  <p class="docs-setting-description">{{ item.description }}</p>
+                  <div class="docs-setting-meta">
+                    <div class="docs-meta-box">
+                      <span>Формат</span>
+                      <strong>{{ item.value_hint }}</strong>
+                    </div>
+                    <div class="docs-meta-box">
+                      <span>Раздел панели</span>
+                      <strong>Настройки чата -> {{ section.title }}</strong>
+                    </div>
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          </div>
+        </section>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

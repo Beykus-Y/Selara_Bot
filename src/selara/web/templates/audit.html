@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Audit Log</span>
+      <h1>{{ chat_title }}</h1>
+      <p class="lead">Хронология админских действий и событий бота в группе.</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">chat id {{ chat_id }}</div>
+      <div class="hero-chip">last 200 events</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Лента событий</h2>
+        <p class="panel-subtitle">Свежие изменения настроек, триггеров, алиасов и действий бота в чате.</p>
+      </div>
+    </div>
+    {% if audit_rows %}
+      <div class="list-stack">
+        {% for row in audit_rows %}
+          <div class="stat-row">
+            <div>
+              <strong>{{ row.action }}</strong>
+              <p>{{ row.description }}</p>
+              <p>actor: {{ row.actor }} • target: {{ row.target }}</p>
+            </div>
+            <span>{{ row.when }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-text">Логи пока пусты.</p>
+    {% endif %}
+  </section>
+{% endblock %}

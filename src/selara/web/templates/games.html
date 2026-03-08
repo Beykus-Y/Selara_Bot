@@ -1,0 +1,624 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero hero-party">
+    <div class="hero-copy">
+      <span class="eyebrow">Selara Party</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+      <div class="hero-cta-row">
+        <a class="button primary" href="#create-game">Создать игру</a>
+        <a class="button ghost" href="#games-list">К партиям</a>
+      </div>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">bluff</div>
+      <div class="hero-chip">catch the truth</div>
+      <div class="hero-chip">telegram + web</div>
+      <button type="button" class="hero-chip live-chip" data-live-indicator data-manual-refresh data-state="ready">обновить сцену</button>
+    </div>
+  </section>
+
+  <section id="games-live-root" data-live-root data-live-signature="{{ live_signature }}">
+    {% include "_games_dashboard.html" %}
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const dashboardRoot = document.querySelector("[data-live-root]");
+      if (!dashboardRoot) {
+        return;
+      }
+
+      const indicator = document.querySelector("[data-live-indicator]");
+      const manualRefreshButton = document.querySelector("[data-manual-refresh]");
+      const toastRegion = document.getElementById("toast-region");
+      const AUTO_REFRESH_MS = 7000;
+      let liveSignature = dashboardRoot.dataset.liveSignature || "";
+      let refreshPromise = null;
+
+      const setLiveState = (state, text) => {
+        if (!indicator) {
+          return;
+        }
+        indicator.dataset.state = state;
+        indicator.textContent = text;
+      };
+
+      const showToast = (message, tone = "ok") => {
+        if (!toastRegion || !message) {
+          return;
+        }
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.dataset.tone = tone;
+        toast.textContent = message;
+        toastRegion.appendChild(toast);
+        window.setTimeout(() => {
+          toast.classList.add("is-hiding");
+        }, 2200);
+        window.setTimeout(() => {
+          toast.remove();
+        }, 2600);
+      };
+
+      const setPending = (panel, pending) => {
+        if (!panel) {
+          return;
+        }
+        panel.classList.toggle("is-pending", pending);
+        for (const field of panel.querySelectorAll("button, input, select, textarea")) {
+          if (field instanceof HTMLInputElement && field.type === "hidden") {
+            continue;
+          }
+          field.disabled = pending;
+        }
+      };
+
+      const isInteractiveField = (element) => {
+        if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+          return true;
+        }
+        if (element instanceof HTMLInputElement) {
+          return !["hidden", "button", "submit", "checkbox", "radio"].includes(element.type);
+        }
+        return false;
+      };
+
+      const formKey = (form) => {
+        const endpoint = form.getAttribute("action") || "";
+        const gameId = form.querySelector('input[name="game_id"]')?.value || "";
+        const callbackData = form.querySelector('input[name="callback_data"]')?.value || "";
+        const actionName = form.querySelector('input[name="action"]')?.value || "";
+        return [endpoint, gameId, callbackData, actionName].join("::");
+      };
+
+      const encodeSelectorValue = (value) => {
+        if (window.CSS?.escape) {
+          return window.CSS.escape(value);
+        }
+        return value.replace(/["\\]/g, "\\$&");
+      };
+
+      const snapshotForms = (root) => {
+        const snapshot = new Map();
+        for (const form of root.querySelectorAll("[data-game-action-form]")) {
+          const fields = [];
+          for (const field of form.querySelectorAll("input, select, textarea")) {
+            if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) {
+              continue;
+            }
+            fields.push({
+              name: field.name,
+              tag: field.tagName.toLowerCase(),
+              type: field instanceof HTMLInputElement ? field.type : "",
+              value: field.value,
+              checked: field instanceof HTMLInputElement ? field.checked : false
+            });
+          }
+          snapshot.set(formKey(form), fields);
+        }
+        return snapshot;
+      };
+
+      const syncKindPicker = (picker, value) => {
+        if (!(picker instanceof HTMLElement)) {
+          return;
+        }
+        const hiddenInput = picker.querySelector('input[name="kind"]');
+        const buttons = picker.querySelectorAll("[data-kind-choice]");
+        const title = picker.querySelector("[data-kind-preview-title]");
+        const text = picker.querySelector("[data-kind-preview-text]");
+        const players = picker.querySelector("[data-kind-preview-players]");
+        const mode = picker.querySelector("[data-kind-preview-mode]");
+
+        if (hiddenInput) {
+          hiddenInput.value = value;
+        }
+
+        for (const button of buttons) {
+          const isActive = button.dataset.kindChoice === value;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+          if (!isActive) {
+            continue;
+          }
+          if (title) {
+            title.textContent = button.dataset.kindTitle || "";
+          }
+          if (text) {
+            text.textContent = button.dataset.kindDescription || button.dataset.kindNote || "";
+          }
+          if (players) {
+            players.textContent = button.dataset.kindPlayers || "";
+          }
+          if (mode) {
+            mode.textContent = button.dataset.kindMode || "";
+          }
+        }
+        syncKindSensitiveSections(picker, value);
+      };
+
+      const selectedChatAllows18 = (scope) => {
+        if (!(scope instanceof HTMLElement)) {
+          return true;
+        }
+        const form = scope.closest("form");
+        if (!(form instanceof HTMLFormElement)) {
+          return true;
+        }
+        const chatSelect = form.querySelector("[data-create-chat-select]");
+        if (!(chatSelect instanceof HTMLSelectElement)) {
+          return true;
+        }
+        const selected = chatSelect.selectedOptions[0];
+        return selected?.dataset.actions18Enabled !== "false";
+      };
+
+      const syncWhoamiCategoryAvailability = (scope) => {
+        if (!(scope instanceof HTMLElement)) {
+          return true;
+        }
+        const picker = scope.querySelector("[data-whoami-category-picker]");
+        if (!(picker instanceof HTMLElement)) {
+          return true;
+        }
+        const chatAllows18 = selectedChatAllows18(scope);
+        for (const button of picker.querySelectorAll("[data-whoami-category-choice]")) {
+          if (!(button instanceof HTMLButtonElement)) {
+            continue;
+          }
+          const isExplicit = button.dataset.whoamiCategoryExplicit === "true";
+          const shouldHide = !chatAllows18 && isExplicit;
+          button.hidden = shouldHide;
+          button.disabled = shouldHide;
+        }
+        return chatAllows18;
+      };
+
+      const syncWhoamiCategoryPicker = (picker, value) => {
+        if (!(picker instanceof HTMLElement)) {
+          return;
+        }
+        const scope = picker.closest("[data-whoami-category-scope]");
+        if (!(scope instanceof HTMLElement)) {
+          return;
+        }
+
+        const chatAllows18 = syncWhoamiCategoryAvailability(scope);
+        const hiddenInput = scope.querySelector('input[name="whoami_category"]');
+        const buttons = [...picker.querySelectorAll("[data-whoami-category-choice]")];
+        const availableButtons = buttons.filter(
+          (button) => button instanceof HTMLButtonElement && !button.hidden && !button.disabled
+        );
+        let currentValue = value || "";
+        let activeButton = null;
+
+        for (const button of availableButtons) {
+          const isActive = button.dataset.whoamiCategoryChoice === currentValue;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+          if (isActive) {
+            activeButton = button;
+          }
+        }
+        for (const button of buttons) {
+          if (availableButtons.includes(button)) {
+            continue;
+          }
+          button.classList.remove("is-active");
+          button.setAttribute("aria-pressed", "false");
+        }
+
+        if (!activeButton && availableButtons.length) {
+          activeButton = availableButtons[0];
+          currentValue = activeButton.dataset.whoamiCategoryChoice || "";
+          for (const button of availableButtons) {
+            const isActive = button === activeButton;
+            button.classList.toggle("is-active", isActive);
+            button.setAttribute("aria-pressed", String(isActive));
+          }
+        }
+
+        if (hiddenInput instanceof HTMLInputElement) {
+          hiddenInput.value = currentValue;
+        }
+
+        const summary = scope.querySelector("[data-whoami-category-summary]");
+        if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLElement)) {
+          return;
+        }
+
+        const label = activeButton.dataset.whoamiCategoryLabel || "Случайная тема";
+        const count = activeButton.dataset.whoamiCategoryCount || "";
+        summary.textContent = currentValue
+          ? `Выбрана тема: ${label}${count ? ` · ${count} карточек` : ""}.`
+          : (
+            chatAllows18
+              ? "Тема не фиксируется заранее. На старте будет выбран случайный набор карточек."
+              : "18+ темы скрыты для выбранного чата. На старте будет выбран случайный безопасный набор карточек."
+          );
+      };
+
+      const syncSpyCategoryPicker = (picker, value) => {
+        if (!(picker instanceof HTMLElement)) {
+          return;
+        }
+        const scope = picker.closest("[data-spy-category-scope]");
+        if (!(scope instanceof HTMLElement)) {
+          return;
+        }
+
+        const hiddenInput = scope.querySelector('input[name="spy_category"]');
+        const buttons = [...picker.querySelectorAll("[data-spy-category-choice]")];
+        let currentValue = value || "";
+        let activeButton = null;
+
+        for (const button of buttons) {
+          if (!(button instanceof HTMLButtonElement)) {
+            continue;
+          }
+          const isActive = button.dataset.spyCategoryChoice === currentValue;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+          if (isActive) {
+            activeButton = button;
+          }
+        }
+
+        if (!(activeButton instanceof HTMLButtonElement) && buttons.length) {
+          const fallbackButton = buttons.find((button) => button instanceof HTMLButtonElement);
+          if (fallbackButton instanceof HTMLButtonElement) {
+            activeButton = fallbackButton;
+            currentValue = fallbackButton.dataset.spyCategoryChoice || "";
+            for (const button of buttons) {
+              if (!(button instanceof HTMLButtonElement)) {
+                continue;
+              }
+              const isActive = button === activeButton;
+              button.classList.toggle("is-active", isActive);
+              button.setAttribute("aria-pressed", String(isActive));
+            }
+          }
+        }
+
+        if (hiddenInput instanceof HTMLInputElement) {
+          hiddenInput.value = currentValue;
+        }
+
+        const summary = scope.querySelector("[data-spy-category-summary]");
+        if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        const label = activeButton.dataset.spyCategoryLabel || "Случайная тема";
+        const count = activeButton.dataset.spyCategoryCount || "";
+        summary.textContent = currentValue
+          ? `Выбрана тема: ${label}${count ? ` · ${count} локаций` : ""}.`
+          : "Тема не фиксируется заранее. На старте будет выбрана случайная группа локаций.";
+      };
+
+      const syncKindSensitiveSections = (picker, value) => {
+        if (!(picker instanceof HTMLElement)) {
+          return;
+        }
+        for (const section of picker.querySelectorAll("[data-kind-sensitive]")) {
+          if (!(section instanceof HTMLElement)) {
+            continue;
+          }
+          const shouldShow = section.dataset.kindSensitive === value;
+          section.hidden = !shouldShow;
+          section.style.display = shouldShow ? "" : "none";
+          section.setAttribute("aria-hidden", String(!shouldShow));
+          for (const field of section.querySelectorAll("input, select, textarea, button")) {
+            if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement || field instanceof HTMLButtonElement)) {
+              continue;
+            }
+            field.disabled = !shouldShow;
+            if (!shouldShow && field instanceof HTMLInputElement && ["whoami_category", "spy_category"].includes(field.name)) {
+              field.value = "";
+            }
+          }
+          if (shouldShow) {
+            const whoamiPicker = section.querySelector("[data-whoami-category-picker]");
+            const whoamiHiddenInput = section.querySelector('input[name="whoami_category"]');
+            syncWhoamiCategoryPicker(whoamiPicker, whoamiHiddenInput instanceof HTMLInputElement ? whoamiHiddenInput.value : "");
+
+            const spyPicker = section.querySelector("[data-spy-category-picker]");
+            const spyHiddenInput = section.querySelector('input[name="spy_category"]');
+            syncSpyCategoryPicker(spyPicker, spyHiddenInput instanceof HTMLInputElement ? spyHiddenInput.value : "");
+          }
+        }
+      };
+
+      const syncAllKindPickers = (root) => {
+        for (const picker of root.querySelectorAll("[data-kind-picker]")) {
+          const hiddenInput = picker.querySelector('input[name="kind"]');
+          const firstButton = picker.querySelector("[data-kind-choice]");
+          const currentValue = hiddenInput?.value || firstButton?.dataset.kindChoice || "";
+          if (currentValue) {
+            syncKindPicker(picker, currentValue);
+          }
+        }
+      };
+
+      const syncAllWhoamiCategoryPickers = (root) => {
+        for (const scope of root.querySelectorAll("[data-whoami-category-scope]")) {
+          if (!(scope instanceof HTMLElement)) {
+            continue;
+          }
+          const picker = scope.querySelector("[data-whoami-category-picker]");
+          const hiddenInput = scope.querySelector('input[name="whoami_category"]');
+          syncWhoamiCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+        }
+      };
+
+      const syncAllSpyCategoryPickers = (root) => {
+        for (const scope of root.querySelectorAll("[data-spy-category-scope]")) {
+          if (!(scope instanceof HTMLElement)) {
+            continue;
+          }
+          const picker = scope.querySelector("[data-spy-category-picker]");
+          const hiddenInput = scope.querySelector('input[name="spy_category"]');
+          syncSpyCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+        }
+      };
+
+      const restoreForms = (root, snapshot) => {
+        for (const form of root.querySelectorAll("[data-game-action-form]")) {
+          const fields = snapshot.get(formKey(form));
+          if (!fields) {
+            continue;
+          }
+          for (const state of fields) {
+            if (!state.name) {
+              continue;
+            }
+            const selector = `[name="${encodeSelectorValue(state.name)}"]`;
+            for (const field of form.querySelectorAll(selector)) {
+              if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) {
+                continue;
+              }
+              if (field instanceof HTMLInputElement && (field.type === "checkbox" || field.type === "radio")) {
+                field.checked = Boolean(state.checked);
+              } else {
+                field.value = state.value;
+              }
+            }
+          }
+        }
+        syncAllKindPickers(root);
+        syncAllWhoamiCategoryPickers(root);
+        syncAllSpyCategoryPickers(root);
+      };
+
+      const applyDashboardHtml = (html, signature) => {
+        const snapshot = snapshotForms(dashboardRoot);
+        const previousScrollY = window.scrollY;
+        const previousHeight = dashboardRoot.offsetHeight;
+        const commit = () => {
+          dashboardRoot.style.minHeight = `${previousHeight}px`;
+          dashboardRoot.classList.add("is-refreshing");
+          dashboardRoot.innerHTML = html;
+          dashboardRoot.dataset.liveSignature = signature;
+          liveSignature = signature;
+          restoreForms(dashboardRoot, snapshot);
+          window.scrollTo({ top: previousScrollY });
+          window.requestAnimationFrame(() => {
+            dashboardRoot.style.minHeight = "";
+            dashboardRoot.classList.remove("is-refreshing");
+          });
+        };
+        commit();
+      };
+
+      const refreshDashboard = async ({ silent = false } = {}) => {
+        if (refreshPromise) {
+          return refreshPromise;
+        }
+
+        const url = new URL("/app/games/live", window.location.origin);
+        if (liveSignature) {
+          url.searchParams.set("signature", liveSignature);
+        }
+
+        if (!silent) {
+          setLiveState("sync", "обновляю...");
+        }
+
+        refreshPromise = fetch(url, {
+          headers: {
+            "Accept": "application/json",
+            "X-Requested-With": "fetch"
+          }
+        })
+          .then(async (response) => {
+            const data = await response.json().catch(() => null);
+            if (!response.ok || data?.ok === false) {
+              if (data?.redirect) {
+                document.body.classList.add("is-route-transition");
+                window.location.assign(data.redirect);
+                return;
+              }
+              throw new Error(data?.message || "Live refresh failed");
+            }
+            if (!data?.changed) {
+              liveSignature = data?.signature || liveSignature;
+              setLiveState("ready", "обновить сцену");
+              return;
+            }
+            if (typeof data?.html === "string" && typeof data?.signature === "string") {
+              applyDashboardHtml(data.html, data.signature);
+            }
+            setLiveState("ready", "обновить сцену");
+          })
+          .catch(() => {
+            setLiveState("error", "offline");
+          })
+          .finally(() => {
+            refreshPromise = null;
+          });
+
+        return refreshPromise;
+      };
+
+      const canAutoRefresh = () => {
+        if (document.visibilityState !== "visible") {
+          return false;
+        }
+        if (refreshPromise || dashboardRoot.querySelector(".is-pending")) {
+          return false;
+        }
+        const activeElement = document.activeElement;
+        if (!activeElement || !dashboardRoot.contains(activeElement)) {
+          return true;
+        }
+        return !isInteractiveField(activeElement);
+      };
+
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const refreshButton = target.closest("[data-manual-refresh]");
+        if (refreshButton) {
+          event.preventDefault();
+          refreshDashboard({ silent: false });
+          return;
+        }
+        const categoryButton = target.closest("[data-whoami-category-choice]");
+        if (categoryButton && dashboardRoot.contains(categoryButton)) {
+          event.preventDefault();
+          const picker = categoryButton.closest("[data-whoami-category-picker]");
+          syncWhoamiCategoryPicker(picker, categoryButton.dataset.whoamiCategoryChoice || "");
+          if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+            const form = picker.closest("form");
+            if (form instanceof HTMLFormElement) {
+              form.requestSubmit();
+            }
+          }
+          return;
+        }
+        const spyCategoryButton = target.closest("[data-spy-category-choice]");
+        if (spyCategoryButton && dashboardRoot.contains(spyCategoryButton)) {
+          event.preventDefault();
+          const picker = spyCategoryButton.closest("[data-spy-category-picker]");
+          syncSpyCategoryPicker(picker, spyCategoryButton.dataset.spyCategoryChoice || "");
+          if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+            const form = picker.closest("form");
+            if (form instanceof HTMLFormElement) {
+              form.requestSubmit();
+            }
+          }
+          return;
+        }
+        const button = target.closest("[data-kind-choice]");
+        if (!button || !dashboardRoot.contains(button)) {
+          return;
+        }
+        const picker = button.closest("[data-kind-picker]");
+        syncKindPicker(picker, button.dataset.kindChoice || "");
+      });
+
+      document.addEventListener("submit", async (event) => {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement) || !form.matches("[data-game-action-form]") || !dashboardRoot.contains(form)) {
+          return;
+        }
+        event.preventDefault();
+
+        const panel = form.closest("[data-game-panel], [data-create-game-panel], .panel");
+        const payload = new URLSearchParams(new FormData(form));
+        const endpoint = form.getAttribute("action") || window.location.pathname;
+        setPending(panel, true);
+
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+              "X-Requested-With": "fetch"
+            },
+            body: payload
+          });
+
+          const data = await response.json().catch(() => null);
+          const message = data?.message || (response.ok ? "Действие выполнено." : "Не удалось выполнить действие.");
+          showToast(message, data?.ok === false || !response.ok ? "error" : "ok");
+
+          const redirect = typeof data?.redirect === "string" ? data.redirect : "";
+          const canStayOnGames = redirect.startsWith("/app/games");
+          if (redirect && !canStayOnGames) {
+            document.body.classList.add("is-route-transition");
+            window.setTimeout(() => {
+              window.location.assign(redirect);
+            }, 260);
+            return;
+          }
+
+          await refreshDashboard({ silent: false });
+          if (panel && response.ok) {
+            panel.classList.add("is-complete");
+            window.setTimeout(() => {
+              panel.classList.remove("is-complete");
+            }, 1200);
+          }
+        } catch (error) {
+          showToast("Сервер недоступен. Повторите попытку.", "error");
+          setLiveState("error", "offline");
+        } finally {
+          setPending(panel, false);
+        }
+      });
+
+      document.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLSelectElement) || !target.matches("[data-create-chat-select]")) {
+          return;
+        }
+        const form = target.closest("form");
+        if (form instanceof HTMLElement) {
+          syncAllWhoamiCategoryPickers(form);
+          syncAllSpyCategoryPickers(form);
+        }
+      });
+
+      syncAllKindPickers(dashboardRoot);
+      syncAllWhoamiCategoryPickers(dashboardRoot);
+      syncAllSpyCategoryPickers(dashboardRoot);
+      if (manualRefreshButton instanceof HTMLElement) {
+        manualRefreshButton.setAttribute("aria-label", "Обновить сцену");
+      }
+      setLiveState("ready", "обновить сцену");
+      window.setInterval(() => {
+        if (canAutoRefresh()) {
+          refreshDashboard({ silent: true });
+        }
+      }, AUTO_REFRESH_MS);
+    })();
+  </script>
+{% endblock %}

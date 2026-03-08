@@ -1,0 +1,747 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Группа</span>
+      <h1>{{ chat_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">chat id {{ chat_id }}</div>
+      <div class="hero-chip">ranked insights</div>
+      <div class="hero-chip">settings control</div>
+    </div>
+  </section>
+
+  <section class="metrics-grid">
+    {% for metric in metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    {% for panel in dashboard_panels %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>{{ panel.title }}</h2>
+        </div>
+        {% if panel.empty_text %}
+          <p class="empty-text">{{ panel.empty_text }}</p>
+        {% else %}
+          <div class="list-stack compact">
+            {% for row in panel.rows %}
+              <div class="stat-row">
+                <div>
+                  <strong>{{ row.title }}</strong>
+                  <p>{{ row.meta }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Ваш доступ</h2>
+      </div>
+      <div class="list-stack compact">
+        {% for row in access_rows %}
+          <div class="stat-row">
+            <div>
+              <strong>{{ row.title }}</strong>
+              <p>{{ row.meta }}</p>
+            </div>
+            <span>{{ row.value }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Роли и ранги команд</h2>
+      </div>
+      <h3 class="subheading">Роли</h3>
+      <div class="list-stack compact">
+        {% for role in roles %}
+          <div class="stat-row">
+            <div>
+              <strong>{{ role.title }}</strong>
+              <p>{{ role.meta }}</p>
+            </div>
+            <span class="role-permissions">{{ role.permissions }}</span>
+          </div>
+        {% endfor %}
+      </div>
+
+      <h3 class="subheading">Ранги команд</h3>
+      {% if command_rules %}
+        <div class="list-stack compact">
+          {% for rule in command_rules %}
+            <div class="stat-row">
+              <div>
+                <strong>{{ rule.command }}</strong>
+                <p>Минимальная роль</p>
+              </div>
+              <span>{{ rule.role }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Индивидуальные ограничения команд пока не заданы.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="leaderboard-grid">
+    {% for board in leaderboards %}
+      <article class="panel leaderboard-panel accent-{{ board.accent }}">
+        <div class="panel-head">
+          <div>
+            <h2>{{ board.title }}</h2>
+            <p class="panel-subtitle">{{ board.subtitle }}</p>
+          </div>
+        </div>
+        {% if board.rows %}
+          <div class="list-stack compact">
+            {% for row in board.rows %}
+              <div class="rank-row">
+                <span class="rank-no">{{ row.position }}</span>
+                <div class="rank-copy">
+                  <strong>{{ row.name }}</strong>
+                  <p>{{ row.secondary }}</p>
+                </div>
+                <span class="rank-value">{{ row.primary }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Для этого рейтинга пока не хватает данных.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="panel settings-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Настройки чата</h2>
+        <p class="panel-subtitle">Редактирование вынесено в веб-форму, а не в огромный текстовый блок.</p>
+      </div>
+      <a class="button ghost small" href="{{ admin_docs_url }}" data-docs-link>Документация админа</a>
+    </div>
+    <div class="banner banner-{{ manage_settings_tone }}">{{ manage_settings_note }}</div>
+
+    {% for section in settings_sections %}
+      <section class="settings-section">
+        <h3 class="subheading">{{ section.title }}</h3>
+        <div class="settings-grid">
+          {% for item in section["items"] %}
+            <article
+              class="setting-card"
+              data-setting-card
+              data-setting-key="{{ item.key }}"
+              data-setting-title="{{ item.title }}"
+              {% if item.input_kind == "select" %}data-setting-saved-value="{{ item.current_value|lower }}"{% endif %}
+            >
+              <div class="setting-head">
+                <div class="setting-title-row">
+                  <strong>{{ item.title }}</strong>
+                  <a
+                    class="setting-doc-link"
+                    href="{{ admin_docs_url }}#{{ item.doc_anchor }}"
+                    data-docs-link
+                    aria-label="Открыть документацию по настройке {{ item.title }}"
+                    title="Открыть документацию"
+                  >?</a>
+                </div>
+                <code>{{ item.key }}</code>
+              </div>
+              <p class="setting-description">{{ item.description }}</p>
+              <p class="helper-text setting-values">
+                Текущее: <strong data-setting-current>{{ item.current_value }}</strong> • env default: <strong data-setting-default>{{ item.default_value }}</strong>
+              </p>
+              <p class="helper-text">{{ item.hint }}</p>
+
+              {% if item.editable %}
+                <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
+                  <input type="hidden" name="key" value="{{ item.key }}">
+                  {% if item.input_kind == "select" %}
+                    <select name="value">
+                      {% for option in item.options %}
+                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% elif item.input_kind == "textarea" %}
+                    <textarea name="value" rows="5">{{ item.current_value }}</textarea>
+                  {% else %}
+                    <input type="text" name="value" value="{{ item.current_value }}">
+                  {% endif %}
+                  <button type="submit" class="button primary small">Сохранить</button>
+                </form>
+                <form class="setting-reset" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="reset">
+                  <input type="hidden" name="key" value="{{ item.key }}">
+                  <input type="hidden" name="value" value="default">
+                  <button type="submit" class="button ghost small">Сбросить</button>
+                </form>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Audit Log</h2>
+          <p class="panel-subtitle">Свежие действия бота и админов в этой группе.</p>
+        </div>
+        <a class="button ghost small" href="/app/chat/{{ chat_id }}/audit">Открыть всю ленту</a>
+      </div>
+      {% if audit_rows %}
+        <div class="list-stack compact">
+          {% for row in audit_rows[:10] %}
+            <div class="stat-row">
+              <div>
+                <strong>{{ row.action }}</strong>
+                <p>{{ row.description }}</p>
+              </div>
+              <span>{{ row.when }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Логи пока пусты.</p>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Алиасы команд</h2>
+          <p class="panel-subtitle">Веб-редактор alias-слоя без кавычек и ручного ввода в чате.</p>
+        </div>
+      </div>
+      {% if can_manage_settings %}
+        <form class="settings-grid" method="post" action="/app/chat/{{ chat_id }}/aliases">
+          <article class="setting-card">
+            <div class="setting-head">
+              <strong>Новый алиас</strong>
+              <code>setalias</code>
+            </div>
+            <p class="setting-description">Источник должен быть стандартным текстовым триггером, например «топ» или «крафт».</p>
+            <input type="text" name="source_trigger" placeholder="Источник, например: топ">
+            <input type="text" name="alias_text" placeholder="Новый алиас, например: рейтинг">
+            <button type="submit" class="button primary small">Сохранить алиас</button>
+          </article>
+        </form>
+      {% endif %}
+      {% if aliases %}
+        <div class="list-stack compact">
+          {% for alias in aliases %}
+            <form class="setting-card" method="post" action="/app/chat/{{ chat_id }}/aliases">
+              <div class="setting-head">
+                <strong>{{ alias.alias }}</strong>
+                <code>{{ alias.command }}</code>
+              </div>
+              <p class="helper-text">source: {{ alias.source }}</p>
+              {% if can_manage_settings %}
+                <input type="hidden" name="alias_text" value="{{ alias.alias }}">
+                <input type="text" name="source_trigger" value="{{ alias.source }}">
+                <div class="top-actions">
+                  <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
+                  <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>
+                </div>
+              {% endif %}
+            </form>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Кастомные алиасы пока не заданы.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Смарт-триггеры</h2>
+        <p class="panel-subtitle">Автоответы по точному совпадению, вхождению фразы и началу сообщения прямо из панели.</p>
+      </div>
+    </div>
+
+    <article class="setting-card">
+      <div class="setting-head">
+        <strong>Переменные шаблонов</strong>
+        <code>/triggervars</code>
+      </div>
+      <p class="setting-description">
+        Один и тот же набор переменных работает в Telegram и в web. Полный каталог доступен в
+        <a href="{{ trigger_template_docs_url }}">админ-документации</a>.
+      </p>
+      <div class="token-cloud">
+        {% for item in trigger_template_quick_rows %}
+          <span class="token-chip" title="{{ item.description }}">{{ item.token }}</span>
+        {% endfor %}
+      </div>
+      <div class="list-stack compact">
+        {% for example in trigger_template_examples %}
+          <div class="helper-text"><code>{{ example }}</code></div>
+        {% endfor %}
+      </div>
+    </article>
+
+    {% if can_manage_settings %}
+      <div class="settings-grid">
+        <form class="setting-card" method="post" action="/app/chat/{{ chat_id }}/triggers">
+          <div class="setting-head">
+            <strong>Новый триггер</strong>
+            <code>chat_triggers</code>
+          </div>
+          <input type="text" name="keyword" placeholder="Ключевое слово или фраза">
+          <select name="match_type">
+            <option value="contains">Содержит фразу</option>
+            <option value="exact">Точное совпадение</option>
+            <option value="starts_with">Начинается с</option>
+          </select>
+          <textarea name="response_text" rows="4" placeholder="Ответ текстом. Поддерживает {user}, {chat}, {args}, {reply_user}..."></textarea>
+          <p class="helper-text">Для буквальных фигурных скобок используйте {{ '{{' }} и {{ '}}' }}.</p>
+          <input type="text" name="media_file_id" placeholder="media_file_id (опционально)">
+          <input type="text" name="media_type" placeholder="media_type: photo / sticker / video">
+          <button type="submit" class="button primary small">Сохранить триггер</button>
+        </form>
+      </div>
+    {% endif %}
+
+    {% if triggers %}
+      <div class="settings-grid">
+        {% for trigger in triggers %}
+          <form class="setting-card" method="post" action="/app/chat/{{ chat_id }}/triggers">
+            <input type="hidden" name="trigger_id" value="{{ trigger.id }}">
+            <div class="setting-head">
+              <strong>{{ trigger.keyword }}</strong>
+              <code>{{ trigger.match_type_label }}</code>
+            </div>
+            <p class="helper-text">{{ trigger.preview }}</p>
+            {% if can_manage_settings %}
+              <input type="text" name="keyword" value="{{ trigger.keyword }}">
+              <select name="match_type">
+                <option value="contains" {% if trigger.match_type == "contains" %}selected{% endif %}>Содержит фразу</option>
+                <option value="exact" {% if trigger.match_type == "exact" %}selected{% endif %}>Точное совпадение</option>
+                <option value="starts_with" {% if trigger.match_type == "starts_with" %}selected{% endif %}>Начинается с</option>
+              </select>
+              <textarea name="response_text" rows="4" placeholder="Ответ текстом">{{ trigger.response_text }}</textarea>
+              <p class="helper-text">Можно использовать шаблонные переменные вроде {{ '{user}' }}, {{ '{reply_user}' }}, {{ '{chat}' }}, {{ '{args}' }}.</p>
+              <input type="text" name="media_file_id" value="{{ trigger.media_file_id }}" placeholder="media_file_id (опционально)">
+              <input type="text" name="media_type" value="{{ trigger.media_type }}" placeholder="media_type: photo / sticker / video">
+              <div class="top-actions">
+                <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
+                <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>
+              </div>
+            {% endif %}
+          </form>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-text">Смарт-триггеры ещё не созданы.</p>
+    {% endif %}
+  </section>
+
+  <dialog class="docs-guard-dialog" id="docs-guard-dialog">
+    <form method="dialog" class="docs-guard-card">
+      <div class="panel-head">
+        <div>
+          <h2>Есть несохранённые изменения</h2>
+          <p class="panel-subtitle">Перед переходом в документацию можно сохранить все текущие правки или открыть справку без сохранения.</p>
+        </div>
+      </div>
+      <div class="banner banner-error">
+        Ниже список всех изменённых настроек на этой странице.
+      </div>
+      <div class="docs-guard-list" data-docs-change-list></div>
+      <div class="top-actions docs-guard-actions">
+        <button type="button" class="button primary small" data-docs-save-and-go>Сохранить и перейти</button>
+        <button type="button" class="button ghost small" data-docs-discard-and-go>Перейти без сохранения</button>
+        <button type="button" class="button subtle small" data-docs-cancel>Остаться</button>
+      </div>
+    </form>
+  </dialog>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const forms = [...document.querySelectorAll(".setting-form, .setting-reset")];
+      const settingCards = [...document.querySelectorAll("[data-setting-card]")];
+      const docsLinks = [...document.querySelectorAll("[data-docs-link]")];
+      if (!forms.length && !docsLinks.length) {
+        return;
+      }
+
+      const toastRegion = document.getElementById("toast-region");
+      const docsDialog = document.getElementById("docs-guard-dialog");
+      const docsChangeList = docsDialog?.querySelector("[data-docs-change-list]");
+      const saveAndGoButton = docsDialog?.querySelector("[data-docs-save-and-go]");
+      const discardAndGoButton = docsDialog?.querySelector("[data-docs-discard-and-go]");
+      const cancelDocsButton = docsDialog?.querySelector("[data-docs-cancel]");
+      let pendingDocsHref = "";
+      let allowUnload = false;
+
+      const showToast = (message, tone = "ok") => {
+        if (!toastRegion || !message) {
+          return;
+        }
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.dataset.tone = tone;
+        toast.textContent = message;
+        toastRegion.appendChild(toast);
+        window.setTimeout(() => {
+          toast.classList.add("is-hiding");
+        }, 2400);
+        window.setTimeout(() => {
+          toast.remove();
+        }, 2800);
+      };
+
+      const getEditableField = (card) => card?.querySelector(".setting-form [name='value']");
+
+      const normalizeValue = (field, value) => {
+        const normalized = String(value ?? "");
+        if (field instanceof HTMLSelectElement) {
+          return normalized.toLowerCase();
+        }
+        return normalized;
+      };
+
+      const getSavedValue = (card) => {
+        const field = getEditableField(card);
+        if (!field) {
+          return "";
+        }
+        if (field instanceof HTMLSelectElement) {
+          return card.dataset.settingSavedValue || normalizeValue(field, field.value);
+        }
+        return field.defaultValue;
+      };
+
+      const getCurrentValue = (card) => {
+        const field = getEditableField(card);
+        if (!field) {
+          return "";
+        }
+        return normalizeValue(field, field.value);
+      };
+
+      const summarizeValue = (value) => {
+        const compact = String(value ?? "").replace(/\s+/g, " ").trim();
+        if (!compact) {
+          return "пусто";
+        }
+        if (compact.length <= 84) {
+          return compact;
+        }
+        return `${compact.slice(0, 81)}...`;
+      };
+
+      const isDirty = (card) => {
+        const field = getEditableField(card);
+        if (!field) {
+          return false;
+        }
+        return getCurrentValue(card) !== getSavedValue(card);
+      };
+
+      const syncDirtyState = (card) => {
+        if (!card) {
+          return;
+        }
+        card.classList.toggle("is-dirty", isDirty(card));
+      };
+
+      const collectDirtyCards = () => settingCards.filter((card) => isDirty(card));
+
+      const renderDirtyChanges = (cards) => {
+        if (!docsChangeList) {
+          return;
+        }
+        docsChangeList.innerHTML = "";
+
+        for (const card of cards) {
+          const item = document.createElement("div");
+          item.className = "docs-guard-item";
+
+          const title = document.createElement("strong");
+          title.textContent = card.dataset.settingTitle || card.dataset.settingKey || "Настройка";
+
+          const meta = document.createElement("p");
+          meta.textContent = `${card.dataset.settingKey || "key"}: ${summarizeValue(getSavedValue(card))} -> ${summarizeValue(getCurrentValue(card))}`;
+
+          item.appendChild(title);
+          item.appendChild(meta);
+          docsChangeList.appendChild(item);
+        }
+      };
+
+      const setDialogPending = (pending) => {
+        if (!docsDialog) {
+          return;
+        }
+        docsDialog.classList.toggle("is-saving", pending);
+        for (const button of docsDialog.querySelectorAll("button")) {
+          button.disabled = pending;
+        }
+      };
+
+      const setPending = (card, pending) => {
+        if (!card) {
+          return;
+        }
+        card.classList.toggle("is-saving", pending);
+        for (const button of card.querySelectorAll("button")) {
+          button.disabled = pending;
+        }
+      };
+
+      const applySettingState = (card, setting) => {
+        if (!card || !setting) {
+          return;
+        }
+
+        const currentValue = card.querySelector("[data-setting-current]");
+        if (currentValue) {
+          currentValue.textContent = setting.current_value;
+        }
+
+        const defaultValue = card.querySelector("[data-setting-default]");
+        if (defaultValue) {
+          defaultValue.textContent = setting.default_value;
+        }
+
+        const input = getEditableField(card);
+        if (!input) {
+          return;
+        }
+
+        if (input instanceof HTMLSelectElement) {
+          input.value = String(setting.current_value).toLowerCase();
+          card.dataset.settingSavedValue = String(setting.current_value).toLowerCase();
+        } else {
+          input.value = setting.current_value;
+          input.defaultValue = setting.current_value;
+        }
+
+        syncDirtyState(card);
+      };
+
+      const sendSettingRequest = async ({ card, actionUrl, payload }) => {
+        if (!actionUrl) {
+          return { ok: false, data: null };
+        }
+        setPending(card, true);
+
+        try {
+          const response = await fetch(actionUrl, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "X-Requested-With": "fetch"
+            },
+            credentials: "same-origin",
+            body: payload
+          });
+          const data = await response.json().catch(() => null);
+          return {
+            ok: Boolean(response.ok && data && data.ok),
+            data,
+          };
+        } catch (error) {
+          return { ok: false, data: null };
+        } finally {
+          setPending(card, false);
+        }
+      };
+
+      const saveDirtyCards = async () => {
+        const dirtyCards = collectDirtyCards();
+        for (const card of dirtyCards) {
+          const form = card.querySelector(".setting-form");
+          const field = getEditableField(card);
+          if (!(form instanceof HTMLFormElement) || !field) {
+            continue;
+          }
+
+          const payload = new URLSearchParams();
+          payload.set("key", card.dataset.settingKey || "");
+          payload.set("value", field.value);
+
+          const result = await sendSettingRequest({
+            card,
+            actionUrl: form.action,
+            payload,
+          });
+          if (!result.ok || !result.data) {
+            showToast(result.data?.message || "Не удалось сохранить часть настроек.", "error");
+            if (result.data?.redirect) {
+              allowUnload = true;
+              window.setTimeout(() => {
+                window.location.assign(result.data.redirect);
+              }, 250);
+            }
+            return false;
+          }
+
+          applySettingState(card, result.data.setting);
+        }
+        return true;
+      };
+
+      const openDocsDialog = (href) => {
+        if (!docsDialog || typeof docsDialog.showModal !== "function") {
+          const summary = collectDirtyCards()
+            .map((card) => `${card.dataset.settingTitle || card.dataset.settingKey}: ${summarizeValue(getSavedValue(card))} -> ${summarizeValue(getCurrentValue(card))}`)
+            .join("\n");
+          const saveFirst = window.confirm(
+            `Есть несохранённые настройки:\n\n${summary}\n\nНажмите OK, чтобы сохранить их и перейти в документацию. Нажмите Cancel, чтобы выбрать переход без сохранения или остаться.`
+          );
+          if (saveFirst) {
+            saveDirtyCards().then((saved) => {
+              if (!saved) {
+                return;
+              }
+              allowUnload = true;
+              window.location.assign(href);
+            });
+            return;
+          }
+          const discardChanges = window.confirm(
+            `Открыть документацию без сохранения?\n\nИзменения будут потеряны:\n\n${summary}`
+          );
+          if (discardChanges) {
+            allowUnload = true;
+            window.location.assign(href);
+          }
+          return;
+        }
+
+        pendingDocsHref = href;
+        renderDirtyChanges(collectDirtyCards());
+        docsDialog.showModal();
+      };
+
+      for (const card of settingCards) {
+        const field = getEditableField(card);
+        if (!field) {
+          continue;
+        }
+        field.addEventListener("input", () => syncDirtyState(card));
+        field.addEventListener("change", () => syncDirtyState(card));
+        syncDirtyState(card);
+      }
+
+      for (const form of forms) {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+
+          const card = form.closest("[data-setting-card]");
+          const payload = new URLSearchParams(new FormData(form));
+          const result = await sendSettingRequest({
+            card,
+            actionUrl: form.action,
+            payload,
+          });
+
+          if (!result.ok || !result.data) {
+            showToast(result.data?.message || "Не удалось сохранить настройку.", "error");
+            if (result.data?.redirect) {
+              allowUnload = true;
+              window.setTimeout(() => {
+                window.location.assign(result.data.redirect);
+              }, 250);
+            }
+            return;
+          }
+
+          applySettingState(card, result.data.setting);
+          showToast(result.data.message || "Сохранено.", "ok");
+        });
+      }
+
+      for (const link of docsLinks) {
+        link.addEventListener("click", (event) => {
+          const href = link.getAttribute("href");
+          if (!href) {
+            return;
+          }
+          const dirtyCards = collectDirtyCards();
+          if (!dirtyCards.length) {
+            allowUnload = true;
+            return;
+          }
+          event.preventDefault();
+          openDocsDialog(href);
+        });
+      }
+
+      if (saveAndGoButton) {
+        saveAndGoButton.addEventListener("click", async () => {
+          if (!pendingDocsHref) {
+            return;
+          }
+          setDialogPending(true);
+          const saved = await saveDirtyCards();
+          setDialogPending(false);
+          if (!saved) {
+            return;
+          }
+          allowUnload = true;
+          docsDialog?.close();
+          window.location.assign(pendingDocsHref);
+        });
+      }
+
+      if (discardAndGoButton) {
+        discardAndGoButton.addEventListener("click", () => {
+          if (!pendingDocsHref) {
+            return;
+          }
+          allowUnload = true;
+          docsDialog?.close();
+          window.location.assign(pendingDocsHref);
+        });
+      }
+
+      if (cancelDocsButton) {
+        cancelDocsButton.addEventListener("click", () => {
+          docsDialog?.close();
+        });
+      }
+
+      docsDialog?.addEventListener("close", () => {
+        pendingDocsHref = "";
+        setDialogPending(false);
+      });
+
+      window.addEventListener("beforeunload", (event) => {
+        if (allowUnload || !collectDirtyCards().length) {
+          return;
+        }
+        event.preventDefault();
+        event.returnValue = "";
+      });
+    })();
+  </script>
+{% endblock %}

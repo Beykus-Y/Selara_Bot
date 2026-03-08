@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <link rel="stylesheet" href="{{ static_url('panel.css') }}">
+</head>
+<body class="page-{{ page_name }}">
+  <div class="bg-layer bg-stars"></div>
+  <div class="bg-layer bg-glow bg-glow-a"></div>
+  <div class="bg-layer bg-glow bg-glow-b"></div>
+  <div class="bg-layer bg-grid"></div>
+  {% if page_name == "games" %}
+    <div class="bg-layer bg-party-ribbons"></div>
+    <div class="bg-layer bg-party-confetti"></div>
+  {% endif %}
+
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="{{ home_href|default('/app') }}">
+        <span class="brand-mark"></span>
+        <span>
+          <strong>Selara</strong>
+          <small>{{ brand_subtitle|default('игровой центр' if page_name == 'games' else 'веб-панель') }}</small>
+        </span>
+      </a>
+      <nav class="top-actions">
+        {% for link in top_links %}
+          <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+        {% endfor %}
+        {% if show_logout %}
+          <form method="post" action="/logout">
+            <button type="submit" class="button ghost">Выйти</button>
+          </form>
+        {% endif %}
+      </nav>
+    </header>
+
+    {% if flash %}
+      <div class="banner banner-ok">{{ flash }}</div>
+    {% endif %}
+    {% if error %}
+      <div class="banner banner-error">{{ error }}</div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+  </main>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

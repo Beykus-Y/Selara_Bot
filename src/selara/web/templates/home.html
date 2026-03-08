@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Личный кабинет</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">web + telegram</div>
+      <div class="hero-chip">one-time auth</div>
+      <div class="hero-chip">group insights</div>
+    </div>
+  </section>
+
+  <section class="metrics-grid">
+    {% for metric in metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Админ-группы</h2>
+        <span class="panel-tag">{{ admin_groups|length }}</span>
+      </div>
+      {% if admin_groups %}
+        <div class="list-stack">
+          {% for group in admin_groups %}
+            <a class="list-card" href="{{ group.href }}">
+              <div>
+                <strong>{{ group.title }}</strong>
+                <p>{{ group.meta }}</p>
+              </div>
+              <span class="pill pill-{{ group.badge }}">{{ group.badge }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Пока нет групп, где у вас есть права на управление ботом.</p>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Недавние группы</h2>
+        <span class="panel-tag">{{ activity_groups|length }}</span>
+      </div>
+      {% if activity_groups %}
+        <div class="list-stack">
+          {% for group in activity_groups %}
+            <a class="list-card" href="{{ group.href }}">
+              <div>
+                <strong>{{ group.title }}</strong>
+                <p>{{ group.meta }}</p>
+              </div>
+              <span class="pill pill-{{ group.badge }}">{{ group.badge }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Данные появятся после активности в группах с ботом.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <h2>{{ global_dashboard.title }}</h2>
+      </div>
+      {% if global_dashboard.empty_text %}
+        <p class="empty-text">{{ global_dashboard.empty_text }}</p>
+      {% else %}
+        <div class="list-stack compact">
+          {% for row in global_dashboard.rows %}
+            <div class="stat-row">
+              <div>
+                <strong>{{ row.title }}</strong>
+                <p>{{ row.meta }}</p>
+              </div>
+              <span>{{ row.value }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Безопасность</h2>
+      </div>
+      <div class="list-stack compact">
+        {% for item in security_items %}
+          <div class="security-card">
+            <strong>{{ item.title }}</strong>
+            <p>{{ item.text }}</p>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+{% endblock %}
