@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -241,6 +241,59 @@ class InlinePrivateMessage:
 
 TriggerMatchType = Literal["exact", "contains", "starts_with"]
 GraphRelationType = Literal["spouse", "parent", "child", "pet"]
+AchievementScope = Literal["chat", "global"]
+AchievementRarity = Literal["common", "uncommon", "rare", "epic", "legendary"]
+
+
+@dataclass(frozen=True)
+class AchievementDefinition:
+    id: str
+    scope: AchievementScope
+    title: str
+    description: str
+    hidden: bool
+    rarity: AchievementRarity
+    icon: str
+    sort_order: int
+    enabled: bool
+    condition_type: str
+    condition_payload: dict[str, Any]
+    tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AchievementAward:
+    achievement_id: str
+    scope: AchievementScope
+    awarded_at: datetime
+    award_reason: str | None = None
+    meta_json: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AchievementAwardResult:
+    awarded: bool
+    achievement_id: str
+    scope: AchievementScope
+    awarded_at: datetime | None
+    holders_count: int
+    holders_percent: float
+
+
+@dataclass(frozen=True)
+class AchievementView:
+    achievement_id: str
+    scope: AchievementScope
+    title: str
+    description: str
+    icon: str
+    rarity: AchievementRarity
+    hidden: bool
+    awarded: bool
+    awarded_at: datetime | None
+    holders_count: int
+    holders_percent: float
+    sort_order: int
 
 
 @dataclass(frozen=True)

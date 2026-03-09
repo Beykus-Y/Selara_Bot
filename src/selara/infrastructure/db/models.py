@@ -1,6 +1,21 @@
 from datetime import date, datetime
 
-from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from selara.infrastructure.db.base import Base
@@ -50,6 +65,7 @@ class UserChatActivityModel(Base):
         primary_key=True,
     )
     message_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    is_active_member: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     display_name_override: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_prefix: Mapped[str | None] = mapped_column(String(96), nullable=True)
@@ -64,6 +80,7 @@ class UserChatActivityModel(Base):
 
 Index("idx_user_chat_activity_chat_count", UserChatActivityModel.chat_id, UserChatActivityModel.message_count)
 Index("idx_user_chat_activity_chat_last_seen", UserChatActivityModel.chat_id, UserChatActivityModel.last_seen_at)
+Index("idx_user_chat_activity_chat_active", UserChatActivityModel.chat_id, UserChatActivityModel.is_active_member)
 
 
 class UserChatProfileModel(Base):
@@ -1250,3 +1267,132 @@ class WebSessionModel(Base):
 
 Index("idx_web_sessions_user_created", WebSessionModel.user_id, WebSessionModel.created_at)
 Index("idx_web_sessions_expires", WebSessionModel.expires_at, WebSessionModel.revoked_at)
+
+
+class UserChatAchievementModel(Base):
+    __tablename__ = "user_chat_achievement"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    achievement_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    award_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", "achievement_id", name="uq_user_chat_achievement"),
+    )
+
+
+Index("idx_user_chat_achievement_chat_user", UserChatAchievementModel.chat_id, UserChatAchievementModel.user_id)
+Index("idx_user_chat_achievement_chat_achievement", UserChatAchievementModel.chat_id, UserChatAchievementModel.achievement_id)
+Index("idx_user_chat_achievement_user", UserChatAchievementModel.user_id)
+Index("idx_user_chat_achievement_achievement", UserChatAchievementModel.achievement_id)
+
+
+class UserGlobalAchievementModel(Base):
+    __tablename__ = "user_global_achievement"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    achievement_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    award_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "achievement_id", name="uq_user_global_achievement"),
+    )
+
+
+Index("idx_user_global_achievement_user", UserGlobalAchievementModel.user_id)
+Index("idx_user_global_achievement_achievement", UserGlobalAchievementModel.achievement_id)
+
+
+class ChatAchievementStatsModel(Base):
+    __tablename__ = "chat_achievement_stats"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    achievement_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    holders_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    holders_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
+    active_members_base_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "achievement_id", name="uq_chat_achievement_stats"),
+    )
+
+
+Index("idx_chat_achievement_stats_chat", ChatAchievementStatsModel.chat_id)
+Index("idx_chat_achievement_stats_chat_achievement", ChatAchievementStatsModel.chat_id, ChatAchievementStatsModel.achievement_id)
+
+
+class GlobalAchievementStatsModel(Base):
+    __tablename__ = "global_achievement_stats"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    achievement_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    holders_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    holders_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
+    global_base_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("achievement_id", name="uq_global_achievement_stats"),
+    )
+
+
+Index("idx_global_achievement_stats_achievement", GlobalAchievementStatsModel.achievement_id)
+
+
+class ChatMetricsModel(Base):
+    __tablename__ = "chat_metrics"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    active_members_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class GlobalMetricsModel(Base):
+    __tablename__ = "global_metrics"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default="1")
+    global_users_base_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

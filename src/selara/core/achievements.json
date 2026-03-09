@@ -1,0 +1,65 @@
+[
+  {
+    "id": "first_message",
+    "scope": "chat",
+    "title": "Первый след",
+    "description": "Отправить первое сообщение в чате",
+    "hidden": false,
+    "rarity": "common",
+    "icon": "1st",
+    "sort_order": 10,
+    "enabled": true,
+    "condition": {
+      "type": "first_message"
+    },
+    "tags": ["messages", "activity"]
+  },
+  {
+    "id": "chat_100_messages",
+    "scope": "chat",
+    "title": "Болтун",
+    "description": "Отправить 100 сообщений в чате",
+    "hidden": false,
+    "rarity": "common",
+    "icon": "100",
+    "sort_order": 20,
+    "enabled": true,
+    "condition": {
+      "type": "message_count_gte",
+      "value": 100
+    },
+    "tags": ["messages", "activity"]
+  },
+  {
+    "id": "chat_7_days_streak",
+    "scope": "chat",
+    "title": "На связи",
+    "description": "Проявлять активность 7 дней подряд в чате",
+    "hidden": false,
+    "rarity": "uncommon",
+    "icon": "7d",
+    "sort_order": 30,
+    "enabled": true,
+    "condition": {
+      "type": "streak_days_gte",
+      "value": 7
+    },
+    "tags": ["messages", "streak"]
+  },
+  {
+    "id": "global_3_achievements",
+    "scope": "global",
+    "title": "Коллекционер",
+    "description": "Открыть 3 достижения",
+    "hidden": false,
+    "rarity": "rare",
+    "icon": "3x",
+    "sort_order": 110,
+    "enabled": true,
+    "condition": {
+      "type": "achievements_count_gte",
+      "value": 3
+    },
+    "tags": ["meta", "collection"]
+  }
+]

@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.domain.entities import UserSnapshot
+from selara.infrastructure.db.achievement_metrics import increment_global_users_base_count
 from selara.infrastructure.db.models import UserModel, WebLoginCodeModel, WebSessionModel
 
 
@@ -144,6 +145,22 @@ class SqlAlchemyWebAuthRepository:
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
 
         if dialect == "postgresql":
+            insert_stmt = (
+                pg_insert(UserModel)
+                .values(
+                    telegram_user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                )
+                .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+                .returning(UserModel.telegram_user_id)
+            )
+            inserted_user_id = (await self._session.execute(insert_stmt)).scalar_one_or_none()
+            if inserted_user_id is not None:
+                await increment_global_users_base_count(self._session)
+
             stmt = pg_insert(UserModel).values(
                 telegram_user_id=user.telegram_user_id,
                 username=user.username,
@@ -175,6 +192,8 @@ class SqlAlchemyWebAuthRepository:
                     is_bot=user.is_bot,
                 )
             )
+            await self._session.flush()
+            await increment_global_users_base_count(self._session)
             return
 
         row.username = user.username

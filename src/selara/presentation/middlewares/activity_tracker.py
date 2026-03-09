@@ -38,6 +38,7 @@ class ActivityTrackerMiddleware(BaseMiddleware):
         if isinstance(event, Message):
             settings = data.get("settings")
             repo = data.get("activity_repo")
+            achievement_orchestrator = data.get("achievement_orchestrator")
 
             if settings is not None and repo is not None and is_trackable_message(event, settings.supported_chat_types):
                 if _is_profile_lookup_message(event):
@@ -54,6 +55,12 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                     is_bot=event.from_user.is_bot,
                     event_at=event.date,
                 )
+                if achievement_orchestrator is not None and event.from_user is not None:
+                    await achievement_orchestrator.process_message(
+                        chat_id=event.chat.id,
+                        user_id=event.from_user.id,
+                        event_at=event.date,
+                    )
                 try:
                     await GAME_STORE.publish_event(
                         event_type="chat_activity",

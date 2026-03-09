@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,10 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
+    achievements_catalog_path: str = Field(
+        default="src/selara/core/achievements.json",
+        validation_alias="ACHIEVEMENTS_CATALOG_PATH",
+    )
 
     top_limit_default: int = Field(default=10, validation_alias="TOP_LIMIT_DEFAULT")
     top_limit_max: int = Field(default=50, validation_alias="TOP_LIMIT_MAX")
@@ -111,6 +116,10 @@ class Settings(BaseSettings):
             candidate = domain if "://" in domain else f"https://{domain}"
             return normalize_base_url(candidate)
         return normalize_base_url(self.web_base_url)
+
+    @property
+    def resolved_achievements_catalog_path(self) -> Path:
+        return Path(self.achievements_catalog_path).expanduser().resolve()
 
 
 @lru_cache(maxsize=1)

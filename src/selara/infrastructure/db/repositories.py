@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -21,6 +21,7 @@ from selara.core.roles import (
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.domain.entities import (
     ActivityStats,
+    AchievementAward,
     BotRole,
     ChatAuditLogEntry,
     ChatActivitySummary,
@@ -69,6 +70,7 @@ from selara.domain.economy_entities import (
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
     ChatAuditLogModel,
+    ChatAchievementStatsModel,
     ChatAuctionModel,
     ChatGlobalBoostModel,
     ChatCommandAccessRuleModel,
@@ -88,6 +90,7 @@ from selara.infrastructure.db.models import (
     EconomyPlotModel,
     EconomyPrivateContextModel,
     EconomyTransferDailyModel,
+    GlobalAchievementStatsModel,
     InlinePrivateMessageModel,
     MarriageModel,
     PairModel,
@@ -97,13 +100,22 @@ from selara.infrastructure.db.models import (
     UserChatActivityDailyModel,
     UserChatActivityMinuteModel,
     UserChatActivityModel,
+    UserChatAchievementModel,
     UserChatAnnouncementSubscriptionModel,
     UserChatAwardModel,
     UserChatBotRoleModel,
     UserChatModerationStateModel,
     UserChatProfileModel,
+    UserGlobalAchievementModel,
     UserKarmaVoteModel,
     UserModel,
+)
+from selara.infrastructure.db.achievement_metrics import (
+    adjust_chat_active_members_count,
+    compute_holders_percent,
+    increment_global_users_base_count,
+    set_chat_active_members_count,
+    set_global_users_base_count,
 )
 
 
@@ -146,6 +158,11 @@ class SqlAlchemyActivityRepository:
         # Keep entity upserts in a stable order to reduce PostgreSQL deadlock risk.
         await self._upsert_chat(chat)
         await self._upsert_user(user)
+        existing_activity = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
+        )
+        previous_is_active = bool(existing_activity.is_active_member) if existing_activity is not None else False
 
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
         if dialect == "postgresql":
@@ -153,12 +170,14 @@ class SqlAlchemyActivityRepository:
                 chat_id=chat.telegram_chat_id,
                 user_id=user.telegram_user_id,
                 message_count=1,
+                is_active_member=True,
                 last_seen_at=event_at,
             )
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 index_elements=[UserChatActivityModel.chat_id, UserChatActivityModel.user_id],
                 set_={
                     "message_count": UserChatActivityModel.message_count + 1,
+                    "is_active_member": True,
                     "last_seen_at": func.greatest(UserChatActivityModel.last_seen_at, insert_stmt.excluded.last_seen_at),
                     "updated_at": func.now(),
                 },
@@ -175,22 +194,90 @@ class SqlAlchemyActivityRepository:
                         chat_id=chat.telegram_chat_id,
                         user_id=user.telegram_user_id,
                         message_count=1,
+                        is_active_member=True,
                         last_seen_at=event_at,
                     )
                 )
             else:
                 activity.message_count += 1
+                activity.is_active_member = True
                 activity.last_seen_at = max(activity.last_seen_at, event_at)
                 activity.updated_at = datetime.now(timezone.utc)
 
         await self._upsert_activity_daily(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id, event_at=event_at)
         await self._upsert_activity_minute(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id, event_at=event_at)
         await self._session.flush()
+        if existing_activity is None or not previous_is_active:
+            await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=1)
 
         stats = await self.get_user_stats(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id)
         if stats is None:
             raise RuntimeError("Failed to load user stats after upsert")
         return stats
+
+    async def set_chat_member_active(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot,
+        is_active: bool,
+        event_at: datetime,
+    ) -> None:
+        await self._upsert_chat(chat)
+        await self._upsert_user(user)
+        existing_row = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
+        )
+        previous_is_active = bool(existing_row.is_active_member) if existing_row is not None else False
+
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if dialect == "postgresql":
+            insert_stmt = pg_insert(UserChatActivityModel).values(
+                chat_id=chat.telegram_chat_id,
+                user_id=user.telegram_user_id,
+                message_count=0,
+                is_active_member=is_active,
+                last_seen_at=event_at,
+            )
+            upsert_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=[UserChatActivityModel.chat_id, UserChatActivityModel.user_id],
+                set_={
+                    "is_active_member": is_active,
+                    "last_seen_at": func.greatest(UserChatActivityModel.last_seen_at, insert_stmt.excluded.last_seen_at),
+                    "updated_at": func.now(),
+                },
+            )
+            await self._session.execute(upsert_stmt)
+            await self._session.flush()
+            delta = int(is_active) - int(previous_is_active)
+            if delta != 0:
+                await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=delta)
+            return
+
+        row = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
+        )
+        if row is None:
+            self._session.add(
+                UserChatActivityModel(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=user.telegram_user_id,
+                    message_count=0,
+                    is_active_member=is_active,
+                    last_seen_at=event_at,
+                )
+            )
+        else:
+            row.is_active_member = is_active
+            row.last_seen_at = max(row.last_seen_at, event_at)
+            row.updated_at = datetime.now(timezone.utc)
+
+        await self._session.flush()
+        delta = int(is_active) - int(previous_is_active)
+        if delta != 0:
+            await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=delta)
 
     async def get_user_stats(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
         stmt = (
@@ -204,6 +291,163 @@ class SqlAlchemyActivityRepository:
 
         activity, user = row
         return self._to_stats(activity, user)
+
+    async def get_user_message_streak_days(self, *, chat_id: int, user_id: int) -> int:
+        stmt = (
+            select(UserChatActivityDailyModel.activity_date)
+            .where(
+                UserChatActivityDailyModel.chat_id == chat_id,
+                UserChatActivityDailyModel.user_id == user_id,
+                UserChatActivityDailyModel.message_count > 0,
+            )
+            .order_by(UserChatActivityDailyModel.activity_date.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        if not rows:
+            return 0
+
+        streak = 0
+        expected_day = rows[0]
+        for current_day in rows:
+            if current_day != expected_day:
+                break
+            streak += 1
+            expected_day = expected_day - timedelta(days=1)
+        return streak
+
+    async def count_total_achievements(self, *, user_id: int) -> int:
+        chat_count_stmt = select(func.count()).select_from(UserChatAchievementModel).where(UserChatAchievementModel.user_id == user_id)
+        global_count_stmt = select(func.count()).select_from(UserGlobalAchievementModel).where(UserGlobalAchievementModel.user_id == user_id)
+        chat_count = (await self._session.execute(chat_count_stmt)).scalar_one()
+        global_count = (await self._session.execute(global_count_stmt)).scalar_one()
+        return int(chat_count or 0) + int(global_count or 0)
+
+    async def list_user_chat_achievements(self, *, chat_id: int, user_id: int) -> list[AchievementAward]:
+        stmt = (
+            select(UserChatAchievementModel)
+            .where(
+                UserChatAchievementModel.chat_id == chat_id,
+                UserChatAchievementModel.user_id == user_id,
+            )
+            .order_by(UserChatAchievementModel.awarded_at.desc(), UserChatAchievementModel.id.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [
+            AchievementAward(
+                achievement_id=row.achievement_id,
+                scope="chat",
+                awarded_at=row.awarded_at,
+                award_reason=row.award_reason,
+                meta_json=row.meta_json,
+            )
+            for row in rows
+        ]
+
+    async def list_user_global_achievements(self, *, user_id: int) -> list[AchievementAward]:
+        stmt = (
+            select(UserGlobalAchievementModel)
+            .where(UserGlobalAchievementModel.user_id == user_id)
+            .order_by(UserGlobalAchievementModel.awarded_at.desc(), UserGlobalAchievementModel.id.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [
+            AchievementAward(
+                achievement_id=row.achievement_id,
+                scope="global",
+                awarded_at=row.awarded_at,
+                award_reason=row.award_reason,
+                meta_json=row.meta_json,
+            )
+            for row in rows
+        ]
+
+    async def get_chat_achievement_stats_map(self, *, chat_id: int) -> dict[str, tuple[int, float]]:
+        stmt = select(ChatAchievementStatsModel).where(ChatAchievementStatsModel.chat_id == chat_id)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {
+            row.achievement_id: (
+                int(row.holders_count),
+                float(row.holders_percent or 0),
+            )
+            for row in rows
+        }
+
+    async def get_global_achievement_stats_map(self) -> dict[str, tuple[int, float]]:
+        rows = (await self._session.execute(select(GlobalAchievementStatsModel))).scalars().all()
+        return {
+            row.achievement_id: (
+                int(row.holders_count),
+                float(row.holders_percent or 0),
+            )
+            for row in rows
+        }
+
+    async def rebuild_chat_achievement_state(self, *, chat_id: int) -> None:
+        active_count_stmt = select(func.count()).select_from(UserChatActivityModel).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.is_active_member.is_(True),
+        )
+        active_count = int((await self._session.execute(active_count_stmt)).scalar_one() or 0)
+        await set_chat_active_members_count(self._session, chat_id=chat_id, active_members_count=active_count)
+
+        rows = (
+            await self._session.execute(
+                select(
+                    UserChatAchievementModel.achievement_id,
+                    func.count(UserChatAchievementModel.id),
+                )
+                .where(UserChatAchievementModel.chat_id == chat_id)
+                .group_by(UserChatAchievementModel.achievement_id)
+            )
+        ).all()
+        await self._session.execute(delete(ChatAchievementStatsModel).where(ChatAchievementStatsModel.chat_id == chat_id))
+        now = datetime.now(timezone.utc)
+        for achievement_id, holders_count in rows:
+            self._session.add(
+                ChatAchievementStatsModel(
+                    chat_id=chat_id,
+                    achievement_id=achievement_id,
+                    holders_count=int(holders_count or 0),
+                    active_members_base_count=active_count,
+                    holders_percent=compute_holders_percent(
+                        holders_count=int(holders_count or 0),
+                        base_count=active_count,
+                    ),
+                    updated_at=now,
+                )
+            )
+        await self._session.flush()
+
+    async def rebuild_global_achievement_state(self) -> None:
+        users_count_stmt = select(func.count()).select_from(UserModel)
+        base_count = int((await self._session.execute(users_count_stmt)).scalar_one() or 0)
+        await set_global_users_base_count(self._session, base_count=base_count)
+
+        rows = (
+            await self._session.execute(
+                select(
+                    UserGlobalAchievementModel.achievement_id,
+                    func.count(UserGlobalAchievementModel.id),
+                )
+                .group_by(UserGlobalAchievementModel.achievement_id)
+            )
+        ).all()
+        await self._session.execute(delete(GlobalAchievementStatsModel))
+        now = datetime.now(timezone.utc)
+        for achievement_id, holders_count in rows:
+            self._session.add(
+                GlobalAchievementStatsModel(
+                    achievement_id=achievement_id,
+                    holders_count=int(holders_count or 0),
+                    global_base_count=base_count,
+                    holders_percent=compute_holders_percent(
+                        holders_count=int(holders_count or 0),
+                        base_count=base_count,
+                    ),
+                    updated_at=now,
+                )
+            )
+        await self._session.flush()
 
     async def get_user_activity_daily_series(self, *, chat_id: int, user_id: int, days: int) -> list[tuple[date, int]]:
         normalized_days = max(1, int(days))
@@ -2804,16 +3048,32 @@ class SqlAlchemyActivityRepository:
         is_minimal_profile = user.username is None and user.first_name is None and user.last_name is None and not user.is_bot
 
         if dialect == "postgresql":
-            stmt = pg_insert(UserModel).values(
-                telegram_user_id=user.telegram_user_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name,
-                is_bot=user.is_bot,
+            insert_stmt = (
+                pg_insert(UserModel)
+                .values(
+                    telegram_user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                )
+                .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+                .returning(UserModel.telegram_user_id)
             )
-            if is_minimal_profile:
-                stmt = stmt.on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
-            else:
+            inserted_user_id = (await self._session.execute(insert_stmt)).scalar_one_or_none()
+            if inserted_user_id is not None:
+                await increment_global_users_base_count(self._session)
+                if is_minimal_profile:
+                    return
+
+            if not is_minimal_profile:
+                stmt = pg_insert(UserModel).values(
+                    telegram_user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                )
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[UserModel.telegram_user_id],
                     set_={
@@ -2824,7 +3084,7 @@ class SqlAlchemyActivityRepository:
                         "updated_at": func.now(),
                     },
                 )
-            await self._session.execute(stmt)
+                await self._session.execute(stmt)
             return
 
         user_row = await self._session.get(UserModel, user.telegram_user_id)
@@ -2838,6 +3098,8 @@ class SqlAlchemyActivityRepository:
                     is_bot=user.is_bot,
                 )
             )
+            await self._session.flush()
+            await increment_global_users_base_count(self._session)
             return
 
         if is_minimal_profile:
@@ -4243,6 +4505,22 @@ class SqlAlchemyEconomyRepository:
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
 
         if dialect == "postgresql":
+            insert_stmt = (
+                pg_insert(UserModel)
+                .values(
+                    telegram_user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                )
+                .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+                .returning(UserModel.telegram_user_id)
+            )
+            inserted_user_id = (await self._session.execute(insert_stmt)).scalar_one_or_none()
+            if inserted_user_id is not None:
+                await increment_global_users_base_count(self._session)
+
             stmt = pg_insert(UserModel).values(
                 telegram_user_id=user.telegram_user_id,
                 username=user.username,
@@ -4274,6 +4552,8 @@ class SqlAlchemyEconomyRepository:
                     is_bot=user.is_bot,
                 )
             )
+            await self._session.flush()
+            await increment_global_users_base_count(self._session)
             return
 
         user_row.username = user.username

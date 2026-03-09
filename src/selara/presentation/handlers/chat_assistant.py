@@ -14,6 +14,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
+    ChatMember,
+    ChatMemberUpdated,
     CallbackQuery,
     ChatPermissions,
     InlineKeyboardButton,
@@ -107,6 +109,15 @@ def _reply_params(message: Message) -> ReplyParameters:
 
 def _group_only(message: Message) -> bool:
     return message.chat.type in _GROUP_CHAT_TYPES
+
+
+def _is_chat_member_active(member: ChatMember) -> bool:
+    status = getattr(member, "status", None)
+    if status in {"member", "administrator", "creator"}:
+        return True
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
 
 
 def _format_user_mention(*, user_id: int, label: str) -> str:
@@ -1030,7 +1041,13 @@ async def family_command(message: Message, command: CommandObject, activity_repo
 
 
 @router.message(F.new_chat_members)
-async def new_chat_members_handler(message: Message, bot: Bot, activity_repo, chat_settings: ChatSettings) -> None:
+async def new_chat_members_handler(
+    message: Message,
+    bot: Bot,
+    activity_repo,
+    achievement_orchestrator,
+    chat_settings: ChatSettings,
+) -> None:
     if message.chat.type not in _GROUP_CHAT_TYPES:
         return
     new_members = [member for member in message.new_chat_members if not member.is_bot]
@@ -1050,6 +1067,29 @@ async def new_chat_members_handler(message: Message, bot: Bot, activity_repo, ch
             )
 
     for member in new_members:
+        await activity_repo.set_chat_member_active(
+            chat=ChatSnapshot(
+                telegram_chat_id=message.chat.id,
+                chat_type=message.chat.type,
+                title=message.chat.title,
+            ),
+            user=UserSnapshot(
+                telegram_user_id=member.id,
+                username=member.username,
+                first_name=member.first_name,
+                last_name=member.last_name,
+                is_bot=bool(member.is_bot),
+            ),
+            is_active=True,
+            event_at=message.date,
+        )
+        if achievement_orchestrator is not None:
+            await achievement_orchestrator.process_membership(
+                chat_id=message.chat.id,
+                user_id=member.id,
+                is_active=True,
+                event_at=message.date,
+            )
         label = await _resolve_display_label(
             activity_repo,
             chat_id=message.chat.id,
@@ -1121,7 +1161,13 @@ async def new_chat_members_handler(message: Message, bot: Bot, activity_repo, ch
 
 
 @router.message(F.left_chat_member)
-async def left_chat_member_handler(message: Message, bot: Bot, activity_repo, chat_settings: ChatSettings) -> None:
+async def left_chat_member_handler(
+    message: Message,
+    bot: Bot,
+    activity_repo,
+    achievement_orchestrator,
+    chat_settings: ChatSettings,
+) -> None:
     if message.chat.type not in _GROUP_CHAT_TYPES or message.left_chat_member is None:
         return
 
@@ -1137,10 +1183,35 @@ async def left_chat_member_handler(message: Message, bot: Bot, activity_repo, ch
                 description="Удалено сервисное сообщение о выходе участника.",
             )
 
+    left = message.left_chat_member
+    if not left.is_bot:
+        await activity_repo.set_chat_member_active(
+            chat=ChatSnapshot(
+                telegram_chat_id=message.chat.id,
+                chat_type=message.chat.type,
+                title=message.chat.title,
+            ),
+            user=UserSnapshot(
+                telegram_user_id=left.id,
+                username=left.username,
+                first_name=left.first_name,
+                last_name=left.last_name,
+                is_bot=bool(left.is_bot),
+            ),
+            is_active=False,
+            event_at=message.date,
+        )
+        if achievement_orchestrator is not None:
+            await achievement_orchestrator.process_membership(
+                chat_id=message.chat.id,
+                user_id=left.id,
+                is_active=False,
+                event_at=message.date,
+            )
+
     if not chat_settings.goodbye_enabled:
         return
 
-    left = message.left_chat_member
     label = await _resolve_display_label(
         activity_repo,
         chat_id=message.chat.id,
@@ -1162,6 +1233,40 @@ async def left_chat_member_handler(message: Message, bot: Bot, activity_repo, ch
         ),
         parse_mode="HTML",
     )
+
+
+@router.chat_member()
+async def chat_member_updated_handler(event: ChatMemberUpdated, activity_repo, achievement_orchestrator) -> None:
+    if event.chat.type not in _GROUP_CHAT_TYPES:
+        return
+
+    member_user = event.new_chat_member.user
+    if member_user.is_bot:
+        return
+
+    await activity_repo.set_chat_member_active(
+        chat=ChatSnapshot(
+            telegram_chat_id=event.chat.id,
+            chat_type=event.chat.type,
+            title=event.chat.title,
+        ),
+        user=UserSnapshot(
+            telegram_user_id=member_user.id,
+            username=member_user.username,
+            first_name=member_user.first_name,
+            last_name=member_user.last_name,
+            is_bot=bool(member_user.is_bot),
+        ),
+        is_active=_is_chat_member_active(event.new_chat_member),
+        event_at=event.date,
+    )
+    if achievement_orchestrator is not None:
+        await achievement_orchestrator.process_membership(
+            chat_id=event.chat.id,
+            user_id=member_user.id,
+            is_active=_is_chat_member_active(event.new_chat_member),
+            event_at=event.date,
+        )
 
 
 @router.callback_query(F.data.startswith("cap:"))

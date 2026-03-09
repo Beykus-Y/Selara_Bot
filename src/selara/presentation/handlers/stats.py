@@ -18,13 +18,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from sqlalchemy.exc import SQLAlchemyError
 
+from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.use_cases.get_last_seen import execute as get_last_seen
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.application.use_cases.get_top_users import execute as get_top_users
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
-from selara.domain.entities import ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
+from selara.domain.entities import AchievementView, ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.charts import build_daily_activity_chart, build_leaderboard_chart, build_profile_chart
@@ -118,14 +119,20 @@ def _build_profile_actions_markup(*, user_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
+                    text="Ачивки",
+                    callback_data=_profile_callback_data(action="achievements", user_id=user_id),
+                ),
+                InlineKeyboardButton(
                     text="Награды",
                     callback_data=_profile_callback_data(action="awards", user_id=user_id),
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="О себе",
                     callback_data=_profile_callback_data(action="about", user_id=user_id),
                 ),
-            ]
+            ],
         ]
     )
 
@@ -137,9 +144,128 @@ def _parse_profile_callback_data(data: str | None) -> tuple[str | None, int | No
     if len(parts) != 3:
         return None, None
     _, action, raw_user_id = parts
-    if action not in {"awards", "about"} or not raw_user_id.lstrip("-").isdigit():
+    if action not in {"achievements", "awards", "about"} or not raw_user_id.lstrip("-").isdigit():
         return None, None
     return action, int(raw_user_id)
+
+
+def _mask_hidden_achievement(view: AchievementView) -> AchievementView:
+    if view.awarded or not view.hidden:
+        return view
+    return AchievementView(
+        achievement_id=view.achievement_id,
+        scope=view.scope,
+        title="Скрытое достижение",
+        description="Описание откроется после получения.",
+        icon="???",
+        rarity=view.rarity,
+        hidden=view.hidden,
+        awarded=view.awarded,
+        awarded_at=view.awarded_at,
+        holders_count=view.holders_count,
+        holders_percent=view.holders_percent,
+        sort_order=view.sort_order,
+    )
+
+
+async def _build_achievement_views(*, activity_repo, settings: Settings, chat_id: int, user_id: int) -> tuple[list[AchievementView], list[AchievementView]]:
+    catalog = get_achievement_catalog_from_settings(settings)
+    chat_awards = {item.achievement_id: item for item in await activity_repo.list_user_chat_achievements(chat_id=chat_id, user_id=user_id)}
+    global_awards = {item.achievement_id: item for item in await activity_repo.list_user_global_achievements(user_id=user_id)}
+    chat_stats = await activity_repo.get_chat_achievement_stats_map(chat_id=chat_id)
+    global_stats = await activity_repo.get_global_achievement_stats_map()
+
+    chat_views: list[AchievementView] = []
+    for definition in catalog.list_by_scope("chat"):
+        award = chat_awards.get(definition.id)
+        holders_count, holders_percent = chat_stats.get(definition.id, (0, 0.0))
+        chat_views.append(
+            _mask_hidden_achievement(
+                AchievementView(
+                    achievement_id=definition.id,
+                    scope=definition.scope,
+                    title=definition.title,
+                    description=definition.description,
+                    icon=definition.icon,
+                    rarity=definition.rarity,
+                    hidden=definition.hidden,
+                    awarded=award is not None,
+                    awarded_at=award.awarded_at if award is not None else None,
+                    holders_count=holders_count,
+                    holders_percent=holders_percent,
+                    sort_order=definition.sort_order,
+                )
+            )
+        )
+
+    global_views: list[AchievementView] = []
+    for definition in catalog.list_by_scope("global"):
+        award = global_awards.get(definition.id)
+        holders_count, holders_percent = global_stats.get(definition.id, (0, 0.0))
+        global_views.append(
+            _mask_hidden_achievement(
+                AchievementView(
+                    achievement_id=definition.id,
+                    scope=definition.scope,
+                    title=definition.title,
+                    description=definition.description,
+                    icon=definition.icon,
+                    rarity=definition.rarity,
+                    hidden=definition.hidden,
+                    awarded=award is not None,
+                    awarded_at=award.awarded_at if award is not None else None,
+                    holders_count=holders_count,
+                    holders_percent=holders_percent,
+                    sort_order=definition.sort_order,
+                )
+            )
+        )
+
+    return chat_views, global_views
+
+
+async def _build_achievements_message(
+    *,
+    activity_repo,
+    settings: Settings,
+    chat_id: int,
+    user_id: int,
+    timezone_name: str,
+) -> str:
+    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    chat_views, global_views = await _build_achievement_views(
+        activity_repo=activity_repo,
+        settings=settings,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    lines = [f"<b>Ачивки:</b> {escape(target_label)}"]
+
+    if chat_views:
+        lines.append("")
+        lines.append("<b>Чатовые</b>")
+        for item in chat_views:
+            status = "получено" if item.awarded else "не получено"
+            awarded_at = f" • {escape(format_elapsed_compact(item.awarded_at, timezone_name))}" if item.awarded_at else ""
+            lines.append(
+                f"• <b>{escape(item.title)}</b> [{escape(item.icon)}] ({status}, {item.holders_percent:.2f}% / {item.holders_count}){awarded_at}"
+            )
+            lines.append(f"  {escape(item.description)}")
+
+    if global_views:
+        lines.append("")
+        lines.append("<b>Глобальные</b>")
+        for item in global_views:
+            status = "получено" if item.awarded else "не получено"
+            awarded_at = f" • {escape(format_elapsed_compact(item.awarded_at, timezone_name))}" if item.awarded_at else ""
+            lines.append(
+                f"• <b>{escape(item.title)}</b> [{escape(item.icon)}] ({status}, {item.holders_percent:.2f}% / {item.holders_count}){awarded_at}"
+            )
+            lines.append(f"  {escape(item.description)}")
+
+    if len(lines) == 1:
+        return f"У пользователя <b>{escape(target_label)}</b> пока нет достижений."
+    return "\n".join(lines)
 
 
 async def _resolve_stats_target_user(
@@ -904,6 +1030,61 @@ async def awards_command(message: Message, command: CommandObject, activity_repo
     )
 
 
+@router.message(Command("achievements"))
+async def achievements_command(message: Message, command: CommandObject, activity_repo, settings: Settings) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    if (command.args or "").strip() or message.reply_to_message is not None:
+        target, error = await _resolve_stats_target_user(message, command=command, activity_repo=activity_repo)
+        if target is None:
+            await message.answer(error or "Не удалось определить пользователя.")
+            return
+    else:
+        target = UserSnapshot(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
+        )
+
+    await message.answer(
+        await _build_achievements_message(
+            activity_repo=activity_repo,
+            settings=settings,
+            chat_id=message.chat.id,
+            user_id=target.telegram_user_id,
+            timezone_name=settings.bot_timezone,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("achsync"))
+async def achsync_command(message: Message, command: CommandObject, activity_repo, bot: Bot) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if not await _ensure_chat_admin(message, bot):
+        return
+
+    mode = (command.args or "").strip().lower()
+    if mode == "global":
+        await activity_repo.rebuild_global_achievement_state()
+        await message.answer("Глобальные achievement stats пересчитаны.")
+        return
+
+    await activity_repo.rebuild_chat_achievement_state(chat_id=message.chat.id)
+    await message.answer("Achievement stats текущего чата пересчитаны.")
+
+
 @router.callback_query(F.data.startswith(f"{_PROFILE_CALLBACK_PREFIX}:"))
 async def profile_card_callback(query: CallbackQuery, activity_repo, settings: Settings) -> None:
     if query.message is None:
@@ -920,6 +1101,14 @@ async def profile_card_callback(query: CallbackQuery, activity_repo, settings: S
             activity_repo=activity_repo,
             chat_id=query.message.chat.id,
             user_id=target_user_id,
+        )
+    elif action == "achievements":
+        text = await _build_achievements_message(
+            activity_repo=activity_repo,
+            settings=settings,
+            chat_id=query.message.chat.id,
+            user_id=target_user_id,
+            timezone_name=settings.bot_timezone,
         )
     else:
         text = await _build_profile_awards_message(

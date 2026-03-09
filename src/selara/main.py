@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
+from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.db.session import create_engine, create_session_factory
@@ -18,6 +19,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="start", description="Открыть ЛС-панель"),
         BotCommand(command="login", description="Код для входа в веб-панель"),
         BotCommand(command="me", description="Моя статистика в чате"),
+        BotCommand(command="achievements", description="Мои достижения в текущем чате"),
         BotCommand(command="rep", description="Мой профиль репутации"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
@@ -88,6 +90,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="family", description="Показать семейное древо"),
         BotCommand(command="lastseen", description="Когда пользователь был активен"),
         BotCommand(command="help", description="Справка"),
+        BotCommand(command="achsync", description="Пересчитать achievement stats"),
     ]
 
 
@@ -142,6 +145,7 @@ async def _run_web_panel(settings, session_factory) -> None:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings)
+    get_achievement_catalog_from_settings(settings)
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
