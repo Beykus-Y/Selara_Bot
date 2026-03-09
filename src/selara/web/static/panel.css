@@ -1957,6 +1957,15 @@ body.page-games::before {
 .page-games .game-score-row {
   border: 3px solid #1d2340;
   box-shadow: 0 5px 0 rgba(29, 35, 64, 0.84);
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+}
+
+.page-games .rank-copy {
+  min-width: 0;
+}
+
+.page-games .rank-copy strong {
+  unicode-bidi: plaintext;
 }
 
 .page-games .game-score-row:nth-child(1) {

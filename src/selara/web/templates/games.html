@@ -39,6 +39,12 @@
       let refreshPromise = null;
       let liveEventSource = null;
       const gameSockets = new Map();
+      const socketReadyGames = new Set();
+      let fallbackPollTimer = null;
+      let wsDisabledUntil = 0;
+      let sseHealthy = false;
+      const FALLBACK_POLL_MS = 4000;
+      const WS_RETRY_BACKOFF_MS = 30000;
 
       const setLiveState = (state, text) => {
         if (!indicator) {
@@ -46,6 +52,35 @@
         }
         indicator.dataset.state = state;
         indicator.textContent = text;
+      };
+
+      const hasHealthyLiveTransport = () => sseHealthy || socketReadyGames.size > 0;
+
+      const stopFallbackPolling = () => {
+        if (fallbackPollTimer) {
+          window.clearInterval(fallbackPollTimer);
+          fallbackPollTimer = null;
+        }
+      };
+
+      const ensureFallbackPolling = () => {
+        if (fallbackPollTimer) {
+          return;
+        }
+        fallbackPollTimer = window.setInterval(() => {
+          if (document.visibilityState === "hidden") {
+            return;
+          }
+          refreshDashboard({ silent: true });
+        }, FALLBACK_POLL_MS);
+      };
+
+      const syncLiveFallbackState = () => {
+        if (hasHealthyLiveTransport()) {
+          stopFallbackPolling();
+          return;
+        }
+        ensureFallbackPolling();
       };
 
       const showToast = (message, tone = "ok") => {
@@ -415,6 +450,98 @@
         syncAllSpyCategoryPickers(root);
       };
 
+      const parseDashboardHtml = (html) => {
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = html;
+        return wrapper;
+      };
+
+      const patchSection = (selector, incomingRoot) => {
+        const current = dashboardRoot.querySelector(selector);
+        const incoming = incomingRoot.querySelector(selector);
+        if (!current && !incoming) {
+          return;
+        }
+        if (!incoming) {
+          current?.remove();
+          return;
+        }
+        if (!current) {
+          dashboardRoot.appendChild(incoming.cloneNode(true));
+          return;
+        }
+        if (current.outerHTML !== incoming.outerHTML) {
+          current.replaceWith(incoming.cloneNode(true));
+        }
+      };
+
+      const hasOnlyGamePanels = (container) => {
+        return [...container.children].every(
+          (child) => child.matches("[data-game-panel][data-game-id]")
+        );
+      };
+
+      const patchGamesList = (incomingRoot) => {
+        const currentList = dashboardRoot.querySelector("#games-list");
+        const incomingList = incomingRoot.querySelector("#games-list");
+        if (!currentList && !incomingList) {
+          return;
+        }
+        if (!incomingList) {
+          currentList?.remove();
+          return;
+        }
+        if (!currentList) {
+          dashboardRoot.appendChild(incomingList.cloneNode(true));
+          return;
+        }
+
+        if (!hasOnlyGamePanels(currentList) || !hasOnlyGamePanels(incomingList)) {
+          if (currentList.outerHTML !== incomingList.outerHTML) {
+            currentList.replaceWith(incomingList.cloneNode(true));
+          }
+          return;
+        }
+
+        const existingById = new Map();
+        for (const child of currentList.children) {
+          const gameId = child.dataset.gameId || "";
+          if (gameId) {
+            existingById.set(gameId, child);
+          }
+        }
+
+        const incomingChildren = [...incomingList.children];
+        for (const [index, incomingChild] of incomingChildren.entries()) {
+          const incomingId = incomingChild.dataset.gameId || "";
+          let targetNode = incomingChild.cloneNode(true);
+          const existing = incomingId ? existingById.get(incomingId) : null;
+          if (existing) {
+            if (existing.outerHTML === incomingChild.outerHTML) {
+              targetNode = existing;
+            } else {
+              existing.replaceWith(targetNode);
+            }
+          }
+          const currentAtIndex = currentList.children[index] || null;
+          if (targetNode !== currentAtIndex) {
+            currentList.insertBefore(targetNode, currentAtIndex);
+          }
+        }
+
+        while (currentList.children.length > incomingChildren.length) {
+          currentList.lastElementChild?.remove();
+        }
+      };
+
+      const patchDashboardDom = (html) => {
+        const incomingRoot = parseDashboardHtml(html);
+        patchSection(".metrics-grid", incomingRoot);
+        patchSection("#create-game", incomingRoot);
+        patchGamesList(incomingRoot);
+        patchSection(".recent-games-panel", incomingRoot);
+      };
+
       const applyDashboardHtml = (html, signature) => {
         const snapshot = snapshotForms(dashboardRoot);
         const previousScrollY = window.scrollY;
@@ -422,7 +549,7 @@
         const commit = () => {
           dashboardRoot.style.minHeight = `${previousHeight}px`;
           dashboardRoot.classList.add("is-refreshing");
-          dashboardRoot.innerHTML = html;
+          patchDashboardDom(html);
           dashboardRoot.dataset.liveSignature = signature;
           liveSignature = signature;
           restoreForms(dashboardRoot, snapshot);
@@ -478,6 +605,7 @@
           })
           .catch(() => {
             setLiveState("error", "offline");
+            ensureFallbackPolling();
           })
           .finally(() => {
             refreshPromise = null;
@@ -495,32 +623,83 @@
           }
         }
         gameSockets.clear();
+        socketReadyGames.clear();
+        syncLiveFallbackState();
       };
 
       const connectGameSockets = () => {
-        closeGameSockets();
+        if (Date.now() < wsDisabledUntil) {
+          return;
+        }
+        const expectedIds = new Set();
         for (const panel of dashboardRoot.querySelectorAll("[data-game-panel][data-game-id]")) {
           const gameId = panel.dataset.gameId || "";
           if (!gameId) {
             continue;
           }
+          expectedIds.add(gameId);
+          if (gameSockets.has(gameId)) {
+            continue;
+          }
           const protocol = window.location.protocol === "https:" ? "wss" : "ws";
           const socket = new WebSocket(`${protocol}://${window.location.host}/api/live/ws/game/${encodeURIComponent(gameId)}`);
-          socket.addEventListener("message", () => {
+          socket.addEventListener("open", () => {
+            socketReadyGames.add(gameId);
+            syncLiveFallbackState();
+          });
+          socket.addEventListener("message", (event) => {
+            let payload = null;
+            try {
+              payload = JSON.parse(event.data);
+            } catch (error) {
+              payload = null;
+            }
+            if (payload && payload.type === "ping") {
+              return;
+            }
             refreshDashboard({ silent: true });
           });
           socket.addEventListener("error", () => {
+            socketReadyGames.delete(gameId);
+            wsDisabledUntil = Date.now() + WS_RETRY_BACKOFF_MS;
             setLiveState("error", "offline");
+            syncLiveFallbackState();
+          });
+          socket.addEventListener("close", () => {
+            if (gameSockets.get(gameId) === socket) {
+              gameSockets.delete(gameId);
+            }
+            socketReadyGames.delete(gameId);
+            syncLiveFallbackState();
           });
           gameSockets.set(gameId, socket);
         }
+        for (const [gameId, socket] of gameSockets.entries()) {
+          if (expectedIds.has(gameId)) {
+            continue;
+          }
+          try {
+            socket.close();
+          } catch (error) {
+            // ignore close race
+          }
+          gameSockets.delete(gameId);
+          socketReadyGames.delete(gameId);
+        }
+        syncLiveFallbackState();
       };
 
       const connectLiveStream = () => {
         if (liveEventSource) {
           liveEventSource.close();
         }
+        sseHealthy = false;
+        syncLiveFallbackState();
         liveEventSource = new EventSource("/api/live/stream?scope=games");
+        liveEventSource.onopen = () => {
+          sseHealthy = true;
+          syncLiveFallbackState();
+        };
         liveEventSource.addEventListener("new_vote", () => {
           refreshDashboard({ silent: true });
         });
@@ -531,7 +710,9 @@
           refreshDashboard({ silent: true });
         });
         liveEventSource.onerror = () => {
+          sseHealthy = false;
           setLiveState("error", "offline");
+          syncLiveFallbackState();
         };
       };
 
@@ -653,10 +834,13 @@
       setLiveState("ready", "обновить сцену");
       connectGameSockets();
       connectLiveStream();
+      syncLiveFallbackState();
       window.addEventListener("beforeunload", () => {
         if (liveEventSource) {
           liveEventSource.close();
         }
+        sseHealthy = false;
+        stopFallbackPolling();
         closeGameSockets();
       });
     })();
