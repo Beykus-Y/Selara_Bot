@@ -10,6 +10,7 @@ from selara.application.achievements import (
     AchievementOrchestrator,
     get_achievement_catalog_from_settings,
 )
+from selara.core.config import get_settings
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 
@@ -25,20 +26,19 @@ class DBSessionMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         async with self._session_factory() as session:
-            settings = data.get("settings")
+            settings = data.get("settings") or get_settings()
             data["session_factory"] = self._session_factory
             data["db_session"] = session
             data["activity_repo"] = SqlAlchemyActivityRepository(session)
             data["economy_repo"] = SqlAlchemyEconomyRepository(session)
             data["web_auth_repo"] = SqlAlchemyWebAuthRepository(session)
-            if settings is not None:
-                catalog = get_achievement_catalog_from_settings(settings)
-                data["achievement_orchestrator"] = AchievementOrchestrator(
-                    catalog=catalog,
-                    evaluator=AchievementConditionEvaluator(),
-                    award_service=AchievementAwardService(session, catalog),
-                    repo=data["activity_repo"],
-                )
+            catalog = get_achievement_catalog_from_settings(settings)
+            data["achievement_orchestrator"] = AchievementOrchestrator(
+                catalog=catalog,
+                evaluator=AchievementConditionEvaluator(),
+                award_service=AchievementAwardService(session, catalog),
+                repo=data["activity_repo"],
+            )
 
             try:
                 result = await handler(event, data)

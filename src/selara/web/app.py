@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.use_cases.economy.results import EconomyDashboard
+from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.use_cases.economy.catalog import localize_crop_code, localize_item_code
 from selara.application.use_cases.economy.market_buy_listing import execute as market_buy_listing
 from selara.application.use_cases.economy.market_cancel_listing import execute as market_cancel_listing
@@ -61,7 +62,14 @@ from selara.presentation.game_state import (
 )
 from selara.presentation.handlers.settings_common import apply_setting_update, setting_title_ru, settings_to_dict
 from selara.web.admin_docs import build_admin_docs_context
-from selara.web.presenters import build_chat_context, build_home_context, build_landing_context, format_datetime, user_label
+from selara.web.presenters import (
+    build_achievement_rows,
+    build_chat_context,
+    build_home_context,
+    build_landing_context,
+    format_datetime,
+    user_label,
+)
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
 
@@ -196,6 +204,58 @@ async def _build_richest_user_payload(
         "label": user_label(snapshot),
         "balance": int(balance or 0),
     }
+
+
+async def _build_achievement_sections(
+    activity_repo: SqlAlchemyActivityRepository,
+    *,
+    settings: Settings,
+    chat_id: int,
+    user_id: int,
+) -> list[dict[str, object]]:
+    catalog = get_achievement_catalog_from_settings(settings)
+    chat_awards = {item.achievement_id: item for item in await activity_repo.list_user_chat_achievements(chat_id=chat_id, user_id=user_id)}
+    global_awards = {item.achievement_id: item for item in await activity_repo.list_user_global_achievements(user_id=user_id)}
+    chat_stats = await activity_repo.get_chat_achievement_stats_map(chat_id=chat_id)
+    global_stats = await activity_repo.get_global_achievement_stats_map()
+
+    def _row(definition, award, stats, *, scope_label: str) -> dict[str, object]:
+        hidden_locked = bool(definition.hidden and award is None)
+        holders_count, holders_percent = stats
+        return {
+            "title": "Скрытое достижение" if hidden_locked else definition.title,
+            "description": "Описание откроется после получения." if hidden_locked else definition.description,
+            "icon": "???" if hidden_locked else definition.icon,
+            "rarity": definition.rarity,
+            "scope_label": scope_label,
+            "status": "получено" if award is not None else "не получено",
+            "holders_count": holders_count,
+            "holders_percent": holders_percent,
+            "awarded_at": format_datetime(award.awarded_at) if award is not None else None,
+        }
+
+    chat_rows = [
+        _row(
+            definition,
+            chat_awards.get(definition.id),
+            chat_stats.get(definition.id, (0, 0.0)),
+            scope_label="чат",
+        )
+        for definition in catalog.list_by_scope("chat")
+    ]
+    global_rows = [
+        _row(
+            definition,
+            global_awards.get(definition.id),
+            global_stats.get(definition.id, (0, 0.0)),
+            scope_label="глобал",
+        )
+        for definition in catalog.list_by_scope("global")
+    ]
+    return [
+        {"title": "Чатовые достижения", "rows": build_achievement_rows(chat_rows)},
+        {"title": "Глобальные достижения", "rows": build_achievement_rows(global_rows)},
+    ]
 
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
@@ -4484,6 +4544,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_id=chat_id,
                 user_id=user.telegram_user_id,
             )
+            achievement_sections = await _build_achievement_sections(
+                activity_repo,
+                settings=settings,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+            )
             await session.commit()
 
         page_context = build_chat_context(
@@ -4507,6 +4573,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             top_mix=top_mix,
             top_karma=top_karma,
             top_mix_7d=top_mix_7d,
+            achievement_sections=achievement_sections,
             flash=request.query_params.get("flash"),
             error=request.query_params.get("error"),
         )

@@ -170,6 +170,32 @@
   </section>
 
   <section class="grid two-col">
+    {% for section in achievement_sections %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>{{ section.title }}</h2>
+        </div>
+        {% if section.rows %}
+          <div class="list-stack compact">
+            {% for row in section.rows %}
+              <div class="stat-row">
+                <div>
+                  <strong>{{ row.title }}</strong>
+                  <p>{{ row.meta }}</p>
+                  <p>{{ row.description }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Пока нет данных по достижениям.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
     <article class="panel">
       <div class="panel-head">
         <h2>Ваш доступ</h2>

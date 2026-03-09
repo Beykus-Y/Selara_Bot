@@ -161,6 +161,23 @@ def build_dashboard_panel(*, title: str, dashboard: EconomyDashboard | None, emp
     }
 
 
+def build_achievement_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for row in rows:
+        items.append(
+            {
+                "title": f"{row['icon']} {row['title']}",
+                "meta": (
+                    f"{row['scope_label']} • {row['rarity']} • {row['status']} • "
+                    f"{row['holders_percent']:.2f}% / {row['holders_count']}"
+                ),
+                "value": row["awarded_at"] or "не открыто",
+                "description": row["description"],
+            }
+        )
+    return items
+
+
 def build_leaderboard_section(
     *,
     title: str,
@@ -663,6 +680,7 @@ def build_chat_context(
     top_mix: list[LeaderboardItem],
     top_karma: list[LeaderboardItem],
     top_mix_7d: list[LeaderboardItem],
+    achievement_sections: list[dict[str, Any]],
     flash: str | None,
     error: str | None,
 ) -> dict[str, Any]:
@@ -734,6 +752,7 @@ def build_chat_context(
                 empty_text="Глобальный аккаунт ещё не создан.",
             ),
         ],
+        "achievement_sections": achievement_sections,
         "leaderboards": [
             build_leaderboard_section(
                 title="Топ по сообщениям",
