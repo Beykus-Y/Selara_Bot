@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,11 +12,11 @@ from selara.domain.entities import AchievementAwardResult, AchievementDefinition
 from selara.infrastructure.db.achievement_metrics import compute_holders_percent
 from selara.infrastructure.db.models import (
     ChatAchievementStatsModel,
-    ChatMetricsModel,
     GlobalAchievementStatsModel,
-    GlobalMetricsModel,
+    UserChatActivityModel,
     UserChatAchievementModel,
     UserGlobalAchievementModel,
+    UserModel,
 )
 
 
@@ -198,12 +198,15 @@ class AchievementAwardService:
         )
 
     async def _get_chat_base_count(self, chat_id: int) -> int:
-        row = await self._session.get(ChatMetricsModel, chat_id)
-        return int(row.active_members_count if row is not None else 0)
+        stmt = select(func.count()).select_from(UserChatActivityModel).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.is_active_member.is_(True),
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
 
     async def _get_global_base_count(self) -> int:
-        row = await self._session.get(GlobalMetricsModel, 1)
-        return int(row.global_users_base_count if row is not None else 0)
+        stmt = select(func.count()).select_from(UserModel)
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
 
     async def _get_or_create_chat_stats(self, *, chat_id: int, achievement_id: str) -> ChatAchievementStatsModel:
         stmt = select(ChatAchievementStatsModel).where(

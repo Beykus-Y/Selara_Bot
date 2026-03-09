@@ -327,14 +327,24 @@ class SqlAlchemyActivityRepository:
             expected_day = expected_day - timedelta(days=1)
         return streak
 
-    async def count_total_achievements(self, *, user_id: int) -> int:
+    async def get_user_message_count_for_day(self, *, chat_id: int, user_id: int, activity_date: date) -> int:
+        stmt = select(UserChatActivityDailyModel.message_count).where(
+            UserChatActivityDailyModel.chat_id == chat_id,
+            UserChatActivityDailyModel.user_id == user_id,
+            UserChatActivityDailyModel.activity_date == activity_date,
+        )
+        return int((await self._session.execute(stmt)).scalar_one_or_none() or 0)
+
+    async def count_total_achievements(self, *, user_id: int, chat_id: int | None = None) -> int:
         chat_count_stmt = select(func.count()).select_from(UserChatAchievementModel).where(UserChatAchievementModel.user_id == user_id)
+        if chat_id is not None:
+            chat_count_stmt = chat_count_stmt.where(UserChatAchievementModel.chat_id == chat_id)
         global_count_stmt = select(func.count()).select_from(UserGlobalAchievementModel).where(UserGlobalAchievementModel.user_id == user_id)
         chat_count = (await self._session.execute(chat_count_stmt)).scalar_one()
         global_count = (await self._session.execute(global_count_stmt)).scalar_one()
         return int(chat_count or 0) + int(global_count or 0)
 
-    async def count_owned_pets(self, *, user_id: int) -> int:
+    async def count_owned_pets(self, *, user_id: int, chat_id: int | None = None) -> int:
         stmt = (
             select(func.count(RelationshipGraphModel.id))
             .where(
@@ -342,9 +352,11 @@ class SqlAlchemyActivityRepository:
                 RelationshipGraphModel.user_a == user_id,
             )
         )
+        if chat_id is not None:
+            stmt = stmt.where(RelationshipGraphModel.chat_id == chat_id)
         return int((await self._session.execute(stmt)).scalar_one() or 0)
 
-    async def count_pet_owners(self, *, user_id: int) -> int:
+    async def count_pet_owners(self, *, user_id: int, chat_id: int | None = None) -> int:
         stmt = (
             select(func.count(RelationshipGraphModel.id))
             .where(
@@ -352,6 +364,8 @@ class SqlAlchemyActivityRepository:
                 RelationshipGraphModel.user_b == user_id,
             )
         )
+        if chat_id is not None:
+            stmt = stmt.where(RelationshipGraphModel.chat_id == chat_id)
         return int((await self._session.execute(stmt)).scalar_one() or 0)
 
     async def list_user_chat_achievements(self, *, chat_id: int, user_id: int) -> list[AchievementAward]:
@@ -396,20 +410,42 @@ class SqlAlchemyActivityRepository:
     async def get_chat_achievement_stats_map(self, *, chat_id: int) -> dict[str, tuple[int, float]]:
         stmt = select(ChatAchievementStatsModel).where(ChatAchievementStatsModel.chat_id == chat_id)
         rows = (await self._session.execute(stmt)).scalars().all()
+        current_base_count = int(
+            (
+                await self._session.execute(
+                    select(func.count()).select_from(UserChatActivityModel).where(
+                        UserChatActivityModel.chat_id == chat_id,
+                        UserChatActivityModel.is_active_member.is_(True),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
         return {
             row.achievement_id: (
                 int(row.holders_count),
-                float(row.holders_percent or 0),
+                float(
+                    compute_holders_percent(
+                        holders_count=int(row.holders_count or 0),
+                        base_count=current_base_count or int(row.active_members_base_count or 0),
+                    )
+                ),
             )
             for row in rows
         }
 
     async def get_global_achievement_stats_map(self) -> dict[str, tuple[int, float]]:
+        current_base_count = int((await self._session.execute(select(func.count()).select_from(UserModel))).scalar_one() or 0)
         rows = (await self._session.execute(select(GlobalAchievementStatsModel))).scalars().all()
         return {
             row.achievement_id: (
                 int(row.holders_count),
-                float(row.holders_percent or 0),
+                float(
+                    compute_holders_percent(
+                        holders_count=int(row.holders_count or 0),
+                        base_count=current_base_count or int(row.global_base_count or 0),
+                    )
+                ),
             )
             for row in rows
         }

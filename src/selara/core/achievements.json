@@ -47,6 +47,102 @@
     "tags": ["messages", "streak"]
   },
   {
+    "id": "chat_100_messages_day",
+    "scope": "chat",
+    "title": "Сотка за день",
+    "description": "Написать 100 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "common",
+    "icon": "⚡",
+    "sort_order": 40,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 100
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
+    "id": "chat_200_messages_day",
+    "scope": "chat",
+    "title": "Двойной разгон",
+    "description": "Написать 200 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "common",
+    "icon": "🔥",
+    "sort_order": 50,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 200
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
+    "id": "chat_500_messages_day",
+    "scope": "chat",
+    "title": "Без пауз",
+    "description": "Написать 500 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "uncommon",
+    "icon": "🚀",
+    "sort_order": 60,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 500
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
+    "id": "chat_1000_messages_day",
+    "scope": "chat",
+    "title": "Тысяча искр",
+    "description": "Написать 1000 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "rare",
+    "icon": "🌋",
+    "sort_order": 70,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 1000
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
+    "id": "chat_1500_messages_day",
+    "scope": "chat",
+    "title": "Шторм чата",
+    "description": "Написать 1500 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "epic",
+    "icon": "🌪️",
+    "sort_order": 80,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 1500
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
+    "id": "chat_3000_messages_day",
+    "scope": "chat",
+    "title": "Легенда суток",
+    "description": "Написать 3000 сообщений за сутки в чате",
+    "hidden": false,
+    "rarity": "legendary",
+    "icon": "☄️",
+    "sort_order": 90,
+    "enabled": true,
+    "condition": {
+      "type": "daily_message_count_gte",
+      "value": 3000
+    },
+    "tags": ["messages", "daily"]
+  },
+  {
     "id": "global_3_achievements",
     "scope": "global",
     "title": "Коллекционер",

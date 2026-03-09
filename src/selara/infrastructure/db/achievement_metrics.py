@@ -22,9 +22,12 @@ def compute_holders_percent(*, holders_count: int, base_count: int) -> Decimal:
     normalized_base = max(0, int(base_count))
     if normalized_holders <= 0 or normalized_base <= 0:
         return Decimal("0.00")
-    return ((Decimal(normalized_holders) * Decimal("100")) / Decimal(normalized_base)).quantize(
-        _PERCENT_QUANT,
-        rounding=ROUND_HALF_UP,
+    return min(
+        Decimal("100.00"),
+        ((Decimal(normalized_holders) * Decimal("100")) / Decimal(normalized_base)).quantize(
+            _PERCENT_QUANT,
+            rounding=ROUND_HALF_UP,
+        ),
     )
 
 
