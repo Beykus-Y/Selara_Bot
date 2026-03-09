@@ -19,3 +19,6 @@ dist/
 project_dump.txt
 a.py
 s.json
+AGENTS.md
+QWEN.md
+.qwen

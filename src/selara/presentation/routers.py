@@ -44,6 +44,9 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     root.chosen_inline_result.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.chosen_inline_result.outer_middleware(DBSessionMiddleware(session_factory))
 
+    root.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    root.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
+
     root.include_router(help_router)
     root.include_router(stats_router)
     root.include_router(chat_assistant_router)

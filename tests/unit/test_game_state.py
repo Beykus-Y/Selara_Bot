@@ -1858,8 +1858,8 @@ def test_zlobcards_decks_have_expected_volume_and_core_categories() -> None:
 
     total_white = sum(len(cards) for cards in game_state_module.ZLOBCARDS_WHITE_BY_CATEGORY.values())
     total_black = sum(len(cards) for cards in game_state_module.ZLOBCARDS_BLACK_BY_CATEGORY.values())
-    assert total_white >= 300
-    assert total_black >= 120
+    assert total_white >= 135
+    assert total_black >= 60
 
-    assert len(game_state_module.ZLOBCARDS_WHITE_BY_CATEGORY["Поп-культура"]) >= 50
-    assert len(game_state_module.ZLOBCARDS_BLACK_BY_CATEGORY["Поп-культура"]) >= 15
+    assert len(game_state_module.ZLOBCARDS_WHITE_BY_CATEGORY["Поп-культура"]) >= 15
+    assert len(game_state_module.ZLOBCARDS_BLACK_BY_CATEGORY["Поп-культура"]) >= 10

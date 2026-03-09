@@ -720,14 +720,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         mode: str,
         chat_id: int | None,
         user_id: int,
-    ) -> EconomyDashboard | None:
-        scope, _ = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=user_id)
+    ) -> tuple[EconomyDashboard | None, str | None]:
+        scope, error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=user_id)
         if scope is None:
-            return None
+            return None, error or "Не удалось определить режим экономики"
 
         account = await economy_repo.get_account(scope=scope, user_id=user_id)
         if account is None:
-            return None
+            return None, "Аккаунт не найден"
 
         farm = await economy_repo.get_farm_state(account_id=account.id)
         if farm is None:
@@ -735,12 +735,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         plots = await economy_repo.list_plots(account_id=account.id)
         inventory = await economy_repo.list_inventory(account_id=account.id)
-        return EconomyDashboard(
-            scope=scope,
-            account=account,
-            farm=farm,
-            plots=tuple(sorted(plots, key=lambda item: item.plot_no)),
-            inventory=tuple(sorted(inventory, key=lambda item: item.item_code)),
+        return (
+            EconomyDashboard(
+                scope=scope,
+                account=account,
+                farm=farm,
+                plots=tuple(sorted(plots, key=lambda item: item.plot_no)),
+                inventory=tuple(sorted(inventory, key=lambda item: item.item_code)),
+            ),
+            None,
         )
 
     async def _collect_visible_groups(activity_repo: SqlAlchemyActivityRepository, *, user_id: int) -> tuple[list[UserChatOverview], list[UserChatOverview]]:
@@ -3931,7 +3934,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 reverse=True,
             )
 
-            global_dashboard = await _load_dashboard_if_exists(
+            global_dashboard, _ = await _load_dashboard_if_exists(
                 economy_repo,
                 mode="global",
                 chat_id=None,
@@ -4598,13 +4601,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 karma_weight=current_settings.leaderboard_hybrid_karma_weight,
                 activity_weight=current_settings.leaderboard_hybrid_activity_weight,
             )
-            global_dashboard = await _load_dashboard_if_exists(
+            global_dashboard, _ = await _load_dashboard_if_exists(
                 economy_repo,
                 mode="global",
                 chat_id=None,
                 user_id=user.telegram_user_id,
             )
-            local_dashboard = await _load_dashboard_if_exists(
+            local_dashboard, _ = await _load_dashboard_if_exists(
                 economy_repo,
                 mode="local",
                 chat_id=chat_id,

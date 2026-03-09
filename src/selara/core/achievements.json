@@ -64,7 +64,7 @@
   },
   {
     "id": "global_found_pair",
-    "scope": "global",
+    "scope": "chat",
     "title": "Найти пару",
     "description": "Вступить в отношения с кем-то в боте",
     "hidden": false,
@@ -80,7 +80,7 @@
   },
   {
     "id": "global_married",
-    "scope": "global",
+    "scope": "chat",
     "title": "Выйти замуж",
     "description": "Заключить брак в системе отношений",
     "hidden": false,
@@ -96,7 +96,7 @@
   },
   {
     "id": "global_pet_owner",
-    "scope": "global",
+    "scope": "chat",
     "title": "Завёл питомца",
     "description": "Получить хотя бы одного питомца",
     "hidden": false,
@@ -112,7 +112,7 @@
   },
   {
     "id": "global_became_pet",
-    "scope": "global",
+    "scope": "chat",
     "title": "Стал питомцем",
     "description": "Стать чьим-то питомцем",
     "hidden": false,
