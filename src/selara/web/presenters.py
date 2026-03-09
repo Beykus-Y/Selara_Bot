@@ -680,7 +680,7 @@ def build_chat_context(
     top_mix: list[LeaderboardItem],
     top_karma: list[LeaderboardItem],
     top_mix_7d: list[LeaderboardItem],
-    achievement_sections: list[dict[str, Any]],
+    local_achievement_sections: list[dict[str, Any]],
     flash: str | None,
     error: str | None,
 ) -> dict[str, Any]:
@@ -752,7 +752,7 @@ def build_chat_context(
                 empty_text="Глобальный аккаунт ещё не создан.",
             ),
         ],
-        "achievement_sections": achievement_sections,
+        "achievement_sections": local_achievement_sections,
         "leaderboards": [
             build_leaderboard_section(
                 title="Топ по сообщениям",

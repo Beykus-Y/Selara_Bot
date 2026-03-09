@@ -127,6 +127,7 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "announce_reg": "рег",
     "announce_unreg": "анрег",
     "rep": "репутация",
+    "achievements": "достижения",
     "lastseen": "когда был",
     "eco": "баланс",
     "farm": "ферма",

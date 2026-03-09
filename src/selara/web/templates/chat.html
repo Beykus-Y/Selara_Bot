@@ -9,13 +9,28 @@
     </div>
     <div class="hero-side">
       <div class="hero-chip">chat id {{ chat_id }}</div>
-      <div class="hero-chip">{{ "overview" if active_tab == "overview" else "settings" }}</div>
-      <div class="hero-chip">family + economy</div>
+      <div class="hero-chip">
+        {% if active_tab == "overview" %}
+          обзор
+        {% elif active_tab == "achievements" %}
+          достижения
+        {% else %}
+          настройки
+        {% endif %}
+      </div>
+      <div class="hero-chip">
+        {% if active_tab == "achievements" %}
+          local unlocks
+        {% else %}
+          family + economy
+        {% endif %}
+      </div>
     </div>
   </section>
 
   <section class="panel section-tabs">
     <a class="button {% if active_tab == 'overview' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=overview">Обзор</a>
+    <a class="button {% if active_tab == 'achievements' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=achievements">Достижения</a>
     {% if can_manage_settings %}
       <a class="button {% if active_tab == 'settings' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=settings">Настройки</a>
     {% endif %}
@@ -170,32 +185,6 @@
   </section>
 
   <section class="grid two-col">
-    {% for section in achievement_sections %}
-      <article class="panel">
-        <div class="panel-head">
-          <h2>{{ section.title }}</h2>
-        </div>
-        {% if section.rows %}
-          <div class="list-stack compact">
-            {% for row in section.rows %}
-              <div class="stat-row">
-                <div>
-                  <strong>{{ row.title }}</strong>
-                  <p>{{ row.meta }}</p>
-                  <p>{{ row.description }}</p>
-                </div>
-                <span>{{ row.value }}</span>
-              </div>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="empty-text">Пока нет данных по достижениям.</p>
-        {% endif %}
-      </article>
-    {% endfor %}
-  </section>
-
-  <section class="grid two-col">
     <article class="panel">
       <div class="panel-head">
         <h2>Ваш доступ</h2>
@@ -273,6 +262,37 @@
           </div>
         {% else %}
           <p class="empty-text">Для этого рейтинга пока не хватает данных.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% if active_tab == "achievements" %}
+  <section class="grid two-col">
+    {% for section in achievement_sections %}
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>{{ section.title }}</h2>
+            <p class="panel-subtitle">Локальные достижения внутри этой группы.</p>
+          </div>
+        </div>
+        {% if section.rows %}
+          <div class="list-stack compact">
+            {% for row in section.rows %}
+              <div class="stat-row">
+                <div>
+                  <strong>{{ row.title }}</strong>
+                  <p>{{ row.meta }}</p>
+                  <p>{{ row.description }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Пока нет локальных достижений для этой группы.</p>
         {% endif %}
       </article>
     {% endfor %}

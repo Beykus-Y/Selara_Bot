@@ -334,6 +334,26 @@ class SqlAlchemyActivityRepository:
         global_count = (await self._session.execute(global_count_stmt)).scalar_one()
         return int(chat_count or 0) + int(global_count or 0)
 
+    async def count_owned_pets(self, *, user_id: int) -> int:
+        stmt = (
+            select(func.count(RelationshipGraphModel.id))
+            .where(
+                RelationshipGraphModel.relation_type == "pet",
+                RelationshipGraphModel.user_a == user_id,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
+    async def count_pet_owners(self, *, user_id: int) -> int:
+        stmt = (
+            select(func.count(RelationshipGraphModel.id))
+            .where(
+                RelationshipGraphModel.relation_type == "pet",
+                RelationshipGraphModel.user_b == user_id,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def list_user_chat_achievements(self, *, chat_id: int, user_id: int) -> list[AchievementAward]:
         stmt = (
             select(UserChatAchievementModel)

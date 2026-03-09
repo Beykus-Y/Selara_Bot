@@ -212,6 +212,8 @@ async def _build_achievement_sections(
     settings: Settings,
     chat_id: int,
     user_id: int,
+    include_chat: bool = True,
+    include_global: bool = True,
 ) -> list[dict[str, object]]:
     catalog = get_achievement_catalog_from_settings(settings)
     chat_awards = {item.achievement_id: item for item in await activity_repo.list_user_chat_achievements(chat_id=chat_id, user_id=user_id)}
@@ -234,28 +236,30 @@ async def _build_achievement_sections(
             "awarded_at": format_datetime(award.awarded_at) if award is not None else None,
         }
 
-    chat_rows = [
-        _row(
-            definition,
-            chat_awards.get(definition.id),
-            chat_stats.get(definition.id, (0, 0.0)),
-            scope_label="чат",
-        )
-        for definition in catalog.list_by_scope("chat")
-    ]
-    global_rows = [
-        _row(
-            definition,
-            global_awards.get(definition.id),
-            global_stats.get(definition.id, (0, 0.0)),
-            scope_label="глобал",
-        )
-        for definition in catalog.list_by_scope("global")
-    ]
-    return [
-        {"title": "Чатовые достижения", "rows": build_achievement_rows(chat_rows)},
-        {"title": "Глобальные достижения", "rows": build_achievement_rows(global_rows)},
-    ]
+    sections: list[dict[str, object]] = []
+    if include_chat:
+        chat_rows = [
+            _row(
+                definition,
+                chat_awards.get(definition.id),
+                chat_stats.get(definition.id, (0, 0.0)),
+                scope_label="чат",
+            )
+            for definition in catalog.list_by_scope("chat")
+        ]
+        sections.append({"title": "Чатовые достижения", "rows": build_achievement_rows(chat_rows)})
+    if include_global:
+        global_rows = [
+            _row(
+                definition,
+                global_awards.get(definition.id),
+                global_stats.get(definition.id, (0, 0.0)),
+                scope_label="глобал",
+            )
+            for definition in catalog.list_by_scope("global")
+        ]
+        sections.append({"title": "Глобальные достижения", "rows": build_achievement_rows(global_rows)})
+    return sections
 
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
@@ -379,6 +383,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         links = _top_links(
             ("/app/docs/user", "Справка пользователя", "ghost"),
             ("/app/games", "Игры", "ghost"),
+            ("/app/achievements", "Достижения", "ghost"),
             (f"https://t.me/{bot_username}", "Telegram", "ghost"),
             ("/app", "К кабинету", "primary"),
         )
@@ -396,6 +401,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "top_links": _top_links(
                 ("/app/docs/user", "Справка пользователя", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
+                ("/app/achievements", "Достижения", "ghost"),
                 ("/app", "Обновить", "subtle"),
             ),
             "show_logout": True,
@@ -408,6 +414,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "top_links": _top_links(
                 ("/app", "К кабинетам", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
+                ("/app/achievements", "Достижения", "ghost"),
                 (f"/app/chat/{chat_id}/economy", "Экономика", "ghost"),
                 (f"/app/family/{chat_id}", "Моя семья", "ghost"),
                 (f"/app/docs/user?chat_id={chat_id}", "Справка пользователя", "ghost"),
@@ -423,9 +430,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return {
             "top_links": _top_links(
                 ("#create-game", "Создать игру", "primary"),
+                ("/app/achievements", "Достижения", "ghost"),
                 ("/app/docs/user", "Справка пользователя", "ghost"),
                 ("/app", "К кабинетам", "ghost"),
                 ("/app/games", "Обновить", "subtle"),
+            ),
+            "show_logout": True,
+            "flash": flash,
+            "error": error,
+        }
+
+    def _achievements_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
+        return {
+            "top_links": _top_links(
+                ("/app/games", "Активные игры", "ghost"),
+                ("/app", "К кабинетам", "ghost"),
+                ("/app/achievements", "Обновить", "subtle"),
             ),
             "show_logout": True,
             "flash": flash,
@@ -451,6 +471,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         links.extend(
             (
                 ("/app/games", "Активные игры", "ghost"),
+                ("/app/achievements", "Достижения", "ghost"),
                 ("/app", "К кабинетам", "ghost"),
                 (docs_href, "Обновить", "subtle"),
             )
@@ -470,6 +491,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         links.extend(
             (
                 ("/app/games", "Активные игры", "ghost"),
+                ("/app/achievements", "Достижения", "ghost"),
                 ("/app", "К кабинетам", "ghost"),
                 (docs_href, "Обновить", "subtle"),
             )
@@ -3933,6 +3955,50 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
         return _render_template("home.html", **page_context)
 
+    @app.get("/app/achievements", response_class=HTMLResponse)
+    async def achievements_page(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            activity_groups = await activity_repo.list_user_activity_chats(user_id=user.telegram_user_id, limit=1)
+            fallback_chat_id = activity_groups[0].chat_id if activity_groups else 0
+            achievement_sections = await _build_achievement_sections(
+                activity_repo,
+                settings=settings,
+                chat_id=fallback_chat_id,
+                user_id=user.telegram_user_id,
+                include_chat=False,
+                include_global=True,
+            )
+            global_rows = achievement_sections[0]["rows"] if achievement_sections else []
+            unlocked_count = sum(1 for row in global_rows if row.get("value") != "не открыто")
+            await session.commit()
+
+        page_context: dict[str, object] = {
+            "page_title": "Selara • Достижения",
+            "page_name": "achievements",
+            "hero_title": "Достижения",
+            "hero_subtitle": "Глобальные ачивки аккаунта. Здесь остаётся история того, что открыто вне привязки к конкретной группе.",
+            "achievement_sections": achievement_sections,
+            "achievement_metrics": [
+                {"label": "Открыто", "value": str(unlocked_count), "note": "глобальных достижений", "tone": "cyan"},
+                {"label": "Всего в каталоге", "value": str(len(global_rows)), "note": "доступно сейчас", "tone": "violet"},
+            ],
+            "flash": request.query_params.get("flash"),
+            "error": request.query_params.get("error"),
+        }
+        page_context.update(
+            _achievements_layout_context(
+                flash=page_context["flash"],  # type: ignore[index]
+                error=page_context["error"],  # type: ignore[index]
+            )
+        )
+        return _render_template("achievements.html", **page_context)
+
     @app.get("/app/games", response_class=HTMLResponse)
     async def games_page(request: Request):
         async with session_factory() as session:
@@ -4544,11 +4610,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_id=chat_id,
                 user_id=user.telegram_user_id,
             )
-            achievement_sections = await _build_achievement_sections(
+            local_achievement_sections = await _build_achievement_sections(
                 activity_repo,
                 settings=settings,
                 chat_id=chat_id,
                 user_id=user.telegram_user_id,
+                include_chat=True,
+                include_global=False,
             )
             await session.commit()
 
@@ -4573,13 +4641,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             top_mix=top_mix,
             top_karma=top_karma,
             top_mix_7d=top_mix_7d,
-            achievement_sections=achievement_sections,
+            local_achievement_sections=local_achievement_sections,
             flash=request.query_params.get("flash"),
             error=request.query_params.get("error"),
         )
         if requested_tab == "settings" and not can_manage_settings:
             requested_tab = "overview"
-        page_context["active_tab"] = "settings" if requested_tab == "settings" else "overview"
+        if requested_tab == "settings":
+            active_tab = "settings"
+        elif requested_tab == "achievements":
+            active_tab = "achievements"
+        else:
+            active_tab = "overview"
+        page_context["active_tab"] = active_tab
         page_context.update(
             _chat_layout_context(
                 chat_id=chat_id,

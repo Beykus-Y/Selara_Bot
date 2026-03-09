@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Аккаунт</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">global unlocks</div>
+      <div class="hero-chip">telegram + web</div>
+      <div class="hero-chip">catalog sync</div>
+    </div>
+  </section>
+
+  <section class="metrics-grid">
+    {% for metric in achievement_metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    {% for section in achievement_sections %}
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>{{ section.title }}</h2>
+            <p class="panel-subtitle">Глобальные достижения аккаунта, не привязанные к одной группе.</p>
+          </div>
+          <span class="panel-tag">{{ section.rows|length }}</span>
+        </div>
+        {% if section.rows %}
+          <div class="list-stack compact">
+            {% for row in section.rows %}
+              <div class="stat-row">
+                <div>
+                  <strong>{{ row.title }}</strong>
+                  <p>{{ row.meta }}</p>
+                  <p>{{ row.description }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Глобальные достижения пока не появились.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Как открываются</h2>
+          <p class="panel-subtitle">Часть достижений приходит из активности, часть из социальных и семейных механик.</p>
+        </div>
+      </div>
+      <div class="list-stack compact">
+        <div class="security-card">
+          <strong>Сообщения и стрики</strong>
+          <p>Чатовые достижения считаются внутри конкретной группы и доступны прямо на её странице.</p>
+        </div>
+        <div class="security-card">
+          <strong>Социальные статусы</strong>
+          <p>Пара, брак, питомцы и коллекции достижений обновляются через события и ручной refresh профиля.</p>
+        </div>
+        <div class="security-card">
+          <strong>Telegram-команды</strong>
+          <p>Используй <code>/achievements</code>, <code>достижения</code> или <code>мои ачивки</code> внутри группы.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+{% endblock %}

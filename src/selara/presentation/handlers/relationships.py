@@ -510,7 +510,7 @@ async def divorce_command(message: Message, activity_repo) -> None:
 
 
 @router.callback_query(F.data.startswith("rel:"))
-async def relationship_callback(query: CallbackQuery, activity_repo) -> None:
+async def relationship_callback(query: CallbackQuery, activity_repo, achievement_orchestrator) -> None:
     if query.from_user is None or query.data is None:
         await _safe_callback_answer(query)
         return
@@ -575,6 +575,20 @@ async def relationship_callback(query: CallbackQuery, activity_repo) -> None:
             actor_user_id=query.from_user.id,
             target_user_id=proposal.target_user_id,
         )
+        if achievement_orchestrator is not None:
+            now = datetime.now(timezone.utc)
+            await achievement_orchestrator.process_refresh(
+                chat_id=proposal.chat_id,
+                user_id=proposal.proposer_user_id,
+                event_at=now,
+                event_type=f"relationship_{relationship.kind}_accepted",
+            )
+            await achievement_orchestrator.process_refresh(
+                chat_id=proposal.chat_id,
+                user_id=proposal.target_user_id,
+                event_at=now,
+                event_type=f"relationship_{relationship.kind}_accepted",
+            )
     elif proposal.status == "rejected":
         text = f"{target_mention} отклонил(а) предложение от {proposer_mention}."
         await log_chat_action(

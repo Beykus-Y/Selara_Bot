@@ -1335,7 +1335,7 @@ async def captcha_callback(query: CallbackQuery, bot: Bot, activity_repo) -> Non
 
 
 @router.callback_query(F.data.startswith("famreq:"))
-async def family_request_callback(query: CallbackQuery, activity_repo) -> None:
+async def family_request_callback(query: CallbackQuery, activity_repo, achievement_orchestrator) -> None:
     if query.data is None or query.from_user is None or query.message is None:
         return
     parts = query.data.split(":")
@@ -1403,5 +1403,19 @@ async def family_request_callback(query: CallbackQuery, activity_repo) -> None:
         description=f"Создана семейная связь {relation.relation_type}: {relation.user_a} -> {relation.user_b}.",
         actor_user_id=query.from_user.id,
     )
+    if achievement_orchestrator is not None:
+        now = datetime.now(timezone.utc)
+        await achievement_orchestrator.process_refresh(
+            chat_id=query.message.chat.id,
+            user_id=relation.user_a,
+            event_at=now,
+            event_type=f"family_{relation.relation_type}_accepted",
+        )
+        await achievement_orchestrator.process_refresh(
+            chat_id=query.message.chat.id,
+            user_id=relation.user_b,
+            event_at=now,
+            event_type=f"family_{relation.relation_type}_accepted",
+        )
     await query.message.edit_text(text)
     await query.answer("Готово")

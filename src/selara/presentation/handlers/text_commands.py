@@ -89,6 +89,7 @@ from selara.presentation.handlers.relationships import (
     vow_command as relationship_vow_command,
 )
 from selara.presentation.handlers.stats import (
+    achievements_command,
     award_reply_text_command,
     send_last_seen,
     send_me_stats,
@@ -2580,6 +2581,7 @@ async def text_commands_handler(
     settings: Settings,
     chat_settings: ChatSettings,
     session_factory,
+    achievement_orchestrator=None,
 ) -> None:
     text = message.text or ""
     if _is_reply_profile_lookup(message, text):
@@ -2831,6 +2833,16 @@ async def text_commands_handler(
 
     if intent.name == "rep":
         await send_rep_stats(message, activity_repo, chat_settings)
+        return
+
+    if intent.name == "achievements":
+        await achievements_command(
+            message,
+            command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            activity_repo=activity_repo,
+            settings=settings,
+            achievement_orchestrator=achievement_orchestrator,
+        )
         return
 
     if intent.name == "active":

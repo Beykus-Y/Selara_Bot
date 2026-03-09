@@ -53,6 +53,26 @@ class AchievementConditionEvaluator:
             threshold = max(0, int(value or 0))
             return total >= threshold, f"achievements_count reached {total}", {"value": total, "target": threshold}
 
+        if condition_type == "active_pair_gte":
+            threshold = max(0, int(value or 0))
+            current = 1 if await repo.get_active_pair(user_id=context.user_id) is not None else 0
+            return current >= threshold, f"active_pair reached {current}", {"value": current, "target": threshold}
+
+        if condition_type == "active_marriage_gte":
+            threshold = max(0, int(value or 0))
+            current = 1 if await repo.get_active_marriage(user_id=context.user_id) is not None else 0
+            return current >= threshold, f"active_marriage reached {current}", {"value": current, "target": threshold}
+
+        if condition_type == "owned_pets_gte":
+            threshold = max(0, int(value or 0))
+            current = await repo.count_owned_pets(user_id=context.user_id)
+            return current >= threshold, f"owned_pets reached {current}", {"value": current, "target": threshold}
+
+        if condition_type == "is_pet_gte":
+            threshold = max(0, int(value or 0))
+            current = await repo.count_pet_owners(user_id=context.user_id)
+            return current >= threshold, f"is_pet reached {current}", {"value": current, "target": threshold}
+
         if condition_type == "joined_chat":
             joined = context.event_type == "member_joined" and context.chat_id is not None
             return joined, "joined_chat", {"chat_id": context.chat_id} if joined else None

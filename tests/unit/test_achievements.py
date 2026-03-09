@@ -31,6 +31,30 @@ class FakeAchievementRepo:
         assert user_id == 10
         return 3
 
+    async def count_active_pairs(self, *, user_id: int) -> int:
+        assert user_id == 10
+        return 1
+
+    async def count_active_marriages(self, *, user_id: int) -> int:
+        assert user_id == 10
+        return 1
+
+    async def get_active_pair(self, *, user_id: int):
+        assert user_id == 10
+        return object()
+
+    async def get_active_marriage(self, *, user_id: int):
+        assert user_id == 10
+        return object()
+
+    async def count_owned_pets(self, *, user_id: int) -> int:
+        assert user_id == 10
+        return 1
+
+    async def count_pet_owners(self, *, user_id: int) -> int:
+        assert user_id == 10
+        return 1
+
 
 def test_achievement_catalog_loads_and_sorts() -> None:
     catalog = AchievementCatalogService.load(Path("src/selara/core/achievements.json"))
@@ -39,7 +63,13 @@ def test_achievement_catalog_loads_and_sorts() -> None:
     global_items = catalog.list_by_scope("global")
 
     assert [item.id for item in chat_items] == ["first_message", "chat_100_messages", "chat_7_days_streak"]
-    assert [item.id for item in global_items] == ["global_3_achievements"]
+    assert [item.id for item in global_items] == [
+        "global_3_achievements",
+        "global_found_pair",
+        "global_married",
+        "global_pet_owner",
+        "global_became_pet",
+    ]
 
 
 @pytest.mark.asyncio
@@ -95,18 +125,74 @@ async def test_achievement_condition_evaluator_supports_core_conditions() -> Non
         condition_payload={"value": 3},
         tags=(),
     )
+    pair_def = AchievementDefinition(
+        id="global_found_pair",
+        scope="global",
+        title="",
+        description="",
+        hidden=False,
+        rarity="rare",
+        icon="",
+        sort_order=4,
+        enabled=True,
+        condition_type="active_pair_gte",
+        condition_payload={"value": 1},
+        tags=(),
+    )
+    marriage_def = AchievementDefinition(
+        id="global_married",
+        scope="global",
+        title="",
+        description="",
+        hidden=False,
+        rarity="rare",
+        icon="",
+        sort_order=5,
+        enabled=True,
+        condition_type="active_marriage_gte",
+        condition_payload={"value": 1},
+        tags=(),
+    )
+    pet_owner_def = AchievementDefinition(
+        id="global_pet_owner",
+        scope="global",
+        title="",
+        description="",
+        hidden=False,
+        rarity="rare",
+        icon="",
+        sort_order=6,
+        enabled=True,
+        condition_type="owned_pets_gte",
+        condition_payload={"value": 1},
+        tags=(),
+    )
+    became_pet_def = AchievementDefinition(
+        id="global_became_pet",
+        scope="global",
+        title="",
+        description="",
+        hidden=False,
+        rarity="rare",
+        icon="",
+        sort_order=7,
+        enabled=True,
+        condition_type="is_pet_gte",
+        condition_payload={"value": 1},
+        tags=(),
+    )
+
+    global_context = AchievementEvaluationContext(
+        user_id=10,
+        chat_id=None,
+        event_type="global_refresh",
+        event_at=context.event_at,
+    )
 
     assert (await evaluator.is_satisfied(message_def, repo=repo, context=context))[0] is True
     assert (await evaluator.is_satisfied(streak_def, repo=repo, context=context))[0] is True
-    assert (
-        await evaluator.is_satisfied(
-            global_def,
-            repo=repo,
-            context=AchievementEvaluationContext(
-                user_id=10,
-                chat_id=None,
-                event_type="global_refresh",
-                event_at=context.event_at,
-            ),
-        )
-    )[0] is True
+    assert (await evaluator.is_satisfied(global_def, repo=repo, context=global_context))[0] is True
+    assert (await evaluator.is_satisfied(pair_def, repo=repo, context=global_context))[0] is True
+    assert (await evaluator.is_satisfied(marriage_def, repo=repo, context=global_context))[0] is True
+    assert (await evaluator.is_satisfied(pet_owner_def, repo=repo, context=global_context))[0] is True
+    assert (await evaluator.is_satisfied(became_pet_def, repo=repo, context=global_context))[0] is True

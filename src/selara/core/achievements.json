@@ -6,7 +6,7 @@
     "description": "Отправить первое сообщение в чате",
     "hidden": false,
     "rarity": "common",
-    "icon": "1st",
+    "icon": "💬",
     "sort_order": 10,
     "enabled": true,
     "condition": {
@@ -21,7 +21,7 @@
     "description": "Отправить 100 сообщений в чате",
     "hidden": false,
     "rarity": "common",
-    "icon": "100",
+    "icon": "🗣️",
     "sort_order": 20,
     "enabled": true,
     "condition": {
@@ -37,7 +37,7 @@
     "description": "Проявлять активность 7 дней подряд в чате",
     "hidden": false,
     "rarity": "uncommon",
-    "icon": "7d",
+    "icon": "📆",
     "sort_order": 30,
     "enabled": true,
     "condition": {
@@ -53,7 +53,7 @@
     "description": "Открыть 3 достижения",
     "hidden": false,
     "rarity": "rare",
-    "icon": "3x",
+    "icon": "🏆",
     "sort_order": 110,
     "enabled": true,
     "condition": {
@@ -61,5 +61,69 @@
       "value": 3
     },
     "tags": ["meta", "collection"]
+  },
+  {
+    "id": "global_found_pair",
+    "scope": "global",
+    "title": "Найти пару",
+    "description": "Вступить в отношения с кем-то в боте",
+    "hidden": false,
+    "rarity": "uncommon",
+    "icon": "💞",
+    "sort_order": 120,
+    "enabled": true,
+    "condition": {
+      "type": "active_pair_gte",
+      "value": 1
+    },
+    "tags": ["social", "relationships"]
+  },
+  {
+    "id": "global_married",
+    "scope": "global",
+    "title": "Выйти замуж",
+    "description": "Заключить брак в системе отношений",
+    "hidden": false,
+    "rarity": "rare",
+    "icon": "💍",
+    "sort_order": 130,
+    "enabled": true,
+    "condition": {
+      "type": "active_marriage_gte",
+      "value": 1
+    },
+    "tags": ["social", "marriage"]
+  },
+  {
+    "id": "global_pet_owner",
+    "scope": "global",
+    "title": "Завёл питомца",
+    "description": "Получить хотя бы одного питомца",
+    "hidden": false,
+    "rarity": "uncommon",
+    "icon": "🐾",
+    "sort_order": 140,
+    "enabled": true,
+    "condition": {
+      "type": "owned_pets_gte",
+      "value": 1
+    },
+    "tags": ["family", "pet"]
+  },
+  {
+    "id": "global_became_pet",
+    "scope": "global",
+    "title": "Стал питомцем",
+    "description": "Стать чьим-то питомцем",
+    "hidden": false,
+    "rarity": "uncommon",
+    "icon": "🦴",
+    "sort_order": 150,
+    "enabled": true,
+    "condition": {
+      "type": "is_pet_gte",
+      "value": 1
+    },
+    "tags": ["family", "pet"]
   }
 ]

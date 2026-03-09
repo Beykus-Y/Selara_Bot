@@ -56,6 +56,30 @@ class AchievementOrchestrator:
         results.extend(await self._evaluate_global(user_id=user_id, event_at=event_at))
         return [item for item in results if item.awarded]
 
+    async def process_refresh(
+        self,
+        *,
+        chat_id: int | None,
+        user_id: int,
+        event_at: datetime,
+        event_type: str = "manual_refresh",
+    ) -> list[AchievementAwardResult]:
+        results: list[AchievementAwardResult] = []
+        if chat_id is not None:
+            results.extend(
+                await self._evaluate_scope(
+                    scope="chat",
+                    context=AchievementEvaluationContext(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        event_type=event_type,
+                        event_at=event_at,
+                    ),
+                )
+            )
+        results.extend(await self._evaluate_global(user_id=user_id, event_at=event_at))
+        return [item for item in results if item.awarded]
+
     async def _evaluate_scope(self, *, scope: str, context: AchievementEvaluationContext) -> list[AchievementAwardResult]:
         results: list[AchievementAwardResult] = []
         for definition in self._catalog.list_by_scope(scope, enabled_only=True):

@@ -239,33 +239,63 @@ async def _build_achievements_message(
         chat_id=chat_id,
         user_id=user_id,
     )
-    lines = [f"<b>Ачивки:</b> {escape(target_label)}"]
+    chat_unlocked = sum(1 for item in chat_views if item.awarded)
+    global_unlocked = sum(1 for item in global_views if item.awarded)
+    total_unlocked = chat_unlocked + global_unlocked
+    total_count = len(chat_views) + len(global_views)
 
-    if chat_views:
+    lines = [
+        f"🏆 <b>Достижения · {escape(target_label)}</b>",
+        (
+            f"<blockquote>Открыто: <b>{total_unlocked}/{total_count}</b> • "
+            f"чат: <b>{chat_unlocked}/{len(chat_views)}</b> • "
+            f"глобал: <b>{global_unlocked}/{len(global_views)}</b></blockquote>"
+        ),
+    ]
+
+    def _append_section(title: str, items: list[AchievementView], *, empty_text: str) -> None:
         lines.append("")
-        lines.append("<b>Чатовые</b>")
-        for item in chat_views:
-            status = "получено" if item.awarded else "не получено"
-            awarded_at = f" • {escape(format_elapsed_compact(item.awarded_at, timezone_name))}" if item.awarded_at else ""
-            lines.append(
-                f"• <b>{escape(item.title)}</b> [{escape(item.icon)}] ({status}, {item.holders_percent:.2f}% / {item.holders_count}){awarded_at}"
-            )
-            lines.append(f"  {escape(item.description)}")
+        lines.append(f"<b>{escape(title)}</b>")
+        if not items:
+            lines.append(empty_text)
+            return
 
-    if global_views:
-        lines.append("")
-        lines.append("<b>Глобальные</b>")
-        for item in global_views:
-            status = "получено" if item.awarded else "не получено"
-            awarded_at = f" • {escape(format_elapsed_compact(item.awarded_at, timezone_name))}" if item.awarded_at else ""
+        for item in items:
+            if item.awarded and item.awarded_at is not None:
+                status_line = f"получено • {escape(format_elapsed_compact(item.awarded_at, timezone_name))}"
+            else:
+                status_line = "не получено"
+            lines.append(f"{escape(item.icon)} <b>{escape(item.title)}</b>")
             lines.append(
-                f"• <b>{escape(item.title)}</b> [{escape(item.icon)}] ({status}, {item.holders_percent:.2f}% / {item.holders_count}){awarded_at}"
+                f"└ {status_line} • {item.holders_percent:.2f}% • владельцев: {item.holders_count}"
             )
-            lines.append(f"  {escape(item.description)}")
+            lines.append(f"└ {escape(item.description)}")
 
-    if len(lines) == 1:
+    _append_section("Чатовые", chat_views, empty_text="Пока нет локальных достижений.")
+    _append_section("Глобальные", global_views, empty_text="Пока нет глобальных достижений.")
+
+    if total_count == 0:
         return f"У пользователя <b>{escape(target_label)}</b> пока нет достижений."
     return "\n".join(lines)
+
+
+async def _refresh_achievements_for_user(
+    *,
+    activity_repo,
+    achievement_orchestrator,
+    chat_id: int,
+    user_id: int,
+) -> None:
+    if achievement_orchestrator is None:
+        return
+    try:
+        await achievement_orchestrator.process_refresh(
+            chat_id=chat_id,
+            user_id=user_id,
+            event_at=datetime.now(timezone.utc),
+        )
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
 
 
 async def _resolve_stats_target_user(
@@ -1031,7 +1061,13 @@ async def awards_command(message: Message, command: CommandObject, activity_repo
 
 
 @router.message(Command("achievements"))
-async def achievements_command(message: Message, command: CommandObject, activity_repo, settings: Settings) -> None:
+async def achievements_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    settings: Settings,
+    achievement_orchestrator=None,
+) -> None:
     if message.from_user is None:
         return
     if message.chat.type not in {"group", "supergroup"}:
@@ -1053,6 +1089,12 @@ async def achievements_command(message: Message, command: CommandObject, activit
             chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
         )
 
+    await _refresh_achievements_for_user(
+        activity_repo=activity_repo,
+        achievement_orchestrator=achievement_orchestrator,
+        chat_id=message.chat.id,
+        user_id=target.telegram_user_id,
+    )
     await message.answer(
         await _build_achievements_message(
             activity_repo=activity_repo,
@@ -1086,7 +1128,7 @@ async def achsync_command(message: Message, command: CommandObject, activity_rep
 
 
 @router.callback_query(F.data.startswith(f"{_PROFILE_CALLBACK_PREFIX}:"))
-async def profile_card_callback(query: CallbackQuery, activity_repo, settings: Settings) -> None:
+async def profile_card_callback(query: CallbackQuery, activity_repo, settings: Settings, achievement_orchestrator=None) -> None:
     if query.message is None:
         await query.answer()
         return
@@ -1103,6 +1145,12 @@ async def profile_card_callback(query: CallbackQuery, activity_repo, settings: S
             user_id=target_user_id,
         )
     elif action == "achievements":
+        await _refresh_achievements_for_user(
+            activity_repo=activity_repo,
+            achievement_orchestrator=achievement_orchestrator,
+            chat_id=query.message.chat.id,
+            user_id=target_user_id,
+        )
         text = await _build_achievements_message(
             activity_repo=activity_repo,
             settings=settings,
