@@ -39,7 +39,7 @@ class AchievementConditionEvaluator:
                 return False, None, None
             stats = await repo.get_user_stats(chat_id=context.chat_id, user_id=context.user_id)
             current = int(stats.message_count if stats is not None else 0)
-            return current == 1, "first_message", {"value": current}
+            return current >= 1, f"message_count reached {current}", {"value": current, "target": 1}
 
         if condition_type == "streak_days_gte":
             if context.chat_id is None:
