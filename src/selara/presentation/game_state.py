@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import random
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -11,6 +12,13 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Literal, Protocol
 from uuid import uuid4
+
+try:
+    from redis.exceptions import RedisError as _RedisError
+except ModuleNotFoundError:  # pragma: no cover
+    _RedisError = None
+
+logger = logging.getLogger(__name__)
 
 GameStatus = Literal["lobby", "started", "finished"]
 GameKind = Literal["spy", "mafia", "dice", "number", "quiz", "bredovukha", "bunker", "whoami"]
@@ -4972,6 +4980,23 @@ class RuntimeGameStore:
         self._codec = GameStateCodec()
         self._state_repo: RedisGameStateRepository | None = None
         self._broker: LiveEventBroker | None = None
+        self._redis_degraded = False
+
+    @staticmethod
+    def _is_redis_error(exc: Exception) -> bool:
+        return _RedisError is not None and isinstance(exc, _RedisError)
+
+    def _degrade_to_in_memory(self, *, stage: str, exc: Exception) -> None:
+        was_using_redis = self._state_repo is not None or self._broker is not None
+        self._state_repo = None
+        self._broker = None
+        if was_using_redis and not self._redis_degraded:
+            self._redis_degraded = True
+            logger.warning(
+                "Redis is unavailable during %s; falling back to in-memory game store. Error: %s",
+                stage,
+                exc,
+            )
 
     @property
     def backend(self) -> InMemoryGameStore:
@@ -4986,11 +5011,13 @@ class RuntimeGameStore:
         self._backend = InMemoryGameStore()
         self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
         self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
+        self._redis_degraded = False
 
     def use_in_memory(self) -> None:
         self._backend = InMemoryGameStore()
         self._state_repo = None
         self._broker = None
+        self._redis_degraded = False
 
     async def close(self) -> None:
         if self._broker is not None:
@@ -5009,15 +5036,21 @@ class RuntimeGameStore:
         if self._broker is None:
             return
         revision = str(int(datetime.now(timezone.utc).timestamp() * 1000))
-        await self._broker.publish(
-            LiveEvent(
-                event_type=event_type,
-                scope=scope,
-                revision=revision,
-                chat_id=chat_id,
-                game_id=game_id,
+        try:
+            await self._broker.publish(
+                LiveEvent(
+                    event_type=event_type,
+                    scope=scope,
+                    revision=revision,
+                    chat_id=chat_id,
+                    game_id=game_id,
+                )
             )
-        )
+        except Exception as exc:
+            if self._is_redis_error(exc):
+                self._degrade_to_in_memory(stage="publish_event", exc=exc)
+                return
+            raise
 
     async def _hydrate_game(self, game_id: str) -> None:
         if self._state_repo is None or game_id in self._backend._by_id:
@@ -5113,11 +5146,23 @@ class RuntimeGameStore:
             return attr
 
         async def _wrapped(*args, **kwargs):
-            await self._hydrate_for_call(name, kwargs)
+            try:
+                await self._hydrate_for_call(name, kwargs)
+            except Exception as exc:
+                if self._is_redis_error(exc):
+                    self._degrade_to_in_memory(stage=f"{name}:hydrate", exc=exc)
+                else:
+                    raise
             result = await attr(*args, **kwargs)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
-                await self._sync_cached_state()
-                await self._publish_after_call(name, result, kwargs)
+                try:
+                    await self._sync_cached_state()
+                    await self._publish_after_call(name, result, kwargs)
+                except Exception as exc:
+                    if self._is_redis_error(exc):
+                        self._degrade_to_in_memory(stage=f"{name}:sync", exc=exc)
+                    else:
+                        raise
             return result
 
         return _wrapped

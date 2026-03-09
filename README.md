@@ -51,10 +51,10 @@ Examples:
 cp .env.example .env
 ```
 
-2. Start PostgreSQL:
+2. Start PostgreSQL and Redis:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres redis
 ```
 
 3. Install dependencies (example with venv):
