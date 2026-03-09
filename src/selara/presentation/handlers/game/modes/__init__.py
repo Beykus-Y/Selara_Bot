@@ -6,6 +6,7 @@ from selara.presentation.handlers.game.modes.number import build_number_start_te
 from selara.presentation.handlers.game.modes.quiz import build_quiz_start_text
 from selara.presentation.handlers.game.modes.spy import build_spy_start_text
 from selara.presentation.handlers.game.modes.whoami import build_whoami_start_text
+from selara.presentation.handlers.game.modes.zlobcards import build_zlobcards_start_text
 
 __all__ = [
     "build_bunker_start_text",
@@ -16,5 +17,6 @@ __all__ = [
     "build_quiz_start_text",
     "build_spy_start_text",
     "build_whoami_start_text",
+    "build_zlobcards_start_text",
     "number_distance_hint",
 ]

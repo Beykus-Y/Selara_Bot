@@ -46,6 +46,7 @@ from selara.presentation.game_state import (
     WhoamiAnswerResolution,
     WhoamiGuessResolution,
     WhoamiQuestionResult,
+    ZlobRoundResolution,
 )
 from selara.presentation.handlers.game.modes import (
     build_bunker_start_text,
@@ -56,6 +57,7 @@ from selara.presentation.handlers.game.modes import (
     build_quiz_start_text,
     build_spy_start_text,
     build_whoami_start_text,
+    build_zlobcards_start_text,
     number_distance_hint,
 )
 from selara.presentation.handlers.private_panel import send_private_start_panel
@@ -71,6 +73,7 @@ _DEAD_VIEW_LIMIT = 10
 _GAME_PARTICIPANT_REWARD_MIN = 10
 _GAME_PARTICIPANT_REWARD_MAX = 20
 _GAME_WINNER_REWARD_TOTAL_BY_KIND: dict[GameKind, tuple[int, int]] = {
+    "zlobcards": (130, 170),
     "dice": (110, 130),
     "number": (120, 150),
     "quiz": (130, 165),
@@ -80,6 +83,8 @@ _GAME_WINNER_REWARD_TOTAL_BY_KIND: dict[GameKind, tuple[int, int]] = {
     "mafia": (130, 170),
     "whoami": (125, 155),
 }
+_ZLOBCARDS_PRIVATE_SECONDS = 75
+_ZLOBCARDS_VOTE_SECONDS = 75
 
 
 def _is_stale_callback_query_error(exc: TelegramBadRequest) -> bool:
@@ -401,6 +406,11 @@ def _parse_kind(raw: str | None) -> GameKind | None:
         "who am i": "whoami",
         "кто я": "whoami",
         "ктоя": "whoami",
+        "zlobcards": "zlobcards",
+        "zlob": "zlobcards",
+        "cah": "zlobcards",
+        "злобные карты": "zlobcards",
+        "злобкарты": "zlobcards",
     }
     return aliases.get(value)
 
@@ -586,6 +596,61 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
     return builder.as_markup()
 
 
+def _build_zlob_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
+    if game.kind != "zlobcards" or game.status != "started" or game.phase != "public_vote":
+        return None
+    if not game.zlob_options:
+        return None
+
+    builder = InlineKeyboardBuilder()
+    for option_index, option_text in enumerate(game.zlob_options):
+        short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
+        builder.button(
+            text=f"{_quiz_choice_label(option_index)}. {short_text}",
+            callback_data=f"gzlobv:{game.game_id}:{option_index}",
+        )
+
+    voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:noop")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) -> InlineKeyboardMarkup | None:
+    if game.kind != "zlobcards" or game.status != "started" or game.phase != "private_answers":
+        return None
+    if actor_user_id not in game.players:
+        return None
+
+    hand = list(game.zlob_hands.get(actor_user_id, ()))
+    if not hand:
+        return None
+
+    slots = max(1, int(game.zlob_black_slots))
+    builder = InlineKeyboardBuilder()
+    if slots == 1:
+        for card_index, card_text in enumerate(hand):
+            label = card_text if len(card_text) <= 24 else f"{card_text[:21]}..."
+            builder.button(
+                text=f"🃏 {label}",
+                callback_data=f"gzlobp:{game.game_id}:{card_index}",
+            )
+    else:
+        for first in range(len(hand)):
+            for second in range(first + 1, len(hand)):
+                first_text = hand[first]
+                second_text = hand[second]
+                merged = f"{first_text} + {second_text}"
+                label = merged if len(merged) <= 24 else f"{merged[:21]}..."
+                builder.button(
+                    text=f"🃏 {label}",
+                    callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
+                )
+    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:noop")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _build_private_bunker_reveal_keyboard(game: GroupGame, *, actor_user_id: int) -> InlineKeyboardMarkup | None:
     if game.kind != "bunker" or game.status != "started" or game.phase != "bunker_reveal":
         return None
@@ -750,6 +815,10 @@ def _whoami_category_label(game: GroupGame) -> str:
 
 def _spy_category_label(game: GroupGame) -> str:
     return game.spy_category or "случайная тема"
+
+
+def _zlob_category_label(game: GroupGame) -> str:
+    return game.zlob_category or "случайная тема"
 
 
 def _extract_whoami_guess(text: str) -> str | None:
@@ -1260,6 +1329,23 @@ def _render_bred_scoreboard(game: GroupGame, *, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
+def _render_zlob_scoreboard(game: GroupGame, *, limit: int = 8) -> str:
+    if game.kind != "zlobcards":
+        return ""
+    if not game.zlob_scores:
+        return "<b>Счёт:</b> пока без очков."
+
+    ranking = sorted(
+        game.zlob_scores.items(),
+        key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
+    )
+    lines = ["<b>Счёт:</b>"]
+    for idx, (user_id, score) in enumerate(ranking[:limit], start=1):
+        label = game.players.get(user_id, f"user:{user_id}")
+        lines.append(f"{idx}. {_mention(user_id, label)} — <code>{score}</code>")
+    return "\n".join(lines)
+
+
 def _render_bred_question(game: GroupGame) -> str:
     if game.kind != "bredovukha":
         return ""
@@ -1323,6 +1409,54 @@ def _render_bred_question(game: GroupGame) -> str:
     return "\n".join(lines)
 
 
+def _render_zlob_round_status(game: GroupGame) -> str:
+    if game.kind != "zlobcards" or not game.zlob_black_text:
+        return ""
+
+    lines = [
+        f"<b>Раунд {max(game.round_no, 1)}/{game.zlob_rounds}</b>",
+        f"<b>Тема:</b> {escape(_zlob_category_label(game))}",
+        f"<b>Чёрная карточка ({game.zlob_black_slots}):</b>",
+        escape(game.zlob_black_text),
+    ]
+
+    if game.phase == "private_answers":
+        submitted_user_ids = [
+            user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id in game.zlob_submissions
+        ]
+        waiting_user_ids = [
+            user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.zlob_submissions
+        ]
+        lines.append("<i>Выберите карту(ы) из руки в ЛС или на сайте. Ответы публикуются анонимно.</i>")
+        lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
+        lines.append(f"<b>Уже сдали:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
+        if waiting_user_ids:
+            lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_user_ids, limit=6)}")
+        return "\n".join(lines)
+
+    if game.phase == "public_vote":
+        vote_tally = [0 for _ in game.zlob_options]
+        for voted_option_index in game.zlob_votes.values():
+            if 0 <= voted_option_index < len(vote_tally):
+                vote_tally[voted_option_index] += 1
+        leader_text = "пока нет"
+        if vote_tally:
+            top_votes = max(vote_tally)
+            if top_votes > 0:
+                leader_indices = [idx for idx, count in enumerate(vote_tally) if count == top_votes]
+                if len(leader_indices) == 1:
+                    leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
+                else:
+                    leader_text = f"ничья по {top_votes}"
+        lines.append("<i>Голосуйте за самый смешной ответ. Голос можно менять до закрытия раунда.</i>")
+        voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
+        lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
+        lines.append(f"<b>Лидер:</b> {leader_text}")
+        return "\n".join(lines)
+
+    return "\n".join(lines)
+
+
 def _format_quiz_round_resolution(game: GroupGame, resolution: QuizRoundResolution) -> str:
     lines = [
         f"<b>Викторина:</b> вопрос {resolution.question_index + 1} закрыт.",
@@ -1374,6 +1508,45 @@ def _format_bred_round_resolution(game: GroupGame, resolution: BredRoundResoluti
             f"<b>Далее:</b> раунд {resolution.next_round_no}. "
             f"Категорию выбирает {escape(resolution.next_selector_label)}."
         )
+    return "\n".join(lines)
+
+
+def _format_zlob_round_resolution(game: GroupGame, resolution: ZlobRoundResolution) -> str:
+    lines = [
+        f"<b>500 Злобных Карт • раунд {resolution.round_no}/{game.zlob_rounds}</b>",
+        f"<b>Чёрная карточка ({resolution.black_slots}):</b> {escape(resolution.black_text)}",
+    ]
+
+    option_lines = ["<b>Варианты и голоса:</b>"]
+    for option_index, option_text in enumerate(resolution.options):
+        votes = resolution.vote_tally[option_index] if option_index < len(resolution.vote_tally) else 0
+        owner_user_id = resolution.option_owner_user_ids[option_index] if option_index < len(resolution.option_owner_user_ids) else None
+        owner_text = game.players.get(owner_user_id, f"user:{owner_user_id}") if owner_user_id is not None else "-"
+        win_mark = " 🏆" if option_index in resolution.winner_option_indexes else ""
+        option_lines.append(
+            f"{_quiz_choice_label(option_index)}. {escape(option_text)} — {escape(owner_text)} • {votes} голос(а/ов){win_mark}"
+        )
+    lines.extend(option_lines)
+
+    gain_parts: list[str] = []
+    for user_id, gain in sorted(
+        resolution.gains,
+        key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
+    ):
+        if gain <= 0:
+            continue
+        label = game.players.get(user_id, f"user:{user_id}")
+        gain_parts.append(f"{escape(label)} +{gain}")
+    if gain_parts:
+        lines.append(f"<b>Очки за раунд:</b> {' • '.join(gain_parts)}")
+    else:
+        lines.append("<b>Очки за раунд:</b> без начислений.")
+
+    lines.append(_render_zlob_scoreboard(game))
+    if resolution.finished:
+        lines.append(f"<b>Победа:</b> {escape(resolution.winner_text or '-')}")
+    elif resolution.next_round_no is not None:
+        lines.append(f"<b>Далее:</b> раунд {resolution.next_round_no}.")
     return "\n".join(lines)
 
 
@@ -1498,6 +1671,11 @@ def _render_game_text(
         if game.kind == "whoami":
             lines.append(f"<b>Категория:</b> {escape(_whoami_category_label(game))}")
             lines.append("<b>Формат:</b> вопрос в чат -> ответ кнопкой -> новая догадка или следующий игрок.")
+        if game.kind == "zlobcards":
+            lines.append(f"<b>Категория:</b> {escape(_zlob_category_label(game))}")
+            lines.append(f"<b>Раундов:</b> {game.zlob_rounds}")
+            lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
+            lines.append("<b>Формат:</b> чёрная карточка -> приватный выбор -> анонимное голосование.")
 
     if game.kind == "mafia" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
@@ -1597,6 +1775,22 @@ def _render_game_text(
             lines.append("")
             lines.append(score_block)
 
+    if game.kind == "zlobcards" and game.status == "started":
+        lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.zlob_rounds}")
+        lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
+        if game.phase == "private_answers":
+            lines.append("<b>Сейчас:</b> выберите карту(ы) из руки в ЛС или на сайте.")
+        elif game.phase == "public_vote":
+            lines.append("<b>Сейчас:</b> голосуйте за лучший анонимный вариант.")
+        zlob_block = _render_zlob_round_status(game)
+        if zlob_block:
+            lines.append("")
+            lines.append(zlob_block)
+        score_block = _render_zlob_scoreboard(game)
+        if score_block:
+            lines.append("")
+            lines.append(score_block)
+
     if game.kind == "bunker" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append(f"<b>Катастрофа:</b> {escape(game.bunker_catastrophe or '-')}")
@@ -1655,6 +1849,17 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             if len(category_text) > 18:
                 category_text = f"{category_text[:15]}..."
             builder.button(text=f"🧠 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:whoami_cat_next")
+        if game.kind == "zlobcards":
+            category_text = _zlob_category_label(game)
+            if len(category_text) > 18:
+                category_text = f"{category_text[:15]}..."
+            builder.button(text=f"😈 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:zlob_cat_next")
+            builder.button(text="➖ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_dec")
+            builder.button(text=f"🔢 Раунды: {game.zlob_rounds}", callback_data=f"gcfg:{game.game_id}:zlob_rounds_noop")
+            builder.button(text="➕ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_inc")
+            builder.button(text="➖ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_dec")
+            builder.button(text=f"🏁 Цель: {game.zlob_target_score}", callback_data=f"gcfg:{game.game_id}:zlob_target_noop")
+            builder.button(text="➕ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_inc")
         if game.kind == "bunker":
             builder.button(text="➖ Места", callback_data=f"gcfg:{game.game_id}:bunker_seats_dec")
             builder.button(text=f"🏚 Мест: {game.bunker_seats}", callback_data=f"gcfg:{game.game_id}:bunker_seats_noop")
@@ -1683,6 +1888,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "bredovukha" and game.phase == "public_vote":
             builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
+        if game.kind == "zlobcards" and game.phase == "private_answers":
+            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
+        if game.kind == "zlobcards" and game.phase == "public_vote":
+            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "bunker" and game.phase == "bunker_reveal":
             builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "bunker" and game.phase == "bunker_vote":
@@ -1705,6 +1914,8 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             builder.button(text="🪪 Карточки", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
         if game.kind == "bredovukha" and game.phase == "private_answers":
             builder.button(text="✍️ Сдать ложь в ЛС", url=f"https://t.me/{bot_username}")
+        if game.kind == "zlobcards" and game.phase == "private_answers":
+            builder.button(text="🃏 Рука в ЛС", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
         if game.kind == "bunker":
             builder.button(text="🔐 Действие в ЛС", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
 
@@ -1735,6 +1946,12 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
     bred_keyboard = _build_bred_vote_buttons(game)
     if bred_keyboard is not None:
         for row in bred_keyboard.inline_keyboard:
+            for button in row:
+                builder.add(button)
+
+    zlob_vote_keyboard = _build_zlob_vote_buttons(game)
+    if zlob_vote_keyboard is not None:
+        for row in zlob_vote_keyboard.inline_keyboard:
             for button in row:
                 builder.add(button)
 
@@ -1861,6 +2078,10 @@ def _build_private_phase_keyboard(game: GroupGame, *, actor_user_id: int) -> Inl
         if game.phase == "bunker_vote":
             return _build_private_bunker_vote_keyboard(game, actor_user_id=actor_user_id)
 
+    if game.kind == "zlobcards":
+        if game.phase == "private_answers":
+            return _build_private_zlob_submit_keyboard(game, actor_user_id=actor_user_id)
+
     return None
 
 
@@ -1969,6 +2190,78 @@ async def _notify_bred_private_answers(bot: Bot, game: GroupGame) -> int:
     failed = 0
     for user_id in sorted(game.players.keys()):
         ok = await _send_bred_question_to_user(bot, game, user_id)
+        if not ok:
+            failed += 1
+    return failed
+
+
+def _render_private_zlob_status_text(game: GroupGame, *, actor_user_id: int) -> str:
+    if game.kind != "zlobcards":
+        return "Это не «500 Злобных Карт»."
+    if actor_user_id not in game.players:
+        return "Вы не участник этого лобби."
+
+    hand = list(game.zlob_hands.get(actor_user_id, ()))
+    lines = [
+        f"<b>{escape(GAME_DEFINITIONS[game.kind].title)}</b>",
+        f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
+        f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.zlob_rounds}",
+        f"<b>Тема:</b> {escape(_zlob_category_label(game))}",
+        f"<b>Цель по очкам:</b> {game.zlob_target_score}",
+    ]
+
+    if game.zlob_black_text:
+        lines.extend(
+            [
+                "",
+                f"<b>Чёрная карточка ({max(1, int(game.zlob_black_slots))}):</b>",
+                escape(game.zlob_black_text),
+            ]
+        )
+
+    lines.append("")
+    lines.append("<b>Ваша рука:</b>")
+    if not hand:
+        lines.append("<i>Карты закончились. Дождитесь следующего раунда.</i>")
+    else:
+        for index, card in enumerate(hand, start=1):
+            lines.append(f"{index}. {escape(card)}")
+
+    if game.phase == "private_answers":
+        submission = game.zlob_submissions.get(actor_user_id)
+        lines.append("")
+        if submission:
+            lines.append(f"<i>Вы уже выбрали: {escape(' + '.join(submission))}</i>")
+            lines.append("<i>Можно выбрать другой вариант до конца этапа.</i>")
+        else:
+            lines.append("<i>Выберите карточку(и) кнопками ниже.</i>")
+    elif game.phase == "public_vote":
+        lines.append("")
+        lines.append("<i>Идёт голосование в группе. На свою карточку голосовать нельзя.</i>")
+    return "\n".join(lines)
+
+
+async def _send_zlob_hand_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
+    if game.kind != "zlobcards":
+        return True
+    if user_id not in game.players:
+        return True
+
+    text = _render_private_zlob_status_text(game, actor_user_id=user_id)
+    keyboard = _build_private_phase_keyboard(game, actor_user_id=user_id)
+    try:
+        await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+        return True
+    except TelegramForbiddenError:
+        return False
+
+
+async def _notify_zlob_private_hands(bot: Bot, game: GroupGame) -> int:
+    if game.kind != "zlobcards" or game.status != "started" or game.phase != "private_answers":
+        return 0
+    failed = 0
+    for user_id in sorted(game.players.keys()):
+        ok = await _send_zlob_hand_to_user(bot, game, user_id)
         if not ok:
             failed += 1
     return failed
@@ -2099,9 +2392,13 @@ def _cancel_phase_timer(game_id: str) -> None:
 def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings) -> None:
     _cancel_phase_timer(game.game_id)
 
-    if game.kind != "mafia" or game.status != "started":
+    if game.status != "started":
         return
 
+    if game.kind not in {"mafia", "zlobcards"}:
+        return
+
+    expected_kind = game.kind
     expected_phase = game.phase
     expected_round_no = game.round_no
     expected_phase_started_at = game.phase_started_at
@@ -2111,12 +2408,61 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
         if current_game is None:
             return True
         return not (
-            current_game.kind == "mafia"
+            current_game.kind == expected_kind
             and current_game.status == "started"
             and current_game.phase == expected_phase
             and current_game.round_no == expected_round_no
             and current_game.phase_started_at == expected_phase_started_at
         )
+
+    if game.kind == "zlobcards":
+        if game.phase == "private_answers":
+            delay = max(5, _ZLOBCARDS_PRIVATE_SECONDS)
+
+            async def _zlob_private_job() -> None:
+                try:
+                    await asyncio.sleep(delay)
+                    if await _is_stale_timer():
+                        return
+                    _, error = await _open_zlob_vote_phase(
+                        bot,
+                        game.game_id,
+                        chat_settings,
+                        force=True,
+                        triggered_by_auto=True,
+                    )
+                    if error is not None:
+                        logger.debug("Zlobcards private timer open skipped", extra={"game_id": game.game_id, "error": error})
+                except Exception:
+                    logger.exception("Failed to advance zlobcards private timer", extra={"game_id": game.game_id})
+
+            _GAME_PHASE_TASKS[game.game_id] = asyncio.create_task(_zlob_private_job())
+            return
+
+        if game.phase == "public_vote":
+            delay = max(5, _ZLOBCARDS_VOTE_SECONDS)
+
+            async def _zlob_vote_job() -> None:
+                try:
+                    await asyncio.sleep(delay)
+                    if await _is_stale_timer():
+                        return
+                    _, error = await _resolve_zlob_round(
+                        bot,
+                        game.game_id,
+                        chat_settings,
+                        force=True,
+                        triggered_by_auto=True,
+                    )
+                    if error is not None:
+                        logger.debug("Zlobcards vote timer resolve skipped", extra={"game_id": game.game_id, "error": error})
+                except Exception:
+                    logger.exception("Failed to advance zlobcards vote timer", extra={"game_id": game.game_id})
+
+            _GAME_PHASE_TASKS[game.game_id] = asyncio.create_task(_zlob_vote_job())
+            return
+
+        return
 
     if game.phase == "night":
         delay = max(5, chat_settings.mafia_night_seconds)
@@ -2232,6 +2578,9 @@ async def _send_role_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
             return True
         except TelegramForbiddenError:
             return False
+
+    if game.kind == "zlobcards":
+        return await _send_zlob_hand_to_user(bot, game, user_id)
 
     role = game.roles.get(user_id)
     if role is None:
@@ -2702,6 +3051,83 @@ async def _resolve_bred_round(
     return game, None
 
 
+async def _open_zlob_vote_phase(
+    bot: Bot,
+    game_id: str,
+    chat_settings: ChatSettings,
+    *,
+    force: bool,
+    triggered_by_auto: bool,
+) -> tuple[GroupGame | None, str | None]:
+    game, error = await GAME_STORE.zlob_open_vote(game_id=game_id, force=force)
+    if game is None:
+        return None, "Игра не найдена"
+    if error:
+        return game, error
+
+    await _safe_edit_or_send_game_board(
+        bot,
+        game,
+        chat_settings,
+        note="<b>Этап:</b> приватный выбор завершён, открыто голосование.",
+    )
+    _schedule_phase_timer(bot, game, chat_settings)
+    if triggered_by_auto:
+        logger.debug("Zlobcards vote opened automatically", extra={"game_id": game.game_id})
+    return game, None
+
+
+async def _resolve_zlob_round(
+    bot: Bot,
+    game_id: str,
+    chat_settings: ChatSettings,
+    economy_repo=None,
+    *,
+    force: bool,
+    triggered_by_auto: bool,
+) -> tuple[GroupGame | None, str | None]:
+    game, resolution, error = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force)
+    if game is None:
+        return None, "Игра не найдена"
+    if error:
+        return game, error
+    if resolution is None:
+        return game, "Не удалось обработать голосование"
+
+    round_text = _format_zlob_round_resolution(game, resolution)
+    if resolution.finished:
+        reward_line = await _grant_game_rewards_if_needed(
+            game,
+            economy_repo=economy_repo,
+            chat_settings=chat_settings,
+        )
+        note = round_text
+        if reward_line:
+            note = f"{note}\n{reward_line}"
+        await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
+        await _send_game_feed_event(
+            bot,
+            game,
+            text=f"<b>Ведущий:</b> Игра «500 Злобных Карт» завершена.\n{round_text}" + (f"\n{reward_line}" if reward_line else ""),
+        )
+        return game, None
+
+    failed_dm = await _notify_zlob_private_hands(bot, game)
+    note_parts = [round_text]
+    if failed_dm > 0:
+        note_parts.append(f"<b>ЛС недоступно:</b> {failed_dm} игрок(ов) не получили обновлённую руку.")
+    await _safe_edit_or_send_game_board(
+        bot,
+        game,
+        chat_settings,
+        note="\n".join(note_parts),
+    )
+    _schedule_phase_timer(bot, game, chat_settings)
+    if triggered_by_auto:
+        logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
+    return game, None
+
+
 async def _resolve_bunker_vote(
     bot: Bot,
     game_id: str,
@@ -2850,6 +3276,17 @@ async def _show_role_for_user(message: Message, *, game_id: str) -> None:
         await message.answer(
             _render_whoami_private_view(game, actor_user_id=message.from_user.id),
             parse_mode="HTML",
+        )
+        return
+
+    if game.kind == "zlobcards":
+        if message.from_user.id not in game.players:
+            await message.answer("Вы не участвуете в этой игре.")
+            return
+        await message.answer(
+            _render_private_zlob_status_text(game, actor_user_id=message.from_user.id),
+            parse_mode="HTML",
+            reply_markup=_build_private_phase_keyboard(game, actor_user_id=message.from_user.id),
         )
         return
 
@@ -3165,6 +3602,69 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         await query.answer(f"Раундов: {updated_game.bred_rounds}", show_alert=False)
         return
 
+    if option.startswith("zlob_rounds_"):
+        if game.kind != "zlobcards" or game.status != "lobby":
+            await query.answer("Настройку можно менять только в лобби «500 Злобных Карт»", show_alert=False)
+            return
+
+        if option == "zlob_rounds_noop":
+            await query.answer(f"Раундов: {game.zlob_rounds}", show_alert=False)
+            return
+
+        delta = 0
+        if option == "zlob_rounds_inc":
+            delta = 1
+        elif option == "zlob_rounds_dec":
+            delta = -1
+        else:
+            await query.answer("Неизвестная настройка", show_alert=False)
+            return
+
+        updated_game, error = await GAME_STORE.set_zlob_rounds(game_id=game.game_id, rounds=game.zlob_rounds + delta)
+        if updated_game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+        if error:
+            await query.answer(error, show_alert=False)
+            return
+
+        await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+        await query.answer(f"Раундов: {updated_game.zlob_rounds}", show_alert=False)
+        return
+
+    if option.startswith("zlob_target_"):
+        if game.kind != "zlobcards" or game.status != "lobby":
+            await query.answer("Настройку можно менять только в лобби «500 Злобных Карт»", show_alert=False)
+            return
+
+        if option == "zlob_target_noop":
+            await query.answer(f"Цель по очкам: {game.zlob_target_score}", show_alert=False)
+            return
+
+        delta = 0
+        if option == "zlob_target_inc":
+            delta = 1
+        elif option == "zlob_target_dec":
+            delta = -1
+        else:
+            await query.answer("Неизвестная настройка", show_alert=False)
+            return
+
+        updated_game, error = await GAME_STORE.set_zlob_target_score(
+            game_id=game.game_id,
+            target_score=game.zlob_target_score + delta,
+        )
+        if updated_game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+        if error:
+            await query.answer(error, show_alert=False)
+            return
+
+        await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+        await query.answer(f"Цель: {updated_game.zlob_target_score}", show_alert=False)
+        return
+
     if option.startswith("bunker_seats_"):
         if game.kind != "bunker" or game.status != "lobby":
             await query.answer("Настройку можно менять только в лобби «Бункера»", show_alert=False)
@@ -3216,6 +3716,26 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
 
         await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
         await query.answer(f"Тема: {_whoami_category_label(updated_game)}", show_alert=False)
+        return
+
+    if option == "zlob_cat_next":
+        if game.kind != "zlobcards" or game.status != "lobby":
+            await query.answer("Настройку можно менять только в лобби «500 Злобных Карт»", show_alert=False)
+            return
+
+        updated_game, error = await GAME_STORE.cycle_zlob_category(
+            game_id=game.game_id,
+            actions_18_enabled=chat_settings.actions_18_enabled,
+        )
+        if updated_game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+        if error:
+            await query.answer(error, show_alert=False)
+            return
+
+        await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+        await query.answer(f"Тема: {_zlob_category_label(updated_game)}", show_alert=False)
         return
 
     if option == "spy_cat_next":
@@ -3338,7 +3858,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
-        if started_game.kind in {"spy", "mafia", "bunker", "whoami"}:
+        if started_game.kind in {"spy", "mafia", "bunker", "whoami", "zlobcards"}:
             failed_dm = await _send_roles_to_private(bot, started_game)
             if failed_dm > 0:
                 await _notify_private_delivery_warning(bot, started_game, failed_dm)
@@ -3359,6 +3879,15 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
         if started_game.kind == "whoami":
             await _send_game_feed_event(bot, started_game, text=build_whoami_start_text(category=_whoami_category_label(started_game)))
+            return
+
+        if started_game.kind == "zlobcards":
+            _schedule_phase_timer(bot, started_game, chat_settings)
+            await _send_game_feed_event(
+                bot,
+                started_game,
+                text=build_zlobcards_start_text(category=_zlob_category_label(started_game)),
+            )
             return
 
         if started_game.kind == "number":
@@ -3483,6 +4012,45 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer("Сейчас нечего переключать", show_alert=False)
             return
 
+        if game.kind == "zlobcards":
+            if game.phase == "private_answers":
+                opened_game, error = await _open_zlob_vote_phase(
+                    bot,
+                    game.game_id,
+                    chat_settings,
+                    force=True,
+                    triggered_by_auto=False,
+                )
+                if opened_game is None:
+                    await query.answer("Игра не найдена", show_alert=False)
+                    return
+                if error:
+                    await query.answer(error, show_alert=False)
+                    return
+                _schedule_phase_timer(bot, opened_game, chat_settings)
+                await query.answer("Голосование открыто", show_alert=False)
+                return
+
+            if game.phase == "public_vote":
+                resolved_game, error = await _resolve_zlob_round(
+                    bot,
+                    game.game_id,
+                    chat_settings,
+                    economy_repo=economy_repo,
+                    force=True,
+                    triggered_by_auto=False,
+                )
+                if error:
+                    await query.answer(error, show_alert=False)
+                    return
+                if resolved_game is not None and resolved_game.status == "started":
+                    _schedule_phase_timer(bot, resolved_game, chat_settings)
+                await query.answer("Раунд закрыт", show_alert=False)
+                return
+
+            await query.answer("Сейчас нечего переключать", show_alert=False)
+            return
+
         if game.kind == "bunker":
             if game.phase == "bunker_reveal":
                 updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(game_id=game.game_id)
@@ -3539,7 +4107,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if game.kind != "mafia":
-            await query.answer("Смена фаз доступна только для мафии, викторины, Бредовухи и Бункера", show_alert=False)
+            await query.answer("Смена фаз доступна только для мафии, викторины, Бредовухи, Злобных Карт и Бункера", show_alert=False)
             return
 
         if game.phase == "night":
@@ -3942,6 +4510,233 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
             triggered_by_auto=True,
         )
         return
+
+
+@router.callback_query(F.data.startswith("gzlobp:"))
+async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
+    if query.data is None or query.from_user is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Некорректный выбор карточек", show_alert=False)
+        return
+
+    _, game_id, payload = parts
+    existing_game = await GAME_STORE.get_game(game_id)
+    if existing_game is not None:
+        await _refresh_game_player_label(
+            activity_repo,
+            game=existing_game,
+            chat_id=existing_game.chat_id,
+            user_id=query.from_user.id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+        )
+
+    if payload == "noop":
+        game, submitted_count, total_players = await GAME_STORE.zlob_get_submit_snapshot(game_id=game_id)
+        if game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+        if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
+            await query.answer("Эта кнопка из другого чата", show_alert=False)
+            return
+
+        if query.message is not None and query.message.chat.type == "private":
+            try:
+                await query.message.edit_text(
+                    _render_private_zlob_status_text(game, actor_user_id=query.from_user.id),
+                    parse_mode="HTML",
+                    reply_markup=_build_private_phase_keyboard(game, actor_user_id=query.from_user.id),
+                )
+            except TelegramBadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    raise
+
+        await _safe_edit_or_send_game_board(
+            bot,
+            game,
+            chat_settings,
+            note=f"<b>Сдача карточек:</b> {submitted_count}/{total_players}",
+        )
+        await _safe_callback_answer(query, f"Сдано: {submitted_count}/{total_players}", show_alert=False)
+        return
+
+    selected_indexes: tuple[int, ...]
+    if "-" in payload:
+        first_raw, second_raw = payload.split("-", maxsplit=1)
+        if not first_raw.isdigit() or not second_raw.isdigit():
+            await query.answer("Некорректный выбор карточек", show_alert=False)
+            return
+        selected_indexes = (int(first_raw), int(second_raw))
+    else:
+        if not payload.isdigit():
+            await query.answer("Некорректный выбор карточек", show_alert=False)
+            return
+        selected_indexes = (int(payload),)
+
+    game, result, error = await GAME_STORE.zlob_submit_cards(
+        game_id=game_id,
+        user_id=query.from_user.id,
+        card_indexes=selected_indexes,
+    )
+    if error:
+        await query.answer(error, show_alert=True)
+        return
+    if game is None or result is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=False)
+        return
+
+    if query.message is not None and query.message.chat.type == "private":
+        try:
+            await query.message.edit_text(
+                _render_private_zlob_status_text(game, actor_user_id=query.from_user.id),
+                parse_mode="HTML",
+                reply_markup=_build_private_phase_keyboard(game, actor_user_id=query.from_user.id),
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    if result.vote_opened:
+        _cancel_phase_timer(game.game_id)
+        await _safe_edit_or_send_game_board(
+            bot,
+            game,
+            chat_settings,
+            note="<b>Этап:</b> все карточки сданы, открыто голосование.",
+        )
+        await _safe_callback_answer(query, "Карточки приняты. Открыто голосование.", show_alert=False)
+        return
+
+    await _safe_edit_or_send_game_board(
+        bot,
+        game,
+        chat_settings,
+        note=f"<b>Сдача карточек:</b> {result.submitted_count}/{result.total_players}",
+    )
+
+    selected_cards = tuple(game.zlob_submissions.get(query.from_user.id, ()))
+    if result.previous_submission == selected_cards:
+        await _safe_callback_answer(query, "Этот выбор уже учтён.", show_alert=False)
+        return
+    if result.previous_submission is None:
+        await _safe_callback_answer(query, "Карточки отправлены.", show_alert=False)
+        return
+    await _safe_callback_answer(query, "Выбор обновлён.", show_alert=False)
+
+
+@router.callback_query(F.data.startswith("gzlobv:"))
+async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, economy_repo, activity_repo) -> None:
+    if query.data is None or query.from_user is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Некорректное голосование", show_alert=False)
+        return
+
+    _, game_id, payload = parts
+    existing_game = await GAME_STORE.get_game(game_id)
+    if existing_game is not None:
+        await _refresh_game_player_label(
+            activity_repo,
+            game=existing_game,
+            chat_id=existing_game.chat_id,
+            user_id=query.from_user.id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+        )
+
+    if payload == "noop":
+        game, voted_count, total_players, vote_tally = await GAME_STORE.zlob_get_vote_snapshot(game_id=game_id)
+        if game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+        if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
+            await query.answer("Эта кнопка из другого чата", show_alert=False)
+            return
+
+        leader_text = "пока нет"
+        if vote_tally:
+            top_votes = max(vote_tally)
+            if top_votes > 0:
+                leader_indexes = [idx for idx, count in enumerate(vote_tally) if count == top_votes]
+                if len(leader_indexes) == 1:
+                    leader_index = leader_indexes[0]
+                    leader_text = f"{_quiz_choice_label(leader_index)}. {game.zlob_options[leader_index]} ({top_votes})"
+                else:
+                    leader_text = f"ничья по {top_votes} голос(ам)"
+
+        await _safe_edit_or_send_game_board(
+            bot,
+            game,
+            chat_settings,
+            note=f"<b>Прогресс голосования:</b> {voted_count}/{total_players}. Лидер: {escape(leader_text)}.",
+        )
+        await _safe_callback_answer(query, f"Голосов: {voted_count}/{total_players}", show_alert=False)
+        return
+
+    if not payload.isdigit():
+        await query.answer("Некорректный вариант", show_alert=False)
+        return
+
+    option_index = int(payload)
+    game, result, error = await GAME_STORE.zlob_register_vote(
+        game_id=game_id,
+        voter_user_id=query.from_user.id,
+        option_index=option_index,
+    )
+    if error:
+        await query.answer(error, show_alert=True)
+        return
+    if game is None or result is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=False)
+        return
+
+    if result.previous_option_index == option_index:
+        await _safe_callback_answer(query, "Этот голос уже учтён.", show_alert=False)
+        return
+
+    snapshot_game, voted_count, total_players, _ = await GAME_STORE.zlob_get_vote_snapshot(game_id=game.game_id)
+    if snapshot_game is not None:
+        await _safe_edit_or_send_game_board(
+            bot,
+            snapshot_game,
+            chat_settings,
+            note=f"<b>Прогресс голосования:</b> {voted_count}/{total_players}",
+        )
+
+    if result.all_voted:
+        _cancel_phase_timer(game.game_id)
+        await _safe_callback_answer(query, "Голос принят. Все проголосовали, считаем итог.", show_alert=False)
+        _, resolve_error = await _resolve_zlob_round(
+            bot,
+            game.game_id,
+            chat_settings,
+            economy_repo=economy_repo,
+            force=False,
+            triggered_by_auto=True,
+        )
+        if resolve_error:
+            await _safe_callback_answer(query, resolve_error, show_alert=True)
+        return
+
+    if result.previous_option_index is None:
+        await _safe_callback_answer(query, "Голос принят.", show_alert=False)
+        return
+    await _safe_callback_answer(query, "Голос обновлён.", show_alert=False)
 
 
 @router.callback_query(F.data.startswith("gbkr:"))

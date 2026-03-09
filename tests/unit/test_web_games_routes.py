@@ -151,6 +151,7 @@ async def _web_client(monkeypatch, state: WebRepoState):
     monkeypatch.setattr(web_app_module, "SqlAlchemyWebAuthRepository", lambda session: FakeWebAuthRepo(state))
     monkeypatch.setattr(web_app_module, "Bot", FakeBot)
     monkeypatch.setattr(web_app_module, "GAME_STORE", store)
+    monkeypatch.setattr(web_app_module.game_router_module, "GAME_STORE", store)
     monkeypatch.setattr(web_app_module.game_router_module, "_safe_edit_or_send_game_board", safe_edit_mock)
     monkeypatch.setattr(web_app_module.game_router_module, "_send_roles_to_private", send_roles_mock)
     monkeypatch.setattr(web_app_module.game_router_module, "_send_game_feed_event", AsyncMock())
@@ -200,6 +201,39 @@ async def _create_started_whoami_game(store: GameStore, *, owner_user_id: int, o
         303: "Чайник",
         404: "Ложка",
     }
+    return started_game
+
+
+async def _create_started_zlobcards_game(
+    store: GameStore,
+    *,
+    owner_user_id: int,
+    owner_label: str,
+    chat_id: int,
+    chat_title: str,
+):
+    game, error = await store.create_lobby(
+        kind="zlobcards",
+        chat_id=chat_id,
+        chat_title=chat_title,
+        owner_user_id=owner_user_id,
+        owner_label=owner_label,
+        reveal_eliminated_role=True,
+        zlob_category="Поп-культура",
+    )
+    assert error is None
+    assert game is not None
+
+    for user_id in [303, 404]:
+        joined_game, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
+        assert joined_game is not None
+        assert status == "joined"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    assert started_game is not None
+    assert started_game.kind == "zlobcards"
+    assert started_game.status == "started"
     return started_game
 
 
@@ -569,4 +603,154 @@ async def test_web_bred_category_pick_uses_board_only_and_refreshes_label(monkey
     assert updated_game.phase == "private_answers"
     assert updated_game.players[user.telegram_user_id] == "Ведущий с сайта"
     feed_mock.assert_not_awaited()
+    safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_create_zlobcards_game(monkeypatch) -> None:
+    settings = _settings()
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=808, username="zhost", first_name="Zlob", last_name="Host", is_bot=False),
+        manageable_groups=[_overview(-5301, "Zlob Create Chat", bot_role="game_master")],
+        chat_settings_by_chat={-5301: default_chat_settings(settings)},
+    )
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        response = await client.post(
+            "/app/games/create",
+            data={"kind": "zlobcards", "chat_id": "-5301", "zlob_category": "Поп-культура"},
+            headers={"accept": "application/json"},
+        )
+        active_games = await store.list_active_games()
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert any(game.kind == "zlobcards" for game in active_games)
+    safe_edit_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_web_zlob_submit_opens_vote_when_last_player_submits(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=909, username="zuser", first_name="Z", last_name="User", is_bot=False)
+    state = WebRepoState(settings=settings, user=user)
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        started_game = await _create_started_zlobcards_game(
+            store,
+            owner_user_id=user.telegram_user_id,
+            owner_label="owner",
+            chat_id=-5302,
+            chat_title="Zlob Submit Chat",
+        )
+        started_game.phase = "private_answers"
+        started_game.zlob_black_slots = 1
+        started_game.zlob_hands[user.telegram_user_id] = ("A", "B", "C", "D", "E")
+        started_game.zlob_hands[303] = ("F", "G", "H", "I", "J")
+        started_game.zlob_hands[404] = ("K", "L", "M", "N", "O")
+        started_game.zlob_submissions = {303: ("F",), 404: ("K",)}
+
+        response = await client.post(
+            "/app/games/action",
+            data={"action": "zlob_submit", "game_id": started_game.game_id, "card_index": "0"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(started_game.game_id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "Открыто голосование" in response.json()["message"]
+    assert updated_game is not None
+    assert updated_game.phase == "public_vote"
+    assert len(updated_game.zlob_options) == 3
+    safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_zlob_vote_auto_resolves_round_when_all_votes_received(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=910, username="voter", first_name="Vote", last_name="R", is_bot=False)
+    state = WebRepoState(settings=settings, user=user)
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        started_game = await _create_started_zlobcards_game(
+            store,
+            owner_user_id=user.telegram_user_id,
+            owner_label="owner",
+            chat_id=-5303,
+            chat_title="Zlob Vote Chat",
+        )
+        started_game.phase = "public_vote"
+        started_game.round_no = 2
+        started_game.zlob_rounds = 6
+        started_game.zlob_target_score = 10
+        started_game.zlob_black_text = "Тест ____"
+        started_game.zlob_black_slots = 1
+        started_game.zlob_options = ("opt-a", "opt-b", "opt-c")
+        started_game.zlob_option_owner_user_ids = (user.telegram_user_id, 303, 404)
+        started_game.zlob_votes = {303: 0, 404: 0}
+        started_game.zlob_scores = {user.telegram_user_id: 0, 303: 0, 404: 0}
+        started_game.zlob_submissions = {
+            user.telegram_user_id: ("A",),
+            303: ("B",),
+            404: ("C",),
+        }
+        started_game.zlob_hands[user.telegram_user_id] = ("A", "X", "Y", "Z", "W")
+        started_game.zlob_hands[303] = ("B", "X2", "Y2", "Z2", "W2")
+        started_game.zlob_hands[404] = ("C", "X3", "Y3", "Z3", "W3")
+
+        response = await client.post(
+            "/app/games/action",
+            data={"callback_data": f"gzlobv:{started_game.game_id}:1"},
+            headers={"accept": "application/json"},
+        )
+        updated_game = await store.get_game(started_game.game_id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert "Раунд обработан" in response.json()["message"]
+    assert updated_game is not None
+    assert updated_game.status == "started"
+    assert updated_game.phase == "private_answers"
+    assert updated_game.round_no == 3
+    safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_zlob_permissions_manage_vs_member(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=911, username="member911", first_name="Member", last_name=None, is_bot=False)
+    state = WebRepoState(settings=settings, user=user)
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        started_game = await _create_started_zlobcards_game(
+            store,
+            owner_user_id=1,
+            owner_label="owner",
+            chat_id=-5304,
+            chat_title="Zlob Rights Chat",
+        )
+        started_game.players[user.telegram_user_id] = "@member911"
+        started_game.phase = "private_answers"
+        started_game.zlob_black_slots = 1
+        started_game.zlob_hands[user.telegram_user_id] = ("M1", "M2", "M3", "M4", "M5")
+
+        denied = await client.post(
+            "/app/games/action",
+            data={"callback_data": f"gcfg:{started_game.game_id}:zlob_rounds_inc"},
+            headers={"accept": "application/json"},
+        )
+        allowed = await client.post(
+            "/app/games/action",
+            data={"action": "zlob_submit", "game_id": started_game.game_id, "card_index": "0"},
+            headers={"accept": "application/json"},
+        )
+
+    assert denied.status_code == 400
+    assert denied.json()["ok"] is False
+    assert "Недостаточно прав" in denied.json()["message"]
+    assert allowed.status_code == 200
+    assert allowed.json()["ok"] is True
+    assert "Карточки" in allowed.json()["message"]
     safe_edit_mock.assert_awaited()

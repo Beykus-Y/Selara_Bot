@@ -298,6 +298,91 @@
           );
       };
 
+      const syncZlobCategoryAvailability = (scope) => {
+        if (!(scope instanceof HTMLElement)) {
+          return true;
+        }
+        const picker = scope.querySelector("[data-zlob-category-picker]");
+        if (!(picker instanceof HTMLElement)) {
+          return true;
+        }
+        const chatAllows18 = selectedChatAllows18(scope);
+        for (const button of picker.querySelectorAll("[data-zlob-category-choice]")) {
+          if (!(button instanceof HTMLButtonElement)) {
+            continue;
+          }
+          const isExplicit = button.dataset.zlobCategoryExplicit === "true";
+          const shouldHide = !chatAllows18 && isExplicit;
+          button.hidden = shouldHide;
+          button.disabled = shouldHide;
+        }
+        return chatAllows18;
+      };
+
+      const syncZlobCategoryPicker = (picker, value) => {
+        if (!(picker instanceof HTMLElement)) {
+          return;
+        }
+        const scope = picker.closest("[data-zlob-category-scope]");
+        if (!(scope instanceof HTMLElement)) {
+          return;
+        }
+
+        const chatAllows18 = syncZlobCategoryAvailability(scope);
+        const hiddenInput = scope.querySelector('input[name="zlob_category"]');
+        const buttons = [...picker.querySelectorAll("[data-zlob-category-choice]")];
+        const availableButtons = buttons.filter(
+          (button) => button instanceof HTMLButtonElement && !button.hidden && !button.disabled
+        );
+        let currentValue = value || "";
+        let activeButton = null;
+
+        for (const button of availableButtons) {
+          const isActive = button.dataset.zlobCategoryChoice === currentValue;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+          if (isActive) {
+            activeButton = button;
+          }
+        }
+        for (const button of buttons) {
+          if (availableButtons.includes(button)) {
+            continue;
+          }
+          button.classList.remove("is-active");
+          button.setAttribute("aria-pressed", "false");
+        }
+
+        if (!activeButton && availableButtons.length) {
+          activeButton = availableButtons[0];
+          currentValue = activeButton.dataset.zlobCategoryChoice || "";
+          for (const button of availableButtons) {
+            const isActive = button === activeButton;
+            button.classList.toggle("is-active", isActive);
+            button.setAttribute("aria-pressed", String(isActive));
+          }
+        }
+
+        if (hiddenInput instanceof HTMLInputElement) {
+          hiddenInput.value = currentValue;
+        }
+
+        const summary = scope.querySelector("[data-zlob-category-summary]");
+        if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLElement)) {
+          return;
+        }
+
+        const label = activeButton.dataset.zlobCategoryLabel || "Случайная тема";
+        const count = activeButton.dataset.zlobCategoryCount || "";
+        summary.textContent = currentValue
+          ? `Выбрана тема: ${label}${count ? ` · ${count} белых/чёрных карт` : ""}.`
+          : (
+            chatAllows18
+              ? "Тема не фиксируется заранее. На старте будет выбран случайный набор."
+              : "18+ темы скрыты для выбранного чата. На старте будет выбран случайный безопасный набор."
+          );
+      };
+
       const syncSpyCategoryPicker = (picker, value) => {
         if (!(picker instanceof HTMLElement)) {
           return;
@@ -373,7 +458,7 @@
               continue;
             }
             field.disabled = !shouldShow;
-            if (!shouldShow && field instanceof HTMLInputElement && ["whoami_category", "spy_category"].includes(field.name)) {
+            if (!shouldShow && field instanceof HTMLInputElement && ["whoami_category", "spy_category", "zlob_category"].includes(field.name)) {
               field.value = "";
             }
           }
@@ -385,6 +470,10 @@
             const spyPicker = section.querySelector("[data-spy-category-picker]");
             const spyHiddenInput = section.querySelector('input[name="spy_category"]');
             syncSpyCategoryPicker(spyPicker, spyHiddenInput instanceof HTMLInputElement ? spyHiddenInput.value : "");
+
+            const zlobPicker = section.querySelector("[data-zlob-category-picker]");
+            const zlobHiddenInput = section.querySelector('input[name="zlob_category"]');
+            syncZlobCategoryPicker(zlobPicker, zlobHiddenInput instanceof HTMLInputElement ? zlobHiddenInput.value : "");
           }
         }
       };
@@ -422,6 +511,17 @@
         }
       };
 
+      const syncAllZlobCategoryPickers = (root) => {
+        for (const scope of root.querySelectorAll("[data-zlob-category-scope]")) {
+          if (!(scope instanceof HTMLElement)) {
+            continue;
+          }
+          const picker = scope.querySelector("[data-zlob-category-picker]");
+          const hiddenInput = scope.querySelector('input[name="zlob_category"]');
+          syncZlobCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+        }
+      };
+
       const restoreForms = (root, snapshot) => {
         for (const form of root.querySelectorAll("[data-game-action-form]")) {
           const fields = snapshot.get(formKey(form));
@@ -448,6 +548,7 @@
         syncAllKindPickers(root);
         syncAllWhoamiCategoryPickers(root);
         syncAllSpyCategoryPickers(root);
+        syncAllZlobCategoryPickers(root);
       };
 
       const parseDashboardHtml = (html) => {
@@ -753,6 +854,19 @@
           }
           return;
         }
+        const zlobCategoryButton = target.closest("[data-zlob-category-choice]");
+        if (zlobCategoryButton && dashboardRoot.contains(zlobCategoryButton)) {
+          event.preventDefault();
+          const picker = zlobCategoryButton.closest("[data-zlob-category-picker]");
+          syncZlobCategoryPicker(picker, zlobCategoryButton.dataset.zlobCategoryChoice || "");
+          if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+            const form = picker.closest("form");
+            if (form instanceof HTMLFormElement) {
+              form.requestSubmit();
+            }
+          }
+          return;
+        }
         const button = target.closest("[data-kind-choice]");
         if (!button || !dashboardRoot.contains(button)) {
           return;
@@ -822,12 +936,14 @@
         if (form instanceof HTMLElement) {
           syncAllWhoamiCategoryPickers(form);
           syncAllSpyCategoryPickers(form);
+          syncAllZlobCategoryPickers(form);
         }
       });
 
       syncAllKindPickers(dashboardRoot);
       syncAllWhoamiCategoryPickers(dashboardRoot);
       syncAllSpyCategoryPickers(dashboardRoot);
+      syncAllZlobCategoryPickers(dashboardRoot);
       if (manualRefreshButton instanceof HTMLElement) {
         manualRefreshButton.setAttribute("aria-label", "Обновить сцену");
       }

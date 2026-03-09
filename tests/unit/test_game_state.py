@@ -145,6 +145,39 @@ async def _create_started_whoami_game(store: GameStore):
     return started_game
 
 
+async def _create_started_zlobcards_game(
+    store: GameStore,
+    *,
+    chat_id: int = 580,
+    owner_user_id: int = 1,
+    extra_player_ids: tuple[int, ...] = (2, 3),
+):
+    game, error = await store.create_lobby(
+        kind="zlobcards",
+        chat_id=chat_id,
+        chat_title="zlobcards-chat",
+        owner_user_id=owner_user_id,
+        owner_label=f"u{owner_user_id}",
+        reveal_eliminated_role=True,
+        zlob_category="Поп-культура",
+    )
+    assert error is None
+    assert game is not None
+
+    for user_id in extra_player_ids:
+        joined_game, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
+        assert joined_game is not None
+        assert status == "joined"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    assert started_game is not None
+    assert started_game.kind == "zlobcards"
+    assert started_game.status == "started"
+    assert started_game.phase == "private_answers"
+    return started_game
+
+
 @pytest.mark.asyncio
 async def test_mafia_night_ready_after_all_role_actions() -> None:
     store = GameStore()
@@ -1520,6 +1553,286 @@ async def test_spy_start_uses_selected_category_pool() -> None:
     assert started.spy_location in game_state_module.SPY_LOCATIONS_BY_CATEGORY[category]
 
 
+@pytest.mark.asyncio
+async def test_zlobcards_start_deals_hands_and_sets_private_phase() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store)
+
+    assert started.zlob_black_text is not None
+    assert started.zlob_black_slots in {1, 2}
+    assert started.round_no == 1
+    assert set(started.zlob_scores.keys()) == set(started.players.keys())
+    assert all(score == 0 for score in started.zlob_scores.values())
+    for player_user_id in started.players:
+        assert len(started.zlob_hands.get(player_user_id, ())) == game_state_module.ZLOBCARDS_HAND_SIZE
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_submit_validates_slots_and_allows_replacing_submission() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store)
+    started.zlob_black_slots = 2
+    started.zlob_hands[1] = ("A", "B", "C", "D", "E")
+
+    game, result, error = await store.zlob_submit_cards(
+        game_id=started.game_id,
+        user_id=1,
+        card_indexes=(0,),
+    )
+    assert game is not None
+    assert result is None
+    assert error == "Нужно выбрать карточек: 2"
+
+    game, result, error = await store.zlob_submit_cards(
+        game_id=started.game_id,
+        user_id=1,
+        card_indexes=(0, 0),
+    )
+    assert game is not None
+    assert result is None
+    assert error == "Для раунда с двумя пропусками нужны две разные карты"
+
+    game, result, error = await store.zlob_submit_cards(
+        game_id=started.game_id,
+        user_id=1,
+        card_indexes=(0, 1),
+    )
+    assert error is None
+    assert game is not None
+    assert result is not None
+    assert game.zlob_submissions[1] == ("A", "B")
+    assert result.previous_submission is None
+
+    started.zlob_black_slots = 1
+    game, result, error = await store.zlob_submit_cards(
+        game_id=started.game_id,
+        user_id=1,
+        card_indexes=(2,),
+    )
+    assert error is None
+    assert game is not None
+    assert result is not None
+    assert result.previous_submission == ("A", "B")
+    assert game.zlob_submissions[1] == ("C",)
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_auto_opens_vote_when_all_players_submitted() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store)
+    started.zlob_black_slots = 1
+    started.zlob_hands[1] = ("u1-a", "u1-b", "u1-c", "u1-d", "u1-e")
+    started.zlob_hands[2] = ("u2-a", "u2-b", "u2-c", "u2-d", "u2-e")
+    started.zlob_hands[3] = ("u3-a", "u3-b", "u3-c", "u3-d", "u3-e")
+
+    game1, result1, error1 = await store.zlob_submit_cards(game_id=started.game_id, user_id=1, card_indexes=(0,))
+    assert error1 is None
+    assert game1 is not None and result1 is not None
+    assert result1.vote_opened is False
+    assert game1.phase == "private_answers"
+
+    game2, result2, error2 = await store.zlob_submit_cards(game_id=started.game_id, user_id=2, card_indexes=(0,))
+    assert error2 is None
+    assert game2 is not None and result2 is not None
+    assert result2.vote_opened is False
+    assert game2.phase == "private_answers"
+
+    game3, result3, error3 = await store.zlob_submit_cards(game_id=started.game_id, user_id=3, card_indexes=(0,))
+    assert error3 is None
+    assert game3 is not None and result3 is not None
+    assert result3.vote_opened is True
+    assert game3.phase == "public_vote"
+    assert len(game3.zlob_options) == 3
+    assert len(game3.zlob_option_owner_user_ids) == 3
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_vote_rejects_invalid_option_and_self_vote() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store)
+    started.phase = "public_vote"
+    started.zlob_black_text = "Тестовая карта ____"
+    started.zlob_options = ("A", "B", "C")
+    started.zlob_option_owner_user_ids = (1, 2, 3)
+
+    game, result, error = await store.zlob_register_vote(
+        game_id=started.game_id,
+        voter_user_id=1,
+        option_index=9,
+    )
+    assert game is not None
+    assert result is None
+    assert error == "Некорректный вариант"
+
+    game, result, error = await store.zlob_register_vote(
+        game_id=started.game_id,
+        voter_user_id=1,
+        option_index=0,
+    )
+    assert game is not None
+    assert result is None
+    assert error == "Нельзя голосовать за свою карточку"
+
+    game, result, error = await store.zlob_register_vote(
+        game_id=started.game_id,
+        voter_user_id=1,
+        option_index=1,
+    )
+    assert error is None
+    assert game is not None
+    assert result is not None
+    assert result.previous_option_index is None
+    assert game.zlob_votes[1] == 1
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_round_resolution_tie_awards_each_leading_option_owner() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store, chat_id=581, extra_player_ids=(2, 3, 4))
+    started.phase = "public_vote"
+    started.round_no = 2
+    started.zlob_rounds = 6
+    started.zlob_target_score = 10
+    started.zlob_black_text = "Раунд ____"
+    started.zlob_black_slots = 1
+    started.zlob_options = ("opt-a", "opt-b", "opt-c", "opt-d")
+    started.zlob_option_owner_user_ids = (1, 2, 3, 4)
+    started.zlob_votes = {1: 1, 2: 0, 3: 0, 4: 1}
+    started.zlob_scores = {1: 0, 2: 0, 3: 0, 4: 0}
+    for user_id in started.players:
+        started.zlob_hands[user_id] = ("h1", "h2", "h3", "h4", "h5")
+
+    game, resolution, error = await store.zlob_resolve_round(game_id=started.game_id, force=False)
+
+    assert error is None
+    assert game is not None
+    assert resolution is not None
+    assert resolution.finished is False
+    assert set(resolution.winner_option_indexes) == {0, 1}
+    gains = dict(resolution.gains)
+    assert gains[1] == 1
+    assert gains[2] == 1
+    assert game.zlob_scores[1] == 1
+    assert game.zlob_scores[2] == 1
+    assert game.status == "started"
+    assert game.phase == "private_answers"
+    assert game.round_no == 3
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_finishes_by_round_limit() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store, chat_id=582)
+    started.phase = "public_vote"
+    started.round_no = 1
+    started.zlob_rounds = 1
+    started.zlob_target_score = 20
+    started.zlob_black_text = "Финал ____"
+    started.zlob_black_slots = 1
+    started.zlob_options = ("opt-a", "opt-b", "opt-c")
+    started.zlob_option_owner_user_ids = (1, 2, 3)
+    started.zlob_votes = {1: 1, 2: 0, 3: 0}
+
+    game, resolution, error = await store.zlob_resolve_round(game_id=started.game_id, force=False)
+
+    assert error is None
+    assert game is not None
+    assert resolution is not None
+    assert resolution.finished is True
+    assert game.status == "finished"
+    assert game.phase == "finished"
+    assert game.winner_text is not None
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_finishes_by_target_score() -> None:
+    store = GameStore()
+    started = await _create_started_zlobcards_game(store, chat_id=583)
+    started.phase = "public_vote"
+    started.round_no = 1
+    started.zlob_rounds = 9
+    started.zlob_target_score = 1
+    started.zlob_scores = {1: 0, 2: 0, 3: 0}
+    started.zlob_black_text = "Цель ____"
+    started.zlob_black_slots = 1
+    started.zlob_options = ("opt-a", "opt-b", "opt-c")
+    started.zlob_option_owner_user_ids = (1, 2, 3)
+    started.zlob_votes = {1: 1, 2: 0, 3: 0}
+
+    game, resolution, error = await store.zlob_resolve_round(game_id=started.game_id, force=False)
+
+    assert error is None
+    assert game is not None
+    assert resolution is not None
+    assert resolution.finished is True
+    assert game.status == "finished"
+    assert game.phase == "finished"
+    assert game.zlob_scores[1] >= 1
+
+
+@pytest.mark.asyncio
+async def test_zlobcards_explicit_categories_are_blocked_when_18_disabled() -> None:
+    store = GameStore()
+
+    game, error = await store.create_lobby(
+        kind="zlobcards",
+        chat_id=584,
+        chat_title="zlobcards",
+        owner_user_id=1,
+        owner_label="u1",
+        reveal_eliminated_role=True,
+        zlob_category="18+ и пикантное",
+        actions_18_enabled=False,
+    )
+    assert game is None
+    assert error == "18+ темы для игры «500 Злобных Карт» отключены в этом чате"
+
+    safe_game, safe_error = await store.create_lobby(
+        kind="zlobcards",
+        chat_id=585,
+        chat_title="zlobcards",
+        owner_user_id=1,
+        owner_label="u1",
+        reveal_eliminated_role=True,
+        zlob_category="Поп-культура",
+        actions_18_enabled=True,
+    )
+    assert safe_error is None
+    assert safe_game is not None
+
+    updated, update_error = await store.set_zlob_category(
+        game_id=safe_game.game_id,
+        category="18+ и пикантное",
+        actions_18_enabled=False,
+    )
+    assert updated is not None
+    assert update_error == "18+ темы для игры «500 Злобных Карт» отключены в этом чате"
+    assert updated.zlob_category == "Поп-культура"
+
+    random_game, random_error = await store.create_lobby(
+        kind="zlobcards",
+        chat_id=586,
+        chat_title="zlobcards",
+        owner_user_id=1,
+        owner_label="u1",
+        reveal_eliminated_role=True,
+        zlob_category=None,
+        actions_18_enabled=True,
+    )
+    assert random_error is None
+    assert random_game is not None
+    for user_id in [2, 3]:
+        joined, status = await store.join(game_id=random_game.game_id, user_id=user_id, user_label=f"u{user_id}")
+        assert joined is not None
+        assert status == "joined"
+
+    started, start_error = await store.start(game_id=random_game.game_id, actions_18_enabled=False)
+    assert start_error is None
+    assert started is not None
+    assert started.zlob_category in game_state_module.allowed_zlob_categories(actions_18_enabled=False)
+    assert started.zlob_category != "18+ и пикантное"
+
+
 def test_whoami_cards_include_genshin_hsr_and_explicit_categories() -> None:
     assert "18+ и пикантное" in game_state_module.WHOAMI_CATEGORIES
     assert "Genshin Impact" in game_state_module.WHOAMI_CATEGORIES
@@ -1535,3 +1848,18 @@ def test_spy_locations_are_grouped_by_category() -> None:
     assert len(game_state_module.SPY_LOCATIONS_BY_CATEGORY["Транспорт и логистика"]) >= 10
     assert len(game_state_module.SPY_LOCATIONS_BY_CATEGORY["Отдых и туризм"]) >= 10
     assert "Аэропорт" in game_state_module.SPY_LOCATIONS_BY_CATEGORY["Транспорт и логистика"]
+
+
+def test_zlobcards_decks_have_expected_volume_and_core_categories() -> None:
+    assert "Поп-культура" in game_state_module.ZLOBCARDS_CATEGORIES
+    assert "Кино и сериалы" in game_state_module.ZLOBCARDS_CATEGORIES
+    assert "18+ и пикантное" in game_state_module.ZLOBCARDS_CATEGORIES
+    assert game_state_module.is_zlob_category_explicit("18+ и пикантное") is True
+
+    total_white = sum(len(cards) for cards in game_state_module.ZLOBCARDS_WHITE_BY_CATEGORY.values())
+    total_black = sum(len(cards) for cards in game_state_module.ZLOBCARDS_BLACK_BY_CATEGORY.values())
+    assert total_white >= 300
+    assert total_black >= 120
+
+    assert len(game_state_module.ZLOBCARDS_WHITE_BY_CATEGORY["Поп-культура"]) >= 50
+    assert len(game_state_module.ZLOBCARDS_BLACK_BY_CATEGORY["Поп-культура"]) >= 15

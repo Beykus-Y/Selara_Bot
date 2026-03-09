@@ -21,7 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 GameStatus = Literal["lobby", "started", "finished"]
-GameKind = Literal["spy", "mafia", "dice", "number", "quiz", "bredovukha", "bunker", "whoami"]
+GameKind = Literal["spy", "mafia", "dice", "number", "quiz", "bredovukha", "bunker", "whoami", "zlobcards"]
 GamePhase = Literal[
     "lobby",
     "freeplay",
@@ -106,9 +106,17 @@ GAME_DEFINITIONS: dict[GameKind, GameDefinition] = {
         min_players=3,
         secret_roles=True,
     ),
+    "zlobcards": GameDefinition(
+        key="zlobcards",
+        title="500 Злобных Карт",
+        short_description="Чёрная карточка, приватный выбор белых карт и анонимное голосование за лучший панч.",
+        min_players=3,
+        secret_roles=False,
+    ),
 }
 
 GAME_LAUNCHABLE_KINDS: tuple[GameKind, ...] = (
+    "zlobcards",
     "spy",
     "whoami",
     "mafia",
@@ -130,6 +138,14 @@ WHOAMI_MIN_QUESTION_LEN = 3
 WHOAMI_MAX_QUESTION_LEN = 180
 WHOAMI_MAX_GUESS_LEN = 120
 WHOAMI_HISTORY_LIMIT = 10
+ZLOBCARDS_DEFAULT_ROUNDS = 8
+ZLOBCARDS_MIN_ROUNDS = 1
+ZLOBCARDS_MAX_ROUNDS = 30
+ZLOBCARDS_DEFAULT_TARGET_SCORE = 7
+ZLOBCARDS_MIN_TARGET_SCORE = 1
+ZLOBCARDS_MAX_TARGET_SCORE = 20
+ZLOBCARDS_HAND_SIZE = 5
+ZLOBCARDS_MAX_CARD_TEXT_LEN = 180
 
 BUNKER_CARD_FIELDS: tuple[str, ...] = (
     "profession",
@@ -495,6 +511,47 @@ class BredRoundResolution:
 
 
 @dataclass(frozen=True)
+class ZlobBlackCard:
+    text: str
+    slots: Literal[1, 2]
+
+
+@dataclass(frozen=True)
+class ZlobSubmitResult:
+    previous_submission: tuple[str, ...] | None
+    submitted_count: int
+    total_players: int
+    all_submitted: bool
+    vote_opened: bool
+
+
+@dataclass(frozen=True)
+class ZlobVoteResult:
+    previous_option_index: int | None
+    voted_count: int
+    total_players: int
+    all_voted: bool
+
+
+@dataclass(frozen=True)
+class ZlobRoundResolution:
+    round_no: int
+    black_text: str
+    black_slots: int
+    options: tuple[str, ...]
+    option_owner_user_ids: tuple[int | None, ...]
+    vote_tally: tuple[int, ...]
+    winner_option_indexes: tuple[int, ...]
+    per_player_votes: tuple[tuple[int, int | None, bool], ...]
+    gains: tuple[tuple[int, int], ...]
+    scores: tuple[tuple[int, int], ...]
+    finished: bool
+    next_round_no: int | None
+    winner_user_ids: tuple[int, ...]
+    winner_text: str | None
+
+
+@dataclass(frozen=True)
 class BunkerCard:
     profession: str
     age: str
@@ -760,6 +817,99 @@ BRED_QUESTIONS_BY_CATEGORY: dict[str, tuple[BredQuestion, ...]] = _load_bred_que
 BRED_CATEGORIES: tuple[str, ...] = tuple(sorted(BRED_QUESTIONS_BY_CATEGORY.keys()))
 
 
+def _load_zlob_cards_by_category() -> tuple[
+    dict[str, tuple[str, ...]],
+    dict[str, tuple[ZlobBlackCard, ...]],
+    frozenset[str],
+]:
+    path = Path(__file__).with_name("zlobcards_cards.json")
+    if not path.exists():
+        return {}, {}, frozenset()
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, {}, frozenset()
+
+    if not isinstance(raw, dict):
+        return {}, {}, frozenset()
+
+    white_by_category: dict[str, tuple[str, ...]] = {}
+    black_by_category: dict[str, tuple[ZlobBlackCard, ...]] = {}
+    explicit_categories: set[str] = set()
+
+    for category_raw, payload_raw in raw.items():
+        if not isinstance(category_raw, str) or not isinstance(payload_raw, dict):
+            continue
+
+        category = " ".join(category_raw.split()).strip()
+        if not category:
+            continue
+
+        white_raw = payload_raw.get("white")
+        black_raw = payload_raw.get("black")
+        explicit = bool(payload_raw.get("explicit", False))
+        if not isinstance(white_raw, list) or not isinstance(black_raw, list):
+            continue
+
+        white_cards: list[str] = []
+        white_seen: set[str] = set()
+        for item in white_raw:
+            if not isinstance(item, str):
+                continue
+            value = " ".join(item.split()).strip()
+            if not value:
+                continue
+            if len(value) > ZLOBCARDS_MAX_CARD_TEXT_LEN:
+                value = value[:ZLOBCARDS_MAX_CARD_TEXT_LEN].rstrip()
+            lowered = value.casefold()
+            if lowered in white_seen:
+                continue
+            white_seen.add(lowered)
+            white_cards.append(value)
+
+        black_cards: list[ZlobBlackCard] = []
+        black_seen: set[tuple[str, int]] = set()
+        for item in black_raw:
+            text = ""
+            slots: int = 1
+            if isinstance(item, str):
+                text = " ".join(item.split()).strip()
+            elif isinstance(item, dict):
+                text = " ".join(str(item.get("text") or "").split()).strip()
+                slots_raw = item.get("slots")
+                if isinstance(slots_raw, int) and slots_raw in {1, 2}:
+                    slots = slots_raw
+            else:
+                continue
+
+            if not text:
+                continue
+            if len(text) > ZLOBCARDS_MAX_CARD_TEXT_LEN:
+                text = text[:ZLOBCARDS_MAX_CARD_TEXT_LEN].rstrip()
+            if slots == 2 and text.count("____") < 2:
+                continue
+            marker = (text.casefold(), slots)
+            if marker in black_seen:
+                continue
+            black_seen.add(marker)
+            black_cards.append(ZlobBlackCard(text=text, slots=slots))  # type: ignore[arg-type]
+
+        if not white_cards or not black_cards:
+            continue
+
+        white_by_category[category] = tuple(white_cards)
+        black_by_category[category] = tuple(black_cards)
+        if explicit:
+            explicit_categories.add(category)
+
+    return white_by_category, black_by_category, frozenset(explicit_categories)
+
+
+ZLOBCARDS_WHITE_BY_CATEGORY, ZLOBCARDS_BLACK_BY_CATEGORY, ZLOBCARDS_EXPLICIT_CATEGORIES = _load_zlob_cards_by_category()
+ZLOBCARDS_CATEGORIES: tuple[str, ...] = tuple(sorted(ZLOBCARDS_WHITE_BY_CATEGORY.keys()))
+
+
 def _load_whoami_cards_by_category() -> dict[str, tuple[str, ...]]:
     path = Path(__file__).with_name("whoami_cards.json")
     if not path.exists():
@@ -828,6 +978,13 @@ def _normalize_whoami_category(category: str | None) -> str | None:
     return value or None
 
 
+def _normalize_zlob_category(category: str | None) -> str | None:
+    if category is None:
+        return None
+    value = " ".join(category.split()).strip()
+    return value or None
+
+
 def is_whoami_category_explicit(category: str | None) -> bool:
     normalized = _normalize_whoami_category(category)
     return normalized in WHOAMI_EXPLICIT_CATEGORIES if normalized is not None else False
@@ -846,6 +1003,26 @@ def is_whoami_category_allowed(category: str | None, *, actions_18_enabled: bool
     if normalized not in WHOAMI_CARDS_BY_CATEGORY:
         return False
     return actions_18_enabled or normalized not in WHOAMI_EXPLICIT_CATEGORIES
+
+
+def is_zlob_category_explicit(category: str | None) -> bool:
+    normalized = _normalize_zlob_category(category)
+    return normalized in ZLOBCARDS_EXPLICIT_CATEGORIES if normalized is not None else False
+
+
+def allowed_zlob_categories(*, actions_18_enabled: bool) -> tuple[str, ...]:
+    if actions_18_enabled:
+        return ZLOBCARDS_CATEGORIES
+    return tuple(category for category in ZLOBCARDS_CATEGORIES if category not in ZLOBCARDS_EXPLICIT_CATEGORIES)
+
+
+def is_zlob_category_allowed(category: str | None, *, actions_18_enabled: bool) -> bool:
+    normalized = _normalize_zlob_category(category)
+    if normalized is None:
+        return True
+    if normalized not in ZLOBCARDS_WHITE_BY_CATEGORY or normalized not in ZLOBCARDS_BLACK_BY_CATEGORY:
+        return False
+    return actions_18_enabled or normalized not in ZLOBCARDS_EXPLICIT_CATEGORIES
 
 
 def _load_bunker_data() -> dict[str, tuple[str, ...]]:
@@ -944,6 +1121,28 @@ class GroupGame:
     bred_last_option_owner_user_ids: tuple[int | None, ...] = field(default_factory=tuple)
     bred_last_vote_tally: tuple[int, ...] = field(default_factory=tuple)
     bred_last_correct_option_index: int | None = None
+    zlob_rounds: int = ZLOBCARDS_DEFAULT_ROUNDS
+    zlob_target_score: int = ZLOBCARDS_DEFAULT_TARGET_SCORE
+    zlob_category: str | None = None
+    zlob_black_text: str | None = None
+    zlob_black_slots: int = 1
+    zlob_hands: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    zlob_white_deck: list[str] = field(default_factory=list)
+    zlob_white_discard: list[str] = field(default_factory=list)
+    zlob_black_deck: list[ZlobBlackCard] = field(default_factory=list)
+    zlob_black_discard: list[ZlobBlackCard] = field(default_factory=list)
+    zlob_submissions: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    zlob_options: tuple[str, ...] = field(default_factory=tuple)
+    zlob_option_owner_user_ids: tuple[int | None, ...] = field(default_factory=tuple)
+    zlob_votes: dict[int, int] = field(default_factory=dict)
+    zlob_scores: dict[int, int] = field(default_factory=dict)
+    zlob_last_round_no: int | None = None
+    zlob_last_black_text: str | None = None
+    zlob_last_black_slots: int = 1
+    zlob_last_options: tuple[str, ...] = field(default_factory=tuple)
+    zlob_last_option_owner_user_ids: tuple[int | None, ...] = field(default_factory=tuple)
+    zlob_last_vote_tally: tuple[int, ...] = field(default_factory=tuple)
+    zlob_last_winner_option_indexes: tuple[int, ...] = field(default_factory=tuple)
     bunker_seats: int = 0
     bunker_seats_tuned: bool = False
     bunker_catastrophe: str | None = None
@@ -1030,6 +1229,7 @@ class GameStore:
         reveal_eliminated_role: bool,
         spy_category: str | None = None,
         whoami_category: str | None = None,
+        zlob_category: str | None = None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock:
@@ -1057,6 +1257,16 @@ class GameStore:
                 if not is_whoami_category_allowed(selected_whoami_category, actions_18_enabled=actions_18_enabled):
                     return None, "18+ темы для игры «Кто я» отключены в этом чате"
 
+            selected_zlob_category = None
+            if kind == "zlobcards":
+                if not ZLOBCARDS_CATEGORIES:
+                    return None, "Не удалось загрузить банк карточек для игры «500 Злобных Карт»"
+                selected_zlob_category = _normalize_zlob_category(zlob_category)
+                if selected_zlob_category is not None and selected_zlob_category not in ZLOBCARDS_CATEGORIES:
+                    return None, "Неизвестная тема для игры «500 Злобных Карт»"
+                if not is_zlob_category_allowed(selected_zlob_category, actions_18_enabled=actions_18_enabled):
+                    return None, "18+ темы для игры «500 Злобных Карт» отключены в этом чате"
+
             game_id = uuid4().hex[:10]
             game = GroupGame(
                 game_id=game_id,
@@ -1068,6 +1278,7 @@ class GameStore:
                 reveal_eliminated_role=reveal_eliminated_role,
                 spy_category=selected_spy_category,
                 whoami_category=selected_whoami_category,
+                zlob_category=selected_zlob_category,
             )
             if kind == "bunker":
                 game.bunker_seats = self._default_bunker_seats(players_count=len(game.players))
@@ -1143,6 +1354,40 @@ class GameStore:
                 return game, f"Раундов должно быть не меньше количества игроков: {len(game.players)}"
 
             game.bred_rounds = rounds
+            return game, None
+
+    async def set_zlob_rounds(self, *, game_id: str, rounds: int) -> tuple[GroupGame | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, "Настройка доступна только для «500 Злобных Карт»"
+            if game.status != "lobby":
+                return game, "Настройку можно менять только в лобби"
+            if rounds < ZLOBCARDS_MIN_ROUNDS:
+                return game, f"Раундов должно быть минимум {ZLOBCARDS_MIN_ROUNDS}"
+            if rounds > ZLOBCARDS_MAX_ROUNDS:
+                return game, f"Раундов должно быть максимум {ZLOBCARDS_MAX_ROUNDS}"
+
+            game.zlob_rounds = rounds
+            return game, None
+
+    async def set_zlob_target_score(self, *, game_id: str, target_score: int) -> tuple[GroupGame | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, "Настройка доступна только для «500 Злобных Карт»"
+            if game.status != "lobby":
+                return game, "Настройку можно менять только в лобби"
+            if target_score < ZLOBCARDS_MIN_TARGET_SCORE:
+                return game, f"Цель по очкам должна быть минимум {ZLOBCARDS_MIN_TARGET_SCORE}"
+            if target_score > ZLOBCARDS_MAX_TARGET_SCORE:
+                return game, f"Цель по очкам должна быть максимум {ZLOBCARDS_MAX_TARGET_SCORE}"
+
+            game.zlob_target_score = target_score
             return game, None
 
     async def set_bunker_seats(self, *, game_id: str, seats: int) -> tuple[GroupGame | None, str | None]:
@@ -1267,6 +1512,62 @@ class GameStore:
             except ValueError:
                 current_index = 0
             game.whoami_category = options[(current_index + 1) % len(options)]
+            return game, None
+
+    async def set_zlob_category(
+        self,
+        *,
+        game_id: str,
+        category: str | None,
+        actions_18_enabled: bool = True,
+    ) -> tuple[GroupGame | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, "Настройка доступна только для «500 Злобных Карт»"
+            if game.status != "lobby":
+                return game, "Категорию можно менять только в лобби"
+            if not ZLOBCARDS_CATEGORIES:
+                return game, "Не удалось загрузить категории для игры «500 Злобных Карт»"
+
+            selected_category = _normalize_zlob_category(category)
+            if selected_category is not None and selected_category not in ZLOBCARDS_CATEGORIES:
+                return game, "Неизвестная тема для игры «500 Злобных Карт»"
+            if not is_zlob_category_allowed(selected_category, actions_18_enabled=actions_18_enabled):
+                return game, "18+ темы для игры «500 Злобных Карт» отключены в этом чате"
+
+            game.zlob_category = selected_category
+            return game, None
+
+    async def cycle_zlob_category(
+        self,
+        *,
+        game_id: str,
+        actions_18_enabled: bool = True,
+    ) -> tuple[GroupGame | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, "Настройка доступна только для «500 Злобных Карт»"
+            if game.status != "lobby":
+                return game, "Категорию можно менять только в лобби"
+            if not ZLOBCARDS_CATEGORIES:
+                return game, "Не удалось загрузить категории для игры «500 Злобных Карт»"
+
+            allowed_categories = allowed_zlob_categories(actions_18_enabled=actions_18_enabled)
+            if not allowed_categories:
+                return game, "Не удалось загрузить разрешённые категории для игры «500 Злобных Карт»"
+
+            options: list[str | None] = [None, *allowed_categories]
+            try:
+                current_index = options.index(game.zlob_category)
+            except ValueError:
+                current_index = 0
+            game.zlob_category = options[(current_index + 1) % len(options)]
             return game, None
 
     async def get_game(self, game_id: str) -> GroupGame | None:
@@ -1447,6 +1748,63 @@ class GameStore:
                 game.whoami_winner_user_id = None
                 game.phase = "whoami_ask"
                 game.round_no = 1
+                return game, None
+
+            if game.kind == "zlobcards":
+                if not ZLOBCARDS_CATEGORIES:
+                    return _restore_lobby("Не удалось загрузить банк карточек для игры «500 Злобных Карт»")
+
+                allowed_categories = allowed_zlob_categories(actions_18_enabled=actions_18_enabled)
+                if not allowed_categories:
+                    return _restore_lobby("Не удалось загрузить разрешённые категории для игры «500 Злобных Карт»")
+
+                category = game.zlob_category
+                if category is not None and not is_zlob_category_allowed(category, actions_18_enabled=actions_18_enabled):
+                    return _restore_lobby("18+ темы для игры «500 Злобных Карт» отключены в этом чате")
+                if category not in ZLOBCARDS_WHITE_BY_CATEGORY or category not in ZLOBCARDS_BLACK_BY_CATEGORY:
+                    category = random.choice(allowed_categories)
+
+                white_cards = list(ZLOBCARDS_WHITE_BY_CATEGORY.get(category, ()))
+                black_cards = list(ZLOBCARDS_BLACK_BY_CATEGORY.get(category, ()))
+                if len(white_cards) < len(game.players):
+                    return _restore_lobby("Недостаточно белых карточек для текущего числа игроков")
+                if not black_cards:
+                    return _restore_lobby("Не удалось подготовить чёрные карточки для раунда")
+
+                random.shuffle(white_cards)
+                random.shuffle(black_cards)
+
+                game.zlob_category = category
+                game.zlob_rounds = min(max(game.zlob_rounds, ZLOBCARDS_MIN_ROUNDS), ZLOBCARDS_MAX_ROUNDS)
+                game.zlob_target_score = min(
+                    max(game.zlob_target_score, ZLOBCARDS_MIN_TARGET_SCORE),
+                    ZLOBCARDS_MAX_TARGET_SCORE,
+                )
+                game.zlob_white_deck = white_cards
+                game.zlob_white_discard.clear()
+                game.zlob_black_deck = black_cards
+                game.zlob_black_discard.clear()
+                game.zlob_hands.clear()
+                game.zlob_submissions.clear()
+                game.zlob_options = ()
+                game.zlob_option_owner_user_ids = ()
+                game.zlob_votes.clear()
+                game.zlob_scores = {player_id: 0 for player_id in game.players}
+                game.zlob_last_round_no = None
+                game.zlob_last_black_text = None
+                game.zlob_last_black_slots = 1
+                game.zlob_last_options = ()
+                game.zlob_last_option_owner_user_ids = ()
+                game.zlob_last_vote_tally = ()
+                game.zlob_last_winner_option_indexes = ()
+                game.round_no = 1
+
+                for player_id in game.players:
+                    game.zlob_hands[player_id] = tuple(self._zlob_draw_white_cards(game, count=ZLOBCARDS_HAND_SIZE))
+
+                opened, error = self._prepare_zlob_private_phase(game)
+                if not opened:
+                    return _restore_lobby(error or "Не удалось открыть первый раунд")
                 return game, None
 
             if game.kind == "mafia":
@@ -1658,6 +2016,24 @@ class GameStore:
                 for game in self._by_id.values()
                 if (
                     game.kind == "bredovukha"
+                    and game.status == "started"
+                    and game.phase == "private_answers"
+                    and user_id in game.players
+                )
+            ]
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+            return candidates[0]
+
+    async def get_latest_zlob_submission_game_for_user(self, *, user_id: int) -> GroupGame | None:
+        async with self._lock:
+            candidates = [
+                game
+                for game in self._by_id.values()
+                if (
+                    game.kind == "zlobcards"
                     and game.status == "started"
                     and game.phase == "private_answers"
                     and user_id in game.players
@@ -2672,6 +3048,303 @@ class GameStore:
                 next_round_no=next_round_no,
                 next_selector_user_id=next_selector_user_id,
                 next_selector_label=next_selector_label,
+                winner_user_ids=winner_user_ids,
+                winner_text=winner_text,
+            )
+            return game, resolution, None
+
+    async def zlob_submit_cards(
+        self,
+        *,
+        game_id: str,
+        user_id: int,
+        card_indexes: tuple[int, ...],
+    ) -> tuple[GroupGame | None, ZlobSubmitResult | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, None, "Это не «500 Злобных Карт»"
+            if game.status != "started" or game.phase != "private_answers":
+                return game, None, "Сейчас не этап приватного выбора"
+            if user_id not in game.players:
+                return game, None, "Вы не участник этой игры"
+            if not game.zlob_black_text:
+                return game, None, "Чёрная карточка текущего раунда не выбрана"
+
+            needed_slots = max(1, int(game.zlob_black_slots))
+            if len(card_indexes) != needed_slots:
+                return game, None, f"Нужно выбрать карточек: {needed_slots}"
+            if needed_slots == 2 and len(set(card_indexes)) != 2:
+                return game, None, "Для раунда с двумя пропусками нужны две разные карты"
+
+            hand = list(game.zlob_hands.get(user_id, ()))
+            if not hand:
+                return game, None, "Ваша рука пуста"
+
+            selected_cards: list[str] = []
+            for index in card_indexes:
+                if index < 0 or index >= len(hand):
+                    return game, None, "Некорректная карта в выборе"
+                selected_cards.append(hand[index])
+
+            previous_submission = game.zlob_submissions.get(user_id)
+            game.zlob_submissions[user_id] = tuple(selected_cards)
+
+            submitted_count = len({player_id for player_id in game.players if player_id in game.zlob_submissions})
+            total_players = len(game.players)
+            all_submitted = total_players > 0 and submitted_count == total_players
+            vote_opened = False
+            if all_submitted:
+                opened, open_error = self._open_zlob_vote(game)
+                if not opened:
+                    return game, None, open_error or "Не удалось открыть голосование"
+                vote_opened = True
+
+            return (
+                game,
+                ZlobSubmitResult(
+                    previous_submission=previous_submission,
+                    submitted_count=submitted_count,
+                    total_players=total_players,
+                    all_submitted=all_submitted,
+                    vote_opened=vote_opened,
+                ),
+                None,
+            )
+
+    async def zlob_get_submit_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, 0, 0
+            submitted_count = len({player_id for player_id in game.players if player_id in game.zlob_submissions})
+            return game, submitted_count, len(game.players)
+
+    async def zlob_open_vote(
+        self,
+        *,
+        game_id: str,
+        force: bool,
+    ) -> tuple[GroupGame | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, "Это не «500 Злобных Карт»"
+            if game.status != "started" or game.phase != "private_answers":
+                return game, "Сейчас не этап приватного выбора"
+
+            submitted_count = len({player_id for player_id in game.players if player_id in game.zlob_submissions})
+            total_players = len(game.players)
+            if not force and submitted_count < total_players:
+                return game, "Ещё не все игроки прислали карточки"
+
+            opened, error = self._open_zlob_vote(game)
+            if not opened:
+                return game, error or "Не удалось открыть голосование"
+            return game, None
+
+    async def zlob_register_vote(
+        self,
+        *,
+        game_id: str,
+        voter_user_id: int,
+        option_index: int,
+    ) -> tuple[GroupGame | None, ZlobVoteResult | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, None, "Это не «500 Злобных Карт»"
+            if game.status != "started" or game.phase != "public_vote":
+                return game, None, "Сейчас не этап голосования"
+            if voter_user_id not in game.players:
+                return game, None, "Вы не участник этой игры"
+            if option_index < 0 or option_index >= len(game.zlob_options):
+                return game, None, "Некорректный вариант"
+
+            owner_user_id = (
+                game.zlob_option_owner_user_ids[option_index]
+                if option_index < len(game.zlob_option_owner_user_ids)
+                else None
+            )
+            if owner_user_id == voter_user_id:
+                return game, None, "Нельзя голосовать за свою карточку"
+
+            previous_option_index = game.zlob_votes.get(voter_user_id)
+            game.zlob_votes[voter_user_id] = option_index
+            voted_count = len({player_id for player_id in game.players if player_id in game.zlob_votes})
+            total_players = len(game.players)
+            return (
+                game,
+                ZlobVoteResult(
+                    previous_option_index=previous_option_index,
+                    voted_count=voted_count,
+                    total_players=total_players,
+                    all_voted=(total_players > 0 and voted_count == total_players),
+                ),
+                None,
+            )
+
+    async def zlob_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, tuple[int, ...]]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, 0, 0, ()
+
+            option_count = len(game.zlob_options)
+            vote_tally = [0] * option_count
+            voted_count = 0
+            for player_id in game.players:
+                option = game.zlob_votes.get(player_id)
+                if option is None:
+                    continue
+                voted_count += 1
+                if 0 <= option < option_count:
+                    vote_tally[option] += 1
+
+            return game, voted_count, len(game.players), tuple(vote_tally)
+
+    async def zlob_resolve_round(
+        self,
+        *,
+        game_id: str,
+        force: bool,
+    ) -> tuple[GroupGame | None, ZlobRoundResolution | None, str | None]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, None, "Игра не найдена"
+            if game.kind != "zlobcards":
+                return game, None, "Это не «500 Злобных Карт»"
+            if game.status != "started" or game.phase != "public_vote":
+                return game, None, "Сейчас не этап голосования"
+            if not game.zlob_options or not game.zlob_option_owner_user_ids:
+                return game, None, "Нет вариантов для голосования"
+            if len(game.zlob_options) != len(game.zlob_option_owner_user_ids):
+                return game, None, "Неконсистентные варианты голосования"
+            if not game.zlob_black_text:
+                return game, None, "Не задана чёрная карточка раунда"
+
+            total_players = len(game.players)
+            voted_count = len({player_id for player_id in game.players if player_id in game.zlob_votes})
+            if not force and voted_count < total_players:
+                return game, None, "Ещё не все участники проголосовали"
+
+            vote_tally = [0] * len(game.zlob_options)
+            per_player_votes: list[tuple[int, int | None, bool]] = []
+            for player_id in sorted(game.players.keys()):
+                voted_option_index = game.zlob_votes.get(player_id)
+                if voted_option_index is not None and 0 <= voted_option_index < len(vote_tally):
+                    vote_tally[voted_option_index] += 1
+                per_player_votes.append((player_id, voted_option_index, False))
+
+            winner_option_indexes: tuple[int, ...] = ()
+            if vote_tally:
+                top_votes = max(vote_tally)
+                if top_votes > 0:
+                    winner_option_indexes = tuple(idx for idx, votes in enumerate(vote_tally) if votes == top_votes)
+
+            gains: dict[int, int] = {player_id: 0 for player_id in game.players}
+            for option_index in winner_option_indexes:
+                owner_user_id = game.zlob_option_owner_user_ids[option_index]
+                if owner_user_id is None or owner_user_id not in game.players:
+                    continue
+                gains[owner_user_id] += 1
+
+            for player_id in game.players:
+                game.zlob_scores[player_id] = game.zlob_scores.get(player_id, 0) + gains.get(player_id, 0)
+            scores = tuple(self._sorted_zlob_scores(game))
+
+            for player_id in sorted(game.players.keys()):
+                hand = list(game.zlob_hands.get(player_id, ()))
+                submitted = game.zlob_submissions.get(player_id, ())
+                for card_text in submitted:
+                    if card_text in hand:
+                        hand.remove(card_text)
+                        game.zlob_white_discard.append(card_text)
+                draw_count = max(0, ZLOBCARDS_HAND_SIZE - len(hand))
+                if draw_count > 0:
+                    hand.extend(self._zlob_draw_white_cards(game, count=draw_count))
+                game.zlob_hands[player_id] = tuple(hand)
+
+            current_round_no = max(game.round_no, 1)
+            current_black_text = game.zlob_black_text
+            current_black_slots = game.zlob_black_slots
+            current_options = tuple(game.zlob_options)
+            current_option_owner_user_ids = tuple(game.zlob_option_owner_user_ids)
+
+            game.zlob_last_round_no = current_round_no
+            game.zlob_last_black_text = current_black_text
+            game.zlob_last_black_slots = current_black_slots
+            game.zlob_last_options = current_options
+            game.zlob_last_option_owner_user_ids = current_option_owner_user_ids
+            game.zlob_last_vote_tally = tuple(vote_tally)
+            game.zlob_last_winner_option_indexes = winner_option_indexes
+
+            game.zlob_submissions.clear()
+            game.zlob_options = ()
+            game.zlob_option_owner_user_ids = ()
+            game.zlob_votes.clear()
+
+            top_score = scores[0][1] if scores else 0
+            finished_by_round = current_round_no >= game.zlob_rounds
+            finished_by_score = top_score >= game.zlob_target_score
+            finished = finished_by_round or finished_by_score
+            winner_user_ids: tuple[int, ...] = ()
+            winner_text: str | None = None
+            next_round_no: int | None = None
+
+            if finished:
+                winner_user_ids = tuple(user_id for user_id, score in scores if score == top_score)
+                winner_text = self._resolve_zlob_winner_text(
+                    game,
+                    winner_user_ids=winner_user_ids,
+                    top_score=top_score,
+                )
+                game.status = "finished"
+                game.phase = "finished"
+                game.winner_text = winner_text
+                game.zlob_black_text = None
+                game.zlob_black_slots = 1
+                self._active_by_chat.pop(game.chat_id, None)
+            else:
+                next_round_no = current_round_no + 1
+                game.round_no = next_round_no
+                opened, error = self._prepare_zlob_private_phase(game)
+                if not opened:
+                    winner_user_ids = tuple(user_id for user_id, score in scores if score == top_score)
+                    winner_text = self._resolve_zlob_winner_text(
+                        game,
+                        winner_user_ids=winner_user_ids,
+                        top_score=top_score,
+                    )
+                    game.status = "finished"
+                    game.phase = "finished"
+                    game.winner_text = winner_text
+                    game.zlob_black_text = None
+                    game.zlob_black_slots = 1
+                    self._active_by_chat.pop(game.chat_id, None)
+                    finished = True
+                    next_round_no = None
+
+            resolution = ZlobRoundResolution(
+                round_no=current_round_no,
+                black_text=current_black_text,
+                black_slots=current_black_slots,
+                options=current_options,
+                option_owner_user_ids=current_option_owner_user_ids,
+                vote_tally=tuple(vote_tally),
+                winner_option_indexes=winner_option_indexes,
+                per_player_votes=tuple(per_player_votes),
+                gains=tuple(sorted(gains.items(), key=lambda item: item[0])),
+                scores=scores,
+                finished=finished,
+                next_round_no=next_round_no,
                 winner_user_ids=winner_user_ids,
                 winner_text=winner_text,
             )
@@ -4268,6 +4941,99 @@ class GameStore:
         return cards, overflow_fields, None
 
     @staticmethod
+    def _zlob_draw_white_cards(game: GroupGame, *, count: int) -> list[str]:
+        cards: list[str] = []
+        need = max(0, count)
+        while len(cards) < need:
+            if not game.zlob_white_deck:
+                if not game.zlob_white_discard:
+                    break
+                random.shuffle(game.zlob_white_discard)
+                game.zlob_white_deck.extend(game.zlob_white_discard)
+                game.zlob_white_discard.clear()
+            if not game.zlob_white_deck:
+                break
+            cards.append(game.zlob_white_deck.pop())
+        return cards
+
+    @staticmethod
+    def _zlob_draw_black_card(game: GroupGame) -> ZlobBlackCard | None:
+        if not game.zlob_black_deck:
+            if not game.zlob_black_discard:
+                return None
+            random.shuffle(game.zlob_black_discard)
+            game.zlob_black_deck.extend(game.zlob_black_discard)
+            game.zlob_black_discard.clear()
+        if not game.zlob_black_deck:
+            return None
+        return game.zlob_black_deck.pop()
+
+    @staticmethod
+    def _prepare_zlob_private_phase(game: GroupGame) -> tuple[bool, str | None]:
+        black_card = GameStore._zlob_draw_black_card(game)
+        if black_card is None:
+            return False, "Закончились чёрные карточки для следующего раунда"
+
+        game.zlob_black_text = black_card.text
+        game.zlob_black_slots = black_card.slots
+        game.zlob_black_discard.append(black_card)
+        game.zlob_submissions.clear()
+        game.zlob_options = ()
+        game.zlob_option_owner_user_ids = ()
+        game.zlob_votes.clear()
+        game.phase = "private_answers"
+        game.phase_started_at = datetime.now(timezone.utc)
+        return True, None
+
+    @staticmethod
+    def _open_zlob_vote(game: GroupGame) -> tuple[bool, str | None]:
+        if game.zlob_black_text is None:
+            return False, "Чёрная карточка не задана"
+
+        options: list[tuple[str, int]] = []
+        needed_slots = max(1, int(game.zlob_black_slots))
+        for player_id in sorted(game.players.keys()):
+            submission = game.zlob_submissions.get(player_id)
+            if not submission:
+                continue
+            if len(submission) != needed_slots:
+                continue
+            option_text = submission[0] if len(submission) == 1 else " + ".join(submission)
+            options.append((option_text, player_id))
+
+        if len(options) < 2:
+            return False, "Нужно минимум два ответа для голосования"
+
+        random.shuffle(options)
+        game.zlob_options = tuple(option_text for option_text, _ in options)
+        game.zlob_option_owner_user_ids = tuple(owner_user_id for _, owner_user_id in options)
+        game.zlob_votes.clear()
+        game.phase = "public_vote"
+        game.phase_started_at = datetime.now(timezone.utc)
+        return True, None
+
+    @staticmethod
+    def _sorted_zlob_scores(game: GroupGame) -> list[tuple[int, int]]:
+        return sorted(
+            game.zlob_scores.items(),
+            key=lambda item: (
+                -item[1],
+                game.players.get(item[0], f"user:{item[0]}").lower(),
+                item[0],
+            ),
+        )
+
+    @staticmethod
+    def _resolve_zlob_winner_text(game: GroupGame, *, winner_user_ids: tuple[int, ...], top_score: int) -> str:
+        if not winner_user_ids:
+            return "Победитель не определён."
+        if len(winner_user_ids) == 1:
+            winner_label = game.players.get(winner_user_ids[0], f"user:{winner_user_ids[0]}")
+            return f"Побеждает {winner_label} с результатом {top_score}."
+        labels = ", ".join(game.players.get(user_id, f"user:{user_id}") for user_id in winner_user_ids)
+        return f"Ничья: {labels}. У каждого по {top_score}."
+
+    @staticmethod
     def _build_bred_selector_order(game: GroupGame) -> tuple[int, ...]:
         players = list(game.players.keys())
         if not players:
@@ -4921,10 +5687,13 @@ _READ_ONLY_GAMESTORE_METHODS: set[str] = {
     "get_latest_role_game_for_user",
     "get_latest_bunker_game_for_user",
     "get_latest_bred_submission_game_for_user",
+    "get_latest_zlob_submission_game_for_user",
     "quiz_get_answer_snapshot",
     "spy_get_vote_snapshot",
     "bred_get_vote_snapshot",
     "bred_get_category_snapshot",
+    "zlob_get_submit_snapshot",
+    "zlob_get_vote_snapshot",
     "bunker_get_reveal_snapshot",
     "bunker_get_vote_snapshot",
     "mafia_is_night_ready",
@@ -4965,6 +5734,7 @@ def _event_type_for_method(name: str) -> str:
         "mafia_resolve_execution_confirm",
         "quiz_resolve_round",
         "bred_resolve_round",
+        "zlob_resolve_round",
         "bunker_resolve_vote",
         "bunker_force_advance_reveal",
         "spy_guess_location",

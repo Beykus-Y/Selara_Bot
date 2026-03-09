@@ -53,6 +53,9 @@ from selara.presentation.game_state import (
     GAME_STORE,
     GroupGame,
     LiveEvent,
+    ZLOBCARDS_BLACK_BY_CATEGORY,
+    ZLOBCARDS_CATEGORIES,
+    ZLOBCARDS_WHITE_BY_CATEGORY,
     WHOAMI_CARDS_BY_CATEGORY,
     WHOAMI_CATEGORIES,
 )
@@ -783,7 +786,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
-        if parts[0] in {"gcfg", "gquiz", "gdice", "gbredcat", "gbred", "gbkr", "gbkv", "gspy", "gwho", "gmact", "gmvote", "gmconfirm"} and len(parts) == 3:
+        if parts[0] in {
+            "gcfg",
+            "gquiz",
+            "gdice",
+            "gbredcat",
+            "gbred",
+            "gbkr",
+            "gbkv",
+            "gspy",
+            "gwho",
+            "gzlobp",
+            "gzlobv",
+            "gmact",
+            "gmvote",
+            "gmconfirm",
+        } and len(parts) == 3:
             return parts[1]
         return None
 
@@ -800,7 +818,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return "primary"
         if callback_data.startswith("gcfg:"):
             return "ghost"
-        if callback_data.startswith(("gquiz:", "gspy:", "gwho:", "gbred:", "gbredcat:", "gbkr:", "gbkv:", "gmact:", "gmvote:", "gmconfirm:")):
+        if callback_data.startswith(
+            ("gquiz:", "gspy:", "gwho:", "gzlobp:", "gzlobv:", "gbred:", "gbredcat:", "gbkr:", "gbkv:", "gmact:", "gmvote:", "gmconfirm:")
+        ):
             return "subtle"
         return "ghost"
 
@@ -820,6 +840,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return can_manage_games
         if callback_data.startswith(("gmact:", "gmvote:", "gmconfirm:")):
             return is_member and user_id in game.alive_player_ids
+        if callback_data.startswith("gzlobp:"):
+            return is_member and game.kind == "zlobcards" and game.status == "started" and game.phase == "private_answers"
+        if callback_data.startswith("gzlobv:"):
+            return is_member and game.kind == "zlobcards" and game.status == "started" and game.phase == "public_vote"
         if callback_data.startswith("gwho:"):
             return is_member and user_id in game.players and user_id != game.whoami_current_actor_user_id
         participant_prefixes = (
@@ -827,6 +851,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "gdice:",
             "gspy:",
             "gwho:",
+            "gzlobv:",
             "gbred:",
             "gbredcat:",
             "gbkr:",
@@ -907,6 +932,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if callback_data.startswith("gbred:"):
                 grouped["vote_buttons"].append(button)
                 continue
+            if callback_data.startswith("gzlobv:"):
+                grouped["vote_buttons"].append(button)
+                continue
             if callback_data.startswith(("game:start:", "game:cancel:", "game:advance:", "game:reveal:", "gcfg:")):
                 grouped["manage_buttons"].append(button)
                 continue
@@ -936,6 +964,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _build_bred_score_rows(game, limit=limit)
         if game.kind in {"quiz", "dice"}:
             return _build_recent_score_rows(game, limit=limit)
+        if game.kind == "zlobcards" and game.zlob_scores:
+            ranking = sorted(
+                game.zlob_scores.items(),
+                key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
+            )
+            return [
+                {
+                    "position": f"{position:02d}",
+                    "label": game.players.get(player_user_id, f"user:{player_user_id}"),
+                    "value": str(score),
+                }
+                for position, (player_user_id, score) in enumerate(ranking[:limit], start=1)
+            ]
         return []
 
     def _build_bred_submission_rows(game: GroupGame) -> list[dict[str, str]]:
@@ -979,6 +1020,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     def _spy_category_label(game: GroupGame) -> str:
         return game.spy_category or "случайная тема"
+
+    def _zlob_category_label(game: GroupGame) -> str:
+        return game.zlob_category or "случайная тема"
 
     def _mafia_role_briefing(role: str | None, *, team_code: str | None) -> dict[str, str]:
         if role is None:
@@ -1636,6 +1680,164 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "guess_form": guess_form,
         }
 
+    def _build_zlob_submission_rows(game: GroupGame) -> list[dict[str, str]]:
+        if game.kind != "zlobcards" or game.status != "started" or game.phase != "private_answers":
+            return []
+        rows: list[dict[str, str]] = []
+        for player_user_id, label in sorted(game.players.items(), key=lambda item: (item[1].lower(), item[0])):
+            submitted = player_user_id in game.zlob_submissions
+            rows.append(
+                {
+                    "label": label,
+                    "state": "ready" if submitted else "waiting",
+                    "state_label": "сдал" if submitted else "ждём",
+                }
+            )
+        return rows
+
+    def _build_zlob_option_rows(game: GroupGame) -> list[dict[str, str | bool]]:
+        if game.kind != "zlobcards":
+            return []
+        options: tuple[str, ...] = ()
+        owners: tuple[int | None, ...] = ()
+        winner_option_indexes: tuple[int, ...] = ()
+        hide_authors = False
+        if game.status == "started" and game.phase == "public_vote" and game.zlob_options:
+            options = game.zlob_options
+            owners = game.zlob_option_owner_user_ids
+            hide_authors = True
+            vote_tally = [0 for _ in options]
+            for voter_user_id in game.players:
+                voted_option_index = game.zlob_votes.get(voter_user_id)
+                if voted_option_index is not None and 0 <= voted_option_index < len(vote_tally):
+                    vote_tally[voted_option_index] += 1
+            top_votes = max(vote_tally) if vote_tally else 0
+            if top_votes > 0:
+                winner_option_indexes = tuple(index for index, count in enumerate(vote_tally) if count == top_votes)
+        elif game.zlob_last_options:
+            options = game.zlob_last_options
+            owners = game.zlob_last_option_owner_user_ids
+            winner_option_indexes = game.zlob_last_winner_option_indexes
+            vote_tally = list(game.zlob_last_vote_tally)
+        else:
+            return []
+
+        rows: list[dict[str, str | bool]] = []
+        for option_index, option_text in enumerate(options):
+            owner_user_id = owners[option_index] if option_index < len(owners) else None
+            votes = vote_tally[option_index] if option_index < len(vote_tally) else 0
+            author_label = (
+                "анонимно"
+                if hide_authors
+                else (game.players.get(owner_user_id, f"user:{owner_user_id}") if owner_user_id is not None else "-")
+            )
+            is_winner = option_index in winner_option_indexes
+            rows.append(
+                {
+                    "slot": game_router_module._quiz_choice_label(option_index),
+                    "text": option_text,
+                    "author": author_label,
+                    "votes": str(votes),
+                    "is_winner": is_winner,
+                    "tone": "winner" if is_winner else "lie",
+                }
+            )
+        return rows
+
+    def _build_zlob_view(
+        game: GroupGame,
+        *,
+        user_id: int,
+        is_member: bool,
+        private_buttons: list[dict[str, str]],
+        grouped_board_buttons: dict[str, list[dict[str, str]]],
+    ) -> dict[str, object] | None:
+        if game.kind != "zlobcards" or game.status == "lobby":
+            return None
+
+        black_text = game.zlob_black_text or game.zlob_last_black_text
+        black_slots = game.zlob_black_slots if game.zlob_black_text else game.zlob_last_black_slots
+        hand = list(game.zlob_hands.get(user_id, ())) if is_member else []
+        submission = game.zlob_submissions.get(user_id)
+        voted_option_index = game.zlob_votes.get(user_id) if is_member else None
+
+        action_buttons = [
+            button
+            for button in private_buttons
+            if button.get("callback_data", "").startswith("gzlobp:")
+        ]
+        vote_buttons = [
+            button
+            for button in grouped_board_buttons["vote_buttons"]
+            if button.get("callback_data", "").startswith("gzlobv:")
+        ]
+
+        status_title = "Статус раунда"
+        status_text = "Раунд активен."
+        status_tone = "observer"
+
+        if game.status == "finished":
+            status_title = "Партия завершена"
+            status_text = game.winner_text or "Итог зафиксирован."
+            status_tone = "ready"
+        elif game.phase == "private_answers":
+            submitted_count = len({player_user_id for player_user_id in game.players if player_user_id in game.zlob_submissions})
+            if not is_member:
+                status_title = "Режим наблюдения"
+                status_text = f"Игроки сдают карты в приватной фазе: {submitted_count}/{len(game.players)}."
+                status_tone = "observer"
+            elif submission:
+                status_title = "Ваш выбор сохранён"
+                status_text = f"Можно сменить набор до конца фазы. Прогресс: {submitted_count}/{len(game.players)}."
+                status_tone = "ready"
+            else:
+                status_title = "Выберите карточки"
+                status_text = f"Сдайте {max(1, int(game.zlob_black_slots))} карточк(у/и). Прогресс: {submitted_count}/{len(game.players)}."
+                status_tone = "waiting"
+        elif game.phase == "public_vote":
+            voted_count = len({player_user_id for player_user_id in game.players if player_user_id in game.zlob_votes})
+            if not is_member:
+                status_title = "Идёт голосование"
+                status_text = f"Прогресс: {voted_count}/{len(game.players)}."
+                status_tone = "observer"
+            elif voted_option_index is None:
+                status_title = "Ваш голос ждут"
+                status_text = f"Голосуйте за самый сильный вариант. Нельзя голосовать за свою карточку. Прогресс: {voted_count}/{len(game.players)}."
+                status_tone = "waiting"
+            else:
+                status_title = "Голос принят"
+                status_text = (
+                    f"Вы выбрали вариант {game_router_module._quiz_choice_label(voted_option_index)}. "
+                    f"До закрытия этапа выбор можно менять."
+                )
+                status_tone = "ready"
+
+        submit_form = None
+        if is_member and game.status == "started" and game.phase == "private_answers" and hand:
+            submit_form = {
+                "game_id": game.game_id,
+                "slots": max(1, int(game.zlob_black_slots)),
+                "hand": [{"index": str(index), "text": card_text} for index, card_text in enumerate(hand)],
+            }
+
+        return {
+            "category": _zlob_category_label(game),
+            "round_label": f"{max(1, game.round_no)}/{game.zlob_rounds}",
+            "target_score": str(game.zlob_target_score),
+            "black_text": black_text or "Чёрная карточка будет показана на следующем этапе.",
+            "black_slots": max(1, int(black_slots)),
+            "status_title": status_title,
+            "status_text": status_text,
+            "status_tone": status_tone,
+            "submit_buttons": action_buttons,
+            "vote_buttons": vote_buttons,
+            "submit_form": submit_form,
+            "submission_rows": _build_zlob_submission_rows(game),
+            "option_rows": _build_zlob_option_rows(game),
+            "voted_option_label": game_router_module._quiz_choice_label(voted_option_index) if voted_option_index is not None else None,
+            "show_vote": game.status == "started" and game.phase == "public_vote",
+        }
+
     def _build_secret_role_reveal_rows(game: GroupGame) -> list[dict[str, str | bool]]:
         if game.kind not in {"spy", "mafia", "whoami"} or game.status != "finished":
             return []
@@ -1680,6 +1882,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         scores: dict[int, int] | None = None
         if game.kind == "bredovukha" and game.bred_scores:
             scores = game.bred_scores
+        elif game.kind == "zlobcards" and game.zlob_scores:
+            scores = game.zlob_scores
         elif game.kind == "quiz" and game.quiz_scores:
             scores = game.quiz_scores
         elif game.kind == "dice" and game.dice_scores:
@@ -1724,6 +1928,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             notes.append(f"Ваш счёт: {game.bred_scores.get(user_id, 0)}")
             notes.append(f"Раундов: {game.bred_rounds}")
             return notes
+        if game.kind == "zlobcards":
+            notes.append(f"Ваш счёт: {game.zlob_scores.get(user_id, 0)}")
+            notes.append(f"Раундов: {game.zlob_rounds} · цель: {game.zlob_target_score}")
+            notes.append(f"Тема: {_zlob_category_label(game)}")
+            return notes
         if game.kind == "quiz":
             notes.append(f"Ваш счёт: {game.quiz_scores.get(user_id, 0)}")
             notes.append(f"Вопросов: {len(game.quiz_questions)}")
@@ -1740,8 +1949,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return notes
 
     def _build_game_catalog() -> list[dict[str, str]]:
-        order = tuple(kind for kind in ("bredovukha", "whoami", "quiz", "spy", "mafia", "bunker", "dice") if kind in GAME_LAUNCHABLE_KINDS)
+        order = tuple(
+            kind
+            for kind in ("zlobcards", "bredovukha", "whoami", "quiz", "spy", "mafia", "bunker", "dice")
+            if kind in GAME_LAUNCHABLE_KINDS
+        )
         notes = {
+            "zlobcards": "Чёрная карта, приватные белые ответы и анонимное голосование каждый раунд.",
             "bredovukha": "Блеф, ложь и угадывание правильного факта.",
             "whoami": "Карточки на лбу, вопросы только с «да / нет» и догадка на своём ходу.",
             "quiz": "Быстрые раунды с вариантами ответов и табло.",
@@ -1751,6 +1965,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "dice": "Моментальная партия на один экран.",
         }
         tones = {
+            "zlobcards": "magenta",
             "bredovukha": "gold",
             "whoami": "blue",
             "quiz": "cyan",
@@ -1818,6 +2033,35 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "label": category,
                     "note": "Готовая тема для партии",
                     "count": str(len(game_state_module.SPY_LOCATIONS_BY_CATEGORY.get(category, ()))),
+                }
+            )
+        return options
+
+    def _build_zlob_category_options(*, actions_18_enabled: bool | None = None) -> list[dict[str, object]]:
+        allowed_categories = None
+        if actions_18_enabled is not None:
+            allowed_categories = set(game_state_module.allowed_zlob_categories(actions_18_enabled=actions_18_enabled))
+        options = [
+            {
+                "value": "",
+                "label": "Случайная тема",
+                "note": "Без фиксации заранее",
+                "count": "",
+                "is_18_plus": False,
+            }
+        ]
+        for category in ZLOBCARDS_CATEGORIES:
+            if allowed_categories is not None and category not in allowed_categories:
+                continue
+            white_count = len(ZLOBCARDS_WHITE_BY_CATEGORY.get(category, ()))
+            black_count = len(ZLOBCARDS_BLACK_BY_CATEGORY.get(category, ()))
+            options.append(
+                {
+                    "value": category,
+                    "label": category,
+                    "note": "Готовая тема для партии",
+                    "count": f"{white_count}/{black_count}",
+                    "is_18_plus": game_state_module.is_zlob_category_explicit(category),
                 }
             )
         return options
@@ -1903,6 +2147,50 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "metrics": [
                         {"label": "Раунд", "value": round_value},
                         {"label": "Категория", "value": game.bred_current_category or "-"},
+                        {"label": "Голоса", "value": f"{voted_count}/{len(game.players)}"},
+                    ],
+                }
+
+        if game.kind == "zlobcards":
+            round_value = f"{max(1, game.round_no)}/{game.zlob_rounds}"
+            if game.status == "finished":
+                return {
+                    "eyebrow": "Финал",
+                    "title": "Партия завершена",
+                    "description": game.winner_text or "Финальные очки зафиксированы.",
+                    "prompt_title": "Последняя чёрная карточка" if game.zlob_last_black_text else None,
+                    "prompt_text": game.zlob_last_black_text,
+                    "metrics": [
+                        {"label": "Раундов", "value": str(game.zlob_rounds)},
+                        {"label": "Цель", "value": str(game.zlob_target_score)},
+                        {"label": "Тема", "value": _zlob_category_label(game)},
+                    ],
+                }
+            if game.phase == "private_answers":
+                submitted_count = len({player_user_id for player_user_id in game.players if player_user_id in game.zlob_submissions})
+                return {
+                    "eyebrow": "Чёрная карточка",
+                    "title": "Приватная сдача карт",
+                    "description": "Каждый игрок выбирает карточки из руки. После полной сдачи автоматически открывается общее голосование.",
+                    "prompt_title": f"Чёрная карточка ({max(1, int(game.zlob_black_slots))})",
+                    "prompt_text": game.zlob_black_text or "Карточка подгружается...",
+                    "metrics": [
+                        {"label": "Раунд", "value": round_value},
+                        {"label": "Тема", "value": _zlob_category_label(game)},
+                        {"label": "Сдали", "value": f"{submitted_count}/{len(game.players)}"},
+                    ],
+                }
+            if game.phase == "public_vote":
+                voted_count = len({player_user_id for player_user_id in game.players if player_user_id in game.zlob_votes})
+                return {
+                    "eyebrow": "Анонимный reveal",
+                    "title": "Голосование",
+                    "description": "Все варианты опубликованы без авторов. Игроки голосуют за самый сильный ответ.",
+                    "prompt_title": f"Чёрная карточка ({max(1, int(game.zlob_black_slots))})",
+                    "prompt_text": game.zlob_black_text or "Карточка подгружается...",
+                    "metrics": [
+                        {"label": "Раунд", "value": round_value},
+                        {"label": "Тема", "value": _zlob_category_label(game)},
                         {"label": "Голоса", "value": f"{voted_count}/{len(game.players)}"},
                     ],
                 }
@@ -2115,6 +2403,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             metrics = [{"label": "Игроки", "value": str(len(game.players))}]
             if game.kind == "bredovukha":
                 metrics.append({"label": "Раундов", "value": str(game.bred_rounds)})
+            if game.kind == "zlobcards":
+                metrics.append({"label": "Раундов", "value": str(game.zlob_rounds)})
+                metrics.append({"label": "Цель", "value": str(game.zlob_target_score)})
+                metrics.append({"label": "Тема", "value": _zlob_category_label(game)})
             if game.kind == "spy":
                 metrics.append({"label": "Тема", "value": _spy_category_label(game)})
             if game.kind == "whoami":
@@ -2226,6 +2518,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     for button in manage_buttons
                     if button.get("callback_data") != f"gcfg:{game.game_id}:whoami_cat_next"
                 ]
+            if game.kind == "zlobcards":
+                manage_buttons = [
+                    button
+                    for button in manage_buttons
+                    if button.get("callback_data") != f"gcfg:{game.game_id}:zlob_cat_next"
+                ]
             spy_view = _build_spy_view(
                 game,
                 user_id=user.telegram_user_id,
@@ -2245,11 +2543,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 private_buttons=private_buttons,
                 grouped_board_buttons=grouped_board_buttons,
             )
+            zlob_view = _build_zlob_view(
+                game,
+                user_id=user.telegram_user_id,
+                is_member=is_member,
+                private_buttons=private_buttons,
+                grouped_board_buttons=grouped_board_buttons,
+            )
             secret_lines = _build_secret_lines(game, user_id=user.telegram_user_id) if is_member and game.status == "started" and game.kind not in {"mafia", "spy"} else []
             players = sorted(game.players.values(), key=lambda value: value.lower())
             mafia_started = game.kind == "mafia" and game.status != "lobby"
             spy_started = game.kind == "spy" and game.status != "lobby"
             whoami_started = game.kind == "whoami" and game.status != "lobby"
+            zlob_started = game.kind == "zlobcards" and game.status != "lobby"
             spy_theme_picker = None
             if game.kind == "spy" and game.status == "lobby" and can_manage_games and game_state_module.SPY_CATEGORIES:
                 spy_theme_picker = {
@@ -2265,6 +2571,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "current_value": game.whoami_category or "",
                     "current_label": game.whoami_category or "Случайная тема",
                     "options": _build_whoami_category_options(
+                        actions_18_enabled=current_chat_settings.actions_18_enabled
+                    ),
+                }
+            zlob_theme_picker = None
+            if game.kind == "zlobcards" and game.status == "lobby" and can_manage_games and ZLOBCARDS_CATEGORIES:
+                zlob_theme_picker = {
+                    "game_id": game.game_id,
+                    "current_value": game.zlob_category or "",
+                    "current_label": _zlob_category_label(game),
+                    "options": _build_zlob_category_options(
                         actions_18_enabled=current_chat_settings.actions_18_enabled
                     ),
                 }
@@ -2289,14 +2605,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "players_hidden": max(0, len(players) - 8),
                     "winner_text": game.winner_text,
                     "spotlight": _build_game_spotlight(game),
-                    "main_buttons": [] if mafia_started or spy_started or whoami_started else grouped_board_buttons["main_buttons"],
+                    "main_buttons": [] if mafia_started or spy_started or whoami_started or zlob_started else grouped_board_buttons["main_buttons"],
                     "manage_buttons": manage_buttons,
                     "category_buttons": grouped_board_buttons["category_buttons"],
                     "vote_buttons": grouped_board_buttons["vote_buttons"],
-                    "telegram_buttons": [] if mafia_started or spy_started or whoami_started else grouped_board_buttons["telegram_buttons"],
-                    "private_buttons": [] if mafia_started else private_buttons,
+                    "telegram_buttons": [] if mafia_started or spy_started or whoami_started or zlob_started else grouped_board_buttons["telegram_buttons"],
+                    "private_buttons": [] if mafia_started or zlob_started else private_buttons,
                     "spy_theme_picker": spy_theme_picker,
                     "whoami_theme_picker": whoami_theme_picker,
+                    "zlob_theme_picker": zlob_theme_picker,
                     "show_number_guess": game.kind == "number" and game.kind in GAME_LAUNCHABLE_KINDS and game.status == "started" and is_member,
                     "show_bred_answer": game.kind == "bredovukha" and game.status == "started" and game.phase == "private_answers" and is_member,
                     "bred_submission_rows": _build_bred_submission_rows(game),
@@ -2304,11 +2621,20 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "spy_view": spy_view,
                     "whoami_view": whoami_view,
                     "mafia_view": mafia_view,
+                    "zlob_view": zlob_view,
                     "role_reveal_rows": _build_secret_role_reveal_rows(game),
                     "role_reveal_note": (
                         f"Тема раунда: {_spy_category_label(game)}. Локация: {game.spy_location or '-'}."
                         if game.kind == "spy" and game.status == "finished"
-                        else (f"Категория раунда: {game.whoami_category or 'случайная'}." if game.kind == "whoami" and game.status == "finished" else "Роли и фракции раскрыты, победители подсвечены отдельно.")
+                        else (
+                            f"Категория раунда: {game.whoami_category or 'случайная'}."
+                            if game.kind == "whoami" and game.status == "finished"
+                            else (
+                                f"Тема раунда: {_zlob_category_label(game)}."
+                                if game.kind == "zlobcards" and game.status == "finished"
+                                else "Роли и фракции раскрыты, победители подсвечены отдельно."
+                            )
+                        )
                     ),
                     "secret_lines": secret_lines,
                     "score_rows": _build_live_score_rows(game),
@@ -2413,6 +2739,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "game_catalog": game_catalog,
             "spy_category_options": _build_spy_category_options(),
             "whoami_category_options": _build_whoami_category_options(),
+            "zlob_category_options": _build_zlob_category_options(),
             "default_create_kind": default_create_game["key"] if default_create_game else "",
             "default_create_game": default_create_game,
             "create_chat_options": available_create_chat_options,
@@ -2566,6 +2893,37 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
                 return True, f"Раундов: {updated_game.bred_rounds}"
 
+            if option.startswith("zlob_rounds_"):
+                delta = 1 if option == "zlob_rounds_inc" else -1
+                if option == "zlob_rounds_noop":
+                    return True, f"Раундов: {game.zlob_rounds}"
+                if option not in {"zlob_rounds_inc", "zlob_rounds_dec"}:
+                    return False, "Неизвестная настройка раундов."
+                updated_game, error = await GAME_STORE.set_zlob_rounds(game_id=game.game_id, rounds=game.zlob_rounds + delta)
+                if updated_game is None:
+                    return False, "Игра не найдена."
+                if error:
+                    return False, error
+                await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+                return True, f"Раундов: {updated_game.zlob_rounds}"
+
+            if option.startswith("zlob_target_"):
+                delta = 1 if option == "zlob_target_inc" else -1
+                if option == "zlob_target_noop":
+                    return True, f"Цель: {game.zlob_target_score}"
+                if option not in {"zlob_target_inc", "zlob_target_dec"}:
+                    return False, "Неизвестная настройка цели."
+                updated_game, error = await GAME_STORE.set_zlob_target_score(
+                    game_id=game.game_id,
+                    target_score=game.zlob_target_score + delta,
+                )
+                if updated_game is None:
+                    return False, "Игра не найдена."
+                if error:
+                    return False, error
+                await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+                return True, f"Цель: {updated_game.zlob_target_score}"
+
             if option.startswith("bunker_seats_"):
                 delta = 1 if option == "bunker_seats_inc" else -1
                 if option == "bunker_seats_noop":
@@ -2600,6 +2958,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return False, error
                 await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
                 return True, f"Тема: {updated_game.whoami_category or 'случайная'}"
+
+            if option == "zlob_cat_next":
+                updated_game, error = await GAME_STORE.cycle_zlob_category(
+                    game_id=game.game_id,
+                    actions_18_enabled=chat_settings.actions_18_enabled,
+                )
+                if updated_game is None:
+                    return False, "Игра не найдена."
+                if error:
+                    return False, error
+                await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+                return True, f"Тема: {_zlob_category_label(updated_game)}"
 
             return False, "Неизвестная настройка игры."
 
@@ -2638,7 +3008,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
                 await game_router_module._safe_edit_or_send_game_board(bot, started_game, chat_settings)
                 success_message = "Игра запущена."
-                if started_game.kind in {"spy", "mafia", "bunker", "whoami"}:
+                if started_game.kind in {"spy", "mafia", "bunker", "whoami", "zlobcards"}:
                     failed_dm = await game_router_module._send_roles_to_private(bot, started_game)
                     if failed_dm > 0:
                         await game_router_module._notify_private_delivery_warning(bot, started_game, failed_dm)
@@ -2669,6 +3039,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         bot,
                         started_game,
                         text=game_router_module.build_whoami_start_text(category=started_game.whoami_category or "случайная"),
+                    )
+                    return True, success_message
+                if started_game.kind == "zlobcards":
+                    game_router_module._schedule_phase_timer(bot, started_game, chat_settings)
+                    await game_router_module._send_game_feed_event(
+                        bot,
+                        started_game,
+                        text=game_router_module.build_zlobcards_start_text(category=_zlob_category_label(started_game)),
                     )
                     return True, success_message
                 if started_game.kind == "number":
@@ -2803,8 +3181,31 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         )
                         return (error is None), (error or "Голосование завершено.")
                     return False, "Сейчас нет шага для переключения."
+                if game.kind == "zlobcards":
+                    if game.phase == "private_answers":
+                        opened_game, error = await game_router_module._open_zlob_vote_phase(
+                            bot,
+                            game.game_id,
+                            chat_settings,
+                            force=True,
+                            triggered_by_auto=False,
+                        )
+                        if opened_game is None:
+                            return False, "Игра не найдена."
+                        return (error is None), (error or "Открыто голосование.")
+                    if game.phase == "public_vote":
+                        _, error = await game_router_module._resolve_zlob_round(
+                            bot,
+                            game.game_id,
+                            chat_settings,
+                            economy_repo=economy_repo,
+                            force=True,
+                            triggered_by_auto=False,
+                        )
+                        return (error is None), (error or "Раунд обработан.")
+                    return False, "Сейчас нет шага для переключения."
                 if game.kind != "mafia":
-                    return False, "Авто-переход доступен для мафии, викторины, Бредовухи и Бункера."
+                    return False, "Авто-переход доступен для мафии, викторины, Бредовухи, Бункера и Злобных Карт."
                 if game.phase == "night":
                     game_router_module._cancel_phase_timer(game.game_id)
                     await game_router_module._advance_mafia_night(
@@ -2985,6 +3386,123 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 note=note,
             )
             return True, f"Ответ: {resolution.answer_label}"
+
+        if prefix == "gzlobp":
+            if payload == "noop":
+                snapshot_game, submitted_count, total_players = await GAME_STORE.zlob_get_submit_snapshot(game_id=game.game_id)
+                if snapshot_game is not None:
+                    await game_router_module._safe_edit_or_send_game_board(
+                        bot,
+                        snapshot_game,
+                        chat_settings,
+                        note=f"<b>Сдача карточек:</b> {submitted_count}/{total_players}",
+                    )
+                return True, f"Сдано: {submitted_count}/{total_players}"
+
+            card_indexes: tuple[int, ...]
+            if "-" in payload:
+                first_raw, second_raw = payload.split("-", maxsplit=1)
+                if not first_raw.isdigit() or not second_raw.isdigit():
+                    return False, "Некорректный выбор карточек."
+                card_indexes = (int(first_raw), int(second_raw))
+            else:
+                if not payload.isdigit():
+                    return False, "Некорректный выбор карточек."
+                card_indexes = (int(payload),)
+
+            current, result, error = await GAME_STORE.zlob_submit_cards(
+                game_id=game.game_id,
+                user_id=user.telegram_user_id,
+                card_indexes=card_indexes,
+            )
+            if error:
+                return False, error
+            if current is None or result is None:
+                return False, "Игра не найдена."
+
+            if result.vote_opened:
+                game_router_module._cancel_phase_timer(current.game_id)
+                await game_router_module._safe_edit_or_send_game_board(
+                    bot,
+                    current,
+                    chat_settings,
+                    note="<b>Этап:</b> все карточки сданы, открыто голосование.",
+                )
+                game_router_module._schedule_phase_timer(bot, current, chat_settings)
+                return True, "Карточки приняты. Открыто голосование."
+
+            await game_router_module._safe_edit_or_send_game_board(
+                bot,
+                current,
+                chat_settings,
+                note=f"<b>Сдача карточек:</b> {result.submitted_count}/{result.total_players}",
+            )
+            if result.previous_submission is None:
+                return True, "Карточки отправлены."
+            return True, "Выбор обновлён."
+
+        if prefix == "gzlobv":
+            if payload == "noop":
+                snapshot_game, voted_count, total_players, vote_tally = await GAME_STORE.zlob_get_vote_snapshot(game_id=game.game_id)
+                if snapshot_game is not None:
+                    leader_text = "пока нет"
+                    if vote_tally:
+                        top_votes = max(vote_tally)
+                        if top_votes > 0:
+                            leaders = [index for index, count in enumerate(vote_tally) if count == top_votes]
+                            if len(leaders) == 1:
+                                leader_index = leaders[0]
+                                leader_text = f"{game_router_module._quiz_choice_label(leader_index)}. {snapshot_game.zlob_options[leader_index]} ({top_votes})"
+                            else:
+                                leader_text = f"ничья по {top_votes} голос(ам)"
+                    await game_router_module._safe_edit_or_send_game_board(
+                        bot,
+                        snapshot_game,
+                        chat_settings,
+                        note=f"<b>Прогресс голосования:</b> {voted_count}/{total_players}. Лидер: {escape(leader_text)}.",
+                    )
+                return True, f"Голосов: {voted_count}/{total_players}"
+
+            if not payload.isdigit():
+                return False, "Некорректный вариант."
+            option_index = int(payload)
+            current, result, error = await GAME_STORE.zlob_register_vote(
+                game_id=game.game_id,
+                voter_user_id=user.telegram_user_id,
+                option_index=option_index,
+            )
+            if error:
+                return False, error
+            if current is None or result is None:
+                return False, "Игра не найдена."
+
+            if result.previous_option_index == option_index:
+                return True, "Этот голос уже учтён."
+
+            snapshot_game, voted_count, total_players, _ = await GAME_STORE.zlob_get_vote_snapshot(game_id=current.game_id)
+            if snapshot_game is not None:
+                await game_router_module._safe_edit_or_send_game_board(
+                    bot,
+                    snapshot_game,
+                    chat_settings,
+                    note=f"<b>Прогресс голосования:</b> {voted_count}/{total_players}",
+                )
+
+            if result.all_voted:
+                game_router_module._cancel_phase_timer(current.game_id)
+                await game_router_module._resolve_zlob_round(
+                    bot,
+                    current.game_id,
+                    chat_settings,
+                    economy_repo=economy_repo,
+                    force=False,
+                    triggered_by_auto=True,
+                )
+                return True, "Голос принят. Раунд обработан."
+
+            if result.previous_option_index is None:
+                return True, "Голос принят."
+            return True, "Голос обновлён."
 
         if prefix == "gbredcat":
             if not payload.isdigit():
@@ -3421,6 +3939,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         chat_id_raw = (form.get("chat_id") or "").strip()
         spy_category_raw = (form.get("spy_category") or "").strip()
         whoami_category_raw = (form.get("whoami_category") or "").strip()
+        zlob_category_raw = (form.get("zlob_category") or "").strip()
 
         definition = GAME_DEFINITIONS.get(kind_raw)  # type: ignore[arg-type]
         if definition is None:
@@ -3491,6 +4010,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 reveal_eliminated_role=chat_settings.mafia_reveal_eliminated_role,
                 spy_category=spy_category_raw or None,
                 whoami_category=whoami_category_raw or None,
+                zlob_category=zlob_category_raw or None,
                 actions_18_enabled=chat_settings.actions_18_enabled,
             )
             if error:
@@ -3630,6 +4150,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     else:
                         await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
                         success, message = True, f"Тема: {updated_game.whoami_category or 'случайная'}"
+            elif form_action == "zlob_set_category":
+                if not can_manage_games:
+                    success, message = False, "Недостаточно прав для изменения темы."
+                else:
+                    updated_game, error = await GAME_STORE.set_zlob_category(
+                        game_id=game.game_id,
+                        category=(form.get("zlob_category") or "").strip() or None,
+                        actions_18_enabled=chat_settings.actions_18_enabled,
+                    )
+                    if updated_game is None:
+                        success, message = False, "Игра не найдена."
+                    elif error:
+                        success, message = False, error
+                    else:
+                        await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+                        success, message = True, f"Тема: {_zlob_category_label(updated_game)}"
             elif form_action == "number_guess":
                 guess_raw = (form.get("guess") or "").strip()
                 if not guess_raw or not guess_raw.lstrip("-").isdigit():
@@ -3792,6 +4328,44 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         )
                     success = True
                     message = "Ответ сохранён."
+            elif form_action == "zlob_submit":
+                first_index_raw = (form.get("card_index") or "").strip()
+                second_index_raw = (form.get("card_index_second") or "").strip()
+                if not first_index_raw.isdigit():
+                    success, message = False, "Выберите хотя бы одну карточку."
+                else:
+                    if second_index_raw and not second_index_raw.isdigit():
+                        success, message = False, "Некорректный второй выбор."
+                    else:
+                        indexes = (int(first_index_raw), int(second_index_raw)) if second_index_raw else (int(first_index_raw),)
+                        current, result, error = await GAME_STORE.zlob_submit_cards(
+                            game_id=game.game_id,
+                            user_id=user.telegram_user_id,
+                            card_indexes=indexes,
+                        )
+                        if error:
+                            success, message = False, error
+                        elif current is None or result is None:
+                            success, message = False, "Игра не найдена."
+                        else:
+                            if result.vote_opened:
+                                game_router_module._cancel_phase_timer(current.game_id)
+                                await game_router_module._safe_edit_or_send_game_board(
+                                    bot,
+                                    current,
+                                    chat_settings,
+                                    note="<b>Этап:</b> все карточки сданы, открыто голосование.",
+                                )
+                                game_router_module._schedule_phase_timer(bot, current, chat_settings)
+                                success, message = True, "Карточки приняты. Открыто голосование."
+                            else:
+                                await game_router_module._safe_edit_or_send_game_board(
+                                    bot,
+                                    current,
+                                    chat_settings,
+                                    note=f"<b>Сдача карточек:</b> {result.submitted_count}/{result.total_players}",
+                                )
+                                success, message = True, "Карточки отправлены."
 
             await session.commit()
 
