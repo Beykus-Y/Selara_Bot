@@ -144,6 +144,18 @@ def _normalize_award_title(value: str) -> str:
     return normalized[:160]
 
 
+def _coerce_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _latest_datetime(left: datetime, right: datetime) -> datetime:
+    normalized_left = _coerce_utc_datetime(left)
+    normalized_right = _coerce_utc_datetime(right)
+    return max(normalized_left, normalized_right)
+
+
 class SqlAlchemyActivityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -201,7 +213,7 @@ class SqlAlchemyActivityRepository:
             else:
                 activity.message_count += 1
                 activity.is_active_member = True
-                activity.last_seen_at = max(activity.last_seen_at, event_at)
+                activity.last_seen_at = _latest_datetime(activity.last_seen_at, event_at)
                 activity.updated_at = datetime.now(timezone.utc)
 
         await self._upsert_activity_daily(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id, event_at=event_at)
@@ -271,7 +283,7 @@ class SqlAlchemyActivityRepository:
             )
         else:
             row.is_active_member = is_active
-            row.last_seen_at = max(row.last_seen_at, event_at)
+            row.last_seen_at = _latest_datetime(row.last_seen_at, event_at)
             row.updated_at = datetime.now(timezone.utc)
 
         await self._session.flush()
@@ -3195,7 +3207,7 @@ class SqlAlchemyActivityRepository:
             return
 
         row.message_count += 1
-        row.last_seen_at = max(row.last_seen_at, event_at)
+        row.last_seen_at = _latest_datetime(row.last_seen_at, event_at)
         row.updated_at = datetime.now(timezone.utc)
 
     async def _upsert_activity_minute(self, *, chat_id: int, user_id: int, event_at: datetime) -> None:
@@ -3242,7 +3254,7 @@ class SqlAlchemyActivityRepository:
             return
 
         row.message_count += 1
-        row.last_seen_at = max(row.last_seen_at, event_at)
+        row.last_seen_at = _latest_datetime(row.last_seen_at, event_at)
         row.updated_at = datetime.now(timezone.utc)
 
     async def _get_activity_aggregate(

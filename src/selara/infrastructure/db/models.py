@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     SmallInteger,
     String,
@@ -19,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from selara.infrastructure.db.base import Base
+
+_AUTOINCREMENT_PK = BigInteger().with_variant(Integer, "sqlite")
 
 
 class UserModel(Base):
@@ -1272,7 +1275,7 @@ Index("idx_web_sessions_expires", WebSessionModel.expires_at, WebSessionModel.re
 class UserChatAchievementModel(Base):
     __tablename__ = "user_chat_achievement"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -1309,7 +1312,7 @@ Index("idx_user_chat_achievement_achievement", UserChatAchievementModel.achievem
 class UserGlobalAchievementModel(Base):
     __tablename__ = "user_global_achievement"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
@@ -1339,7 +1342,7 @@ Index("idx_user_global_achievement_achievement", UserGlobalAchievementModel.achi
 class ChatAchievementStatsModel(Base):
     __tablename__ = "chat_achievement_stats"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -1363,7 +1366,7 @@ Index("idx_chat_achievement_stats_chat_achievement", ChatAchievementStatsModel.c
 class GlobalAchievementStatsModel(Base):
     __tablename__ = "global_achievement_stats"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     achievement_id: Mapped[str] = mapped_column(String(128), nullable=False)
     holders_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     holders_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
