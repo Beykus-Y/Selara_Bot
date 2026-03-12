@@ -30,6 +30,26 @@ services:
     volumes:
       - selara_redis_data:/data
 
+  app:
+    image: ${SELARA_IMAGE:-selara:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: selara-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${SELARA_DATABASE_URL:-postgresql+asyncpg://selara:selara@postgres:5432/selara}
+      REDIS_URL: ${SELARA_REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:${WEB_PORT:-8080}"
+
 volumes:
   selara_pg_data:
   selara_redis_data:

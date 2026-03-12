@@ -101,6 +101,147 @@ WEB_SESSION_TTL_HOURS=168
 WEB_SESSION_COOKIE_SECURE=false
 ```
 
+## Docker deployment
+
+The repository now includes an application image and a compose service for the bot + web panel.
+
+Local image build:
+
+```bash
+docker compose build app
+docker compose up -d app
+```
+
+VPS-friendly image workflow:
+
+1. Build and push the image from your workstation or CI:
+
+```bash
+docker build -t ghcr.io/<your-user>/selara:latest .
+docker push ghcr.io/<your-user>/selara:latest
+```
+
+2. On the VPS set image and container-network DSNs in `.env`:
+
+```bash
+SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
+SELARA_DATABASE_URL=postgresql+asyncpg://selara:selara@postgres:5432/selara
+SELARA_REDIS_URL=redis://redis:6379/0
+WEB_HOST=0.0.0.0
+WEB_PORT=8080
+WEB_BASE_URL=https://your-domain.example
+WEB_SESSION_COOKIE_SECURE=true
+```
+
+3. Start or update only the application container:
+
+```bash
+docker compose pull app
+docker compose up -d app
+```
+
+After that, application updates on the VPS no longer require `git pull`. You only publish a new image and then run `docker compose pull app && docker compose up -d app`.
+
+Notes:
+
+- `postgres` and `redis` keep their existing named volumes.
+- The app container runs `alembic upgrade head` before startup.
+- If you proxy the panel through Nginx Proxy Manager, point it to the VPS host and `WEB_PORT`.
+
+## GitHub Actions
+
+The repository now includes two workflows:
+
+- [docker-publish.yml](/mnt/c/Selara/.github/workflows/docker-publish.yml): builds and pushes `ghcr.io/<owner>/selara:latest` on every push to `main`
+- [deploy-vps.yml](/mnt/c/Selara/.github/workflows/deploy-vps.yml): manual deploy to the VPS over SSH
+
+### 1. Prepare GitHub Packages
+
+On GitHub:
+
+1. Open repository `Settings -> Actions -> General`
+2. Make sure actions are allowed
+3. Open your GitHub account `Settings -> Developer settings -> Personal access tokens -> Tokens (classic)`
+4. Create a token with:
+   - `read:packages`
+   - `write:packages` if you want to push manually from your machine too
+
+For the publish workflow itself, `GITHUB_TOKEN` is enough. The personal token is mainly needed by the VPS to pull from GHCR.
+
+### 2. Add repository secrets
+
+Open `Settings -> Secrets and variables -> Actions` and add:
+
+- `VPS_HOST`: public IP or domain of the server
+- `VPS_PORT`: SSH port, usually `22`
+- `VPS_USER`: SSH user
+- `VPS_SSH_KEY`: private SSH key content used by GitHub Actions
+- `VPS_APP_DIR`: absolute path on VPS where `docker-compose.yml` and `.env` live
+- `GHCR_USERNAME`: your GitHub username
+- `GHCR_TOKEN`: GitHub token with at least `read:packages`
+
+### 3. Prepare the VPS once
+
+Repository code no longer needs to be updated on every release, but the VPS still needs the compose files once.
+
+Put these files on the VPS in one directory:
+
+- `docker-compose.yml`
+- `.env`
+
+Set the app image in `.env`:
+
+```bash
+SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
+SELARA_DATABASE_URL=postgresql+asyncpg://selara:selara@postgres:5432/selara
+SELARA_REDIS_URL=redis://redis:6379/0
+WEB_HOST=0.0.0.0
+WEB_PORT=8080
+WEB_BASE_URL=https://your-domain.example
+WEB_SESSION_COOKIE_SECURE=true
+```
+
+Then log in to GHCR on the VPS once:
+
+```bash
+echo '<github-token-with-read-packages>' | docker login ghcr.io -u <your-user> --password-stdin
+```
+
+And start the app:
+
+```bash
+docker compose up -d postgres redis app
+```
+
+### 4. Daily workflow
+
+Normal release flow becomes:
+
+1. Push code to `main`
+2. GitHub Actions builds and pushes a fresh Docker image to GHCR
+3. Run the manual `Deploy To VPS` workflow in the Actions tab
+
+The deploy workflow executes this on the server:
+
+```bash
+docker compose pull app
+docker compose up -d app
+```
+
+### 5. Nginx Proxy Manager
+
+In Nginx Proxy Manager point the host to:
+
+- Forward hostname/IP: your VPS IP or Docker host
+- Forward port: the same `WEB_PORT` from `.env`, for example `8080`
+
+If the public site works over HTTPS, keep this in `.env`:
+
+```bash
+WEB_BASE_URL=https://your-domain.example
+WEB_SESSION_COOKIE_SECURE=true
+```
+
 ## Tests
 
 ```bash

@@ -1,0 +1,15 @@
+.git
+.gitattributes
+.gitignore
+.pytest_cache
+.qwen
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+frontend
+tests
+docs
+project_dump.txt
