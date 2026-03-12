@@ -33,7 +33,7 @@ def test_activity_mode_hides_karma_and_rating() -> None:
     assert "сообщ." in text
     assert "карма за" not in text
     assert "гибридный балл:" not in text
-    assert "16.02.2026 в 12:00" in text
+    assert "16.02.2026 в 12:00" not in text
     assert "последнее сообщение:" not in text
 
 
@@ -63,7 +63,19 @@ def test_week_period_title_is_rendered() -> None:
     assert "User Hundred" in text
     assert "последнее сообщение:" not in text
     assert "сообщ." in text
-    assert "16.02.2026 в 12:00" in text
+    assert "16.02.2026 в 12:00" not in text
+
+
+def test_activity_mode_does_not_render_last_seen_suffix() -> None:
+    text = format_leaderboard(
+        [_item()],
+        mode="activity",
+        period="day",
+        limit=10,
+        timezone_name="UTC",
+    )
+    assert " | " not in text
+    assert "нет данных" not in text
 
 
 def test_mix_mode_shows_score_and_period_breakdown() -> None:

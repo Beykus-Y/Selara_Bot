@@ -1,6 +1,6 @@
 from selara.application.dto import CommandIntent
 from selara.presentation.commands.aliases import EXACT_ALIASES
-from selara.presentation.commands.catalog import PREFIX_TRIGGER_TO_COMMAND_KEY
+from selara.presentation.commands.catalog import PREFIX_TRIGGER_TO_COMMAND_KEY, prefix_tail_is_valid
 from selara.presentation.commands.normalizer import normalize_text_command
 
 
@@ -84,8 +84,12 @@ def resolve_text_command(
         return None
 
     if tokens[0] == "актив":
+        if len(tokens) > 1 and not prefix_tail_is_valid(command_key="active", tail_text=" ".join(tokens[1:])):
+            return None
         return _parse_active_command(tokens[1:], top_default=top_default, top_max=top_max)
     if tokens[0] == "топ":
+        if len(tokens) > 1 and not prefix_tail_is_valid(command_key="top", tail_text=" ".join(tokens[1:])):
+            return None
         return _parse_top_command(tokens[1:], top_default=top_default, top_max=top_max)
 
     alias_command = EXACT_ALIASES.get(normalized)
@@ -97,11 +101,9 @@ def resolve_text_command(
             return CommandIntent(name=PREFIX_TRIGGER_TO_COMMAND_KEY[trigger])
         if normalized.startswith(f"{trigger} "):
             tail = normalized[len(trigger) :].strip()
-            return CommandIntent(name=PREFIX_TRIGGER_TO_COMMAND_KEY[trigger], args={"raw_args": tail})
-
-    if tokens[0] in {"актив", "топ"}:
-        raise TextCommandResolutionError(
-            "Формат команды: актив [N] или топ [karma|activity] [неделя|сутки|час|месяц] [N]"
-        )
+            command_key = PREFIX_TRIGGER_TO_COMMAND_KEY[trigger]
+            if not prefix_tail_is_valid(command_key=command_key, tail_text=tail):
+                continue
+            return CommandIntent(name=command_key, args={"raw_args": tail})
 
     return None

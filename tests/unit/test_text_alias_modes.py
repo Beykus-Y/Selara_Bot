@@ -42,6 +42,14 @@ def test_catalog_matches_game_prefix_with_tail() -> None:
     assert match.matched_trigger_norm == "игра"
 
 
+def test_catalog_does_not_match_invalid_active_sentence_prefix() -> None:
+    assert match_builtin_command("актив вернулся что ли") is None
+
+
+def test_catalog_does_not_match_invalid_market_sentence_prefix() -> None:
+    assert match_builtin_command("рынок сегодня шумный") is None
+
+
 def test_alias_mode_both_rewrites_prefix_and_tail() -> None:
     aliases = [_alias(alias_text="+ник", command_key="naming", source_trigger="нейминг")]
     rewritten = _apply_alias_mode_to_text(text="+ник Ivan", mode="both", aliases=aliases)

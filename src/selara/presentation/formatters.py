@@ -227,11 +227,7 @@ def format_leaderboard(
         lines = [f"<b>Топ пользователей {title}</b>\n<b>Лимит:</b> <code>{limit}</code>"]
         for index, item in enumerate(items, start=1):
             user_html = _format_leaderboard_user_html(item)
-            last_seen_text = _format_dt(item.last_seen_at, timezone_name) if item.last_seen_at is not None else "нет данных"
-            lines.append(
-                f"<b>{index}.</b> {user_html} — <code>{item.activity_value}</code> сообщ. | "
-                f"<code>{last_seen_text}</code>"
-            )
+            lines.append(f"<b>{index}.</b> {user_html} — <code>{item.activity_value}</code> сообщ.")
         return "\n".join(lines)
 
     mode_title = {"mix": "гибрид", "activity": "активность", "karma": "карма"}[mode]

@@ -166,6 +166,8 @@ def test_resolver_maps_economy_aliases() -> None:
 def test_resolver_rejects_non_command_phrases() -> None:
     assert resolve_text_command("активность", top_default=10, top_max=50) is None
     assert resolve_text_command("кто я такой", top_default=10, top_max=50) is None
+    assert resolve_text_command("актив вернулся что ли", top_default=10, top_max=50) is None
+    assert resolve_text_command("рынок сегодня шумный", top_default=10, top_max=50) is None
 
 
 def test_resolver_raises_for_out_of_range_limit() -> None:
@@ -173,6 +175,12 @@ def test_resolver_raises_for_out_of_range_limit() -> None:
         resolve_text_command("актив 99", top_default=10, top_max=50)
 
 
-def test_resolver_raises_for_invalid_top_format() -> None:
-    with pytest.raises(TextCommandResolutionError):
-        resolve_text_command("актив abc", top_default=10, top_max=50)
+def test_resolver_ignores_invalid_active_tail_that_is_not_command_argument() -> None:
+    assert resolve_text_command("актив abc", top_default=10, top_max=50) is None
+
+
+def test_resolver_maps_market_structured_args() -> None:
+    intent = resolve_text_command("рынок buy 15 2", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "market"
+    assert intent.args["raw_args"] == "buy 15 2"

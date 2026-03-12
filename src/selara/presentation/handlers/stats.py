@@ -1108,9 +1108,9 @@ async def _send_text_or_photo(
         )
         return
 
-    await message.answer(html_text, parse_mode="HTML", reply_markup=reply_markup)
     if chart_bytes is not None:
         await message.answer_photo(BufferedInputFile(chart_bytes, filename=filename))
+    await message.answer(html_text, parse_mode="HTML", reply_markup=reply_markup)
 
 
 async def _build_chart_async(builder, /, **kwargs) -> bytes | None:

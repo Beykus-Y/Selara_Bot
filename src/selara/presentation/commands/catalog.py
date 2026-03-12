@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from selara.application.use_cases.economy.catalog import RECIPES
 from selara.presentation.commands.aliases import EXACT_ALIASES
 from selara.presentation.commands.normalizer import normalize_text_command
 
@@ -241,6 +242,161 @@ COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "social_fistbump",
 }
 
+_MODE_HINT_TOKENS = {"global", "local"}
+_FARM_ACTION_TOKENS = {"plant", "plantall", "plant_all", "harvest", "harvestall", "harvest_all", "upfarm", "upsize", "sell"}
+_LOTTERY_ACTION_TOKENS = {"free", "paid", "status", "view"}
+_GROWTH_ACTION_TOKENS = {"do", "d", "act", "go", "дрочить", "подрочить"}
+_TITLE_RESET_TOKENS = {"clear", "reset", "off"}
+_TITLE_SET_TOKENS = {"buy", "set"}
+_GAME_KIND_TAILS = {
+    "spy",
+    "шпион",
+    "spygame",
+    "mafia",
+    "мафия",
+    "dice",
+    "кости",
+    "кубик",
+    "кубики",
+    "number",
+    "num",
+    "число",
+    "угадай",
+    "угадай число",
+    "quiz",
+    "викторина",
+    "вик",
+    "bredovukha",
+    "bred",
+    "бредовуха",
+    "whoami",
+    "who_am_i",
+    "ктоя",
+    "кто я",
+    "bunker",
+    "бункер",
+    "zlobcards",
+    "злобные карты",
+    "злобкарты",
+}
+_CRAFT_RECIPE_TAILS = {normalize_text_command(recipe_code) for recipe_code in RECIPES}
+
+
+def _split_tail_tokens(tail_text: str) -> list[str]:
+    return [token for token in normalize_text_command(tail_text).split(" ") if token]
+
+
+def _strip_mode_hint(tokens: list[str]) -> list[str]:
+    if tokens and tokens[0] in _MODE_HINT_TOKENS:
+        return tokens[1:]
+    return tokens
+
+
+def _is_user_ref_token(token: str) -> bool:
+    return bool(token) and (token.startswith("@") and len(token) > 1 or token.lstrip("-").isdigit())
+
+
+def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool:
+    normalized_tail = normalize_text_command(tail_text)
+    tokens = _split_tail_tokens(tail_text)
+    if not tokens:
+        return True
+
+    if command_key == "active":
+        return len(tokens) == 1 and tokens[0].isdigit()
+
+    if command_key == "top":
+        mode_aliases = {"карма", "karma", "актив", "activity", "гибрид", "mix", "hybrid"}
+        period_aliases = {"час", "hour", "сутки", "день", "day", "неделя", "week", "месяц", "month"}
+        rest = list(tokens)
+        if rest and rest[0] in mode_aliases:
+            rest = rest[1:]
+        if rest and rest[0] in period_aliases:
+            rest = rest[1:]
+        return not rest or len(rest) == 1 and rest[0].isdigit()
+
+    if command_key in {"announce", "naming"}:
+        return True
+
+    if command_key == "game":
+        return normalized_tail in _GAME_KIND_TAILS
+
+    if command_key == "eco":
+        rest = _strip_mode_hint(tokens)
+        return not rest or len(rest) == 1 and rest[0].isdigit()
+
+    if command_key == "farm":
+        rest = _strip_mode_hint(tokens)
+        return not rest or rest[0] in _FARM_ACTION_TOKENS
+
+    if command_key == "shop":
+        rest = _strip_mode_hint(tokens)
+        return not rest or rest[0] == "buy"
+
+    if command_key == "inventory":
+        rest = _strip_mode_hint(tokens)
+        return not rest or rest[0] == "use"
+
+    if command_key == "lottery":
+        rest = _strip_mode_hint(tokens)
+        return not rest or rest[0] in _LOTTERY_ACTION_TOKENS
+
+    if command_key == "market":
+        rest = _strip_mode_hint(tokens)
+        if not rest:
+            return True
+        if rest[0] == "sell":
+            return len(rest) == 4 and rest[2].isdigit() and rest[3].isdigit()
+        if rest[0] == "buy":
+            return len(rest) == 3 and rest[1].isdigit() and rest[2].isdigit()
+        if rest[0] == "cancel":
+            return len(rest) == 2 and rest[1].isdigit()
+        return False
+
+    if command_key == "auction":
+        if tokens[0] == "cancel":
+            return len(tokens) == 1
+        if tokens[0] in {"start", "sell"}:
+            if len(tokens) not in {4, 5}:
+                return False
+            if not tokens[2].isdigit() or not tokens[3].isdigit():
+                return False
+            return len(tokens) == 4 or tokens[4].isdigit()
+        return False
+
+    if command_key == "bid":
+        return len(tokens) == 1 and tokens[0].isdigit()
+
+    if command_key == "pay":
+        rest = _strip_mode_hint(tokens)
+        if len(rest) == 1:
+            return rest[0].isdigit()
+        return len(rest) == 2 and _is_user_ref_token(rest[0]) and rest[1].isdigit()
+
+    if command_key == "craft":
+        rest = _strip_mode_hint(tokens)
+        return not rest or " ".join(rest) in _CRAFT_RECIPE_TAILS
+
+    if command_key == "growth":
+        rest = _strip_mode_hint(tokens)
+        return not rest or len(rest) == 1 and rest[0] in _GROWTH_ACTION_TOKENS
+
+    if command_key in {"pair", "marry", "adopt", "pet", "family"}:
+        return len(tokens) == 1 and _is_user_ref_token(tokens[0])
+
+    if command_key == "title":
+        action = tokens[0]
+        if action in _TITLE_RESET_TOKENS:
+            return len(tokens) == 1
+        if action in _TITLE_SET_TOKENS:
+            return len(tokens) >= 2
+        return False
+
+    if command_key == "role":
+        return False
+
+    return True
+
 
 @dataclass(frozen=True)
 class BuiltinTextMatch:
@@ -266,8 +422,13 @@ def match_builtin_command(text: str) -> BuiltinTextMatch | None:
 
     for trigger in sorted(PREFIX_TRIGGER_TO_COMMAND_KEY, key=len, reverse=True):
         if normalized == trigger or normalized.startswith(f"{trigger} "):
+            command_key = PREFIX_TRIGGER_TO_COMMAND_KEY[trigger]
+            if normalized != trigger:
+                tail = normalized[len(trigger) :].strip()
+                if not prefix_tail_is_valid(command_key=command_key, tail_text=tail):
+                    continue
             return BuiltinTextMatch(
-                command_key=PREFIX_TRIGGER_TO_COMMAND_KEY[trigger],
+                command_key=command_key,
                 matched_trigger_norm=trigger,
             )
 
