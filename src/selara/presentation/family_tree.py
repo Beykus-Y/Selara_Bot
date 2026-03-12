@@ -1,13 +1,35 @@
 from __future__ import annotations
 
 from io import BytesIO
-from math import ceil
+
+from selara.presentation.charts import (
+    _ACCENT_CYAN,
+    _ACCENT_GOLD,
+    _ACCENT_ROSE,
+    _ACCENT_VIOLET,
+    _FIGURE_BG,
+    _GRID,
+    _PANEL_BG,
+    _TEXT_MAIN,
+    _TEXT_MUTED,
+)
 
 
-def _load_font(size: int):
+_CARD_WIDTH = 196
+_CARD_RADIUS = 24
+_CARD_OUTLINE_WIDTH = 2
+_LINE_WIDTH = 4
+_DASHED_WIDTH = 3
+
+
+def _load_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
-    for candidate in ("DejaVuSans.ttf", "arial.ttf"):
+    if bold:
+        candidates = ("DejaVuSans-Bold.ttf", "arialbd.ttf", "arial.ttf", "DejaVuSans.ttf")
+    else:
+        candidates = ("DejaVuSans.ttf", "arial.ttf")
+    for candidate in candidates:
         try:
             return ImageFont.truetype(candidate, size=size)
         except OSError:
@@ -63,36 +85,85 @@ def build_family_tree_image(
     width = max(1320, 280 + content_slots * 220)
     height = 980
 
-    image = Image.new("RGB", (width, height), "#f4efe4")
+    image = Image.new("RGB", (width, height), _FIGURE_BG)
     draw = ImageDraw.Draw(image)
 
-    title_font = _load_font(34)
-    section_font = _load_font(24)
-    name_font = _load_font(20)
-    small_font = _load_font(16)
+    title_font = _load_font(34, bold=True)
+    section_font = _load_font(20)
+    name_font = _load_font(20, bold=True)
+    small_font = _load_font(15)
+    chip_font = _load_font(15, bold=True)
 
-    draw.rounded_rectangle((32, 32, width - 32, height - 32), radius=30, outline="#1c2a39", width=3, fill="#fffaf1")
-    draw.text((64, 52), "Семья и династия", fill="#1c2a39", font=title_font)
+    draw.text((64, 48), "Семья и династия", fill=_TEXT_MAIN, font=title_font)
 
-    accent = "#b85c38"
-    line_color = "#4c5b6a"
-    card_outline = "#c8b99f"
+    def _text_height(text: str, font) -> int:
+        _left, _top, _right, bottom = draw.textbbox((0, 0), text, font=font)
+        return bottom - _top
 
-    def draw_badge(x: int, y: int, text: str, *, fill: str = "#f0e1cb") -> int:
-        text_width = int(draw.textlength(text, font=small_font))
-        width_local = text_width + 28
-        draw.rounded_rectangle((x, y, x + width_local, y + 28), radius=14, fill=fill, outline="#d2c4ad", width=1)
-        draw.text((x + 14, y + 6), text, fill="#31404f", font=small_font)
+    def draw_pill(
+        x: int,
+        y: int,
+        text: str,
+        *,
+        outline: str,
+        font,
+        text_fill: str = _TEXT_MAIN,
+        fill: str = _PANEL_BG,
+        padding_x: int = 14,
+        height_local: int = 34,
+    ) -> int:
+        text_width = int(draw.textlength(text, font=font))
+        width_local = text_width + padding_x * 2
+        draw.rounded_rectangle(
+            (x, y, x + width_local, y + height_local),
+            radius=height_local // 2,
+            fill=fill,
+            outline=outline,
+            width=2,
+        )
+        text_height = _text_height(text, font)
+        draw.text(
+            (x + (width_local - text_width) / 2, y + (height_local - text_height) / 2 - 1),
+            text,
+            fill=text_fill,
+            font=font,
+        )
         return width_local
 
-    def draw_card(x: int, y: int, *, label: str, subtitle: str, fill: str) -> tuple[int, int, int, int]:
-        card_width = 184
+    def draw_badge(x: int, y: int, text: str, *, outline: str = _GRID, text_fill: str = _TEXT_MUTED) -> int:
+        return draw_pill(
+            x,
+            y,
+            text,
+            outline=outline,
+            font=small_font,
+            text_fill=text_fill,
+            padding_x=12,
+            height_local=28,
+        )
+
+    def draw_card(
+        x: int,
+        y: int,
+        *,
+        label: str,
+        subtitle: str,
+        outline: str,
+        text_fill: str = _TEXT_MAIN,
+        subtitle_fill: str = _TEXT_MUTED,
+    ) -> tuple[int, int, int, int]:
         card_height = _card_height_for_label(label)
-        draw.rounded_rectangle((x, y, x + card_width, y + card_height), radius=24, fill=fill, outline=card_outline, width=2)
-        draw.text((x + 18, y + 16), subtitle, fill=accent, font=small_font)
+        draw.rounded_rectangle(
+            (x, y, x + _CARD_WIDTH, y + card_height),
+            radius=_CARD_RADIUS,
+            fill=_PANEL_BG,
+            outline=outline,
+            width=_CARD_OUTLINE_WIDTH,
+        )
+        draw.text((x + 18, y + 16), subtitle, fill=subtitle_fill, font=small_font)
         for index, line in enumerate(_wrap_lines(label)):
-            draw.text((x + 18, y + 40 + index * 24), line, fill="#0f2438", font=name_font)
-        return (x, y, x + card_width, y + card_height)
+            draw.text((x + 18, y + 40 + index * 24), line, fill=text_fill, font=name_font if text_fill == _TEXT_MAIN else small_font)
+        return (x, y, x + _CARD_WIDTH, y + card_height)
 
     def draw_dashed_line(start: tuple[int, int], end: tuple[int, int], *, color: str, width_local: int = 3) -> None:
         segments = 14
@@ -111,76 +182,116 @@ def build_family_tree_image(
         return [start_x + index * (card_width + gap) for index in range(count)]
 
     content_width = width - 128
-    top_y = 148
+    stats_y = 100
+    top_y = 188
     subject_y = 430
     bottom_y = 724
 
-    draw.text((64, top_y - 38), "Родители и супруги", fill="#1c2a39", font=section_font)
+    stat_x = 64
+    for text, outline in (
+        (f"Родителей: {len(direct_parents)}", _ACCENT_CYAN),
+        (f"Партнёров: {1 if spouse else 0}", _ACCENT_GOLD),
+        (f"Детей: {len(children)}", _ACCENT_VIOLET),
+        (f"Питомцев: {len(pets)}", _ACCENT_ROSE),
+    ):
+        stat_x += draw_pill(stat_x, stats_y, text, outline=outline, font=chip_font) + 12
+
+    draw.text((64, top_y - 34), "Родители и супруги", fill=_TEXT_MUTED, font=section_font)
     top_cards: list[tuple[int, int, int, int]] = []
-    top_people = [*(("Родитель", label, "#dce8d6") for label in direct_parents), *(("Отчим/мачеха", label, "#e9e1f5") for label in indirect_parents)]
-    top_positions = centered_positions(max(1, len(top_people)), row_width=content_width, card_width=184)
+    top_people = [*(("Родитель", label) for label in direct_parents), *(("Отчим/мачеха", label) for label in indirect_parents)]
+    top_positions = centered_positions(max(1, len(top_people)), row_width=content_width, card_width=_CARD_WIDTH)
     if top_people:
-        for index, (subtitle, label, fill) in enumerate(top_people):
-            top_cards.append(draw_card(top_positions[index], top_y, label=label, subtitle=subtitle, fill=fill))
+        for index, (subtitle, label) in enumerate(top_people):
+            top_cards.append(draw_card(top_positions[index], top_y, label=label, subtitle=subtitle, outline=_ACCENT_VIOLET))
     else:
-        draw_card(top_positions[0], top_y, label="Связи ещё не заданы", subtitle="Родители", fill="#eef2f5")
+        top_cards.append(
+            draw_card(
+                top_positions[0],
+                top_y,
+                label="Связи ещё не заданы",
+                subtitle="Родители",
+                outline=_GRID,
+                text_fill=_TEXT_MUTED,
+                subtitle_fill=_TEXT_MUTED,
+            )
+        )
 
     if grandparent_labels:
         chip_x = 64
-        chip_y = top_y + 138
-        draw.text((chip_x, chip_y), "Предки:", fill="#6a5d4d", font=small_font)
-        chip_cursor = chip_x + 72
+        chip_y = top_y + 142
+        draw.text((chip_x, chip_y), "Предки", fill=_TEXT_MUTED, font=small_font)
+        chip_cursor = chip_x
         for label in grandparent_labels:
-            chip_cursor += draw_badge(chip_cursor, chip_y - 4, label, fill="#f2dfc7") + 10
+            chip_cursor += draw_badge(chip_cursor, chip_y + 26, label) + 10
 
-    subject_box = draw_card(max(96, width // 2 - 92), subject_y, label=subject_label, subtitle="Центр династии", fill="#dde8f7")
+    subject_box = draw_card(
+        max(96, width // 2 - (_CARD_WIDTH // 2)),
+        subject_y,
+        label=subject_label,
+        subtitle="Центр династии",
+        outline=_ACCENT_CYAN,
+    )
     spouse_box = None
     if spouse:
-        spouse_box = draw_card(subject_box[2] + 34, subject_y + 12, label=spouse, subtitle="Супруг(а)", fill="#ffe4d7")
+        spouse_box = draw_card(
+            subject_box[2] + 34,
+            subject_y + 12,
+            label=spouse,
+            subtitle="Супруг(а)",
+            outline=_ACCENT_GOLD,
+        )
         draw_dashed_line(
             (subject_box[2], subject_box[1] + 42),
             (spouse_box[0], spouse_box[1] + 42),
-            color=accent,
-            width_local=3,
+            color=_ACCENT_GOLD,
+            width_local=_DASHED_WIDTH,
         )
 
     if sibling_labels:
-        draw.text((64, subject_y + 12), "Братья и сёстры", fill="#1c2a39", font=section_font)
+        draw.text((64, subject_y + 12), "Братья и сёстры", fill=_TEXT_MUTED, font=section_font)
         chip_x = 64
         chip_y = subject_y + 52
         for label in sibling_labels:
-            chip_x += draw_badge(chip_x, chip_y, label, fill="#f6f0d2") + 10
+            chip_x += draw_badge(chip_x, chip_y, label) + 10
 
-    lower_people = [*(("Ребёнок", label, "#fff0d6") for label in children[:8]), *(("Питомец", label, "#f7dfe3") for label in pets[:6])]
-    lower_positions = centered_positions(max(1, len(lower_people)), row_width=content_width, card_width=184)
-    draw.text((64, bottom_y - 38), "Дети и питомцы", fill="#1c2a39", font=section_font)
+    lower_people = [*(("Ребёнок", label) for label in children[:8]), *(("Питомец", label) for label in pets[:6])]
+    lower_positions = centered_positions(max(1, len(lower_people)), row_width=content_width, card_width=_CARD_WIDTH)
+    draw.text((64, bottom_y - 34), "Дети и питомцы", fill=_TEXT_MUTED, font=section_font)
     lower_cards: list[tuple[int, int, int, int]] = []
     if lower_people:
-        for index, (subtitle, label, fill) in enumerate(lower_people):
-            lower_cards.append(draw_card(lower_positions[index], bottom_y, label=label, subtitle=subtitle, fill=fill))
+        for index, (subtitle, label) in enumerate(lower_people):
+            lower_cards.append(draw_card(lower_positions[index], bottom_y, label=label, subtitle=subtitle, outline=_ACCENT_VIOLET))
     else:
-        lower_cards.append(draw_card(lower_positions[0], bottom_y, label="Потомков и питомцев пока нет", subtitle="Нижний слой", fill="#eef2f5"))
+        lower_cards.append(
+            draw_card(
+                lower_positions[0],
+                bottom_y,
+                label="Потомков нет",
+                subtitle="Дети и питомцы",
+                outline=_GRID,
+                text_fill=_TEXT_MUTED,
+                subtitle_fill=_TEXT_MUTED,
+            )
+        )
 
     top_anchor_x = subject_box[0] + (subject_box[2] - subject_box[0]) // 2
     for card in top_cards:
-        if card == subject_box:
-            continue
         parent_anchor_x = card[0] + (card[2] - card[0]) // 2
-        draw.line((parent_anchor_x, card[3], parent_anchor_x, subject_y - 42), fill=line_color, width=3)
-        draw.line((parent_anchor_x, subject_y - 42, top_anchor_x, subject_y - 42), fill=line_color, width=3)
-    draw.line((top_anchor_x, subject_y - 42, top_anchor_x, subject_box[1]), fill=line_color, width=3)
+        draw.line((parent_anchor_x, card[3], parent_anchor_x, subject_y - 42), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
+        draw.line((parent_anchor_x, subject_y - 42, top_anchor_x, subject_y - 42), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
+    draw.line((top_anchor_x, subject_y - 42, top_anchor_x, subject_box[1]), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
 
     child_anchor_y = subject_box[3] + 24
-    draw.line((top_anchor_x, subject_box[3], top_anchor_x, child_anchor_y), fill=line_color, width=3)
+    draw.line((top_anchor_x, subject_box[3], top_anchor_x, child_anchor_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
     if lower_cards:
         branch_y = child_anchor_y + 42
-        draw.line((top_anchor_x, child_anchor_y, top_anchor_x, branch_y), fill=line_color, width=3)
+        draw.line((top_anchor_x, child_anchor_y, top_anchor_x, branch_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
         left_x = lower_cards[0][0] + (lower_cards[0][2] - lower_cards[0][0]) // 2
         right_x = lower_cards[-1][0] + (lower_cards[-1][2] - lower_cards[-1][0]) // 2
-        draw.line((left_x, branch_y, right_x, branch_y), fill=line_color, width=3)
+        draw.line((left_x, branch_y, right_x, branch_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
         for card in lower_cards:
             anchor_x = card[0] + (card[2] - card[0]) // 2
-            draw.line((anchor_x, branch_y, anchor_x, card[1]), fill=line_color, width=3)
+            draw.line((anchor_x, branch_y, anchor_x, card[1]), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
 
     for index in range(min(len(direct_parents), len(indirect_parents))):
         direct_box = top_cards[index]
@@ -188,24 +299,11 @@ def build_family_tree_image(
         draw_dashed_line(
             (direct_box[2], direct_box[1] + 28),
             (indirect_box[0], indirect_box[1] + 28),
-            color=accent,
+            color=_ACCENT_GOLD,
             width_local=2,
         )
 
-    stats_y = height - 112
-    draw.text((64, stats_y), "Сводка связей", fill="#1c2a39", font=section_font)
-    stat_x = 64
-    stat_y = stats_y + 36
-    for text, fill in (
-        (f"Родителей: {len(direct_parents)}", "#dce8d6"),
-        (f"Отчимов/мачех: {len(indirect_parents)}", "#e9e1f5"),
-        (f"Детей: {len(children)}", "#fff0d6"),
-        (f"Питомцев: {len(pets)}", "#f7dfe3"),
-        (f"Сиблингов: {len(sibling_labels)}", "#f6f0d2"),
-    ):
-        stat_x += draw_badge(stat_x, stat_y, text, fill=fill) + 12
-
-    draw.text((width - 280, height - 54), "Selara • family graph", fill="#6a5d4d", font=small_font)
+    draw.text((width - 272, height - 54), "Selara • family graph", fill=_TEXT_MUTED, font=small_font)
 
     buffer = BytesIO()
     image.save(buffer, format="PNG")
