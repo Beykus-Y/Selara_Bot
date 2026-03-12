@@ -1,249 +1,136 @@
-# Selara
+# Selara Bot
 
-Telegram bot on `aiogram 3` with clean architecture and dual command interface:
+> Основная документация проекта ведётся на русском языке.  
+> English summary is intentionally short and placed at the end of this file.
 
-- slash commands: `/me`, `/rep`, `/top [N|karma N|activity N|неделя [N]|сутки [N]|час [N]|месяц [N]]`, `/active [N]`, `/game`, `/role`, `/pair`, `/marry`, `/relation`, `/love`, `/care`, `/date`, `/gift`, `/support`, `/flirt`, `/surprise`, `/vow`, `/breakup`, `/divorce`, `/eco`, `/farm`, `/shop`, `/inventory`, `/tap`, `/daily`, `/lottery`, `/market`, `/pay`, `/settings`, `/setcfg`, `/setrank`, `/ranks`, `/setalias`, `/aliases`, `/unalias`, `/aliasmode`, `/roles`, `/roleadd`, `/roleremove`, `/roledefs`, `/roletemplates`, `/rolecreate`, `/rolesettitle`, `/rolesetrank`, `/roleperms`, `/roledelete`, `/lastseen [@username|user_id]`, `/login`, `/help`
-- text aliases (RU): `кто я`, `репутация`, `мой рейтинг`, `актив [N]`, `топ [N]`, `топ карма [N]`, `топ неделя [N]`, `топ сутки [N]`, `топ час [N]`, `топ месяц [N]`, `когда был/когда была`, `помощь`, `флирт`, `сюрприз`, `клятва`
+---
 
-## Features
+## 🇷🇺 Полное описание проекта
 
-- Tracks activity per chat and per user.
-- Tracks daily and minute activity aggregates for leaderboard windows.
-- Supports karma voting via reply `+` / `-` in group chats.
-- Provides interactive leaderboard modes: hybrid, activity, karma.
-- Sends chart images for `/me`, `/rep`, `/top`.
-- Supports group mini-games: Spy, Mafia, Dice, Number, Quiz, Bredovukha and Bunker.
-- Supports secret role/card delivery in DM for game modes that use private information.
-- Supports economy mode: farm, clicker, daily rewards, lottery, market and inventory.
-- Supports per-group bot settings with `.env` defaults.
-- Supports per-group command access ranks and custom bot roles (with templates and editable permissions).
-- Stores last seen timestamp per user in chat.
-- Runs a parallel web panel with one-time 6-digit login codes issued by the bot in DM via `/login`.
-- Supports PostgreSQL with Alembic migrations.
-- Keeps business logic outside Telegram handlers.
+Selara — Telegram-бот для групп и сообществ, объединяющий статистику активности, игровые механики, экономику, отношения, модерацию, кастомные роли/ранги и веб-панель администрирования. Проект построен на `aiogram 3` и `FastAPI`, использует `PostgreSQL` для постоянных данных и `Redis` для оперативного состояния игровых/временных механик.
 
-## Group settings
+### 1. Архитектура и состав репозитория
 
-`/settings` shows effective settings for the current chat.
+Проект включает:
 
-`/setcfg <key> <value>` changes one setting for the current group.
+- **Bot runtime (Python)** — обработка команд, событий и бизнес-логики.
+- **Web runtime (FastAPI)** — вход по Telegram-коду (`/login`), панель `/app`, встроенные docs-страницы.
+- **Хранилища данных**:
+  - PostgreSQL (основные сущности и история);
+  - Redis (временные состояния, игровые данные, кешоподобные сценарии).
+- **Миграции Alembic** для контроля схемы базы.
+- **Docker/Compose** для локального и серверного развёртывания.
+- **CI/CD workflow** для публикации Docker-образа и деплоя на VPS.
 
-`/setrank "<command>" "<role>"` sets a minimum bot role rank for a command in the current group.
-Text form also works: `установить "команда" ранг внутри бота роль`.
+### 2. Возможности бота (актуально по текущему коду)
 
-Examples:
+#### 2.1 Профили, репутация и активность
+- `/me`, `/rep` — персональная статистика и репутация.
+- `/top`, `/active` — рейтинг с разными режимами/окнами.
+- `/lastseen` — когда пользователь был активен в чате.
+- `/achievements`, `/achsync` — система достижений и служебная синхронизация.
+- `/iris_perenos` — перенос профиля из Iris (если применимо к вашему чату).
 
-```bash
-/setcfg vote_daily_limit 30
-/setcfg text_commands_enabled false
-/setcfg leaderboard_hybrid_karma_weight 0.6
-/setcfg leaderboard_hybrid_activity_weight 0.4
-/setcfg leaderboard_week_start_weekday 0
-/setcfg leaderboard_week_start_hour 6
-/setcfg vote_daily_limit default
-```
+#### 2.2 Игровой блок
+- `/game` — запуск и управление игровыми режимами.
+- Поддерживаемые режимы включают: `spy`, `mafia`, `dice`, `number`, `quiz`, `bredovukha`, `bunker`.
+- `/role` — выдача приватной роли через ЛС (для режимов с скрытой информацией).
 
-## Quick start
+#### 2.3 Экономика и прогресс
+- Базовые: `/eco`, `/tap`, `/daily`, `/farm`, `/shop`, `/inventory`, `/lottery`, `/market`, `/pay`, `/growth`.
+- Расширенные: `/craft`, `/auction`, `/bid`, `/article`.
+- Поддерживаются режимы экономики (например global/local), задаются через конфигурацию группы.
 
-1. Copy env file:
+#### 2.4 Отношения, семья и RP-составляющая
+- `/relation`, `/pair`, `/marry`, `/breakup`, `/divorce`.
+- `/love`, `/care`, `/date`, `/gift`, `/support`, `/flirt`, `/surprise`, `/vow`.
+- `/adopt`, `/pet`, `/family`, `/title`.
 
-```bash
-cp .env.example .env
-```
+#### 2.5 Администрирование, роли и доступы
+- Ролевой контур: `/roles`, `/roleadd`, `/roleremove`, `/roledefs`, `/roletemplates`, `/rolecreate`, `/rolesettitle`, `/rolesetrank`, `/roleperms`, `/roledelete`.
+- Модерация: `/pred`, `/warn`, `/unwarn`, `/ban`, `/unban`, `/modstat`.
+- Настройки: `/settings`, `/setcfg`, `/setrank`, `/ranks`.
+- Текстовые алиасы: `/setalias`, `/aliases`, `/unalias`, `/aliasmode`.
+- Смарт-триггеры/RP-автоматизация: `/settrigger`, `/triggers`, `/triggervars`, `/deltrigger`, `/rpadd`, `/rps`, `/rpdel`.
 
-2. Start PostgreSQL and Redis:
+### 3. Как использовать бот: пользователь и администратор
 
-```bash
-docker compose up -d postgres redis
-```
+#### 3.1 Обычный пользователь
+1. В группе выполните `/help` для обзора возможностей.
+2. Проверьте профиль через `/me`.
+3. Для приватных функций (роли в играх, авторизация web) откройте ЛС с ботом и отправьте `/start`.
+4. Для входа в web-панель отправьте в ЛС `/login`, получите одноразовый код и введите его на странице входа.
 
-3. Install dependencies (example with venv):
+Подробно: **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** — расширенное руководство (включая текстовые команды, игровые сценарии и практический атлас пользовательских проблем).
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-```
+#### 3.2 Администратор группы
+1. Проверьте/настройте ранг доступа к критичным командам (`/setrank`, `/ranks`).
+2. Настройте параметры группы через `/setcfg`.
+3. При необходимости создайте свои роли и права (`/role*`).
+4. Определите стратегию текстовых алиасов (`/aliasmode`) и смарт-триггеров.
+5. Используйте web-доки `/app/docs/admin` для централизованного контроля.
 
-4. Run migrations:
+Подробно: **[docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md)**.
 
-```bash
-alembic upgrade head
-```
+### 4. Веб-панель
 
-5. Start bot and web panel:
+- Вход: `/login` (через 6-значный код из ЛС бота).
+- Базовый URL локально: `http://127.0.0.1:8080/login`.
+- Панель: `/app`.
+- Проверка работоспособности: `/healthz`.
+- Встроенная документация:
+  - `/app/docs/user`
+  - `/app/docs/admin`
 
-```bash
-python -m selara.main
-```
+Ключевые env-параметры:
+- `WEB_ENABLED`
+- `WEB_HOST`, `WEB_PORT`
+- `WEB_BASE_URL`
+- `WEB_AUTH_SECRET`
+- `WEB_SESSION_COOKIE_SECURE`
 
-The same process now starts both the Telegram bot and the HTTP panel.
+### 5. Установка и эксплуатация
 
-## Web panel
+Для практической установки и продакшен-деплоя используйте отдельный документ:
 
-Default URL: `http://127.0.0.1:8080/login`
+- **[INSTALLATION.md](INSTALLATION.md)** — подробная инструкция (локально, Docker, GHCR, reverse proxy через Caddy и NGINX, рекомендации по безопасности).
 
-1. Open the bot in DM
-2. Send `/login`
-3. Enter the one-time 6-digit code on the site
+### 6. Аналитические документы по качеству проекта
 
-Useful env vars:
+- **[BUGS.md](BUGS.md)** — пользовательские баги и спорные механики (как проявляются и как воспроизводятся с точки зрения участника чата).
+- **[CONTRADICTIONS.md](CONTRADICTIONS.md)** — найденные противоречия в документации/конфигурации.
+- **[MISSING_LOGIC.md](MISSING_LOGIC.md)** — недостающие, но логически ожидаемые артефакты и процессы.
 
-```bash
-WEB_ENABLED=true
-WEB_HOST=0.0.0.0
-WEB_PORT=8080
-WEB_DOMAIN=example.com
-WEB_BASE_URL=http://127.0.0.1:8080
-WEB_AUTH_SECRET=change-me
-WEB_LOGIN_CODE_TTL_MINUTES=5
-WEB_SESSION_TTL_HOURS=168
-WEB_SESSION_COOKIE_SECURE=false
-```
+### 7. Docker и CI/CD (кратко)
 
-## Docker deployment
+- В репозитории есть `Dockerfile` и `docker-compose.yml` с сервисами `postgres`, `redis`, `app`.
+- Есть workflow публикации Docker-образа в GHCR.
+- Есть workflow деплоя на VPS по SSH.
+- Контейнер приложения запускает миграции (`alembic upgrade head`) перед стартом runtime.
 
-The repository now includes an application image and a compose service for the bot + web panel.
+### 8. Проверка и тесты
 
-Local image build:
-
-```bash
-docker compose build app
-docker compose up -d app
-```
-
-VPS-friendly image workflow:
-
-1. Build and push the image from your workstation or CI:
-
-```bash
-docker build -t ghcr.io/<your-user>/selara:latest .
-docker push ghcr.io/<your-user>/selara:latest
-```
-
-2. On the VPS set image and container-network DSNs in `.env`:
-
-```bash
-SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
-SELARA_DATABASE_URL=postgresql+asyncpg://selara:selara@postgres:5432/selara
-SELARA_REDIS_URL=redis://redis:6379/0
-WEB_HOST=0.0.0.0
-WEB_PORT=8080
-WEB_BASE_URL=https://your-domain.example
-WEB_SESSION_COOKIE_SECURE=true
-```
-
-3. Start or update only the application container:
-
-```bash
-docker compose pull app
-docker compose up -d app
-```
-
-After that, application updates on the VPS no longer require `git pull`. You only publish a new image and then run `docker compose pull app && docker compose up -d app`.
-
-Notes:
-
-- `postgres` and `redis` keep their existing named volumes.
-- The app container runs `alembic upgrade head` before startup.
-- If you proxy the panel through Nginx Proxy Manager, point it to the VPS host and `WEB_PORT`.
-
-## GitHub Actions
-
-The repository now includes two workflows:
-
-- [docker-publish.yml](/mnt/c/Selara/.github/workflows/docker-publish.yml): builds and pushes `ghcr.io/<owner>/selara:latest` on every push to `main`
-- [deploy-vps.yml](/mnt/c/Selara/.github/workflows/deploy-vps.yml): manual deploy to the VPS over SSH
-
-### 1. Prepare GitHub Packages
-
-On GitHub:
-
-1. Open repository `Settings -> Actions -> General`
-2. Make sure actions are allowed
-3. Open your GitHub account `Settings -> Developer settings -> Personal access tokens -> Tokens (classic)`
-4. Create a token with:
-   - `read:packages`
-   - `write:packages` if you want to push manually from your machine too
-
-For the publish workflow itself, `GITHUB_TOKEN` is enough. The personal token is mainly needed by the VPS to pull from GHCR.
-
-### 2. Add repository secrets
-
-Open `Settings -> Secrets and variables -> Actions` and add:
-
-- `VPS_HOST`: public IP or domain of the server
-- `VPS_PORT`: SSH port, usually `22`
-- `VPS_USER`: SSH user
-- `VPS_SSH_KEY`: private SSH key content used by GitHub Actions
-- `VPS_APP_DIR`: absolute path on VPS where `docker-compose.yml` and `.env` live
-- `GHCR_USERNAME`: your GitHub username
-- `GHCR_TOKEN`: GitHub token with at least `read:packages`
-
-### 3. Prepare the VPS once
-
-Repository code no longer needs to be updated on every release, but the VPS still needs the compose files once.
-
-Put these files on the VPS in one directory:
-
-- `docker-compose.yml`
-- `.env`
-
-Set the app image in `.env`:
-
-```bash
-SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
-SELARA_DATABASE_URL=postgresql+asyncpg://selara:selara@postgres:5432/selara
-SELARA_REDIS_URL=redis://redis:6379/0
-WEB_HOST=0.0.0.0
-WEB_PORT=8080
-WEB_BASE_URL=https://your-domain.example
-WEB_SESSION_COOKIE_SECURE=true
-```
-
-Then log in to GHCR on the VPS once:
-
-```bash
-echo '<github-token-with-read-packages>' | docker login ghcr.io -u <your-user> --password-stdin
-```
-
-And start the app:
-
-```bash
-docker compose up -d postgres redis app
-```
-
-### 4. Daily workflow
-
-Normal release flow becomes:
-
-1. Push code to `main`
-2. GitHub Actions builds and pushes a fresh Docker image to GHCR
-3. Run the manual `Deploy To VPS` workflow in the Actions tab
-
-The deploy workflow executes this on the server:
-
-```bash
-docker compose pull app
-docker compose up -d app
-```
-
-### 5. Nginx Proxy Manager
-
-In Nginx Proxy Manager point the host to:
-
-- Forward hostname/IP: your VPS IP or Docker host
-- Forward port: the same `WEB_PORT` from `.env`, for example `8080`
-
-If the public site works over HTTPS, keep this in `.env`:
-
-```bash
-WEB_BASE_URL=https://your-domain.example
-WEB_SESSION_COOKIE_SECURE=true
-```
-
-## Tests
+Минимальная команда:
 
 ```bash
 pytest
 ```
+
+Важно:
+- используйте Python **3.11+**;
+- предварительно установите dev-зависимости:
+
+```bash
+pip install -e .[dev]
+```
+
+---
+
+## 🇬🇧 English summary (short)
+
+Selara is a Telegram bot + FastAPI web panel project with activity analytics, games, economy, social mechanics, moderation, role-based permissions, and chat automation.
+
+- Full docs are in Russian.
+- Setup and deployment guide: [INSTALLATION.md](INSTALLATION.md).
+- User/admin deep guides: [docs/USER_GUIDE.md](docs/USER_GUIDE.md), [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md).
+- Current quality analysis: [BUGS.md](BUGS.md), [CONTRADICTIONS.md](CONTRADICTIONS.md), [MISSING_LOGIC.md](MISSING_LOGIC.md).
