@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 from typing import Sequence
 
@@ -10,6 +11,7 @@ from selara.presentation.font_support import matplotlib_text_families
 
 def _safe_import_matplotlib():
     try:
+        logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
         import matplotlib
 
         matplotlib.use("Agg")

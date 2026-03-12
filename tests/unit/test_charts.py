@@ -4,15 +4,18 @@ from PIL import Image
 
 from selara.domain.entities import LeaderboardItem
 from selara.presentation.charts import build_leaderboard_chart
-from selara.presentation.font_support import matplotlib_text_families
+from selara.presentation.font_support import matplotlib_base_families, matplotlib_text_families
 
 
-def test_matplotlib_text_families_include_emoji_fallbacks() -> None:
+def test_matplotlib_text_families_only_return_installed_families() -> None:
+    from matplotlib import font_manager
+
     families = matplotlib_text_families()
+    installed = {entry.name for entry in font_manager.fontManager.ttflist}
 
     assert families
-    assert "Noto Color Emoji" in families
-    assert "Symbola" in families
+    assert all(family in installed for family in families)
+    assert families[0] == matplotlib_base_families()[0]
 
 
 def test_build_leaderboard_chart_accepts_emoji_names() -> None:

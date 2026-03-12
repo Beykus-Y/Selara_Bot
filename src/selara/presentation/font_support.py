@@ -8,14 +8,20 @@ _GENERIC_FAMILY_PARAMS = {
     "fantasy": "font.fantasy",
     "monospace": "font.monospace",
 }
-_EMOJI_FONT_FAMILIES = (
+_PIL_EMOJI_FONT_FAMILIES = (
     "Noto Color Emoji",
     "Segoe UI Emoji",
     "Apple Color Emoji",
     "Noto Emoji",
+    "Symbola",
+    "Twemoji Mozilla",
+    "EmojiOne Color",
+)
+_MATPLOTLIB_EMOJI_FONT_FAMILIES = (
     "Twemoji Mozilla",
     "EmojiOne Color",
     "Symbola",
+    "Noto Emoji",
 )
 
 
@@ -38,7 +44,7 @@ def _normalize_family_values(value) -> list[str]:
     return []
 
 
-def matplotlib_base_families() -> tuple[str, ...]:
+def _configured_matplotlib_families() -> tuple[str, ...]:
     try:
         from matplotlib import rcParams
     except Exception:
@@ -56,8 +62,12 @@ def matplotlib_base_families() -> tuple[str, ...]:
     return _dedupe(families or ["DejaVu Sans"])
 
 
-def matplotlib_text_families() -> tuple[str, ...]:
-    return _dedupe([*matplotlib_base_families(), *_EMOJI_FONT_FAMILIES])
+def _installed_matplotlib_families() -> set[str]:
+    try:
+        from matplotlib import font_manager
+    except Exception:
+        return set()
+    return {entry.name for entry in font_manager.fontManager.ttflist}
 
 
 def resolve_matplotlib_font_path(*, bold: bool) -> str | None:
@@ -69,7 +79,7 @@ def resolve_matplotlib_font_path(*, bold: bool) -> str | None:
     try:
         resolved = font_manager.findfont(
             font_manager.FontProperties(
-                family=list(matplotlib_base_families()),
+                family=list(_configured_matplotlib_families()),
                 weight="bold" if bold else "normal",
             ),
             fallback_to_default=True,
@@ -79,6 +89,34 @@ def resolve_matplotlib_font_path(*, bold: bool) -> str | None:
     return resolved or None
 
 
+def matplotlib_base_families() -> tuple[str, ...]:
+    try:
+        from matplotlib import font_manager
+    except Exception:
+        return ("DejaVu Sans",)
+
+    resolved = resolve_matplotlib_font_path(bold=False)
+    if resolved:
+        try:
+            family = font_manager.FontProperties(fname=resolved).get_name()
+        except Exception:
+            family = None
+        if family:
+            return (family,)
+
+    installed = _installed_matplotlib_families()
+    for family in _configured_matplotlib_families():
+        if family in installed:
+            return (family,)
+    return ("DejaVu Sans",)
+
+
+def matplotlib_text_families() -> tuple[str, ...]:
+    installed = _installed_matplotlib_families()
+    emoji_families = [family for family in _MATPLOTLIB_EMOJI_FONT_FAMILIES if family in installed]
+    return _dedupe([*matplotlib_base_families(), *emoji_families])
+
+
 def resolve_emoji_font_paths() -> tuple[str, ...]:
     try:
         from matplotlib import font_manager
@@ -86,7 +124,7 @@ def resolve_emoji_font_paths() -> tuple[str, ...]:
         return ()
 
     candidates: list[str] = []
-    for family in _EMOJI_FONT_FAMILIES:
+    for family in _PIL_EMOJI_FONT_FAMILIES:
         try:
             resolved = font_manager.findfont(
                 font_manager.FontProperties(family=[family]),
