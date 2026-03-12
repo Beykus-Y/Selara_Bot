@@ -35,9 +35,10 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "<b>Статистика</b>\n"
         "• <code>/me</code> — профиль в чате\n"
         "• <code>/rep</code> — карма и активность\n"
-        "• <code>/top [N]</code> — гибридный топ\n"
+        "• <code>/top [N]</code> — топ пользователей за всё время по сообщениям\n"
         "• <code>/active [N]</code> — топ по активности\n"
         "• <code>/top karma [N]</code> — топ по карме\n"
+        "• <code>/top гибрид [N]</code> — гибридный топ\n"
         "• <code>/top неделя|сутки|час|месяц [N]</code> — топ по сообщениям за период\n"
         "• <code>/lastseen [@username|user_id]</code> — когда был активен"
     ),
@@ -58,11 +59,13 @@ _HELP_SECTION_TEXT: dict[str, str] = {
     ),
     "relationships": (
         "<b>Отношения</b>\n"
-        "• <code>/pair @user</code> — предложение пары\n"
+        "• <code>мои отношения</code> / <code>/relation</code> — статус, кулдауны и кнопки действий\n"
+        "• <code>мой брак</code> — отдельная карточка активного брака\n"
+        "• <code>браки</code> — все активные браки беседы\n"
+        "• <code>/pair @user</code> или <code>предложить встречаться @user</code> — предложение пары\n"
         "• <code>/breakup</code> — расстаться\n"
-        "• <code>/marry @user</code> — предложение брака\n"
+        "• <code>/marry @user</code> или <code>предложить брак @user</code> — предложение брака\n"
         "• <code>/divorce</code> — развод\n"
-        "• <code>/relation</code> — статус и кулдауны\n"
         "• Для пары: <code>/care</code>, <code>/date</code>, <code>/gift</code>, <code>/support</code>, <code>/flirt</code>, <code>/surprise</code>\n"
         "• Для брака: <code>/love</code>, <code>/care</code>, <code>/date</code>, <code>/gift</code>, <code>/support</code>, <code>/vow</code>"
     ),

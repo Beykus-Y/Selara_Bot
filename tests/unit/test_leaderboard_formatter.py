@@ -26,10 +26,15 @@ def test_activity_mode_hides_karma_and_rating() -> None:
         limit=10,
         timezone_name="UTC",
     )
-    assert "сообщений всего: 25" in text
+    assert "Топ пользователей за всё время" in text
+    assert "tg://user?id=100" in text
+    assert "User Hundred" in text
+    assert "25" in text
+    assert "сообщ." in text
     assert "карма за" not in text
     assert "гибридный балл:" not in text
-    assert "последнее сообщение:" in text
+    assert "16.02.2026 в 12:00" in text
+    assert "последнее сообщение:" not in text
 
 
 def test_karma_mode_hides_activity_and_rating() -> None:
@@ -43,6 +48,7 @@ def test_karma_mode_hides_activity_and_rating() -> None:
     assert "карма за всё время: 9" in text
     assert "сообщений всего: 25" in text
     assert "гибридный балл:" not in text
+    assert "последнее сообщение:" not in text
 
 
 def test_week_period_title_is_rendered() -> None:
@@ -53,8 +59,11 @@ def test_week_period_title_is_rendered() -> None:
         limit=10,
         timezone_name="UTC",
     )
-    assert "за текущую неделю" in text
-    assert "сообщений за период: 25" in text
+    assert "Топ пользователей за текущую неделю" in text
+    assert "User Hundred" in text
+    assert "последнее сообщение:" not in text
+    assert "сообщ." in text
+    assert "16.02.2026 в 12:00" in text
 
 
 def test_mix_mode_shows_score_and_period_breakdown() -> None:
@@ -65,5 +74,7 @@ def test_mix_mode_shows_score_and_period_breakdown() -> None:
         limit=10,
         timezone_name="UTC",
     )
+    assert "User Hundred" in text
     assert "гибридный балл: 12.500" in text
     assert "сообщений за период: 25 | карма за период: 9" in text
+    assert "последнее сообщение:" not in text

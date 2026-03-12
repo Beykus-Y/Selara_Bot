@@ -10,7 +10,14 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from selara.domain.entities import ChatSnapshot, RelationshipActionCode, RelationshipKind, RelationshipState, UserSnapshot
+from selara.domain.entities import (
+    ChatSnapshot,
+    MarriageState,
+    RelationshipActionCode,
+    RelationshipKind,
+    RelationshipState,
+    UserSnapshot,
+)
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 
@@ -52,6 +59,17 @@ _RELATION_ACTION_MESSAGES: dict[RelationshipActionCode, dict[RelationshipKind, s
     "vow": {"marriage": "дал(а) семейное обещание"},
 }
 
+_RELATION_VIEW_RELATION = "relation"
+_RELATION_VIEW_MARRIAGE = "marriage"
+
+
+def _relationship_action_codes(kind: RelationshipKind) -> list[RelationshipActionCode]:
+    return (
+        ["care", "date", "gift", "support", "flirt", "surprise"]
+        if kind == "pair"
+        else ["love", "care", "date", "gift", "support", "vow"]
+    )
+
 
 def _format_seconds(seconds: int) -> str:
     seconds = max(0, int(seconds))
@@ -62,6 +80,38 @@ def _format_seconds(seconds: int) -> str:
         return f"{mins}м {sec:02d}с"
     hours, mins = divmod(mins, 60)
     return f"{hours}ч {mins:02d}м"
+
+
+def _format_relationship_duration(*, started_at: datetime, now: datetime) -> str:
+    total_seconds = max(0, int((now - started_at).total_seconds()))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days} дн." if hours == 0 else f"{days} дн. {hours} ч."
+    if hours:
+        return f"{hours} ч. {minutes:02d} м."
+    return f"{max(1, minutes)} мин."
+
+
+def _action_unavailable_text(*, action_code: RelationshipActionCode, relationship_kind: RelationshipKind) -> str:
+    if relationship_kind == "pair":
+        return f"Команда {_RELATION_ACTION_LABELS[action_code]} доступна только в браке."
+    return f"Команда {_RELATION_ACTION_LABELS[action_code]} доступна только на стадии пары."
+
+
+def _relationship_state_from_marriage(marriage: MarriageState) -> RelationshipState:
+    return RelationshipState(
+        kind="marriage",
+        id=marriage.id,
+        user_low_id=marriage.user_low_id,
+        user_high_id=marriage.user_high_id,
+        chat_id=marriage.chat_id,
+        started_at=marriage.married_at,
+        affection_points=marriage.affection_points,
+        last_affection_at=marriage.last_affection_at,
+        last_affection_by_user_id=marriage.last_affection_by_user_id,
+    )
 
 
 def _build_proposal_keyboard(proposal_id: int) -> InlineKeyboardMarkup:
@@ -98,6 +148,26 @@ async def _get_user_label(activity_repo, *, chat_id: int, user: UserSnapshot | N
 async def _mention(activity_repo, *, chat_id: int, user: UserSnapshot | None, user_id: int) -> str:
     label = await _get_user_label(activity_repo, chat_id=chat_id, user=user, user_id=user_id)
     return f'<a href="tg://user?id={user_id}">{escape(label)}</a>'
+
+
+async def _build_actor_snapshot(
+    activity_repo,
+    *,
+    chat_id: int,
+    telegram_user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    is_bot: bool,
+) -> UserSnapshot:
+    return UserSnapshot(
+        telegram_user_id=telegram_user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        is_bot=is_bot,
+        chat_display_name=await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=telegram_user_id),
+    )
 
 
 async def _resolve_target_user(message: Message, activity_repo, *, args: str | None) -> UserSnapshot | None:
@@ -158,6 +228,26 @@ def _relation_status_title(kind: str) -> str:
     return "Пара" if kind == "pair" else "Брак"
 
 
+def _build_relationship_action_keyboard(
+    kind: RelationshipKind,
+    *,
+    owner_user_id: int,
+    view: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for code in _relationship_action_codes(kind):
+        builder.button(
+            text=_RELATION_ACTION_LABELS[code],
+            callback_data=f"relact:{code}:{view}:{owner_user_id}",
+        )
+    builder.button(
+        text="Обновить",
+        callback_data=f"relact:refresh:{view}:{owner_user_id}",
+    )
+    builder.adjust(2, 2, 2, 1)
+    return builder.as_markup()
+
+
 async def _build_action_cooldown_line(
     activity_repo,
     *,
@@ -177,6 +267,186 @@ async def _build_action_cooldown_line(
     if next_time <= now:
         return "готово"
     return _format_seconds(int((next_time - now).total_seconds()))
+
+
+async def _build_relationship_status_text(
+    activity_repo,
+    *,
+    relationship: RelationshipState,
+    actor_user_id: int,
+    chat_id: int,
+    title: str,
+) -> str:
+    partner_user_id = _partner_id(relationship, user_id=actor_user_id)
+    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
+    partner_mention = await _mention(activity_repo, chat_id=chat_id, user=partner, user_id=partner_user_id)
+
+    now = datetime.now(timezone.utc)
+    action_lines: list[str] = []
+    for code in _relationship_action_codes(relationship.kind):
+        status = await _build_action_cooldown_line(
+            activity_repo,
+            relationship=relationship,
+            actor_user_id=actor_user_id,
+            action_code=code,
+            now=now,
+        )
+        action_lines.append(f"<b>{escape(_RELATION_ACTION_LABELS[code])}:</b> {escape(status)}")
+
+    return (
+        f"<b>{escape(title)}</b>\n"
+        f"<b>Статус:</b> <code>{escape(_relation_status_title(relationship.kind))}</code>\n"
+        f"<b>Партнёр:</b> {partner_mention}\n"
+        f"<b>Вместе:</b> <code>{_format_relationship_duration(started_at=relationship.started_at, now=now)}</code>\n"
+        f"<b>Уровень отношений:</b> <code>{relationship.affection_points}</code> 💞\n"
+        + "\n".join(action_lines)
+    )
+
+
+async def _render_relationship_panel(
+    activity_repo,
+    *,
+    relationship: RelationshipState,
+    actor_user_id: int,
+    chat_id: int,
+    title: str,
+    view: str,
+) -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        await _build_relationship_status_text(
+            activity_repo,
+            relationship=relationship,
+            actor_user_id=actor_user_id,
+            chat_id=chat_id,
+            title=title,
+        ),
+        _build_relationship_action_keyboard(relationship.kind, owner_user_id=actor_user_id, view=view),
+    )
+
+
+async def _edit_relationship_panel(
+    query: CallbackQuery,
+    *,
+    activity_repo,
+    view: str,
+) -> None:
+    if query.from_user is None or query.message is None:
+        return
+
+    text: str
+    reply_markup: InlineKeyboardMarkup | None = None
+    if view == _RELATION_VIEW_MARRIAGE:
+        marriage = await activity_repo.get_active_marriage(user_id=query.from_user.id, chat_id=query.message.chat.id)
+        if marriage is None:
+            relationship = await activity_repo.get_active_relationship(user_id=query.from_user.id, chat_id=query.message.chat.id)
+            if relationship is not None and relationship.kind == "pair":
+                text = (
+                    "У вас пока нет активного брака.\n"
+                    "Сейчас у вас пара, откройте <code>мои отношения</code> или <code>/relation</code>."
+                )
+            else:
+                text = "У вас нет активного брака.\nПредложение брака: <code>/marry @username</code>"
+        else:
+            text, reply_markup = await _render_relationship_panel(
+                activity_repo,
+                relationship=_relationship_state_from_marriage(marriage),
+                actor_user_id=query.from_user.id,
+                chat_id=query.message.chat.id,
+                title="Ваш брак",
+                view=_RELATION_VIEW_MARRIAGE,
+            )
+    else:
+        relationship = await activity_repo.get_active_relationship(user_id=query.from_user.id, chat_id=query.message.chat.id)
+        if relationship is None:
+            text = (
+                "Вы пока не в отношениях.\n"
+                "Пара: <code>/pair @username</code>\n"
+                "Брак: <code>/marry @username</code>"
+            )
+        else:
+            text, reply_markup = await _render_relationship_panel(
+                activity_repo,
+                relationship=relationship,
+                actor_user_id=query.from_user.id,
+                chat_id=query.message.chat.id,
+                title="Ваши отношения",
+                view=_RELATION_VIEW_RELATION,
+            )
+
+    try:
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+async def _perform_relation_action(
+    activity_repo,
+    *,
+    relationship: RelationshipState,
+    actor_user: UserSnapshot,
+    chat: ChatSnapshot,
+    action_code: RelationshipActionCode,
+    reply_target_user_id: int | None = None,
+) -> tuple[RelationshipState | None, str | None, str | None]:
+    action_kind_ranges = _RELATION_ACTION_RANGES[action_code]
+    if relationship.kind not in action_kind_ranges:
+        return None, None, _action_unavailable_text(action_code=action_code, relationship_kind=relationship.kind)
+
+    partner_user_id = _partner_id(relationship, user_id=actor_user.telegram_user_id)
+    if reply_target_user_id is not None and reply_target_user_id != partner_user_id:
+        return None, None, "Это действие можно отправить только своему партнёру."
+
+    now = datetime.now(timezone.utc)
+    last_used_at = await activity_repo.get_relationship_action_last_used_at(
+        relationship=relationship,
+        actor_user_id=actor_user.telegram_user_id,
+        action_code=action_code,
+    )
+    if last_used_at is not None:
+        next_time = last_used_at + timedelta(seconds=_RELATION_ACTION_COOLDOWN_SECONDS)
+        if next_time > now:
+            remain = int((next_time - now).total_seconds())
+            return None, None, f"Слишком рано. До {_RELATION_ACTION_LABELS[action_code]}: {_format_seconds(remain)}."
+
+    min_gain, max_gain = action_kind_ranges[relationship.kind]
+    gain = random.randint(min_gain, max_gain)
+    updated = await activity_repo.touch_relationship_affection(
+        relationship=relationship,
+        actor_user_id=actor_user.telegram_user_id,
+        affection_delta=gain,
+        event_at=now,
+    )
+    if updated is None:
+        return None, None, "Не удалось применить действие."
+
+    await activity_repo.set_relationship_action_last_used_at(
+        relationship=updated,
+        actor_user_id=actor_user.telegram_user_id,
+        action_code=action_code,
+        used_at=now,
+    )
+
+    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
+    actor_mention = await _mention(
+        activity_repo,
+        chat_id=chat.telegram_chat_id,
+        user=actor_user,
+        user_id=actor_user.telegram_user_id,
+    )
+    partner_mention = await _mention(
+        activity_repo,
+        chat_id=chat.telegram_chat_id,
+        user=partner,
+        user_id=partner_user_id,
+    )
+    action_message = _RELATION_ACTION_MESSAGES[action_code][relationship.kind]
+    text = (
+        f"{actor_mention} {action_message} {partner_mention}.\n"
+        f"+<code>{gain}</code> 💞 | Итого: <code>{updated.affection_points}</code> 💞\n"
+        f"Кулдаун {_RELATION_ACTION_LABELS[action_code]}: <code>{_format_seconds(_RELATION_ACTION_COOLDOWN_SECONDS)}</code>"
+    )
+    return updated, text, None
 
 
 async def _send_relationship_proposal(
@@ -257,78 +527,39 @@ async def _run_relation_action(
         await message.answer("Сначала нужны отношения: <code>/pair @username</code> или <code>/marry @username</code>.", parse_mode="HTML")
         return
 
-    action_kind_ranges = _RELATION_ACTION_RANGES[action_code]
-    if relationship.kind not in action_kind_ranges:
-        if relationship.kind == "pair":
-            await message.answer(
-                f"Команда <code>{_RELATION_ACTION_LABELS[action_code]}</code> доступна только в браке.",
-                parse_mode="HTML",
-            )
-        else:
-            await message.answer(
-                f"Команда <code>{_RELATION_ACTION_LABELS[action_code]}</code> доступна только на стадии пары.",
-                parse_mode="HTML",
-            )
-        return
-
-    partner_user_id = _partner_id(relationship, user_id=message.from_user.id)
-    if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id != partner_user_id:
-        await message.answer("Это действие можно отправить только своему партнёру.")
-        return
-
-    now = datetime.now(timezone.utc)
-    last_used_at = await activity_repo.get_relationship_action_last_used_at(
-        relationship=relationship,
-        actor_user_id=message.from_user.id,
-        action_code=action_code,
-    )
-    if last_used_at is not None:
-        next_time = last_used_at + timedelta(seconds=_RELATION_ACTION_COOLDOWN_SECONDS)
-        if next_time > now:
-            remain = int((next_time - now).total_seconds())
-            await message.answer(f"Слишком рано. До {_RELATION_ACTION_LABELS[action_code]}: {_format_seconds(remain)}.")
-            return
-
-    min_gain, max_gain = action_kind_ranges[relationship.kind]
-    gain = random.randint(min_gain, max_gain)
-    updated = await activity_repo.touch_relationship_affection(
-        relationship=relationship,
-        actor_user_id=message.from_user.id,
-        affection_delta=gain,
-        event_at=now,
-    )
-    if updated is None:
-        await message.answer("Не удалось применить действие.")
-        return
-    await activity_repo.set_relationship_action_last_used_at(
-        relationship=updated,
-        actor_user_id=message.from_user.id,
-        action_code=action_code,
-        used_at=now,
-    )
-
-    actor = UserSnapshot(
+    actor = await _build_actor_snapshot(
+        activity_repo,
+        chat_id=message.chat.id,
         telegram_user_id=message.from_user.id,
         username=message.from_user.username,
         first_name=message.from_user.first_name,
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
-        chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
     )
-    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
-    actor_mention = await _mention(activity_repo, chat_id=message.chat.id, user=actor, user_id=actor.telegram_user_id)
-    partner_mention = await _mention(activity_repo, chat_id=message.chat.id, user=partner, user_id=partner_user_id)
-    action_message = _RELATION_ACTION_MESSAGES[action_code][relationship.kind]
-
-    await message.answer(
-        (
-            f"{actor_mention} {action_message} {partner_mention}.\n"
-            f"+<code>{gain}</code> 💞 | Итого: <code>{updated.affection_points}</code> 💞\n"
-            f"Кулдаун {_RELATION_ACTION_LABELS[action_code]}: <code>{_format_seconds(_RELATION_ACTION_COOLDOWN_SECONDS)}</code>"
+    updated, action_text, error = await _perform_relation_action(
+        activity_repo,
+        relationship=relationship,
+        actor_user=actor,
+        chat=ChatSnapshot(
+            telegram_chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            title=message.chat.title,
         ),
-        parse_mode="HTML",
-        disable_notification=True,
+        action_code=action_code,
+        reply_target_user_id=(
+            message.reply_to_message.from_user.id
+            if message.reply_to_message and message.reply_to_message.from_user
+            else None
+        ),
     )
+    if error:
+        await message.answer(error)
+        return
+    if updated is None or action_text is None:
+        await message.answer("Не удалось применить действие.")
+        return
+
+    await message.answer(action_text, parse_mode="HTML", disable_notification=True)
 
 
 @router.message(Command("relation"))
@@ -349,38 +580,73 @@ async def relation_command(message: Message, activity_repo) -> None:
         )
         return
 
-    partner_user_id = _partner_id(relationship, user_id=message.from_user.id)
-    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
-    partner_mention = await _mention(activity_repo, chat_id=message.chat.id, user=partner, user_id=partner_user_id)
+    text, keyboard = await _render_relationship_panel(
+        activity_repo,
+        relationship=relationship,
+        actor_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        title="Ваши отношения",
+        view=_RELATION_VIEW_RELATION,
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def marriage_status_command(message: Message, activity_repo) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна в группе.")
+        return
+
+    marriage = await activity_repo.get_active_marriage(user_id=message.from_user.id, chat_id=message.chat.id)
+    if marriage is None:
+        relationship = await activity_repo.get_active_relationship(user_id=message.from_user.id, chat_id=message.chat.id)
+        if relationship is not None and relationship.kind == "pair":
+            await message.answer(
+                "У вас пока нет активного брака.\n"
+                "Сейчас у вас пара, откройте <code>мои отношения</code> или <code>/relation</code>.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                "У вас нет активного брака.\n"
+                "Предложение брака: <code>/marry @username</code>",
+                parse_mode="HTML",
+            )
+        return
+
+    text, keyboard = await _render_relationship_panel(
+        activity_repo,
+        relationship=_relationship_state_from_marriage(marriage),
+        actor_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        title="Ваш брак",
+        view=_RELATION_VIEW_MARRIAGE,
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def marriages_command(message: Message, activity_repo) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна в группе.")
+        return
+
+    marriages = await activity_repo.list_active_marriages(chat_id=message.chat.id)
+    if not marriages:
+        await message.answer("В этой беседе пока нет активных браков.")
+        return
 
     now = datetime.now(timezone.utc)
-    days = max(0, int((now - relationship.started_at).total_seconds() // 86400))
-    action_codes: list[RelationshipActionCode] = (
-        ["care", "date", "gift", "support", "flirt", "surprise"]
-        if relationship.kind == "pair"
-        else ["love", "care", "date", "gift", "support", "vow"]
-    )
-
-    action_lines: list[str] = []
-    for code in action_codes:
-        status = await _build_action_cooldown_line(
-            activity_repo,
-            relationship=relationship,
-            actor_user_id=message.from_user.id,
-            action_code=code,
-            now=now,
+    lines = ["<b>Активные браки беседы</b>"]
+    for index, marriage in enumerate(marriages, start=1):
+        user_low = await activity_repo.get_user_snapshot(user_id=marriage.user_low_id)
+        user_high = await activity_repo.get_user_snapshot(user_id=marriage.user_high_id)
+        left = await _mention(activity_repo, chat_id=message.chat.id, user=user_low, user_id=marriage.user_low_id)
+        right = await _mention(activity_repo, chat_id=message.chat.id, user=user_high, user_id=marriage.user_high_id)
+        lines.append(
+            f"{index}. {left} + {right} — <code>{_format_relationship_duration(started_at=marriage.married_at, now=now)}</code>"
         )
-        action_lines.append(f"<b>{escape(_RELATION_ACTION_LABELS[code])}:</b> {escape(status)}")
-
-    text = (
-        "<b>Ваши отношения</b>\n"
-        f"<b>Статус:</b> <code>{escape(_relation_status_title(relationship.kind))}</code>\n"
-        f"<b>Партнёр:</b> {partner_mention}\n"
-        f"<b>Вместе:</b> <code>{days}</code> дн.\n"
-        f"<b>Уровень отношений:</b> <code>{relationship.affection_points}</code> 💞\n"
-        + "\n".join(action_lines)
-    )
-    await message.answer(text, parse_mode="HTML")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("pair"))
@@ -507,6 +773,89 @@ async def divorce_command(message: Message, activity_repo) -> None:
         actor_user_id=message.from_user.id,
         target_user_id=partner_user_id,
     )
+
+
+async def _enforce_relationship_panel_owner(query: CallbackQuery, *, owner_user_id: int) -> bool:
+    if query.from_user is None:
+        return False
+    if query.from_user.id == owner_user_id:
+        return True
+    await _safe_callback_answer(query, "Это панель другого пользователя.", show_alert=True)
+    return False
+
+
+@router.callback_query(F.data.startswith("relact:"))
+async def relationship_action_callback(query: CallbackQuery, activity_repo) -> None:
+    if query.from_user is None or query.data is None or query.message is None:
+        await _safe_callback_answer(query)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await _safe_callback_answer(query, "Некорректная кнопка", show_alert=True)
+        return
+
+    _, action_raw, view, owner_raw = parts
+    if view not in {_RELATION_VIEW_RELATION, _RELATION_VIEW_MARRIAGE}:
+        await _safe_callback_answer(query, "Неизвестный экран", show_alert=True)
+        return
+    if not owner_raw.isdigit():
+        await _safe_callback_answer(query, "Некорректный владелец", show_alert=True)
+        return
+    if action_raw != "refresh" and action_raw not in _RELATION_ACTION_LABELS:
+        await _safe_callback_answer(query, "Неизвестное действие", show_alert=True)
+        return
+
+    owner_user_id = int(owner_raw)
+    if not await _enforce_relationship_panel_owner(query, owner_user_id=owner_user_id):
+        return
+
+    if action_raw == "refresh":
+        await _edit_relationship_panel(query, activity_repo=activity_repo, view=view)
+        await _safe_callback_answer(query, "Обновлено")
+        return
+
+    action_code: RelationshipActionCode = action_raw  # type: ignore[assignment]
+    if view == _RELATION_VIEW_MARRIAGE:
+        marriage = await activity_repo.get_active_marriage(user_id=query.from_user.id, chat_id=query.message.chat.id)
+        relationship = None if marriage is None else _relationship_state_from_marriage(marriage)
+    else:
+        relationship = await activity_repo.get_active_relationship(user_id=query.from_user.id, chat_id=query.message.chat.id)
+    if relationship is None:
+        await _edit_relationship_panel(query, activity_repo=activity_repo, view=view)
+        await _safe_callback_answer(query, "У вас нет активных отношений.", show_alert=True)
+        return
+
+    actor = await _build_actor_snapshot(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        telegram_user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
+    updated, action_text, error = await _perform_relation_action(
+        activity_repo,
+        relationship=relationship,
+        actor_user=actor,
+        chat=ChatSnapshot(
+            telegram_chat_id=query.message.chat.id,
+            chat_type=query.message.chat.type,
+            title=query.message.chat.title,
+        ),
+        action_code=action_code,
+    )
+    if error:
+        await _safe_callback_answer(query, error, show_alert=True)
+        return
+    if updated is None or action_text is None:
+        await _safe_callback_answer(query, "Не удалось применить действие.", show_alert=True)
+        return
+
+    await query.message.answer(action_text, parse_mode="HTML", disable_notification=True)
+    await _edit_relationship_panel(query, activity_repo=activity_repo, view=view)
+    await _safe_callback_answer(query, "Готово")
 
 
 @router.callback_query(F.data.startswith("rel:"))

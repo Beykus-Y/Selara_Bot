@@ -54,7 +54,7 @@ def test_farm_text_includes_inventory_sections_and_hides_zero_qty() -> None:
     assert "<b>Ферма</b>" in text
     assert "Грядки:" in text
     assert "Остатки на складе:" in text
-    assert "Быстро:" in text
+    assert "Быстро:" not in text
     assert "⏳" in text
     assert localize_item_code("crop:radish") in text
     assert localize_item_code("seed:wheat") in text

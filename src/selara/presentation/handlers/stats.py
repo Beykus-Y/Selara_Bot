@@ -1884,7 +1884,7 @@ async def top_command(
     mode, limit, error = parse_leaderboard_request(
         command.args,
         chat_settings=chat_settings,
-        default_mode="mix",
+        default_mode="activity",
         allow_mode_switch=True,
     )
     if error:

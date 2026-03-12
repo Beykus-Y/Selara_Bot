@@ -20,6 +20,8 @@ def test_resolver_maps_top_with_limit() -> None:
     intent = resolve_text_command("топ 15", top_default=10, top_max=50)
     assert intent is not None
     assert intent.name == "top"
+    assert intent.args["mode"] == "activity"
+    assert intent.args["period"] == "all"
     assert intent.args["limit"] == 15
 
 
@@ -96,6 +98,19 @@ def test_resolver_maps_game_alias_with_args() -> None:
     assert intent.args["raw_args"] == "мафия"
 
 
+def test_resolver_maps_relationship_proposal_phrases_with_args() -> None:
+    pair_intent = resolve_text_command("предложить встречаться @alice", top_default=10, top_max=50)
+    marry_intent = resolve_text_command("предложить брак @alice", top_default=10, top_max=50)
+
+    assert pair_intent is not None
+    assert pair_intent.name == "pair"
+    assert pair_intent.args["raw_args"] == "@alice"
+
+    assert marry_intent is not None
+    assert marry_intent.name == "marry"
+    assert marry_intent.args["raw_args"] == "@alice"
+
+
 def test_resolver_maps_announce_subscribe_aliases() -> None:
     intent_reg = resolve_text_command("рег", top_default=10, top_max=50)
     assert intent_reg is not None
@@ -123,6 +138,9 @@ def test_resolver_maps_economy_aliases() -> None:
         "профиль": "growth",
         "дрочка": "growth_action",
         "подрочить": "growth_action",
+        "мои отношения": "relation",
+        "мой брак": "marriage",
+        "браки": "marriages",
         "пара": "pair",
         "расстаться": "breakup",
         "забота": "care",

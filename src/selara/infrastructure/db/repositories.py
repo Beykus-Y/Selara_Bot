@@ -1243,6 +1243,7 @@ class SqlAlchemyActivityRepository:
 
         parent_marriages_stmt = select(MarriageModel).where(
             MarriageModel.chat_id == chat_id,
+            MarriageModel.is_active.is_(True),
             or_(
                 MarriageModel.user_low_id.in_(parents or [-1]),
                 MarriageModel.user_high_id.in_(parents or [-1]),
@@ -2124,7 +2125,10 @@ class SqlAlchemyActivityRepository:
         return self._to_pair_state(row)
 
     async def get_active_marriage(self, *, user_id: int, chat_id: int | None = None) -> MarriageState | None:
-        stmt = select(MarriageModel).where(or_(MarriageModel.user_low_id == user_id, MarriageModel.user_high_id == user_id))
+        stmt = select(MarriageModel).where(
+            or_(MarriageModel.user_low_id == user_id, MarriageModel.user_high_id == user_id),
+            MarriageModel.is_active.is_(True),
+        )
         if chat_id is not None:
             stmt = stmt.where(MarriageModel.chat_id == chat_id)
         stmt = stmt.limit(1)
@@ -2132,6 +2136,15 @@ class SqlAlchemyActivityRepository:
         if row is None:
             return None
         return self._to_marriage_state(row)
+
+    async def list_active_marriages(self, *, chat_id: int) -> list[MarriageState]:
+        stmt = (
+            select(MarriageModel)
+            .where(MarriageModel.chat_id == chat_id, MarriageModel.is_active.is_(True))
+            .order_by(MarriageModel.married_at.asc(), MarriageModel.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [self._to_marriage_state(row) for row in rows]
 
     async def get_active_relationship(self, *, user_id: int, chat_id: int | None = None) -> RelationshipState | None:
         marriage = await self.get_active_marriage(user_id=user_id, chat_id=chat_id)
@@ -2429,7 +2442,10 @@ class SqlAlchemyActivityRepository:
         return pair_state
 
     async def dissolve_marriage(self, *, user_id: int, chat_id: int | None = None) -> MarriageState | None:
-        stmt = select(MarriageModel).where(or_(MarriageModel.user_low_id == user_id, MarriageModel.user_high_id == user_id))
+        stmt = select(MarriageModel).where(
+            or_(MarriageModel.user_low_id == user_id, MarriageModel.user_high_id == user_id),
+            MarriageModel.is_active.is_(True),
+        )
         if chat_id is not None:
             stmt = stmt.where(MarriageModel.chat_id == chat_id)
         stmt = stmt.limit(1)
@@ -2437,16 +2453,20 @@ class SqlAlchemyActivityRepository:
         if row is None:
             return None
 
-        marriage_state = self._to_marriage_state(row)
         await self._session.execute(
             RelationshipActionUsageModel.__table__.delete().where(
                 RelationshipActionUsageModel.relationship_kind == "marriage",
                 RelationshipActionUsageModel.relationship_id == row.id,
             )
         )
-        await self._session.delete(row)
+        ended_at = datetime.now(timezone.utc)
+        row.is_active = False
+        row.ended_at = ended_at
+        row.ended_by_user_id = user_id
+        row.ended_reason = "initiated_by_user"
+        row.updated_at = ended_at
         await self._session.flush()
-        return marriage_state
+        return self._to_marriage_state(row)
 
     async def ensure_chat_role_templates(self, *, chat: ChatSnapshot | None = None, chat_id: int | None = None) -> None:
         if chat is not None:
@@ -3436,6 +3456,7 @@ class SqlAlchemyActivityRepository:
                 self._relationship_chat_match(MarriageModel.chat_id, int(row.chat_id) if row.chat_id is not None else None),
                 MarriageModel.user_low_id == row.user_low_id,
                 MarriageModel.user_high_id == row.user_high_id,
+                MarriageModel.is_active.is_(True),
             )
             .limit(1)
         )
@@ -4120,6 +4141,10 @@ class SqlAlchemyActivityRepository:
             affection_points=int(row.affection_points),
             last_affection_at=row.last_affection_at,
             last_affection_by_user_id=int(row.last_affection_by_user_id) if row.last_affection_by_user_id is not None else None,
+            is_active=bool(row.is_active),
+            ended_at=row.ended_at,
+            ended_by_user_id=int(row.ended_by_user_id) if row.ended_by_user_id is not None else None,
+            ended_reason=row.ended_reason,
         )
 
     @staticmethod
@@ -4165,6 +4190,10 @@ class SqlAlchemyActivityRepository:
             affection_points=value.affection_points,
             last_affection_at=value.last_affection_at,
             last_affection_by_user_id=value.last_affection_by_user_id,
+            is_active=True,
+            ended_at=None,
+            ended_by_user_id=None,
+            ended_reason=None,
         )
 
     @staticmethod

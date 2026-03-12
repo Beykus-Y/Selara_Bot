@@ -81,6 +81,8 @@ from selara.presentation.handlers.relationships import (
     flirt_command as relationship_flirt_command,
     gift_command as relationship_gift_command,
     love_command as relationship_love_command,
+    marriage_status_command as relationship_marriage_status_command,
+    marriages_command as relationship_marriages_command,
     marry_command as relationship_marry_command,
     pair_command as relationship_pair_command,
     relation_command as relationship_relation_command,
@@ -922,8 +924,9 @@ def _menu_text(*, screen: str, mode: str) -> str:
     if screen == "relations":
         return (
             "<b>/menu • Отношения</b>\n"
-            "Быстрые точки входа: <code>/relation</code>, <code>/pair</code>, <code>/marry</code>, "
-            "<code>/family</code> и reply-действия вроде <code>обнять</code>."
+            "Быстрые точки входа: <code>мои отношения</code>, <code>мой брак</code>, <code>браки</code>, "
+            "<code>предложить встречаться</code>, <code>предложить брак</code>, <code>/family</code> "
+            "и reply-действия вроде <code>обнять</code>."
         )
     return (
         "<b>/menu</b>\n"
@@ -2877,9 +2880,9 @@ async def text_commands_handler(
         return
 
     if intent.name == "top":
-        mode = str(intent.args.get("mode", "mix"))
+        mode = str(intent.args.get("mode", "activity"))
         if mode not in {"mix", "activity", "karma"}:
-            mode = "mix"
+            mode = "activity"
         period = str(intent.args.get("period", "all"))
         if period not in {"all", "7d", "hour", "day", "week", "month"}:
             period = "all"
@@ -3056,6 +3059,14 @@ async def text_commands_handler(
 
     if intent.name == "relation":
         await relationship_relation_command(message, activity_repo=activity_repo)
+        return
+
+    if intent.name == "marriage":
+        await relationship_marriage_status_command(message, activity_repo=activity_repo)
+        return
+
+    if intent.name == "marriages":
+        await relationship_marriages_command(message, activity_repo=activity_repo)
         return
 
     if intent.name == "pair":

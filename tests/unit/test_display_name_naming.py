@@ -18,12 +18,23 @@ def test_display_name_prefers_chat_display_name() -> None:
     assert display_name(stats) == "ЛокальныйНик"
 
 
-def test_display_name_from_parts_fallback_to_username() -> None:
+def test_display_name_from_parts_prefers_telegram_name_over_username() -> None:
     value = display_name_from_parts(
         user_id=10,
         username="real_username",
         first_name="Real",
         last_name="Name",
+        chat_display_name=None,
+    )
+    assert value == "Real Name"
+
+
+def test_display_name_from_parts_fallback_to_username() -> None:
+    value = display_name_from_parts(
+        user_id=10,
+        username="real_username",
+        first_name=None,
+        last_name=None,
         chat_display_name=None,
     )
     assert value == "@real_username"
@@ -37,4 +48,4 @@ def test_display_name_ignores_technical_fallback_alias() -> None:
         last_name=None,
         chat_display_name="user:2105984481",
     )
-    assert value == "@Jullusionist"
+    assert value == "Julla"

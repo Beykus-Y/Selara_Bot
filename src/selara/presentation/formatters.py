@@ -4,7 +4,7 @@ from html import escape
 from selara.application.dto import RepStats
 from selara.core.timezone import to_timezone
 from selara.domain.entities import ActivityStats, LeaderboardItem, LeaderboardMode, LeaderboardPeriod
-from selara.domain.value_objects import display_name, display_name_from_parts
+from selara.domain.value_objects import display_name_from_parts
 
 
 def format_user_link(*, user_id: int, label: str) -> str:
@@ -19,18 +19,13 @@ def preferred_mention_label_from_parts(
     last_name: str | None,
     chat_display_name: str | None = None,
 ) -> str:
-    alias = (chat_display_name or "").strip()
-    if alias and alias != f"user:{user_id}":
-        return alias
-
-    full_name = " ".join(filter(None, [first_name, last_name])).strip()
-    if full_name:
-        return full_name
-
-    if username:
-        return f"@{username}"
-
-    return f"user:{user_id}"
+    return display_name_from_parts(
+        user_id=user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        chat_display_name=chat_display_name,
+    )
 
 
 def format_user_mention_html(
@@ -164,11 +159,18 @@ def format_top(stats_list: list[ActivityStats], *, timezone_name: str, limit: in
     if not stats_list:
         return "<b>Пока нет данных об активности в этом чате.</b>"
 
-    lines = [f"<b>Топ активных пользователей (до {limit}):</b>"]
+    lines = [f"<b>Топ пользователей за всё время</b>\n<b>Лимит:</b> <code>{limit}</code>"]
     for index, item in enumerate(stats_list, start=1):
+        user_html = format_user_mention_html(
+            user_id=item.user_id,
+            username=item.username,
+            first_name=item.first_name,
+            last_name=item.last_name,
+            chat_display_name=item.chat_display_name,
+        )
         lines.append(
-            f"<b>{index}.</b> {escape(display_name(item))}"
-            f"\n<code>сообщений: {item.message_count} | последняя активность: {_format_dt(item.last_seen_at, timezone_name)}</code>"
+            f"<b>{index}.</b> {user_html} — <code>{item.message_count}</code> сообщ. | "
+            f"<code>{_format_dt(item.last_seen_at, timezone_name)}</code>"
         )
     return "\n".join(lines)
 
@@ -188,6 +190,27 @@ def _karma_label(period: LeaderboardPeriod) -> str:
     return "карма за всё время" if period == "all" else "карма за период"
 
 
+def _period_title(period: LeaderboardPeriod) -> str:
+    return {
+        "all": "за всё время",
+        "7d": "за 7 дней",
+        "hour": "за последний час",
+        "day": "за последние сутки",
+        "week": "за текущую неделю",
+        "month": "за последние 30 дней",
+    }[period]
+
+
+def _format_leaderboard_user_html(item: LeaderboardItem) -> str:
+    return format_user_mention_html(
+        user_id=item.user_id,
+        username=item.username,
+        first_name=item.first_name,
+        last_name=item.last_name,
+        chat_display_name=item.chat_display_name,
+    )
+
+
 def format_leaderboard(
     items: list[LeaderboardItem],
     *,
@@ -199,26 +222,25 @@ def format_leaderboard(
     if not items:
         return "<b>Пока нет данных для выбранного рейтинга.</b>"
 
+    if mode == "activity":
+        title = _period_title(period)
+        lines = [f"<b>Топ пользователей {title}</b>\n<b>Лимит:</b> <code>{limit}</code>"]
+        for index, item in enumerate(items, start=1):
+            user_html = _format_leaderboard_user_html(item)
+            last_seen_text = _format_dt(item.last_seen_at, timezone_name) if item.last_seen_at is not None else "нет данных"
+            lines.append(
+                f"<b>{index}.</b> {user_html} — <code>{item.activity_value}</code> сообщ. | "
+                f"<code>{last_seen_text}</code>"
+            )
+        return "\n".join(lines)
+
     mode_title = {"mix": "гибрид", "activity": "активность", "karma": "карма"}[mode]
-    period_title = {
-        "all": "за всё время",
-        "7d": "за 7 дней",
-        "hour": "за последний час",
-        "day": "за последние сутки",
-        "week": "за текущую неделю",
-        "month": "за последние 30 дней",
-    }[period]
+    period_title = _period_title(period)
     lines = [f"<b>Топ пользователей</b>\n<b>Режим:</b> {mode_title} | <b>Период:</b> {period_title} | <b>Лимит:</b> {limit}"]
 
     for index, item in enumerate(items, start=1):
-        name = display_name_from_parts(
-            user_id=item.user_id,
-            username=item.username,
-            first_name=item.first_name,
-            last_name=item.last_name,
-            chat_display_name=item.chat_display_name,
-        )
-        item_lines = [f"<b>{index}.</b> {escape(name)}"]
+        user_html = _format_leaderboard_user_html(item)
+        item_lines = [f"<b>{index}.</b> {user_html}"]
 
         if mode == "mix":
             item_lines.append(f"<code>гибридный балл: {item.hybrid_score:.3f}</code>")
@@ -229,10 +251,11 @@ def format_leaderboard(
             item_lines.append(f"<code>{_karma_label(period)}: {item.karma_value}</code>")
             item_lines.append(f"<code>{_activity_label(period)}: {item.activity_value}</code>")
         else:
-            item_lines.append(f"<code>{_activity_label(period)}: {item.activity_value}</code>")
-
-        if item.last_seen_at is not None:
-            item_lines.append(f"<code>последнее сообщение: {_format_dt(item.last_seen_at, timezone_name)}</code>")
+            last_seen_text = _format_dt(item.last_seen_at, timezone_name) if item.last_seen_at is not None else "нет данных"
+            item_lines = [
+                f"<b>{index}.</b> {escape(name)} — <code>{item.activity_value}</code>",
+                f"<code>последнее сообщение: {last_seen_text}</code>",
+            ]
 
         lines.append("\n".join(item_lines))
 

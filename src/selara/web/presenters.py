@@ -640,7 +640,7 @@ def build_landing_context(
                 "kicker": "социальный граф",
                 "title": "Отношения, семьи и титулы",
                 "text": "Пары, браки, семейное древо, питомцы, нейминг и локальные титулы прямо в рамках конкретного чата.",
-                "items": ("/relation", "/pair", "/marry", "/family", "/title", "/naming"),
+                "items": ("мои отношения", "мой брак", "браки", "/pair", "/marry", "/family"),
                 "href": "/app/docs/user",
                 "link_label": "Смотреть сценарии",
             },

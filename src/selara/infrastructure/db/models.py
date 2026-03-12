@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -589,7 +590,15 @@ class MarriageModel(Base):
         ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"),
         nullable=True,
     )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     married_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    ended_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     affection_points: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     last_affection_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_affection_by_user_id: Mapped[int | None] = mapped_column(
@@ -610,7 +619,15 @@ class MarriageModel(Base):
     )
 
 
-Index("uq_marriages_chat_pair", MarriageModel.chat_id, MarriageModel.user_low_id, MarriageModel.user_high_id, unique=True)
+Index(
+    "uq_marriages_chat_pair",
+    MarriageModel.chat_id,
+    MarriageModel.user_low_id,
+    MarriageModel.user_high_id,
+    unique=True,
+    postgresql_where=text("is_active"),
+    sqlite_where=text("is_active = 1"),
+)
 Index("idx_marriages_user_low", MarriageModel.user_low_id)
 Index("idx_marriages_user_high", MarriageModel.user_high_id)
 

@@ -422,10 +422,6 @@ def _farm_text(dashboard) -> str:
     lines.append("")
     lines.append("<b>Предметы:</b>")
     lines.extend(items or ["- пусто"])
-    lines.append("")
-    lines.append(
-        "<b>Быстро:</b> /farm plant редис 1, /farm harvest 1, /farm harvestall, /farm plantall, /farm upfarm, /farm upsize средний"
-    )
     return "\n".join(lines)
 
 

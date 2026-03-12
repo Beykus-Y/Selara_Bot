@@ -16,6 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from selara.application.use_cases.economy.grant_game_rewards import execute as grant_game_rewards
 from selara.core.chat_settings import ChatSettings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import has_permission
 from selara.presentation.game_state import (
     GAME_DEFINITIONS,
@@ -226,12 +227,13 @@ async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_dm:
 
 
 def _user_label(user_id: int, username: str | None, first_name: str | None, last_name: str | None) -> str:
-    if username:
-        return f"@{username}"
-    full_name = " ".join(filter(None, [first_name, last_name])).strip()
-    if full_name:
-        return full_name
-    return f"user:{user_id}"
+    return display_name_from_parts(
+        user_id=user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        chat_display_name=None,
+    )
 
 
 async def _resolve_chat_player_label(

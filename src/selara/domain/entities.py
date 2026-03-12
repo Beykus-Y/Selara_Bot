@@ -192,6 +192,10 @@ class MarriageState:
     affection_points: int
     last_affection_at: datetime | None
     last_affection_by_user_id: int | None
+    is_active: bool = True
+    ended_at: datetime | None = None
+    ended_by_user_id: int | None = None
+    ended_reason: str | None = None
 
 
 @dataclass(frozen=True)

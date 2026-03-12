@@ -24,11 +24,11 @@ def display_name_from_parts(
     if alias and alias != f"user:{user_id}":
         return alias
 
-    if username:
-        return f"@{username}"
-
     full_name = " ".join(filter(None, [first_name, last_name])).strip()
     if full_name:
         return full_name
+
+    if username:
+        return f"@{username}"
 
     return f"user:{user_id}"

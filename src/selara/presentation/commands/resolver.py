@@ -26,7 +26,7 @@ def _parse_active_command(tokens: list[str], *, top_default: int, top_max: int) 
 
 
 def _parse_top_command(tokens: list[str], *, top_default: int, top_max: int) -> CommandIntent:
-    mode = "mix"
+    mode = "activity"
     period = "all"
     mode_aliases = {
         "карма": "karma",

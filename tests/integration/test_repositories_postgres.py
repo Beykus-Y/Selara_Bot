@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import UserChatActivityDailyModel, UserChatIrisImportHistoryModel
+from selara.infrastructure.db.models import MarriageModel, UserChatActivityDailyModel, UserChatIrisImportHistoryModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 
@@ -299,6 +299,139 @@ async def test_repository_pair_to_marriage_transition_and_action_usage() -> None
             )
             == used_at
         )
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_lists_active_marriages_oldest_first() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100510, chat_type="group", title="Marriage List")
+    user_a = UserSnapshot(telegram_user_id=2001, username="user_a", first_name="A", last_name=None, is_bot=False)
+    user_b = UserSnapshot(telegram_user_id=2002, username="user_b", first_name="B", last_name=None, is_bot=False)
+    user_c = UserSnapshot(telegram_user_id=2003, username="user_c", first_name="C", last_name=None, is_bot=False)
+    user_d = UserSnapshot(telegram_user_id=2004, username="user_d", first_name="D", last_name=None, is_bot=False)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        first_at = datetime(2026, 2, 10, 10, 0, tzinfo=timezone.utc)
+        second_at = first_at + timedelta(days=2)
+
+        first_proposal, error = await repo.create_marriage_proposal(
+            chat=chat,
+            proposer=user_a,
+            target=user_b,
+            kind="marriage",
+            expires_at=first_at + timedelta(hours=1),
+            event_at=first_at,
+        )
+        assert first_proposal is not None
+        assert error is None
+        _, first_marriage, error = await repo.respond_relationship_proposal(
+            proposal_id=first_proposal.id,
+            actor_user_id=user_b.telegram_user_id,
+            accept=True,
+            event_at=first_at,
+        )
+        assert first_marriage is not None
+        assert error is None
+
+        second_proposal, error = await repo.create_marriage_proposal(
+            chat=chat,
+            proposer=user_c,
+            target=user_d,
+            kind="marriage",
+            expires_at=second_at + timedelta(hours=1),
+            event_at=second_at,
+        )
+        assert second_proposal is not None
+        assert error is None
+        _, second_marriage, error = await repo.respond_relationship_proposal(
+            proposal_id=second_proposal.id,
+            actor_user_id=user_d.telegram_user_id,
+            accept=True,
+            event_at=second_at,
+        )
+        assert second_marriage is not None
+        assert error is None
+
+        marriages = await repo.list_active_marriages(chat_id=chat.telegram_chat_id)
+        assert [item.id for item in marriages] == [first_marriage.id, second_marriage.id]
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_keeps_marriage_history_after_divorce() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100511, chat_type="group", title="Marriage History")
+    user_a = UserSnapshot(telegram_user_id=2101, username="user_a", first_name="A", last_name=None, is_bot=False)
+    user_b = UserSnapshot(telegram_user_id=2102, username="user_b", first_name="B", last_name=None, is_bot=False)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        married_at = datetime(2026, 2, 12, 10, 0, tzinfo=timezone.utc)
+
+        proposal, error = await repo.create_marriage_proposal(
+            chat=chat,
+            proposer=user_a,
+            target=user_b,
+            kind="marriage",
+            expires_at=married_at + timedelta(hours=1),
+            event_at=married_at,
+        )
+        assert proposal is not None
+        assert error is None
+
+        _, marriage, error = await repo.respond_relationship_proposal(
+            proposal_id=proposal.id,
+            actor_user_id=user_b.telegram_user_id,
+            accept=True,
+            event_at=married_at,
+        )
+        assert marriage is not None
+        assert error is None
+
+        dissolved = await repo.dissolve_marriage(user_id=user_a.telegram_user_id, chat_id=chat.telegram_chat_id)
+        assert dissolved is not None
+        assert dissolved.id == marriage.id
+
+        assert await repo.get_active_marriage(user_id=user_a.telegram_user_id, chat_id=chat.telegram_chat_id) is None
+        assert await repo.list_active_marriages(chat_id=chat.telegram_chat_id) == []
+
+        row = (
+            await session.execute(select(MarriageModel).where(MarriageModel.id == marriage.id))
+        ).scalar_one()
+        assert row.is_active is False
+        assert row.ended_at is not None
+        assert row.ended_by_user_id == user_a.telegram_user_id
+        assert row.ended_reason == "initiated_by_user"
 
         await session.commit()
 

@@ -257,9 +257,9 @@ def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMo
         xlabel = "Сообщения"
         base_color = _ACCENT_BLUE
 
-    fig, ax = plt.subplots(figsize=(10.6, max(5.4, len(names) * 0.72 + 1.8)), dpi=160)
+    fig, ax = plt.subplots(figsize=(11.8, max(5.4, len(names) * 0.72 + 1.8)), dpi=160)
     _style_chart(fig, ax, grid_axis="x")
-    fig.subplots_adjust(top=0.77, left=0.29, right=0.96, bottom=0.12)
+    fig.subplots_adjust(top=0.77, left=0.35, right=0.84, bottom=0.12)
 
     _add_header(fig, title=title, subtitle=subtitle)
     _add_chip(fig, x=0.08, y=0.83, label="Участников", value=str(len(items)), edge=base_color)
@@ -274,27 +274,28 @@ def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMo
     palette = [_ACCENT_GOLD, _ACCENT_CYAN, _ACCENT_VIOLET] + [base_color] * max(0, len(values) - 3)
     bars = ax.barh(positions, values, color=palette[: len(values)], height=0.64, zorder=3)
     ax.set_yticks(positions)
-    ax.set_yticklabels(names, color=_TEXT_MAIN, fontsize=10.5)
+    ax.set_yticklabels([])
     ax.invert_yaxis()
     ax.set_xlabel(xlabel, color=_TEXT_MUTED, labelpad=10)
 
     if has_negative:
         left_bound = min(values) * 1.18
-        right_bound = max_value * 1.24
+        right_bound = max_value * 1.02
         if left_bound == right_bound:
             right_bound = left_bound + 1
         ax.set_xlim(left_bound, right_bound)
         ax.axvline(0, color=_GRID, linewidth=1.0, alpha=0.8, zorder=2)
     else:
-        ax.set_xlim(0, max_value * 1.24)
+        ax.set_xlim(0, max_value * 1.02)
 
-    right_limit = ax.get_xlim()[1]
-    left_rank_x = 0.02 * right_limit if not has_negative else max(0.0, 0.02 * right_limit)
+    rank_column_x = 0.014
+    name_column_x = -0.07
+    value_column_x = 1.02
 
     for index, (bar, value) in enumerate(zip(bars, values, strict=False), start=1):
         y = bar.get_y() + bar.get_height() / 2
         ax.text(
-            left_rank_x,
+            rank_column_x,
             y,
             f"{index:02d}",
             va="center",
@@ -302,6 +303,7 @@ def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMo
             color=_TEXT_MAIN,
             fontsize=8.5,
             fontweight="bold",
+            transform=ax.get_yaxis_transform(),
             bbox={
                 "boxstyle": "round,pad=0.3,rounding_size=0.5",
                 "facecolor": _PANEL_BG,
@@ -311,23 +313,31 @@ def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMo
             },
             zorder=4,
         )
+        ax.text(
+            name_column_x,
+            y,
+            names[index - 1],
+            va="center",
+            ha="right",
+            color=_TEXT_MAIN,
+            fontsize=10.5,
+            transform=ax.get_yaxis_transform(),
+            clip_on=False,
+            zorder=4,
+        )
 
         label = f"{value:.3f}" if mode == "mix" else str(value)
-        if value >= 0:
-            text_x = value + max_value * 0.03
-            ha = "left"
-        else:
-            text_x = value - max_value * 0.03
-            ha = "right"
         ax.text(
-            text_x,
+            value_column_x,
             y,
             label,
             va="center",
-            ha=ha,
+            ha="left",
             color=_TEXT_MAIN,
             fontsize=9.2,
             fontweight="bold",
+            transform=ax.get_yaxis_transform(),
+            clip_on=False,
             zorder=4,
         )
 
