@@ -35,6 +35,8 @@ def test_format_me_includes_first_seen_when_available() -> None:
     )
 
     assert "<b>Первое появление:</b> 08.02.2026" in text
+    assert 'href="tg://user?id=42"' in text
+    assert ">@cheburek<" in text
     assert "<b>Вся активность:</b>" not in text
     assert "<b>Сообщений:</b>" not in text
     assert "<b>Последний актив:</b>" in text
@@ -56,6 +58,26 @@ def test_format_me_uses_whole_activity_label() -> None:
 
     assert "<b>Вся активность:</b> 1д 1 • 7д 2 • 30д 3 • всё 4" in text
     assert "<b>Сообщений:</b>" not in text
+
+
+def test_format_me_prefers_telegram_name_over_username_for_tag_label() -> None:
+    text = format_me(
+        ActivityStats(
+            chat_id=1,
+            user_id=77,
+            message_count=0,
+            last_seen_at=datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc),
+            username="Hislorr",
+            first_name="Крис",
+        ),
+        timezone_name="UTC",
+        fallback_user_id=77,
+        activity_pulse=None,
+    )
+
+    assert 'href="tg://user?id=77"' in text
+    assert ">Крис<" in text
+    assert "@Hislorr" not in text
 
 
 def test_format_profile_positions_line_has_compact_shape() -> None:

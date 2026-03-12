@@ -214,7 +214,12 @@ def _short_to_value(key: str, short: str) -> str | None:
     return None
 
 
-def _build_home_keyboard(*, has_admin_groups: bool, has_user_groups: bool, web_url: str | None) -> InlineKeyboardMarkup:
+def _build_home_keyboard(
+    *,
+    has_admin_groups: bool,
+    has_user_groups: bool,
+    web_url: str | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if has_admin_groups:
         builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
@@ -370,6 +375,19 @@ def _build_web_panel_url(settings: Settings) -> str | None:
     return f"{settings.resolved_web_base_url}/login"
 
 
+def _append_web_panel_info(text: str, web_url: str | None) -> str:
+    if not web_url:
+        return text
+    return "\n".join(
+        [
+            text,
+            "",
+            f'🌐 <b>Веб-панель:</b> <a href="{escape(web_url)}">открыть</a>',
+            "Для входа получите одноразовый код командой <code>/login</code> в этом чате.",
+        ]
+    )
+
+
 async def send_private_start_panel(message: Message, activity_repo, economy_repo, settings: Settings) -> None:
     if message.chat.type != "private" or message.from_user is None:
         return
@@ -378,15 +396,7 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
     user_groups = await activity_repo.list_user_activity_chats(user_id=message.from_user.id, limit=100)
     text = await _render_home_text(user=message.from_user, admin_groups=admin_groups, user_groups=user_groups)
     web_url = _build_web_panel_url(settings)
-    if web_url:
-        text = "\n".join(
-            [
-                text,
-                "",
-                f'🌐 <b>Веб-панель:</b> <a href="{escape(web_url)}">открыть</a>',
-                "Для входа получите одноразовый код командой <code>/login</code> в этом чате.",
-            ]
-        )
+    text = _append_web_panel_info(text, web_url)
 
     await message.answer(
         text,
@@ -804,12 +814,14 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         text = await _render_home_text(user=query.from_user, admin_groups=admin_groups, user_groups=user_groups)
+        web_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
-            text,
+            _append_web_panel_info(text, web_url),
             _build_home_keyboard(
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
+                web_url=web_url,
             ),
         )
         return
@@ -819,10 +831,11 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         if not groups:
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
+            web_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Нет групп, где у вас есть админ-права бота.",
-                _build_home_keyboard(has_admin_groups=False, has_user_groups=bool(user_groups)),
+                _build_home_keyboard(has_admin_groups=False, has_user_groups=bool(user_groups), web_url=web_url),
             )
             return
         await _edit_or_answer(
@@ -903,12 +916,14 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if chat_id is None:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
+            web_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Ввод отменён.",
                 _build_home_keyboard(
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
+                    web_url=web_url,
                 ),
             )
             return
@@ -957,12 +972,14 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if chat_id is None:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
+            web_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Ввод отменён.",
                 _build_home_keyboard(
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
+                    web_url=web_url,
                 ),
             )
             return
@@ -1098,12 +1115,14 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         _clear_pending_cfg_input(query.from_user.id)
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
+        web_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
             "Ввод значения отменён.",
             _build_home_keyboard(
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
+                web_url=web_url,
             ),
         )
         return
@@ -1113,10 +1132,11 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         if not groups:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
+            web_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Нет групп в истории активности. Напишите что-нибудь в группе с ботом.",
-                _build_home_keyboard(has_admin_groups=bool(admin_groups), has_user_groups=False),
+                _build_home_keyboard(has_admin_groups=bool(admin_groups), has_user_groups=False, web_url=web_url),
             )
             return
         await _edit_or_answer(

@@ -99,6 +99,7 @@ from selara.presentation.handlers.stats import (
     send_top_stats,
     should_include_hybrid_top_keyboard,
 )
+from selara.presentation.formatters import format_user_link, preferred_mention_label_from_parts
 from selara.presentation.db_recovery import safe_rollback
 
 router = Router(name="text_commands")
@@ -112,7 +113,7 @@ _SMART_TRIGGER_LEARN_PATTERN = re.compile(r"^\s*!?научить\b(?P<body>[\s\S
 _CUSTOM_RP_ADD_PATTERN = re.compile(r"^\s*!?добавить_действие\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _ZHMYH_PATTERN = re.compile(r"^жмых(?:\s+(?P<level>\d+))?$")
 _MAX_MESSAGE_LEN_SAFE = 3900
-_ANNOUNCE_REPEAT_COUNT = 5
+_ANNOUNCE_MENTION_CHUNK_SIZE = 5
 _ZHMYH_FILENAME = "zhmyh.jpg"
 _ZHMYH_MAX_SIDE = 1600
 _ZHMYH_MIN_LEVEL = 1
@@ -1535,28 +1536,30 @@ def _is_naming_reset(value: str) -> bool:
     return value.lower() in {"сброс", "сбросить", "очистить", "удалить", "reset", "off", "none", "выкл"}
 
 
-def _build_announcement_ping_messages(mentions: list[str]) -> list[str]:
+def _build_announcement_messages(*, body: str, mentions: list[str]) -> list[str]:
     if not mentions:
         return []
 
-    chunks: list[str] = []
-    current = "<b>Объявление для участников:</b>\n"
+    messages: list[str] = []
+    current_mentions: list[str] = []
     for mention in mentions:
-        separator = "" if current.endswith("\n") else " "
-        candidate = f"{current}{separator}{mention}"
-        if len(candidate) <= _MAX_MESSAGE_LEN_SAFE:
-            current = candidate
+        candidate_mentions = current_mentions + [mention]
+        candidate = f"{body}\n\n{' '.join(candidate_mentions)}"
+        if current_mentions and (
+            len(candidate_mentions) > _ANNOUNCE_MENTION_CHUNK_SIZE or len(candidate) > _MAX_MESSAGE_LEN_SAFE
+        ):
+            messages.append(f"{body}\n\n{' '.join(current_mentions)}")
+            current_mentions = [mention]
             continue
+        current_mentions = candidate_mentions
 
-        chunks.append(current)
-        current = f"<b>Доп. пинг участников:</b>\n{mention}"
-
-    chunks.append(current)
-    return chunks
+    if current_mentions:
+        messages.append(f"{body}\n\n{' '.join(current_mentions)}")
+    return messages
 
 
 async def _announcement_human_name(message: Message, bot: Bot, user: UserSnapshot) -> str:
-    label = display_name_from_parts(
+    label = preferred_mention_label_from_parts(
         user_id=user.telegram_user_id,
         username=user.username,
         first_name=user.first_name,
@@ -1572,7 +1575,7 @@ async def _announcement_human_name(message: Message, bot: Bot, user: UserSnapsho
         member = None
 
     if member is not None and member.user is not None:
-        refreshed = display_name_from_parts(
+        refreshed = preferred_mention_label_from_parts(
             user_id=member.user.id,
             username=member.user.username,
             first_name=member.user.first_name,
@@ -1930,27 +1933,21 @@ async def _send_announcement(message: Message, activity_repo, body: str, bot: Bo
     mentions: list[str] = []
     for user in recipients:
         label = await _announcement_human_name(message, bot, user)
-        mentions.append(f'<a href="tg://user?id={user.telegram_user_id}">{escape(label)}</a>')
+        mentions.append(format_user_link(user_id=user.telegram_user_id, label=label))
 
-    ping_messages = _build_announcement_ping_messages(mentions)
-    if not ping_messages:
+    announcement_messages = _build_announcement_messages(body=body, mentions=mentions)
+    if not announcement_messages:
         await message.answer("Пока нет участников для тега. Нужна активность пользователей в чате.")
         return
 
-    for ping_text in ping_messages:
-        await message.answer(ping_text, parse_mode="HTML", disable_web_page_preview=True)
-
-    html_ok = True
-    for _ in range(_ANNOUNCE_REPEAT_COUNT):
-        if html_ok:
-            try:
-                await message.answer(body, parse_mode="HTML", disable_web_page_preview=True)
-                continue
-            except TelegramBadRequest as exc:
-                if "can't parse entities" not in str(exc).lower():
-                    raise
-                html_ok = False
-        await message.answer(body, disable_web_page_preview=True)
+    escaped_messages = _build_announcement_messages(body=escape(body), mentions=mentions)
+    for raw_text, escaped_text in zip(announcement_messages, escaped_messages):
+        try:
+            await message.answer(raw_text, parse_mode="HTML", disable_web_page_preview=True)
+        except TelegramBadRequest as exc:
+            if "can't parse entities" not in str(exc).lower():
+                raise
+            await message.answer(escaped_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def _set_announcement_subscription(message: Message, activity_repo, *, enabled: bool) -> None:
@@ -2914,6 +2911,7 @@ async def text_commands_handler(
         await economy_farm_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2923,6 +2921,7 @@ async def text_commands_handler(
         await economy_shop_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2932,6 +2931,7 @@ async def text_commands_handler(
         await economy_inventory_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2941,6 +2941,7 @@ async def text_commands_handler(
         await economy_craft_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2950,6 +2951,7 @@ async def text_commands_handler(
         await economy_lottery_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2959,6 +2961,7 @@ async def text_commands_handler(
         await economy_market_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
@@ -2968,6 +2971,7 @@ async def text_commands_handler(
         await economy_pay_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             activity_repo=activity_repo,
             chat_settings=chat_settings,
@@ -3001,6 +3005,7 @@ async def text_commands_handler(
         await economy_growth_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             activity_repo=activity_repo,
             settings=settings,
@@ -3012,6 +3017,7 @@ async def text_commands_handler(
         await economy_growth_command(
             message,
             command=_command_object_from_args("do"),
+            bot=bot,
             economy_repo=economy_repo,
             activity_repo=activity_repo,
             settings=settings,

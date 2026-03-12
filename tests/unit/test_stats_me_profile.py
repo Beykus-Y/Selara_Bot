@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from selara.domain.entities import GraphRelationship, RelationshipState
-from selara.presentation.handlers.stats import _build_profile_social_lines
+from selara.domain.entities import GraphRelationship, RelationshipState, UserSnapshot
+from selara.presentation.handlers.stats import _build_profile_social_lines, _resolve_profile_mention
 
 
 def _message() -> SimpleNamespace:
@@ -55,7 +55,7 @@ async def test_build_profile_social_lines_include_compact_clan_and_family_summar
 
     assert lines == [
         "<b>Титул:</b> <code>[N&lt;7&gt;]</code>",
-        "<b>Семья:</b> брак с Tom &amp; Jerry • родители 2 • дети 1 • питомцы 1",
+        '<b>Семья:</b> брак с <a href="tg://user?id=20">Tom &amp; Jerry</a> • родители 2 • дети 1 • питомцы 1',
     ]
 
 
@@ -70,3 +70,23 @@ async def test_build_profile_social_lines_skip_empty_profile_bits() -> None:
     lines = await _build_profile_social_lines(_message(), activity_repo, user_id=10)
 
     assert lines == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_profile_mention_prefers_telegram_name_over_username() -> None:
+    activity_repo = SimpleNamespace(
+        get_chat_display_name=AsyncMock(return_value=None),
+        get_user_snapshot=AsyncMock(
+            return_value=UserSnapshot(
+                telegram_user_id=10,
+                username="Hislorr",
+                first_name="Крис",
+                last_name=None,
+                is_bot=False,
+            )
+        ),
+    )
+
+    mention = await _resolve_profile_mention(activity_repo, chat_id=777, user_id=10, cache={})
+
+    assert mention == '<a href="tg://user?id=10">Крис</a>'

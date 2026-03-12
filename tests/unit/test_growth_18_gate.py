@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from selara.core.chat_settings import ChatSettings
-from selara.presentation.handlers.economy import is_growth_action_allowed
+from selara.presentation.handlers.economy import _dashboard_text, is_growth_action_allowed
 
 
 def _chat_settings(*, actions_18_enabled: bool) -> ChatSettings:
@@ -117,3 +118,37 @@ async def test_growth_action_gate_private_local_uses_selected_group_setting() ->
         settings=object(),
     )
     assert allowed is False
+
+
+def _dashboard_fixture():
+    return SimpleNamespace(
+        account=SimpleNamespace(
+            balance=123,
+            growth_size_mm=2,
+            growth_stress_pct=0,
+            growth_actions=1,
+            tap_streak=4,
+            daily_streak=2,
+            last_growth_at=None,
+            last_daily_claimed_at=None,
+        ),
+        farm=SimpleNamespace(farm_level=1, size_tier="micro"),
+        inventory=[],
+        scope=SimpleNamespace(scope_id="global"),
+    )
+
+
+def test_dashboard_text_hides_growth_block_when_18_disabled() -> None:
+    text = _dashboard_text(_dashboard_fixture(), show_growth=False)
+
+    assert "<b>Рост:</b>" not in text
+    assert "стресс" not in text
+    assert "действий" not in text
+
+
+def test_dashboard_text_keeps_growth_block_when_18_enabled() -> None:
+    text = _dashboard_text(_dashboard_fixture(), show_growth=True)
+
+    assert "<b>Рост:</b>" in text
+    assert "стресс" in text
+    assert "действий" in text

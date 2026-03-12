@@ -7,6 +7,52 @@ from selara.domain.entities import ActivityStats, LeaderboardItem, LeaderboardMo
 from selara.domain.value_objects import display_name, display_name_from_parts
 
 
+def format_user_link(*, user_id: int, label: str) -> str:
+    return f'<a href="tg://user?id={user_id}">{escape(label)}</a>'
+
+
+def preferred_mention_label_from_parts(
+    *,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    chat_display_name: str | None = None,
+) -> str:
+    alias = (chat_display_name or "").strip()
+    if alias and alias != f"user:{user_id}":
+        return alias
+
+    full_name = " ".join(filter(None, [first_name, last_name])).strip()
+    if full_name:
+        return full_name
+
+    if username:
+        return f"@{username}"
+
+    return f"user:{user_id}"
+
+
+def format_user_mention_html(
+    *,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    chat_display_name: str | None = None,
+) -> str:
+    return format_user_link(
+        user_id=user_id,
+        label=preferred_mention_label_from_parts(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            chat_display_name=chat_display_name,
+        ),
+    )
+
+
 def _format_relative(localized_value: datetime) -> str:
     now = datetime.now(localized_value.tzinfo or timezone.utc)
     delta = now - localized_value
@@ -71,18 +117,27 @@ def format_me(
     timezone_name: str,
     fallback_user_id: int,
     activity_pulse: str | None = None,
+    user_label_html: str | None = None,
 ) -> str:
     if stats is None:
+        user_html = user_label_html or format_user_link(user_id=fallback_user_id, label=f"user:{fallback_user_id}")
         text = (
-            f"<b>Пользователь:</b> <code>user:{fallback_user_id}</code>\n"
+            f"<b>Пользователь:</b> {user_html}\n"
             "<b>Последний актив:</b> нет данных"
         )
         if activity_pulse:
             text += f"\n<b>Вся активность:</b> {activity_pulse}"
         return text
 
+    user_html = user_label_html or format_user_mention_html(
+        user_id=stats.user_id,
+        username=stats.username,
+        first_name=stats.first_name,
+        last_name=stats.last_name,
+        chat_display_name=stats.chat_display_name,
+    )
     text = (
-        f"<b>Пользователь:</b> {escape(display_name(stats))}\n"
+        f"<b>Пользователь:</b> {user_html}\n"
         + (
             f"<b>Первое появление:</b> {_format_first_seen(stats.first_seen_at, timezone_name)}\n"
             if stats.first_seen_at is not None
@@ -184,7 +239,8 @@ def format_leaderboard(
     return "\n".join(lines)
 
 
-def format_rep_stats(stats: RepStats, *, user_label: str) -> str:
+def format_rep_stats(stats: RepStats, *, user_label: str | None = None, user_label_html: str | None = None) -> str:
+    profile_label = user_label_html or escape(user_label or "пользователь")
     pulse_line = format_activity_pulse_line(
         day=stats.activity_1d,
         week=stats.activity_7d,
@@ -192,7 +248,7 @@ def format_rep_stats(stats: RepStats, *, user_label: str) -> str:
         all_time=stats.activity_all,
     )
     lines = [
-        f"<b>Профиль:</b> {escape(user_label)}",
+        f"<b>Профиль:</b> {profile_label}",
         f"<b>Карма за всё время:</b> <code>{stats.karma_all}</code>",
         f"<b>Карма за 7 дней:</b> <code>{stats.karma_7d}</code>",
         f"<b>Активность за 1 день:</b> <code>{stats.activity_1d}</code>",

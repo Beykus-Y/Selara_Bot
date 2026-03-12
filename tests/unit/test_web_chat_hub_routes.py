@@ -8,7 +8,8 @@ import pytest
 
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
-from selara.domain.entities import ChatActivitySummary, LeaderboardItem, UserChatOverview, UserSnapshot
+from selara.application.dto import RepStats
+from selara.domain.entities import ActivityStats, ChatActivitySummary, ChatRoleDefinition, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.web import app as web_app_module
 
 
@@ -64,6 +65,33 @@ class FakeActivityRepo:
     async def get_chat_activity_summary(self, *, chat_id: int):
         return self._state.summaries[chat_id]
 
+    async def get_effective_role_definition(self, *, chat_id: int, user_id: int):
+        _ = chat_id, user_id
+        return ChatRoleDefinition(
+            chat_id=chat_id,
+            role_code="participant",
+            title_ru="Участник",
+            rank=0,
+            permissions=(),
+            is_system=True,
+        )
+
+    async def list_chat_role_definitions(self, *, chat_id: int):
+        _ = chat_id
+        return []
+
+    async def list_command_access_rules(self, *, chat_id: int):
+        _ = chat_id
+        return []
+
+    async def list_audit_logs(self, *, chat_id: int, limit: int = 10):
+        _ = chat_id, limit
+        return []
+
+    async def get_top(self, *, chat_id: int, limit: int):
+        _ = chat_id, limit
+        return []
+
     async def get_leaderboard(
         self,
         *,
@@ -88,6 +116,10 @@ class FakeEconomyRepo:
         if chat_id is None:
             return None, "chat_id is required"
         return SimpleNamespace(scope_id=f"chat:{chat_id}"), None
+
+    async def get_account(self, *, scope, user_id: int):
+        _ = scope, user_id
+        return None
 
 
 class FakeWebAuthRepo:
@@ -131,11 +163,48 @@ async def _web_client(monkeypatch, state: ChatHubState):
         _ = session, scope_id, chat_id
         return state.richest_payload
 
+    async def _my_stats(repo, *, chat_id: int, user_id: int):
+        _ = repo
+        return ActivityStats(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_count=0,
+            last_seen_at=datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc),
+            first_name=state.user.first_name,
+            last_name=state.user.last_name,
+            username=state.user.username,
+        )
+
+    async def _rep_stats(
+        repo,
+        *,
+        chat_id: int,
+        user_id: int,
+        limit: int,
+        karma_weight: float,
+        activity_weight: float,
+        days: int,
+    ):
+        _ = repo, chat_id, user_id, limit, karma_weight, activity_weight, days
+        return RepStats(
+            user_id=state.user.telegram_user_id,
+            karma_all=0,
+            karma_7d=0,
+            activity_1d=0,
+            activity_all=0,
+            activity_7d=0,
+            activity_30d=0,
+            rank_all=None,
+            rank_7d=None,
+        )
+
     monkeypatch.setattr(web_app_module, "SqlAlchemyActivityRepository", lambda session: FakeActivityRepo(state))
     monkeypatch.setattr(web_app_module, "SqlAlchemyEconomyRepository", lambda session: FakeEconomyRepo(state))
     monkeypatch.setattr(web_app_module, "SqlAlchemyWebAuthRepository", lambda session: FakeWebAuthRepo(state))
     monkeypatch.setattr(web_app_module, "_build_chat_daily_activity_series", _daily_activity)
     monkeypatch.setattr(web_app_module, "_build_richest_user_payload", _richest_payload)
+    monkeypatch.setattr(web_app_module, "get_my_stats", _my_stats)
+    monkeypatch.setattr(web_app_module, "get_rep_stats", _rep_stats)
 
     app = web_app_module.create_web_app(settings=state.settings, session_factory=DummySessionFactory())
     transport = httpx.ASGITransport(app=app)

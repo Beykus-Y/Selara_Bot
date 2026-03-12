@@ -328,15 +328,10 @@ async def is_growth_action_allowed(
     return bool(default_chat_settings(settings).actions_18_enabled)
 
 
-def _dashboard_text(dashboard) -> str:
+def _dashboard_text(dashboard, *, show_growth: bool = True) -> str:
     account = dashboard.account
     farm = dashboard.farm
     active_slots = FARM_LEVEL_PLOTS.get(farm.farm_level, 2)
-    effective_stress = effective_growth_stress_pct(
-        last_growth_at=account.last_growth_at,
-        stress_pct=account.growth_stress_pct,
-        as_of=datetime.now(timezone.utc),
-    )
 
     crop_count = 0
     item_count = 0
@@ -351,10 +346,19 @@ def _dashboard_text(dashboard) -> str:
         f"<b>Режим:</b> <code>{escape(localize_scope(dashboard.scope.scope_id))}</code>",
         f"<b>Баланс:</b> <code>{account.balance}</code> монет",
         f"<b>Ферма:</b> уровень <code>{farm.farm_level}</code>, размер <code>{escape(localize_size_tier(farm.size_tier))}</code>, слотов <code>{active_slots}</code>",
-        f"<b>Рост:</b> <code>{_format_size_mm(account.growth_size_mm)} см</code>, стресс <code>{effective_stress}%</code>, действий <code>{account.growth_actions}</code>",
         f"<b>Серии:</b> тап <code>{account.tap_streak}</code>, daily <code>{account.daily_streak}</code>",
         f"<b>Инвентарь:</b> культуры <code>{crop_count}</code>, предметы <code>{item_count}</code>",
     ]
+    if show_growth:
+        effective_stress = effective_growth_stress_pct(
+            last_growth_at=account.last_growth_at,
+            stress_pct=account.growth_stress_pct,
+            as_of=datetime.now(timezone.utc),
+        )
+        lines.insert(
+            4,
+            f"<b>Рост:</b> <code>{_format_size_mm(account.growth_size_mm)} см</code>, стресс <code>{effective_stress}%</code>, действий <code>{account.growth_actions}</code>",
+        )
 
     if account.last_daily_claimed_at is not None:
         lines.append(f"<b>Последний daily:</b> <code>{account.last_daily_claimed_at.strftime('%d.%m %H:%M UTC')}</code>")
@@ -730,7 +734,7 @@ async def _send_dashboard(message: Message, economy_repo, chat_settings: ChatSet
 
     await _answer_message(
         message,
-        _dashboard_text(dashboard),
+        _dashboard_text(dashboard, show_growth=chat_settings.actions_18_enabled),
         parse_mode="HTML",
         reply_markup=_build_dashboard_keyboard(mode, owner_user_id=message.from_user.id),
     )
@@ -1865,7 +1869,7 @@ async def eco_callback(query: CallbackQuery, economy_repo, chat_settings: ChatSe
 
     await _edit_or_answer(
         query,
-        _dashboard_text(dashboard),
+        _dashboard_text(dashboard, show_growth=chat_settings.actions_18_enabled),
         _build_dashboard_keyboard(mode, owner_user_id=panel_owner_user_id),
     )
     await _safe_query_answer(query)

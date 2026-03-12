@@ -211,13 +211,23 @@ async def test_chat_achievement_checks_stay_within_chat_scope_and_recompute_perc
         assert chat_metrics_row is not None
         chat_metrics_row.active_members_count = 0
 
-        global_stats_row = GlobalAchievementStatsModel(
-            achievement_id="global_3_achievements",
-            holders_count=1,
-            holders_percent=0,
-            global_base_count=0,
+        global_stats_row = await session.scalar(
+            select(GlobalAchievementStatsModel).where(
+                GlobalAchievementStatsModel.achievement_id == "global_3_achievements",
+            )
         )
-        session.add(global_stats_row)
+        if global_stats_row is None:
+            global_stats_row = GlobalAchievementStatsModel(
+                achievement_id="global_3_achievements",
+                holders_count=1,
+                holders_percent=0,
+                global_base_count=0,
+            )
+            session.add(global_stats_row)
+        else:
+            global_stats_row.holders_count = 1
+            global_stats_row.holders_percent = 0
+            global_stats_row.global_base_count = 0
         await session.flush()
 
         chat_stats = await repo.get_chat_achievement_stats_map(chat_id=chat_one.telegram_chat_id)

@@ -39,6 +39,8 @@ from selara.presentation.formatters import (
     format_me,
     format_profile_positions_line,
     format_rep_stats,
+    format_user_link,
+    preferred_mention_label_from_parts,
 )
 from selara.presentation.handlers.activity import format_user_label, resolve_last_seen_target
 
@@ -92,7 +94,7 @@ async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, c
 
     user = await activity_repo.get_user_snapshot(user_id=user_id)
     if user is not None:
-        label = display_name_from_parts(
+        label = preferred_mention_label_from_parts(
             user_id=user.telegram_user_id,
             username=user.username,
             first_name=user.first_name,
@@ -104,6 +106,17 @@ async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, c
 
     cache[user_id] = label
     return label
+
+
+async def _resolve_profile_mention(activity_repo, *, chat_id: int, user_id: int, cache: dict[int, str]) -> str:
+    cached = cache.get(user_id)
+    if cached is not None:
+        return cached
+
+    label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    mention = format_user_link(user_id=user_id, label=label)
+    cache[user_id] = mention
+    return mention
 
 
 def _join_profile_sections(sections: list[str]) -> str:
@@ -232,7 +245,7 @@ async def _build_achievements_message(
     user_id: int,
     timezone_name: str,
 ) -> str:
-    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
     chat_views, global_views = await _build_achievement_views(
         activity_repo=activity_repo,
         settings=settings,
@@ -245,7 +258,7 @@ async def _build_achievements_message(
     total_count = len(chat_views) + len(global_views)
 
     lines = [
-        f"🏆 <b>Достижения · {escape(target_label)}</b>",
+        f"🏆 <b>Достижения · {target_mention}</b>",
         (
             f"<blockquote>Открыто: <b>{total_unlocked}/{total_count}</b> • "
             f"чат: <b>{chat_unlocked}/{len(chat_views)}</b> • "
@@ -275,7 +288,7 @@ async def _build_achievements_message(
     _append_section("Глобальные", global_views, empty_text="Пока нет глобальных достижений.")
 
     if total_count == 0:
-        return f"У пользователя <b>{escape(target_label)}</b> пока нет достижений."
+        return f"У пользователя <b>{target_mention}</b> пока нет достижений."
     return "\n".join(lines)
 
 
@@ -379,21 +392,21 @@ async def _ensure_chat_admin(message: Message, bot: Bot) -> bool:
 
 
 async def _build_profile_about_message(*, activity_repo, chat_id: int, user_id: int) -> str:
-    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
     profile = await activity_repo.get_user_chat_profile(chat_id=chat_id, user_id=user_id)
     description = " ".join(((profile.description if profile is not None else "") or "").split()).strip()
     if not description:
-        return f"У пользователя <b>{escape(target_label)}</b> пока пусто в разделе «О себе»."
-    return f"<b>О себе:</b> {escape(target_label)}\n{escape(description)}"
+        return f"У пользователя <b>{target_mention}</b> пока пусто в разделе «О себе»."
+    return f"<b>О себе:</b> {target_mention}\n{escape(description)}"
 
 
 async def _build_profile_awards_message(*, activity_repo, chat_id: int, user_id: int, timezone_name: str) -> str:
-    target_label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
     awards = await activity_repo.list_user_chat_awards(chat_id=chat_id, user_id=user_id, limit=_PROFILE_AWARDS_LIMIT)
     if not awards:
-        return f"У пользователя <b>{escape(target_label)}</b> пока нет наград."
+        return f"У пользователя <b>{target_mention}</b> пока нет наград."
 
-    lines = [f"<b>Награды:</b> {escape(target_label)}"]
+    lines = [f"<b>Награды:</b> {target_mention}"]
     for award in awards:
         lines.append(f"• {escape(award.title)} — {escape(format_elapsed_compact(award.created_at, timezone_name))}")
     return "\n".join(lines)
@@ -494,7 +507,7 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         granted_by_user_id=message.from_user.id,
         created_at=datetime.now(timezone.utc),
     )
-    target_label = await _resolve_profile_label(activity_repo, chat_id=message.chat.id, user_id=target.telegram_user_id, cache={})
+    target_mention = await _resolve_profile_mention(activity_repo, chat_id=message.chat.id, user_id=target.telegram_user_id, cache={})
     await log_chat_action(
         activity_repo,
         chat_id=message.chat.id,
@@ -507,14 +520,14 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         meta_json={"award_id": award.id, "title": normalized},
     )
     await message.answer(
-        f"Награда выдана <b>{escape(target_label)}</b>: {escape(normalized)}",
+        f"Награда выдана <b>{target_mention}</b>: {escape(normalized)}",
         parse_mode="HTML",
     )
 
 
 async def _build_profile_social_lines(message: Message, activity_repo, *, user_id: int) -> list[str]:
     lines: list[str] = []
-    label_cache: dict[int, str] = {}
+    mention_cache: dict[int, str] = {}
 
     try:
         title_prefix = await activity_repo.get_chat_title_prefix(chat_id=message.chat.id, user_id=user_id)
@@ -559,23 +572,23 @@ async def _build_profile_social_lines(message: Message, activity_repo, *, user_i
             user_low_id=relationship.user_low_id,
             user_high_id=relationship.user_high_id,
         )
-        partner_label = await _resolve_profile_label(
+        partner_mention = await _resolve_profile_mention(
             activity_repo,
             chat_id=message.chat.id,
             user_id=partner_id,
-            cache=label_cache,
+            cache=mention_cache,
         )
         relation_label = "брак" if relationship.kind == "marriage" else "пара"
-        family_parts.append(f"{relation_label} с {escape(partner_label)}")
+        family_parts.append(f"{relation_label} с {partner_mention}")
     elif spouse_ids:
         spouse_id = min(spouse_ids)
-        spouse_label = await _resolve_profile_label(
+        spouse_mention = await _resolve_profile_mention(
             activity_repo,
             chat_id=message.chat.id,
             user_id=spouse_id,
-            cache=label_cache,
+            cache=mention_cache,
         )
-        family_parts.append(f"супруг(а) {escape(spouse_label)}")
+        family_parts.append(f"супруг(а) {spouse_mention}")
 
     if parents:
         family_parts.append(f"родители {len(parents)}")
@@ -802,6 +815,7 @@ async def send_user_stats(
         timezone_name=settings.bot_timezone,
         fallback_user_id=user_id,
         activity_pulse=pulse,
+        user_label_html=await _resolve_profile_mention(activity_repo, chat_id=message.chat.id, user_id=user_id, cache={}),
     )
 
     social_lines = await _build_profile_social_lines(message, activity_repo, user_id=user_id)
@@ -997,14 +1011,17 @@ async def send_rep_stats(message: Message, activity_repo, chat_settings: ChatSet
         karma_all=rep.karma_all,
         karma_7d=rep.karma_7d,
     )
-    user_label = format_user_label(message.from_user)
-    chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id)
-    if chat_display_name:
-        user_label = chat_display_name
-
     await _send_text_or_photo(
         message,
-        html_text=format_rep_stats(rep, user_label=user_label),
+        html_text=format_rep_stats(
+            rep,
+            user_label_html=await _resolve_profile_mention(
+                activity_repo,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                cache={},
+            ),
+        ),
         chart_bytes=chart,
         filename="rep_stats.png",
     )
