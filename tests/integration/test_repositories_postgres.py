@@ -412,6 +412,18 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
             period="7d",
             since=imported_at - timedelta(days=7),
         ) == 0
+        activity_1d, _, _ = await repo.get_representation_stats(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            since=imported_at - timedelta(days=1),
+        )
+        activity_7d, _, _ = await repo.get_representation_stats(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            since=imported_at - timedelta(days=7),
+        )
+        assert activity_1d == 4
+        assert activity_7d == 11
 
         leaderboard = await repo.get_leaderboard(
             chat_id=chat.telegram_chat_id,
@@ -438,6 +450,19 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
         assert day_leaderboard
         assert day_leaderboard[0].user_id == target.telegram_user_id
         assert day_leaderboard[0].activity_value == 4
+
+        seven_day_leaderboard = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="activity",
+            period="7d",
+            since=imported_at - timedelta(days=7),
+            limit=10,
+            karma_weight=0.0,
+            activity_weight=1.0,
+        )
+        assert seven_day_leaderboard
+        assert seven_day_leaderboard[0].user_id == target.telegram_user_id
+        assert seven_day_leaderboard[0].activity_value == 11
 
         await session.commit()
 

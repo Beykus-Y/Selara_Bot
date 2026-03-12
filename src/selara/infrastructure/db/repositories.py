@@ -1468,12 +1468,12 @@ class SqlAlchemyActivityRepository:
             last_seen_at = row[1] if row is not None else None
         else:
             activity_stmt = select(
-                func.coalesce(func.sum(UserChatActivityDailyModel.message_count), 0),
-                func.max(UserChatActivityDailyModel.last_seen_at),
+                func.coalesce(func.sum(UserChatActivityMinuteModel.message_count), 0),
+                func.max(UserChatActivityMinuteModel.last_seen_at),
             ).where(
-                UserChatActivityDailyModel.chat_id == chat_id,
-                UserChatActivityDailyModel.user_id == user_id,
-                UserChatActivityDailyModel.activity_date >= since.date(),
+                UserChatActivityMinuteModel.chat_id == chat_id,
+                UserChatActivityMinuteModel.user_id == user_id,
+                UserChatActivityMinuteModel.activity_minute >= since,
             )
             row = (await self._session.execute(activity_stmt)).one()
             activity_value = int(row[0] or 0)
@@ -3687,7 +3687,7 @@ class SqlAlchemyActivityRepository:
 
         if since is None:
             return {}
-        if period in {"hour", "day", "week", "month"}:
+        if period in {"hour", "day", "week", "month", "7d"}:
             stmt = (
                 select(
                     UserChatActivityMinuteModel.user_id,
