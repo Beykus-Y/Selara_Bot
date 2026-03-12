@@ -8,7 +8,7 @@
       <p class="lead">{{ hero_subtitle }}</p>
     </div>
     <div class="hero-side">
-      <div class="hero-chip">chat id {{ chat_id }}</div>
+      <div class="hero-chip">ID чата {{ chat_id }}</div>
       <div class="hero-chip">
         {% if active_tab == "overview" %}
           обзор
@@ -20,22 +20,18 @@
       </div>
       <div class="hero-chip">
         {% if active_tab == "achievements" %}
-          local unlocks
+          локальные награды
         {% else %}
-          family + economy
+          семья и экономика
         {% endif %}
       </div>
     </div>
   </section>
 
   <section class="panel section-tabs">
-    <a class="button {% if active_tab == 'overview' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=overview">Обзор</a>
-    <a class="button {% if active_tab == 'achievements' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=achievements">Достижения</a>
-    {% if can_manage_settings %}
-      <a class="button {% if active_tab == 'settings' %}primary{% else %}ghost{% endif %}" href="/app/chat/{{ chat_id }}?tab=settings">Настройки</a>
-    {% endif %}
-    <a class="button ghost" href="/app/chat/{{ chat_id }}/economy">Экономика</a>
-    <a class="button ghost" href="/app/family/{{ chat_id }}">Моя семья</a>
+    {% for link in chat_section_links %}
+      <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+    {% endfor %}
   </section>
 
   {% if active_tab == "overview" %}
@@ -310,6 +306,16 @@
     </div>
     <div class="banner banner-{{ manage_settings_tone }}">{{ manage_settings_note }}</div>
 
+    <div class="settings-summary-grid">
+      {% for row in settings_overview %}
+        <article class="setting-summary-card">
+          <strong>{{ row.title }}</strong>
+          <span>{{ row.value }}</span>
+          <p>{{ row.meta }}</p>
+        </article>
+      {% endfor %}
+    </div>
+
     {% for section in settings_sections %}
       <section class="settings-section">
         <h3 class="subheading">{{ section.title }}</h3>
@@ -320,6 +326,7 @@
               data-setting-card
               data-setting-key="{{ item.key }}"
               data-setting-title="{{ item.title }}"
+              data-setting-input-kind="{{ item.input_kind }}"
               {% if item.input_kind == "select" %}data-setting-saved-value="{{ item.current_value|lower }}"{% endif %}
             >
               <div class="setting-head">
@@ -333,25 +340,30 @@
                     title="Открыть документацию"
                   >?</a>
                 </div>
+                <div class="setting-meta-strip">
+                  <span class="setting-status">{{ item.current_value_display }}</span>
+                  <span class="setting-format">Формат: {{ item.hint }}</span>
+                </div>
                 <code>{{ item.key }}</code>
               </div>
               <p class="setting-description">{{ item.description }}</p>
               <p class="helper-text setting-values">
-                Текущее: <strong data-setting-current>{{ item.current_value }}</strong> • env default: <strong data-setting-default>{{ item.default_value }}</strong>
+                Сейчас: <strong data-setting-current>{{ item.current_value_display }}</strong> • по умолчанию: <strong data-setting-default>{{ item.default_value_display }}</strong>
               </p>
-              <p class="helper-text">{{ item.hint }}</p>
 
               {% if item.editable %}
                 <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
                   <input type="hidden" name="key" value="{{ item.key }}">
                   {% if item.input_kind == "toggle" %}
                     <label class="setting-toggle">
-                      <input type="checkbox" data-setting-toggle {% if item.current_value|lower == "true" %}checked{% endif %}>
+                      <input
+                        type="checkbox"
+                        data-setting-toggle
+                        aria-label="Переключить {{ item.title }}"
+                        {% if item.current_value|lower == "true" %}checked{% endif %}
+                      >
                       <input type="hidden" name="value" value="{{ item.current_value|lower }}">
                       <span class="setting-toggle-track"></span>
-                      <span class="setting-toggle-copy" data-toggle-label>
-                        {{ "Включено" if item.current_value|lower == "true" else "Выключено" }}
-                      </span>
                     </label>
                   {% elif item.input_kind == "select" %}
                     <select name="value">
@@ -384,7 +396,7 @@
     <article class="panel">
       <div class="panel-head">
         <div>
-          <h2>Audit Log</h2>
+          <h2>Журнал аудита</h2>
           <p class="panel-subtitle">Свежие действия бота и админов в этой группе.</p>
         </div>
         <a class="button ghost small" href="/app/chat/{{ chat_id }}/audit">Открыть всю ленту</a>
@@ -411,7 +423,7 @@
       <div class="panel-head">
         <div>
           <h2>Алиасы команд</h2>
-          <p class="panel-subtitle">Веб-редактор alias-слоя без кавычек и ручного ввода в чате.</p>
+          <p class="panel-subtitle">Веб-редактор слоя алиасов без кавычек и ручного ввода в чате.</p>
         </div>
       </div>
       {% if can_manage_settings %}
@@ -436,7 +448,7 @@
                 <strong>{{ alias.alias }}</strong>
                 <code>{{ alias.command }}</code>
               </div>
-              <p class="helper-text">source: {{ alias.source }}</p>
+              <p class="helper-text">Источник: {{ alias.source }}</p>
               {% if can_manage_settings %}
                 <input type="hidden" name="alias_text" value="{{ alias.alias }}">
                 <input type="text" name="source_trigger" value="{{ alias.source }}">
@@ -470,7 +482,7 @@
         <code>/triggervars</code>
       </div>
       <p class="setting-description">
-        Один и тот же набор переменных работает в Telegram и в web. Полный каталог доступен в
+        Один и тот же набор переменных работает в Telegram и в браузере. Полный каталог доступен в
         <a href="{{ trigger_template_docs_url }}">админ-документации</a>.
       </p>
       <div class="token-cloud">
@@ -500,8 +512,8 @@
           </select>
           <textarea name="response_text" rows="4" placeholder="Ответ текстом. Поддерживает {user}, {chat}, {args}, {reply_user}..."></textarea>
           <p class="helper-text">Для буквальных фигурных скобок используйте {{ '{{' }} и {{ '}}' }}.</p>
-          <input type="text" name="media_file_id" placeholder="media_file_id (опционально)">
-          <input type="text" name="media_type" placeholder="media_type: photo / sticker / video">
+          <input type="text" name="media_file_id" placeholder="ID медиафайла (опционально)">
+          <input type="text" name="media_type" placeholder="Тип медиа: photo / sticker / video">
           <button type="submit" class="button primary small">Сохранить триггер</button>
         </form>
       </div>
@@ -526,8 +538,8 @@
               </select>
               <textarea name="response_text" rows="4" placeholder="Ответ текстом">{{ trigger.response_text }}</textarea>
               <p class="helper-text">Можно использовать шаблонные переменные вроде {{ '{user}' }}, {{ '{reply_user}' }}, {{ '{chat}' }}, {{ '{args}' }}.</p>
-              <input type="text" name="media_file_id" value="{{ trigger.media_file_id }}" placeholder="media_file_id (опционально)">
-              <input type="text" name="media_type" value="{{ trigger.media_type }}" placeholder="media_type: photo / sticker / video">
+              <input type="text" name="media_file_id" value="{{ trigger.media_file_id }}" placeholder="ID медиафайла (опционально)">
+              <input type="text" name="media_type" value="{{ trigger.media_type }}" placeholder="Тип медиа: photo / sticker / video">
               <div class="top-actions">
                 <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
                 <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>
@@ -824,6 +836,45 @@
       let pendingDocsHref = "";
       let allowUnload = false;
 
+      const humanizeSettingValue = (key, value) => {
+        const normalized = String(value ?? "");
+        const lowered = normalized.toLowerCase();
+        if (!normalized.trim()) {
+          return "пусто";
+        }
+        if ([
+          "text_commands_enabled",
+          "leaderboard_hybrid_buttons_enabled",
+          "mafia_reveal_eliminated_role",
+          "actions_18_enabled",
+          "smart_triggers_enabled",
+          "welcome_enabled",
+          "goodbye_enabled",
+          "welcome_cleanup_service_messages",
+          "entry_captcha_enabled",
+          "entry_captcha_kick_on_fail",
+          "custom_rp_enabled",
+          "family_tree_enabled",
+          "titles_enabled",
+          "craft_enabled",
+          "auctions_enabled",
+          "economy_enabled",
+          "cleanup_economy_commands",
+        ].includes(key)) {
+          return lowered === "true" ? "включено" : "выключено";
+        }
+        if (key === "text_commands_locale") {
+          return lowered === "ru" ? "русский" : lowered === "en" ? "english" : normalized;
+        }
+        if (key === "economy_mode") {
+          return lowered === "global" ? "общая" : lowered === "local" ? "по группе" : normalized;
+        }
+        if (normalized.length > 42) {
+          return `${normalized.slice(0, 39)}...`;
+        }
+        return normalized;
+      };
+
       const showToast = (message, tone = "ok") => {
         if (!toastRegion || !message) {
           return;
@@ -965,12 +1016,17 @@
 
         const currentValue = card.querySelector("[data-setting-current]");
         if (currentValue) {
-          currentValue.textContent = setting.current_value;
+          currentValue.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.current_value);
         }
 
         const defaultValue = card.querySelector("[data-setting-default]");
         if (defaultValue) {
-          defaultValue.textContent = setting.default_value;
+          defaultValue.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.default_value);
+        }
+
+        const status = card.querySelector(".setting-status");
+        if (status) {
+          status.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.current_value);
         }
 
         const input = getEditableField(card);
@@ -987,13 +1043,9 @@
         }
 
         const toggle = card.querySelector("[data-setting-toggle]");
-        const toggleLabel = card.querySelector("[data-toggle-label]");
         if (toggle instanceof HTMLInputElement) {
           const enabled = String(setting.current_value).toLowerCase() === "true";
           toggle.checked = enabled;
-          if (toggleLabel) {
-            toggleLabel.textContent = enabled ? "Включено" : "Выключено";
-          }
         }
 
         syncDirtyState(card);

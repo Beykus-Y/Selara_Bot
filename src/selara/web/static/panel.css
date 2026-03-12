@@ -458,7 +458,7 @@ code {
   color: var(--muted-strong);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
@@ -1432,6 +1432,13 @@ body.page-games::before {
 .page-games .hero-chip {
   background: #fff3d3;
   color: #1d2340;
+  min-height: 56px;
+  justify-content: center;
+  padding: 14px 18px;
+  border-radius: 24px;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  text-transform: none;
 }
 
 .page-games .hero-chip:nth-child(2) {
@@ -3496,6 +3503,16 @@ body.page-games.is-route-transition .panel {
   gap: 12px;
   margin-top: var(--gap);
   align-items: center;
+  padding: 14px;
+  overflow-x: auto;
+}
+
+.section-tabs .button {
+  flex: 0 0 auto;
+}
+
+.section-tabs .button.primary {
+  box-shadow: 0 14px 28px rgba(26, 109, 182, 0.24);
 }
 
 .setting-card {
@@ -3528,6 +3545,31 @@ body.page-games.is-route-transition .panel {
 .setting-head {
   display: grid;
   gap: 10px;
+}
+
+.setting-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.setting-status,
+.setting-format {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(88, 216, 255, 0.16);
+  background: rgba(88, 216, 255, 0.07);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.setting-status {
+  color: var(--cyan-soft);
 }
 
 .setting-title-row {
@@ -3619,14 +3661,15 @@ body.page-games.is-route-transition .panel {
 }
 
 .setting-toggle {
-  display: grid;
-  grid-template-columns: auto 1fr;
+  display: inline-grid;
+  grid-template-columns: auto;
   align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 12px 14px;
+  gap: 0;
+  min-height: 0;
+  width: fit-content;
+  padding: 10px;
   border: 1px solid rgba(88, 216, 255, 0.16);
-  border-radius: 14px;
+  border-radius: 999px;
   background: linear-gradient(180deg, rgba(4, 8, 18, 0.92), rgba(7, 13, 24, 0.84));
   cursor: pointer;
 }
@@ -3672,6 +3715,42 @@ body.page-games.is-route-transition .panel {
   color: var(--muted-strong);
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+.settings-summary-grid {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.setting-summary-card {
+  display: grid;
+  gap: 6px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(124, 144, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02)),
+    rgba(7, 13, 24, 0.74);
+}
+
+.setting-summary-card strong {
+  font-size: 14px;
+  color: var(--muted-strong);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.setting-summary-card span {
+  font-size: 28px;
+  font-family: var(--font-display);
+  line-height: 1;
+}
+
+.setting-summary-card p {
+  margin: 0;
+  color: var(--muted);
 }
 
 .economy-plot-grid,
@@ -3799,6 +3878,7 @@ textarea::placeholder {
 
 select {
   appearance: none;
+  color-scheme: dark;
   padding-right: 42px;
   background-image:
     linear-gradient(45deg, transparent 50%, var(--muted-strong) 50%),
@@ -3815,46 +3895,21 @@ select {
   background-repeat: no-repeat;
 }
 
-body:not(.page-games) select {
-  color-scheme: dark;
-}
-
-body:not(.page-games) select option,
-body:not(.page-games) select optgroup {
+select option,
+select optgroup {
   color: #e7f4ff;
   background: #0b1423;
 }
 
-body:not(.page-games) select option:checked {
+select option:checked {
   color: #ffffff;
   background: #12344a;
   font-weight: 700;
 }
 
-body:not(.page-games) select option[disabled] {
+select option[disabled] {
   color: #7f92ad;
   background: #101a2b;
-}
-
-body.page-games select {
-  color-scheme: light;
-}
-
-body.page-games select option,
-body.page-games select optgroup {
-  color: #1d2340;
-  background: #fffdf7;
-}
-
-body.page-games select option:checked {
-  color: #1d2340;
-  background: #ffe6a2;
-  font-weight: 700;
-}
-
-body.page-games select option[disabled] {
-  color: #7b879d;
-  background: #edf2f8;
 }
 
 .code-input {
@@ -4061,7 +4116,8 @@ body.page-games select option[disabled] {
 
 .docs-bullet-list {
   margin: 0;
-  padding-left: 18px;
+  padding-left: 0;
+  list-style: none;
   display: grid;
   gap: 8px;
   color: var(--muted-strong);

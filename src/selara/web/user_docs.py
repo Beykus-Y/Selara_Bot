@@ -561,6 +561,9 @@ def build_user_docs_context(*, chat: UserChatOverview | None) -> dict[str, Any]:
                 "label": chat.chat_title or f"chat:{chat.chat_id}",
             }
             if chat is not None
-            else None
+            else {
+                "href": "/app",
+                "label": "кабинет",
+            }
         ),
     }

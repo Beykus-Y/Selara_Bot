@@ -1,0 +1,271 @@
+.family-page {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.family-hero,
+.family-panel,
+.family-metric,
+.family-node-card,
+.family-related-row {
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+
+.family-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 2rem;
+}
+
+.family-hero p,
+.family-panel__head p,
+.family-related-row p,
+.family-empty,
+.family-metric__note,
+.family-node-card small {
+  color: var(--text-muted);
+}
+
+.family-hero h1,
+.family-panel h2 {
+  margin: 0.4rem 0 0;
+}
+
+.family-hero__chips,
+.family-token-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.family-chip,
+.family-token-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid rgba(168, 181, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.family-metrics,
+.family-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.family-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.family-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.family-metric {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1.25rem;
+}
+
+.family-metric__label {
+  color: var(--text-muted);
+}
+
+.family-metric__value {
+  font-size: clamp(1.75rem, 2.5vw, 2.5rem);
+  line-height: 1;
+}
+
+.family-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+.family-panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.family-node-grid,
+.family-related-list,
+.family-scene-panel,
+.family-scene {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.family-scene-panel {
+  align-content: start;
+}
+
+.family-scene {
+  position: relative;
+  min-height: 640px;
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid rgba(168, 181, 255, 0.12);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at top, rgba(124, 140, 255, 0.12), transparent 46%),
+    rgba(255, 255, 255, 0.02);
+}
+
+.family-scene__svg {
+  position: absolute;
+  left: 1rem;
+  top: 1rem;
+  width: 980px;
+  height: 620px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.family-edge {
+  stroke: rgba(168, 181, 255, 0.34);
+  stroke-width: 3;
+}
+
+.family-edge--spouse {
+  stroke: rgba(214, 110, 255, 0.72);
+}
+
+.family-edge--parent,
+.family-edge--grandparent,
+.family-edge--step_parent,
+.family-edge--child {
+  stroke: rgba(83, 218, 255, 0.68);
+}
+
+.family-edge--sibling,
+.family-edge--relative,
+.family-edge--pet {
+  stroke: rgba(124, 140, 255, 0.58);
+}
+
+.family-scene-node {
+  position: absolute;
+  display: grid;
+  gap: 0.25rem;
+  width: 178px;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(168, 181, 255, 0.14);
+  border-radius: 20px;
+  background: rgba(17, 23, 43, 0.92);
+  box-shadow: var(--shadow);
+  transform: translate(-50%, -50%);
+  text-align: left;
+}
+
+.family-scene-node span,
+.family-scene-node small,
+.family-related-row p {
+  color: var(--text-muted);
+}
+
+.family-scene-node.is-active {
+  border-color: rgba(124, 140, 255, 0.42);
+  background: linear-gradient(180deg, rgba(124, 140, 255, 0.16), rgba(17, 23, 43, 0.94));
+}
+
+.family-scene-node--subject {
+  border-color: rgba(93, 211, 158, 0.36);
+}
+
+.family-scene-node--spouse {
+  border-color: rgba(214, 110, 255, 0.34);
+}
+
+.family-scene-node--child,
+.family-scene-node--parent,
+.family-scene-node--grandparent,
+.family-scene-node--step_parent,
+.family-scene-node--sibling,
+.family-scene-node--pet,
+.family-scene-node--relative {
+  border-color: rgba(83, 218, 255, 0.22);
+}
+
+.family-node-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.family-node-card,
+.family-related-row {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem;
+  text-align: left;
+}
+
+.family-related-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.family-node-card.is-active {
+  border-color: rgba(124, 140, 255, 0.35);
+}
+
+.family-node-card--subject {
+  border-color: rgba(93, 211, 158, 0.35);
+}
+
+.family-node-card--spouse {
+  border-color: rgba(214, 110, 255, 0.35);
+}
+
+.family-node-card--child,
+.family-node-card--parent,
+.family-node-card--grandparent,
+.family-node-card--sibling,
+.family-node-card--step_parent,
+.family-node-card--pet {
+  border-color: rgba(83, 218, 255, 0.22);
+}
+
+.family-loading,
+.family-error {
+  padding: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+
+.family-error {
+  border-color: rgba(255, 113, 113, 0.35);
+}
+
+@media (max-width: 1080px) {
+  .family-metrics,
+  .family-node-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .family-hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .family-metrics,
+  .family-grid,
+  .family-node-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .family-related-row {
+    grid-template-columns: 1fr;
+  }
+}

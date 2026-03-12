@@ -50,6 +50,20 @@ _ECONOMY_MODE_LABELS_RU: dict[str, str] = {
     "global": "общая",
     "local": "по группе",
 }
+_BOT_ROLE_LABELS_RU: dict[str, str] = {
+    "participant": "участник",
+    "junior_admin": "младший админ",
+    "senior_admin": "старший админ",
+    "co_owner": "совладелец",
+    "owner": "владелец",
+}
+_ACHIEVEMENT_RARITY_LABELS_RU: dict[str, str] = {
+    "common": "обычное",
+    "uncommon": "необычное",
+    "rare": "редкое",
+    "epic": "эпическое",
+    "legendary": "легендарное",
+}
 _TRIGGER_TEMPLATE_QUICK_NAMES: tuple[str, ...] = (
     "{user}",
     "{user_name}",
@@ -83,6 +97,32 @@ def economy_mode_label_ru(value: str) -> str:
     return _ECONOMY_MODE_LABELS_RU.get(value, value)
 
 
+def bot_role_label_ru(value: str | None) -> str:
+    if not value:
+        return "участник"
+    return _BOT_ROLE_LABELS_RU.get(value, value.replace("_", " "))
+
+
+def achievement_rarity_label_ru(value: str) -> str:
+    return _ACHIEVEMENT_RARITY_LABELS_RU.get(value, value)
+
+
+def setting_value_display(key: str, value: Any) -> str:
+    normalized = str(value)
+    lowered = normalized.lower()
+    if key in CFG_BOOL_KEYS:
+        return "включено" if lowered == "true" else "выключено"
+    if key == "text_commands_locale":
+        return "русский" if lowered == "ru" else "english" if lowered == "en" else normalized
+    if key == "economy_mode":
+        return "общая" if lowered == "global" else "по группе" if lowered == "local" else normalized
+    if not normalized.strip():
+        return "пусто"
+    if len(normalized) > 42:
+        return f"{normalized[:39]}..."
+    return normalized
+
+
 def user_label(value: UserSnapshot | ActivityStats | LeaderboardItem) -> str:
     user_id = getattr(value, "telegram_user_id", None)
     if user_id is None:
@@ -106,7 +146,7 @@ def build_metric(*, label: str, value: str, note: str, tone: str = "violet") -> 
 
 
 def build_group_link(group: UserChatOverview, *, is_admin: bool) -> dict[str, str]:
-    meta_parts = [f"ID {group.chat_id}", f"роль: {group.bot_role or 'participant'}"]
+    meta_parts = [f"ID {group.chat_id}", f"роль: {bot_role_label_ru(group.bot_role)}"]
     if group.message_count is not None:
         meta_parts.append(f"сообщений: {group.message_count}")
     if group.last_seen_at is not None:
@@ -139,7 +179,7 @@ def build_dashboard_panel(*, title: str, dashboard: EconomyDashboard | None, emp
         "rows": [
             {
                 "title": "Баланс",
-                "meta": f"scope: {dashboard.scope.scope_id}",
+                "meta": f"контур: {dashboard.scope.scope_id}",
                 "value": str(dashboard.account.balance),
             },
             {
@@ -154,7 +194,7 @@ def build_dashboard_panel(*, title: str, dashboard: EconomyDashboard | None, emp
             },
             {
                 "title": "Рост",
-                "meta": f"действий {dashboard.account.growth_actions}, stress {effective_stress}%",
+                "meta": f"действий {dashboard.account.growth_actions}, стресс {effective_stress}%",
                 "value": f"{dashboard.account.growth_size_mm} мм",
             },
         ],
@@ -168,7 +208,7 @@ def build_achievement_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
             {
                 "title": f"{row['icon']} {row['title']}",
                 "meta": (
-                    f"{row['scope_label']} • {row['rarity']} • {row['status']} • "
+                    f"{row['scope_label']} • {achievement_rarity_label_ru(row['rarity'])} • {row['status']} • "
                     f"{row['holders_percent']:.2f}% / {row['holders_count']}"
                 ),
                 "value": row["awarded_at"] or "не открыто",
@@ -279,6 +319,14 @@ def build_trigger_template_quick_rows() -> list[dict[str, str]]:
     return [rows_by_token[token] for token in _TRIGGER_TEMPLATE_QUICK_NAMES if token in rows_by_token]
 
 
+def build_trigger_template_examples() -> list[str]:
+    return [
+        'Сейчас тут {user}, чат: {chat}, время: {time}',
+        'Привет, {user_name}. Ты ответил(а) на: {reply_text}',
+        '{actor} кусает {target}. Комментарий: {args}',
+    ]
+
+
 def build_alias_rows(aliases: list[ChatTextAlias]) -> list[dict[str, str]]:
     return [
         {
@@ -323,13 +371,13 @@ def build_settings_sections(
         if key in CFG_BOOL_KEYS:
             input_kind = "toggle"
             options = [
-                {"value": "true", "label": "true", "selected": str(current_value).lower() == "true"},
-                {"value": "false", "label": "false", "selected": str(current_value).lower() == "false"},
+                {"value": "true", "label": "Включено", "selected": str(current_value).lower() == "true"},
+                {"value": "false", "label": "Выключено", "selected": str(current_value).lower() == "false"},
             ]
         elif key in CFG_ENUM_VALUES:
             input_kind = "select"
             options = [
-                {"value": item, "label": item, "selected": str(current_value) == item}
+                {"value": item, "label": setting_value_display(key, item), "selected": str(current_value) == item}
                 for item in CFG_ENUM_VALUES[key]
             ]
         elif key in CFG_TEXTAREA_KEYS:
@@ -346,6 +394,8 @@ def build_settings_sections(
             "hint": setting_value_hint_ru(key),
             "current_value": str(current_value),
             "default_value": str(default_value),
+            "current_value_display": setting_value_display(key, current_value),
+            "default_value_display": setting_value_display(key, default_value),
             "editable": editable,
             "input_kind": input_kind,
             "options": options,
@@ -393,7 +443,7 @@ def build_home_context(
             build_metric(label="Админ-группы", value=str(len(admin_groups)), note="где у вас есть права управления ботом"),
             build_metric(label="Активные группы", value=str(len(activity_groups)), note="группы из вашей активности и ролей", tone="cyan"),
             build_metric(
-                label="Global balance",
+                label="Общий баланс",
                 value=str(global_dashboard.account.balance if global_dashboard else 0),
                 note="общий баланс экономики",
                 tone="magenta",
@@ -401,14 +451,14 @@ def build_home_context(
             build_metric(
                 label="Инвентарь",
                 value=str(sum(item.quantity for item in global_dashboard.inventory) if global_dashboard else 0),
-                note="сумма предметов в global-аккаунте",
+                note="сумма предметов в общем аккаунте",
                 tone="indigo",
             ),
         ],
         "admin_groups": [build_group_link(group, is_admin=True) for group in admin_groups[:8]],
         "activity_groups": [build_group_link(group, is_admin=group.chat_id in admin_ids) for group in activity_groups[:12]],
         "global_dashboard": build_dashboard_panel(
-            title="Global экономика",
+            title="Общая экономика",
             dashboard=global_dashboard,
             empty_text="Экономический аккаунт ещё не создан.",
         ),
@@ -419,7 +469,7 @@ def build_home_context(
             },
             {
                 "title": "Сессия браузера",
-                "text": "После входа создаётся отдельная cookie-сессия, которую можно завершить кнопкой «Выйти».",
+                "text": "После входа создаётся отдельная сессия браузера, которую можно завершить кнопкой «Выйти».",
             },
             {
                 "title": "Доступ к группам",
@@ -512,7 +562,7 @@ def build_landing_context(
             ),
             build_metric(
                 label="Экономика",
-                value="global / local",
+                value="общая / по группе",
                 note="баланс, ферма, магазин, инвентарь, рынок, переводы, лотерея и рост",
                 tone="magenta",
             ),
@@ -685,6 +735,9 @@ def build_chat_context(
     error: str | None,
 ) -> dict[str, Any]:
     role_titles = {role.role_code: role.title_ru for role in roles}
+    current_map = settings_to_dict(current_settings)
+    default_map = settings_to_dict(defaults)
+    customized_settings = sum(1 for key, value in current_map.items() if default_map.get(key) != value)
     metrics = [
         build_metric(
             label="Участники",
@@ -740,6 +793,31 @@ def build_chat_context(
                 "value": "включена" if current_settings.economy_enabled else "выключена",
             },
         ],
+        "settings_overview": [
+            {
+                "title": "Своих правок",
+                "meta": "значения, отличающиеся от серверных дефолтов",
+                "value": str(customized_settings),
+            },
+            {
+                "title": "Текстовые команды",
+                "meta": f"язык: {setting_value_display('text_commands_locale', current_settings.text_commands_locale)}",
+                "value": setting_value_display("text_commands_enabled", current_settings.text_commands_enabled),
+            },
+            {
+                "title": "Экономика",
+                "meta": f"режим: {setting_value_display('economy_mode', current_settings.economy_mode)}",
+                "value": setting_value_display("economy_enabled", current_settings.economy_enabled),
+            },
+            {
+                "title": "Социальные механики",
+                "meta": (
+                    f"семья: {setting_value_display('family_tree_enabled', current_settings.family_tree_enabled)} • "
+                    f"титулы: {setting_value_display('titles_enabled', current_settings.titles_enabled)}"
+                ),
+                "value": setting_value_display("actions_18_enabled", current_settings.actions_18_enabled),
+            },
+        ],
         "dashboard_panels": [
             build_dashboard_panel(
                 title="Локальная экономика",
@@ -784,11 +862,7 @@ def build_chat_context(
         "aliases": build_alias_rows(aliases),
         "triggers": build_trigger_rows(triggers),
         "trigger_template_quick_rows": build_trigger_template_quick_rows(),
-        "trigger_template_examples": [
-            'Сейчас тут {user}, чат: {chat}, время: {time}',
-            'Привет, {user_name}. Ты ответил(а) на: {reply_text}',
-            '{actor} кусает {target}. Комментарий: {args}',
-        ],
+        "trigger_template_examples": build_trigger_template_examples(),
         "trigger_template_docs_url": f"/app/docs/admin?chat_id={chat.chat_id}#docs-trigger-variables",
         "audit_rows": build_audit_rows(audit_entries),
         "settings_sections": build_settings_sections(current=current_settings, defaults=defaults, editable=can_manage_settings),

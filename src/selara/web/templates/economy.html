@@ -9,9 +9,33 @@
     </div>
     <div class="hero-side">
       <div class="hero-chip">{{ scope_id }}</div>
-      <div class="hero-chip">баланс {{ dashboard.account.balance }}</div>
+      <div class="hero-chip">баланс {{ dashboard.balance }}</div>
       <div class="hero-chip">последняя культура: {{ last_crop_label }}</div>
     </div>
+  </section>
+
+  <section class="panel section-tabs">
+    {% for link in chat_section_links %}
+      <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+    {% endfor %}
+  </section>
+
+  <section class="metrics-grid">
+    <article class="metric-card tone-cyan">
+      <span class="metric-label">Баланс</span>
+      <strong class="metric-value">{{ dashboard.balance }}</strong>
+      <span class="metric-note">активный контур {{ economy_mode }}</span>
+    </article>
+    <article class="metric-card tone-violet">
+      <span class="metric-label">Рост</span>
+      <strong class="metric-value">{{ dashboard.growth_size_mm }} мм</strong>
+      <span class="metric-note">действий роста: {{ dashboard.growth_actions }}</span>
+    </article>
+    <article class="metric-card tone-magenta">
+      <span class="metric-label">Ферма</span>
+      <strong class="metric-value">{{ dashboard.farm_level }}</strong>
+      <span class="metric-note">размер {{ dashboard.farm_size_tier }}</span>
+    </article>
   </section>
 
   <section class="grid two-col">

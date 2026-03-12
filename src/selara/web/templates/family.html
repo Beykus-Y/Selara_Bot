@@ -8,10 +8,16 @@
       <p class="lead">Интерактивное дерево отношений вокруг выбранного участника.</p>
     </div>
     <div class="hero-side">
-      <div class="hero-chip">focus {{ focus_user_id }}</div>
+      <div class="hero-chip">фокус {{ focus_user_id }}</div>
       <div class="hero-chip">{{ focus_label }}</div>
-      <div class="hero-chip">family graph</div>
+      <div class="hero-chip">семейный граф</div>
     </div>
+  </section>
+
+  <section class="panel section-tabs">
+    {% for link in chat_section_links %}
+      <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+    {% endfor %}
   </section>
 
   <section class="metrics-grid">

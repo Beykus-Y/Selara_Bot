@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 import hashlib
+from io import BytesIO
 import json
 import logging
 from html import escape
@@ -13,7 +14,7 @@ from urllib.parse import parse_qs, quote
 from aiogram import Bot
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,6 +32,7 @@ from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
+from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.core.web_auth import (
     digest_login_code,
     digest_session_token,
@@ -64,9 +66,15 @@ from selara.presentation.handlers.settings_common import apply_setting_update, s
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.presenters import (
     build_achievement_rows,
+    build_alias_rows,
+    build_audit_rows,
     build_chat_context,
     build_home_context,
     build_landing_context,
+    build_settings_sections,
+    build_trigger_rows,
+    build_trigger_template_examples,
+    build_trigger_template_quick_rows,
     format_datetime,
     user_label,
 )
@@ -344,6 +352,69 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             {"href": href, "label": label, "variant": variant}
             for href, label, variant in links
         ]
+
+    async def _can_manage_chat_settings(
+        activity_repo: SqlAlchemyActivityRepository,
+        *,
+        chat: UserChatOverview,
+        user: UserSnapshot,
+    ) -> bool:
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=chat.chat_id,
+            chat_type=chat.chat_type,
+            chat_title=chat.chat_title,
+            user_id=user.telegram_user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_bot=user.is_bot,
+            permission=PERM_MANAGE_SETTINGS,
+            bootstrap_if_missing_owner=False,
+        )
+        return allowed
+
+    def _build_chat_section_links(
+        chat_id: int,
+        *,
+        active: str,
+        can_manage_settings: bool,
+    ) -> list[dict[str, str]]:
+        links = [
+            {
+                "href": f"/app/chat/{chat_id}?tab=overview",
+                "label": "Обзор",
+                "variant": "primary" if active == "overview" else "ghost",
+            },
+            {
+                "href": f"/app/chat/{chat_id}?tab=achievements",
+                "label": "Достижения",
+                "variant": "primary" if active == "achievements" else "ghost",
+            },
+        ]
+        if can_manage_settings:
+            links.append(
+                {
+                    "href": f"/app/chat/{chat_id}?tab=settings",
+                    "label": "Настройки",
+                    "variant": "primary" if active == "settings" else "ghost",
+                }
+            )
+        links.extend(
+            [
+                {
+                    "href": f"/app/chat/{chat_id}/economy",
+                    "label": "Экономика",
+                    "variant": "primary" if active == "economy" else "ghost",
+                },
+                {
+                    "href": f"/app/family/{chat_id}",
+                    "label": "Моя семья",
+                    "variant": "primary" if active == "family" else "ghost",
+                },
+            ]
+        )
+        return links
 
     def _login_context(*, flash: str | None, error: str | None) -> dict[str, object]:
         return {
@@ -745,6 +816,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ),
             None,
         )
+
+    def _viewer_initials(user: UserSnapshot) -> str:
+        letters = "".join(
+            part[:1].upper()
+            for part in ((user.first_name or "").strip(), (user.last_name or "").strip())
+            if part
+        )
+        if letters:
+            return letters[:2]
+        if user.username:
+            return user.username[:2].upper()
+        return "S"
 
     async def _collect_visible_groups(activity_repo: SqlAlchemyActivityRepository, *, user_id: int) -> tuple[list[UserChatOverview], list[UserChatOverview]]:
         admin_groups = await activity_repo.list_user_admin_chats(user_id=user_id)
@@ -3839,6 +3922,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ),
         )
 
+    @app.get("/api/login/context")
+    async def login_context_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=False)
+            await session.commit()
+        if user is not None:
+            return _json_result(ok=False, message="Вход уже выполнен.", status_code=200, redirect="/app")
+        context = _login_context(
+            flash=request.query_params.get("flash"),
+            error=request.query_params.get("error"),
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "bot_username": context["bot_username"],
+                "bot_dm_url": context["bot_dm_url"],
+            }
+        )
+
     @app.post("/login")
     async def login_submit(request: Request):
         now = _now_utc()
@@ -3913,13 +4015,63 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         response.delete_cookie(settings.web_session_cookie_name)
         return response
 
-    @app.get("/app", response_class=HTMLResponse)
-    async def app_home(request: Request):
+    @app.get("/api/app/me")
+    async def app_me_api(request: Request):
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "viewer": {
+                    "telegram_user_id": user.telegram_user_id,
+                    "display_name": user_label(user),
+                    "username": f"@{user.username}" if user.username else "",
+                    "first_name": user.first_name or "",
+                    "last_name": user.last_name or "",
+                    "initials": _viewer_initials(user),
+                    "avatar_url": "/api/app/me/avatar",
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/app/me/avatar")
+    async def app_me_avatar(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=False)
+            if user is None:
+                await session.commit()
+                return Response(status_code=401)
+            await session.commit()
+
+        try:
+            bot = await _get_game_bot()
+            profile_photos = await bot.get_user_profile_photos(user.telegram_user_id, limit=1)
+            if not profile_photos.photos:
+                return Response(status_code=404)
+
+            source = BytesIO()
+            await bot.download(profile_photos.photos[0][-1], destination=source)
+            return Response(
+                content=source.getvalue(),
+                media_type="image/jpeg",
+                headers={"Cache-Control": "private, max-age=300"},
+            )
+        except Exception:
+            logger.exception("Failed to load Telegram avatar for web viewer", extra={"user_id": user.telegram_user_id})
+            return Response(status_code=404)
+
+    async def _build_home_page_context(request: Request) -> tuple[dict[str, object] | None, str | None]:
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
 
             activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
@@ -3956,15 +4108,35 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],
             )
         )
+        return page_context, None
+
+    @app.get("/app", response_class=HTMLResponse)
+    async def app_home(request: Request):
+        page_context, redirect_path = await _build_home_page_context(request)
+        if redirect_path is not None:
+            return _redirect(redirect_path)
+        assert page_context is not None
         return _render_template("home.html", **page_context)
 
-    @app.get("/app/achievements", response_class=HTMLResponse)
-    async def achievements_page(request: Request):
+    @app.get("/api/app/home")
+    async def app_home_api(request: Request):
+        page_context, redirect_path = await _build_home_page_context(request)
+        if redirect_path is not None:
+            return _json_result(
+                ok=False,
+                message="Сессия истекла. Войдите снова.",
+                status_code=401,
+                redirect=redirect_path,
+            )
+        assert page_context is not None
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
+
+    async def _build_achievements_page_context(request: Request) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
 
             activity_repo = SqlAlchemyActivityRepository(session)
             activity_groups = await activity_repo.list_user_activity_chats(user_id=user.telegram_user_id, limit=1)
@@ -4000,7 +4172,28 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],  # type: ignore[index]
             )
         )
+        return page_context, None
+
+    @app.get("/app/achievements", response_class=HTMLResponse)
+    async def achievements_page(request: Request):
+        page_context, redirect_path = await _build_achievements_page_context(request)
+        if redirect_path is not None:
+            return _redirect(redirect_path)
+        assert page_context is not None
         return _render_template("achievements.html", **page_context)
+
+    @app.get("/api/app/achievements")
+    async def achievements_page_api(request: Request):
+        page_context, redirect_path = await _build_achievements_page_context(request)
+        if redirect_path is not None:
+            return _json_result(
+                ok=False,
+                message="Сессия истекла. Войдите снова.",
+                status_code=401,
+                redirect=redirect_path,
+            )
+        assert page_context is not None
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
 
     @app.get("/app/games", response_class=HTMLResponse)
     async def games_page(request: Request):
@@ -4036,6 +4229,34 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
         )
         return _render_template("games.html", **page_context)
+
+    @app.get("/api/app/games")
+    async def games_page_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                redirect_path = _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect=redirect_path)
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            dashboard_context = await _build_games_dashboard_context(activity_repo, user=user)
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    "hero_title": "Активные игры",
+                    "hero_subtitle": (
+                        "Сессии из Telegram отображаются здесь в реальном времени. "
+                        "Можно запускать новые лобби прямо отсюда, а внутри партии интерфейс живёт отдельными экранами вместо копии клавиатуры бота."
+                    ),
+                    **dashboard_context,
+                },
+            },
+            status_code=200,
+        )
 
     @app.get("/app/games/live")
     async def games_live(request: Request):
@@ -4543,18 +4764,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             defaults = default_chat_settings(settings)
             current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or defaults
             role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
-            can_manage_settings, _, _ = await has_permission(
+            can_manage_settings = await _can_manage_chat_settings(
                 activity_repo,
-                chat_id=chat_id,
-                chat_type=chat.chat_type,
-                chat_title=chat.chat_title,
-                user_id=user.telegram_user_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name,
-                is_bot=user.is_bot,
-                permission="manage_settings",
-                bootstrap_if_missing_owner=False,
+                chat=chat,
+                user=user,
             )
 
             summary = await activity_repo.get_chat_activity_summary(chat_id=chat_id)
@@ -4657,6 +4870,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         else:
             active_tab = "overview"
         page_context["active_tab"] = active_tab
+        page_context["chat_section_links"] = _build_chat_section_links(
+            chat_id,
+            active=active_tab,
+            can_manage_settings=can_manage_settings,
+        )
         page_context.update(
             _chat_layout_context(
                 chat_id=chat_id,
@@ -4682,8 +4900,56 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
             current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            defaults = default_chat_settings(settings)
+            role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
             summary = await activity_repo.get_chat_activity_summary(chat_id=chat_id)
+            stats = await get_my_stats(activity_repo, chat_id=chat_id, user_id=user.telegram_user_id)
+            rep_stats = await get_rep_stats(
+                activity_repo,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+                limit=max(current_settings.top_limit_max, 50),
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+                days=current_settings.leaderboard_7d_days,
+            )
             activity_series = await _build_chat_daily_activity_series(session, chat_id=chat_id, days=7)
+            roles = await activity_repo.list_chat_role_definitions(chat_id=chat_id)
+            command_rules = await activity_repo.list_command_access_rules(chat_id=chat_id)
+            audit_entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=10)
+            top_activity = await activity_repo.get_top(chat_id=chat_id, limit=8)
+            top_mix = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="mix",
+                period="all",
+                since=None,
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            top_karma = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="karma",
+                period="all",
+                since=None,
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            top_mix_7d = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="mix",
+                period="7d",
+                since=_now_utc() - timedelta(days=current_settings.leaderboard_7d_days),
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
             hero_candidates = await activity_repo.get_leaderboard(
                 chat_id=chat_id,
                 mode="activity",
@@ -4703,13 +4969,54 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 if scope is not None:
                     richest_payload = await _build_richest_user_payload(session, scope_id=scope.scope_id, chat_id=chat_id)
+            global_dashboard, _ = await _load_dashboard_if_exists(
+                economy_repo,
+                mode="global",
+                chat_id=None,
+                user_id=user.telegram_user_id,
+            )
+            local_dashboard, _ = await _load_dashboard_if_exists(
+                economy_repo,
+                mode="local",
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+            )
 
             await session.commit()
 
         hero = hero_candidates[0] if hero_candidates else None
+        chat_context = build_chat_context(
+            user=user,
+            chat=chat,
+            summary=summary,
+            stats=stats,
+            rep_stats=rep_stats,
+            role_definition=role_definition,
+            current_settings=current_settings,
+            defaults=defaults,
+            can_manage_settings=can_manage_settings,
+            roles=roles,
+            command_rules=command_rules,
+            aliases=[],
+            triggers=[],
+            audit_entries=audit_entries,
+            global_dashboard=global_dashboard,
+            local_dashboard=local_dashboard,
+            top_activity=top_activity,
+            top_mix=top_mix,
+            top_karma=top_karma,
+            top_mix_7d=top_mix_7d,
+            local_achievement_sections=[],
+            flash=None,
+            error=None,
+        )
         return JSONResponse(
             content={
                 "ok": True,
+                "chat_id": chat_id,
+                "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+                "hero_subtitle": chat_context["hero_subtitle"],
+                "metrics": chat_context["metrics"],
                 "summary": {
                     "participants_count": summary.participants_count,
                     "total_messages": summary.total_messages,
@@ -4726,6 +5033,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     else None
                 ),
                 "richest_of_day": richest_payload,
+                "dashboard_panels": chat_context["dashboard_panels"],
+                "access_rows": chat_context["access_rows"],
+                "roles": chat_context["roles"],
+                "command_rules": chat_context["command_rules"],
+                "leaderboards": chat_context["leaderboards"],
+                "audit_rows": chat_context["audit_rows"],
+                "can_manage_settings": can_manage_settings,
             }
         )
 
@@ -4809,13 +5123,114 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             }
         )
 
-    @app.get("/app/family/{chat_id}", response_class=HTMLResponse)
-    async def family_page(chat_id: int, request: Request, user_id: int | None = None):
+    @app.get("/api/chat/{chat_id}/achievements")
+    async def chat_achievements_api(chat_id: int, request: Request):
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
+
+            achievement_sections = await _build_achievement_sections(
+                activity_repo,
+                settings=settings,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+                include_chat=True,
+                include_global=False,
+            )
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "chat_id": chat_id,
+                "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+                "can_manage_settings": can_manage_settings,
+                "achievement_sections": achievement_sections,
+            }
+        )
+
+    @app.get("/api/chat/{chat_id}/settings")
+    async def chat_settings_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
+
+            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
+            aliases = await activity_repo.list_chat_aliases(chat_id=chat_id) if can_manage_settings else []
+            triggers = await activity_repo.list_chat_triggers(chat_id=chat_id) if can_manage_settings else []
+            audit_entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=10)
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "chat_id": chat.chat_id,
+                "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+                "can_manage_settings": can_manage_settings,
+                "manage_settings_note": (
+                    "У вашей роли есть право на управление настройками, поэтому значения можно менять прямо из браузера."
+                    if can_manage_settings
+                    else "Настройки видны только для чтения: у вашей роли нет права на управление настройками."
+                ),
+                "manage_settings_tone": "ok" if can_manage_settings else "error",
+                "admin_docs_url": f"/app/docs/admin?chat_id={chat.chat_id}",
+                "chat_section_links": _build_chat_section_links(
+                    chat.chat_id,
+                    active="settings",
+                    can_manage_settings=can_manage_settings,
+                ),
+                "settings_sections": build_settings_sections(
+                    current=current_settings,
+                    defaults=chat_settings_defaults,
+                    editable=can_manage_settings,
+                ),
+                "aliases": build_alias_rows(aliases),
+                "triggers": build_trigger_rows(triggers),
+                "trigger_template_quick_rows": build_trigger_template_quick_rows(),
+                "trigger_template_examples": build_trigger_template_examples(),
+                "trigger_template_docs_url": f"/app/docs/admin?chat_id={chat.chat_id}#docs-trigger-variables",
+                "audit_rows": build_audit_rows(audit_entries),
+            }
+        )
+
+    async def _build_family_page_context(
+        chat_id: int,
+        request: Request,
+        *,
+        user_id: int | None = None,
+    ) -> tuple[dict[str, object] | None, str | None, int | None]:
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова."), 401
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
@@ -4823,16 +5238,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
-                return _render_template(
-                    "error.html",
-                    response_status_code=403,
-                    **_error_context(
-                        status_code=403,
-                        headline="Нет доступа",
-                        message="Эта группа недоступна для вашего аккаунта.",
-                        user=user,
-                    ),
-                )
+                return None, "/app", 403
+
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
 
             focus_user_id = int(user_id or user.telegram_user_id)
             bundle = await activity_repo.list_family_bundle(chat_id=chat_id, user_id=focus_user_id)
@@ -4872,33 +5284,89 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ]
             await session.commit()
 
-        return _render_template(
-            "family.html",
-            page_title=f"Selara Family • {chat.chat_title or chat.chat_id}",
-            page_name="family",
-            chat_id=chat.chat_id,
-            chat_title=chat.chat_title or f"chat:{chat.chat_id}",
-            focus_user_id=focus_user_id,
-            focus_label=next((node["label"] for node in nodes if node["id"] == focus_user_id), f"user:{focus_user_id}"),
-            family_nodes=nodes,
-            family_nodes_json=json.dumps(nodes, ensure_ascii=False),
-            family_edges_json=json.dumps(edges, ensure_ascii=False),
-            bundle_summary=[
+        page_context: dict[str, object] = {
+            "page_title": f"Selara Family • {chat.chat_title or chat.chat_id}",
+            "page_name": "family",
+            "chat_id": chat.chat_id,
+            "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+            "focus_user_id": focus_user_id,
+            "focus_label": next((node["label"] for node in nodes if node["id"] == focus_user_id), f"user:{focus_user_id}"),
+            "family_nodes": nodes,
+            "family_edges": edges,
+            "bundle_summary": [
                 {"label": "Родители", "value": str(len(bundle.parents))},
                 {"label": "Супруг(а)", "value": "есть" if bundle.spouse_user_id is not None else "нет"},
                 {"label": "Дети", "value": str(len(bundle.children))},
                 {"label": "Питомцы", "value": str(len(bundle.pets))},
             ],
-            **_chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+            "chat_section_links": _build_chat_section_links(
+                chat.chat_id,
+                active="family",
+                can_manage_settings=can_manage_settings,
+            ),
+        }
+        page_context.update(
+            _chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+        )
+        return page_context, None, None
+
+    @app.get("/app/family/{chat_id}", response_class=HTMLResponse)
+    async def family_page(chat_id: int, request: Request, user_id: int | None = None):
+        page_context, redirect_or_error, status_code = await _build_family_page_context(
+            chat_id,
+            request,
+            user_id=user_id,
+        )
+        if page_context is None:
+            if status_code == 401:
+                return _redirect(redirect_or_error or "/login")
+            async with session_factory() as session:
+                user = await _load_user_from_request(session, request, touch=False)
+                await session.commit()
+            return _render_template(
+                "error.html",
+                response_status_code=403,
+                **_error_context(
+                    status_code=403,
+                    headline="Нет доступа",
+                    message="Эта группа недоступна для вашего аккаунта.",
+                    user=user,
+                ),
+            )
+        family_nodes = page_context["family_nodes"]
+        family_edges = page_context["family_edges"]
+        return _render_template(
+            "family.html",
+            **page_context,
+            family_nodes_json=json.dumps(family_nodes, ensure_ascii=False),
+            family_edges_json=json.dumps(family_edges, ensure_ascii=False),
         )
 
-    @app.get("/app/chat/{chat_id}/economy", response_class=HTMLResponse)
-    async def chat_economy_page(chat_id: int, request: Request):
+    @app.get("/api/chat/{chat_id}/family")
+    async def family_page_api(chat_id: int, request: Request, user_id: int | None = None):
+        page_context, redirect_or_error, status_code = await _build_family_page_context(
+            chat_id,
+            request,
+            user_id=user_id,
+        )
+        if page_context is None:
+            return _json_result(
+                ok=False,
+                message="Сессия истекла. Войдите снова." if status_code == 401 else "Группа недоступна.",
+                status_code=status_code or 400,
+                redirect="/login" if status_code == 401 else "/app",
+            )
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
+
+    async def _build_chat_economy_page_context(
+        chat_id: int,
+        request: Request,
+    ) -> tuple[dict[str, object] | None, str | None, int | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова."), 401
 
             activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
@@ -4907,30 +5375,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
-                return _render_template(
-                    "error.html",
-                    response_status_code=403,
-                    **_error_context(
-                        status_code=403,
-                        headline="Нет доступа",
-                        message="Эта группа недоступна для вашего аккаунта.",
-                        user=user,
-                    ),
-                )
+                return None, "__chat_forbidden__", 403
+
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
 
             current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
             if not current_settings.economy_enabled:
                 await session.commit()
-                return _render_template(
-                    "error.html",
-                    response_status_code=403,
-                    **_error_context(
-                        status_code=403,
-                        headline="Экономика отключена",
-                        message="Для этой группы веб-экономика сейчас выключена.",
-                        user=user,
-                    ),
-                )
+                return None, "__economy_disabled__", 403
 
             mode = current_settings.economy_mode
             dashboard, error = await _load_dashboard_if_exists(
@@ -4949,16 +5405,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if dashboard is None or scope is None:
-            return _render_template(
-                "error.html",
-                response_status_code=400,
-                **_error_context(
-                    status_code=400,
-                    headline="Экономика недоступна",
-                    message=error or scope_error or "Не удалось открыть экономический кабинет.",
-                    user=user,
-                ),
-            )
+            return None, error or scope_error or "Не удалось открыть экономический кабинет.", 400
 
         now = _now_utc()
         plots = []
@@ -5023,23 +5470,89 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 }
             )
 
-        return _render_template(
-            "economy.html",
-            page_title=f"Selara Economy • {chat.chat_title or chat.chat_id}",
-            page_name="economy",
-            chat_id=chat.chat_id,
-            chat_title=chat.chat_title or f"chat:{chat.chat_id}",
-            scope_id=scope.scope_id,
-            economy_mode=mode,
-            dashboard=dashboard,
-            plot_cards=plots,
-            inventory_items=inventory_items,
-            market_rows=market_rows,
-            market_rows_json=json.dumps(market_rows, ensure_ascii=False),
-            trade_points_json=json.dumps(trade_points, ensure_ascii=False),
-            last_crop_label=localize_crop_code(dashboard.farm.last_planted_crop_code),
-            **_chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+        page_context: dict[str, object] = {
+            "page_title": f"Selara Economy • {chat.chat_title or chat.chat_id}",
+            "page_name": "economy",
+            "chat_id": chat.chat_id,
+            "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+            "scope_id": scope.scope_id,
+            "economy_mode": mode,
+            "dashboard": {
+                "balance": dashboard.account.balance,
+                "growth_size_mm": dashboard.account.growth_size_mm,
+                "growth_actions": dashboard.account.growth_actions,
+                "farm_level": dashboard.farm.farm_level,
+                "farm_size_tier": dashboard.farm.size_tier,
+            },
+            "plot_cards": plots,
+            "inventory_items": inventory_items,
+            "market_rows": market_rows,
+            "trade_points": trade_points,
+            "last_crop_label": localize_crop_code(dashboard.farm.last_planted_crop_code),
+            "chat_section_links": _build_chat_section_links(
+                chat.chat_id,
+                active="economy",
+                can_manage_settings=can_manage_settings,
+            ),
+        }
+        page_context.update(
+            _chat_layout_context(chat.chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
         )
+        return page_context, None, None
+
+    @app.get("/app/chat/{chat_id}/economy", response_class=HTMLResponse)
+    async def chat_economy_page(chat_id: int, request: Request):
+        page_context, error_or_redirect, status_code = await _build_chat_economy_page_context(chat_id, request)
+        if page_context is None:
+            if status_code == 401:
+                return _redirect(error_or_redirect or "/login")
+            async with session_factory() as session:
+                user = await _load_user_from_request(session, request, touch=False)
+                await session.commit()
+            if status_code == 403:
+                message = (
+                    "Для этой группы веб-экономика сейчас выключена."
+                    if error_or_redirect == "__economy_disabled__"
+                    else "Эта группа недоступна для вашего аккаунта."
+                )
+                return _render_template(
+                    "error.html",
+                    response_status_code=403,
+                    **_error_context(
+                        status_code=403,
+                        headline="Экономика недоступна" if message.startswith("Для этой группы") else "Нет доступа",
+                        message=message,
+                        user=user,
+                    ),
+                )
+            return _render_template(
+                "error.html",
+                response_status_code=400,
+                **_error_context(
+                    status_code=400,
+                    headline="Экономика недоступна",
+                    message=error_or_redirect or "Не удалось открыть экономический кабинет.",
+                    user=user,
+                ),
+            )
+        return _render_template("economy.html", **page_context)
+
+    @app.get("/api/chat/{chat_id}/economy")
+    async def chat_economy_page_api(chat_id: int, request: Request):
+        page_context, error_or_redirect, status_code = await _build_chat_economy_page_context(chat_id, request)
+        if page_context is None:
+            redirect = "/login" if status_code == 401 else "/app" if status_code == 403 else None
+            message = (
+                "Сессия истекла. Войдите снова."
+                if status_code == 401
+                else "Для этой группы веб-экономика сейчас выключена."
+                if error_or_redirect == "__economy_disabled__"
+                else "Группа недоступна."
+                if status_code == 403
+                else error_or_redirect or "Не удалось открыть экономический кабинет."
+            )
+            return _json_result(ok=False, message=message, status_code=status_code or 400, redirect=redirect)
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
 
     @app.get("/api/chat/{chat_id}/economy/market")
     async def market_data_api(chat_id: int, request: Request):
@@ -5253,16 +5766,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await _publish_chat_live_event(chat_id)
             return _json_result(ok=True, message="Лот снят с рынка.", status_code=200)
 
-    @app.get("/app/docs/admin", response_class=HTMLResponse)
-    async def admin_docs_page(request: Request, chat_id: int | None = None):
+    async def _build_admin_docs_page_context(
+        request: Request,
+        *,
+        chat_id: int | None = None,
+    ) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
-            if user is None:
-                await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
 
             chat: UserChatOverview | None = None
-            if chat_id is not None:
+            if user is not None and chat_id is not None:
                 activity_repo = SqlAlchemyActivityRepository(session)
                 admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
                 visible_groups = _merge_visible_groups(admin_groups, activity_groups)
@@ -5279,18 +5792,39 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],
             )
         )
+        return page_context, None
+
+    @app.get("/app/docs/admin", response_class=HTMLResponse)
+    async def admin_docs_page(request: Request, chat_id: int | None = None):
+        page_context, redirect_path = await _build_admin_docs_page_context(request, chat_id=chat_id)
+        if redirect_path is not None:
+            return _redirect(redirect_path)
+        assert page_context is not None
         return _render_template("admin_docs.html", **page_context)
 
-    @app.get("/app/docs/user", response_class=HTMLResponse)
-    async def user_docs_page(request: Request, chat_id: int | None = None):
+    @app.get("/api/app/docs/admin")
+    async def admin_docs_page_api(request: Request, chat_id: int | None = None):
+        page_context, redirect_path = await _build_admin_docs_page_context(request, chat_id=chat_id)
+        if redirect_path is not None:
+            return _json_result(
+                ok=False,
+                message="Сессия истекла. Войдите снова.",
+                status_code=401,
+                redirect=redirect_path,
+            )
+        assert page_context is not None
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
+
+    async def _build_user_docs_page_context(
+        request: Request,
+        *,
+        chat_id: int | None = None,
+    ) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
-            if user is None:
-                await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
 
             chat: UserChatOverview | None = None
-            if chat_id is not None:
+            if user is not None and chat_id is not None:
                 activity_repo = SqlAlchemyActivityRepository(session)
                 admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
                 visible_groups = _merge_visible_groups(admin_groups, activity_groups)
@@ -5307,15 +5841,38 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],
             )
         )
+        return page_context, None
+
+    @app.get("/app/docs/user", response_class=HTMLResponse)
+    async def user_docs_page(request: Request, chat_id: int | None = None):
+        page_context, redirect_path = await _build_user_docs_page_context(request, chat_id=chat_id)
+        if redirect_path is not None:
+            return _redirect(redirect_path)
+        assert page_context is not None
         return _render_template("user_docs.html", **page_context)
 
-    @app.get("/app/chat/{chat_id}/audit", response_class=HTMLResponse)
-    async def chat_audit_page(chat_id: int, request: Request):
+    @app.get("/api/app/docs/user")
+    async def user_docs_page_api(request: Request, chat_id: int | None = None):
+        page_context, redirect_path = await _build_user_docs_page_context(request, chat_id=chat_id)
+        if redirect_path is not None:
+            return _json_result(
+                ok=False,
+                message="Сессия истекла. Войдите снова.",
+                status_code=401,
+                redirect=redirect_path,
+            )
+        assert page_context is not None
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
+
+    async def _build_chat_audit_page_context(
+        chat_id: int,
+        request: Request,
+    ) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
@@ -5323,6 +5880,50 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
+                return None, "/app"
+
+            can_manage_settings = await _can_manage_chat_settings(
+                activity_repo,
+                chat=chat,
+                user=user,
+            )
+            entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=200)
+            await session.commit()
+
+        page_context: dict[str, object] = {
+            "page_title": f"Selara Audit • {chat.chat_title or chat.chat_id}",
+            "page_name": "audit",
+            "chat_id": chat.chat_id,
+            "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+            "audit_rows": [
+                {
+                    "when": format_datetime(entry.created_at),
+                    "action": entry.action_code,
+                    "description": entry.description,
+                    "actor": str(entry.actor_user_id) if entry.actor_user_id is not None else "system",
+                    "target": str(entry.target_user_id) if entry.target_user_id is not None else "—",
+                }
+                for entry in entries
+            ],
+            "chat_section_links": _build_chat_section_links(
+                chat.chat_id,
+                active="overview",
+                can_manage_settings=can_manage_settings,
+            ),
+        }
+        page_context.update(
+            _audit_layout_context(chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
+        )
+        return page_context, None
+
+    @app.get("/app/chat/{chat_id}/audit", response_class=HTMLResponse)
+    async def chat_audit_page(chat_id: int, request: Request):
+        page_context, redirect_path = await _build_chat_audit_page_context(chat_id, request)
+        if redirect_path is not None:
+            if redirect_path == "/app":
+                async with session_factory() as session:
+                    user = await _load_user_from_request(session, request, touch=False)
+                    await session.commit()
                 return _render_template(
                     "error.html",
                     response_status_code=403,
@@ -5333,36 +5934,31 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         user=user,
                     ),
                 )
+            return _redirect(redirect_path)
+        assert page_context is not None
+        return _render_template("audit.html", **page_context)
 
-            entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=200)
-            await session.commit()
-
-        return _render_template(
-            "audit.html",
-            page_title=f"Selara Audit • {chat.chat_title or chat.chat_id}",
-            page_name="audit",
-            chat_id=chat.chat_id,
-            chat_title=chat.chat_title or f"chat:{chat.chat_id}",
-            audit_rows=[
-                {
-                    "when": format_datetime(entry.created_at),
-                    "action": entry.action_code,
-                    "description": entry.description,
-                    "actor": str(entry.actor_user_id) if entry.actor_user_id is not None else "system",
-                    "target": str(entry.target_user_id) if entry.target_user_id is not None else "—",
-                }
-                for entry in entries
-            ],
-            **_audit_layout_context(chat_id, flash=request.query_params.get("flash"), error=request.query_params.get("error")),
-        )
+    @app.get("/api/chat/{chat_id}/audit")
+    async def chat_audit_page_api(chat_id: int, request: Request):
+        page_context, redirect_path = await _build_chat_audit_page_context(chat_id, request)
+        if redirect_path is not None:
+            status_code = 403 if redirect_path == "/app" else 401
+            message = "Группа недоступна." if redirect_path == "/app" else "Сессия истекла. Войдите снова."
+            return _json_result(ok=False, message=message, status_code=status_code, redirect=redirect_path)
+        assert page_context is not None
+        return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
 
     @app.post("/app/chat/{chat_id}/triggers")
     async def update_chat_trigger(chat_id: int, request: Request):
+        prefers_json = _prefers_json(request)
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                redirect_path = _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
@@ -5370,7 +5966,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
-                return _redirect(_with_message("/app", key="error", text="Группа недоступна."))
+                redirect_path = _with_message("/app", key="error", text="Группа недоступна.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Группа недоступна.", status_code=404, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             allowed, _, _ = await has_permission(
                 activity_repo,
@@ -5387,7 +5986,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if not allowed:
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав."))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Недостаточно прав.", status_code=403, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             form = await _parse_form(request)
             action = (form.get("action") or "save").strip().lower()
@@ -5395,7 +5997,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if action == "delete":
                 if trigger_id is None or not await activity_repo.remove_chat_trigger(chat_id=chat_id, trigger_id=trigger_id):
                     await session.commit()
-                    return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text="Триггер не найден."))
+                    redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Триггер не найден.")
+                    if prefers_json:
+                        return _json_result(ok=False, message="Триггер не найден.", status_code=404, redirect=redirect_path)
+                    return _redirect(redirect_path)
                 await log_chat_action(
                     activity_repo,
                     chat_id=chat_id,
@@ -5407,7 +6012,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 invalidate_chat_feature_cache(chat_id)
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер удалён."))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер удалён.")
+                if prefers_json:
+                    return _json_result(ok=True, message="Триггер удалён.", status_code=200, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             try:
                 await activity_repo.upsert_chat_trigger(
@@ -5422,7 +6030,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             except ValueError as exc:
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text=str(exc)))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text=str(exc))
+                if prefers_json:
+                    return _json_result(ok=False, message=str(exc), status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             await log_chat_action(
                 activity_repo,
@@ -5435,15 +6046,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             invalidate_chat_feature_cache(chat_id)
             await session.commit()
-            return _redirect(_with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер сохранён."))
+            redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер сохранён.")
+            if prefers_json:
+                return _json_result(ok=True, message="Триггер сохранён.", status_code=200, redirect=redirect_path)
+            return _redirect(redirect_path)
 
     @app.post("/app/chat/{chat_id}/aliases")
     async def update_chat_alias(chat_id: int, request: Request):
+        prefers_json = _prefers_json(request)
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+                redirect_path = _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             activity_repo = SqlAlchemyActivityRepository(session)
             admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
@@ -5451,7 +6069,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
-                return _redirect(_with_message("/app", key="error", text="Группа недоступна."))
+                redirect_path = _with_message("/app", key="error", text="Группа недоступна.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Группа недоступна.", status_code=404, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             allowed, _, _ = await has_permission(
                 activity_repo,
@@ -5468,7 +6089,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if not allowed:
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав."))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Недостаточно прав.", status_code=403, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             form = await _parse_form(request)
             action = (form.get("action") or "save").strip().lower()
@@ -5488,14 +6112,20 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 key = "flash" if removed else "error"
                 text = "Алиас удалён." if removed else "Алиас не найден."
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key=key, text=text))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key=key, text=text)
+                if prefers_json:
+                    return _json_result(ok=removed, message=text, status_code=200 if removed else 404, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             source_raw = form.get("source_trigger") or ""
             command_key = resolve_builtin_command_key(source_raw)
             source_norm = normalize_text_command(source_raw)
             if command_key is None or not alias_norm:
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text="Некорректный source или alias."))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Некорректный source или alias.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Некорректный source или alias.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             try:
                 await activity_repo.upsert_chat_alias(
@@ -5508,7 +6138,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             except ValueError as exc:
                 await session.commit()
-                return _redirect(_with_message(f"/app/chat/{chat_id}", key="error", text=str(exc)))
+                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text=str(exc))
+                if prefers_json:
+                    return _json_result(ok=False, message=str(exc), status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
 
             await log_chat_action(
                 activity_repo,
@@ -5520,7 +6153,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 actor_user_id=user.telegram_user_id,
             )
             await session.commit()
-            return _redirect(_with_message(f"/app/chat/{chat_id}", key="flash", text="Алиас сохранён."))
+            redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Алиас сохранён.")
+            if prefers_json:
+                return _json_result(ok=True, message="Алиас сохранён.", status_code=200, redirect=redirect_path)
+            return _redirect(redirect_path)
 
     @app.post("/app/chat/{chat_id}/settings")
     async def update_chat_setting(chat_id: int, request: Request):
