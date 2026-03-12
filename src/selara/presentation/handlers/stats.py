@@ -1,11 +1,13 @@
 from html import escape
 
 import asyncio
+from dataclasses import dataclass
 from functools import partial
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -15,7 +17,6 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.achievements import get_achievement_catalog_from_settings
@@ -23,11 +24,18 @@ from selara.application.use_cases.get_last_seen import execute as get_last_seen
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.application.use_cases.get_top_users import execute as get_top_users
+from selara.application.use_cases.iris_import import (
+    IrisProfileImportData,
+    parse_forwarded_awards_message,
+    parse_forwarded_profile_message,
+)
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
+from selara.core.timezone import to_timezone
 from selara.domain.entities import AchievementView, ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
+from selara.presentation.auth import get_actor_role_definition
 from selara.presentation.charts import build_daily_activity_chart, build_leaderboard_chart, build_profile_chart
 from selara.presentation.db_recovery import safe_rollback
 from selara.presentation.formatters import (
@@ -53,6 +61,9 @@ _AWARD_TITLE_MAX_LEN = 160
 _PROFILE_AWARDS_LIMIT = 20
 _PROFILE_CALLBACK_PREFIX = "profile"
 _ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N]"
+_IRIS_IMPORT_TTL = timedelta(minutes=15)
+_IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
+_IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
 _ACTIVITY_TOP_PERIOD_ALIASES: dict[str, LeaderboardPeriod] = {
     "week": "week",
     "неделя": "week",
@@ -64,6 +75,233 @@ _ACTIVITY_TOP_PERIOD_ALIASES: dict[str, LeaderboardPeriod] = {
     "месяц": "month",
     "month": "month",
 }
+
+
+@dataclass
+class _PendingIrisImportSession:
+    source_chat_id: int
+    source_chat_type: str
+    source_chat_title: str | None
+    target_user_id: int
+    target_username: str
+    target_label: str
+    target_first_name: str | None
+    target_last_name: str | None
+    target_chat_display_name: str | None
+    actor_user_id: int
+    step: str
+    expires_at: datetime
+    profile_data: IrisProfileImportData | None = None
+    profile_text: str | None = None
+
+
+_pending_iris_imports: dict[int, _PendingIrisImportSession] = {}
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _cleanup_pending_iris_imports(*, exclude_user_id: int | None = None) -> None:
+    now = _now_utc()
+    for user_id, session in list(_pending_iris_imports.items()):
+        if user_id == exclude_user_id:
+            continue
+        if session.expires_at <= now:
+            _pending_iris_imports.pop(user_id, None)
+
+
+def _get_pending_iris_import(user_id: int) -> _PendingIrisImportSession | None:
+    _cleanup_pending_iris_imports(exclude_user_id=user_id)
+    return _pending_iris_imports.get(user_id)
+
+
+def _set_pending_iris_import(*, importer_user_id: int, session: _PendingIrisImportSession) -> None:
+    _cleanup_pending_iris_imports(exclude_user_id=importer_user_id)
+    _pending_iris_imports[importer_user_id] = session
+
+
+def _clear_pending_iris_import(user_id: int) -> None:
+    _pending_iris_imports.pop(user_id, None)
+
+
+def _is_pending_iris_import_expired(session: _PendingIrisImportSession, *, now: datetime | None = None) -> bool:
+    return session.expires_at <= (now or _now_utc())
+
+
+def _normalize_username(value: str | None) -> str | None:
+    normalized = (value or "").strip().lstrip("@").lower()
+    return normalized or None
+
+
+def _is_iris_import_manager_role(role_code: str | None) -> bool:
+    return (role_code or "").strip().lower() in _IRIS_IMPORT_ALLOWED_ROLES
+
+
+def _can_start_iris_import(*, actor_user_id: int, target_user_id: int, role_code: str | None) -> bool:
+    if int(actor_user_id) == int(target_user_id):
+        return True
+    return _is_iris_import_manager_role(role_code)
+
+
+def _is_forwarded_message(message: Message) -> bool:
+    return any(
+        getattr(message, attr, None) is not None
+        for attr in ("forward_origin", "forward_from", "forward_from_chat", "forward_sender_name")
+    )
+
+
+def _resolve_forwarded_bot_username(message: Message) -> str | None:
+    forward_origin = getattr(message, "forward_origin", None)
+    if forward_origin is not None:
+        sender_user = getattr(forward_origin, "sender_user", None)
+        if sender_user is not None and getattr(sender_user, "is_bot", False):
+            return _normalize_username(getattr(sender_user, "username", None))
+        sender_chat = getattr(forward_origin, "chat", None)
+        if sender_chat is not None:
+            return _normalize_username(getattr(sender_chat, "username", None))
+
+    forward_from = getattr(message, "forward_from", None)
+    if forward_from is not None and getattr(forward_from, "is_bot", False):
+        return _normalize_username(getattr(forward_from, "username", None))
+
+    forward_from_chat = getattr(message, "forward_from_chat", None)
+    if forward_from_chat is not None:
+        return _normalize_username(getattr(forward_from_chat, "username", None))
+
+    return None
+
+
+def _validate_iris_forward_source(message: Message) -> str | None:
+    if not _is_forwarded_message(message):
+        return f"Нужно переслать сюда именно ответ от @{_IRIS_SOURCE_BOT_USERNAME}, а не копию текста."
+
+    forwarded_username = _resolve_forwarded_bot_username(message)
+    if forwarded_username != _IRIS_SOURCE_BOT_USERNAME:
+        return f"Нужен пересланный ответ именно от @{_IRIS_SOURCE_BOT_USERNAME}."
+    return None
+
+
+def _detect_iris_message_kind(text: str) -> str | None:
+    body = (text or "").strip().lower()
+    if not body:
+        return None
+    if body.startswith("🏆 награды") or "\n1." in body:
+        return "awards"
+    if "первое появление:" in body or "актив (д|н|м|весь):" in body or "ранг:" in body:
+        return "profile"
+    return None
+
+
+def _validate_iris_message_step(*, expected_step: str, text: str, target_username: str) -> str | None:
+    detected = _detect_iris_message_kind(text)
+    if detected is None or detected == expected_step:
+        return None
+    if expected_step == "profile":
+        return (
+            f"Сейчас нужен первый ответ Iris на команду <code>кто ты @{escape(target_username)}</code>. "
+            f"Перешлите сначала карточку профиля."
+        )
+    return (
+        f"Сейчас нужен второй ответ Iris на команду <code>награды @{escape(target_username)}</code>. "
+        f"Перешлите список наград."
+    )
+
+
+def _validate_iris_target_username(*, expected_username: str, actual_username: str) -> str | None:
+    if _normalize_username(actual_username) == _normalize_username(expected_username):
+        return None
+    return (
+        f"Этот ответ Iris относится не к @{escape(expected_username)}. "
+        "Проверьте, что пересылаете карточку именно нужного пользователя."
+    )
+
+
+def _format_iris_import_date(value: datetime, timezone_name: str, *, include_time: bool) -> str:
+    local_value = to_timezone(value, timezone_name)
+    return local_value.strftime("%d.%m.%Y %H:%M" if include_time else "%d.%m.%Y")
+
+
+def _format_iris_already_imported_message(*, state, timezone_name: str, is_self: bool) -> str:
+    imported_at_text = _format_iris_import_date(state.imported_at, timezone_name, include_time=True)
+    variants = (
+        (
+            "Не нужно, вы уже перенесли себя {date}.",
+            "Повторный перенос не требуется: импорт уже был {date}.",
+            "Профиль из Iris уже переносили {date}, второй раз делать это не нужно.",
+        )
+        if is_self
+        else (
+            "Этот пользователь уже перенесён из Iris {date}.",
+            "Повторный перенос не нужен: профиль уже импортирован {date}.",
+            "Импорт для этого пользователя уже был выполнен {date}.",
+        )
+    )
+    index = abs(int(state.chat_id) + int(state.user_id) + int(state.imported_at.day)) % len(variants)
+    return variants[index].format(date=imported_at_text)
+
+
+def _build_iris_import_intro(*, session: _PendingIrisImportSession) -> str:
+    chat_title = escape((session.source_chat_title or "").strip() or f"chat:{session.source_chat_id}")
+    target_username = escape(session.target_username)
+    target_label = escape(session.target_label)
+    return (
+        f"<b>Перенос из Iris</b>\n"
+        f"Чат: <b>{chat_title}</b>\n"
+        f"Кого переносим: <b>{target_label}</b> (@{target_username})\n\n"
+        f"1. В той же группе отправьте Iris команду <code>кто ты @{target_username}</code>.\n"
+        f"2. Перешлите сюда ответ от @{_IRIS_SOURCE_BOT_USERNAME}.\n\n"
+        "После этого я попрошу второй ответ с наградами. "
+        f"Сессия активна {int(_IRIS_IMPORT_TTL.total_seconds() // 60)} минут."
+    )
+
+
+def _build_iris_awards_step_prompt(*, session: _PendingIrisImportSession) -> str:
+    return (
+        "Первый шаг принят.\n\n"
+        f"Теперь отправьте в группе Iris команду <code>награды @{escape(session.target_username)}</code> "
+        f"и перешлите сюда ответ от @{_IRIS_SOURCE_BOT_USERNAME}."
+    )
+
+
+def _build_iris_unrelated_message_text() -> str:
+    return "Это не то сообщение для переноса. Если хотите отменить перенос, отправьте /cancel или «отмена»."
+
+
+def _build_iris_import_success_text(
+    *,
+    session: _PendingIrisImportSession,
+    profile: IrisProfileImportData,
+    awards_count: int,
+    imported_at: datetime,
+    timezone_name: str,
+) -> str:
+    return (
+        f"<b>Перенос завершён</b>\n"
+        f"Чат: <b>{escape((session.source_chat_title or '').strip() or f'chat:{session.source_chat_id}')}</b>\n"
+        f"Пользователь: <b>{escape(session.target_label)}</b> (@{escape(session.target_username)})\n"
+        f"Карма Iris: <b>{profile.karma_all_time}</b>\n"
+        f"Первое появление: <b>{_format_iris_import_date(profile.first_seen_at, timezone_name, include_time=False)}</b>\n"
+        f"Актив (1д | 7д | 30д | всё): <b>{profile.activity_1d} | {profile.activity_7d} | {profile.activity_30d} | {profile.activity_all}</b>\n"
+        f"Наград перенесено: <b>{awards_count}</b>\n"
+        f"Дата переноса: <b>{_format_iris_import_date(imported_at, timezone_name, include_time=True)}</b>"
+    )
+
+
+def _message_text_and_entities(message: Message) -> tuple[str, tuple]:
+    if message.text:
+        return message.text, tuple(message.entities or ())
+    if message.caption:
+        return message.caption, tuple(message.caption_entities or ())
+    return "", ()
+
+
+class PendingIrisImportFilter(Filter):
+    async def __call__(self, message: Message) -> bool:
+        if message.chat.type != "private" or message.from_user is None:
+            return False
+        _cleanup_pending_iris_imports(exclude_user_id=message.from_user.id)
+        return message.from_user.id in _pending_iris_imports
 
 
 def _group_status_label(status: str) -> str:
@@ -408,7 +646,10 @@ async def _build_profile_awards_message(*, activity_repo, chat_id: int, user_id:
 
     lines = [f"<b>Награды:</b> {target_mention}"]
     for award in awards:
-        lines.append(f"• {escape(award.title)} — {escape(format_elapsed_compact(award.created_at, timezone_name))}")
+        award_date = _format_iris_import_date(award.created_at, timezone_name, include_time=False)
+        lines.append(
+            f"• {escape(award.title)} — {escape(award_date)} • {escape(format_elapsed_compact(award.created_at, timezone_name))}"
+        )
     return "\n".join(lines)
 
 
@@ -1041,6 +1282,328 @@ async def award_command(message: Message) -> None:
         'Награды выдаются только так: reply на сообщение участника и <code>наградить текст награды</code>.',
         parse_mode="HTML",
     )
+
+
+@router.message(Command("iris_perenos"))
+async def iris_import_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    bot: Bot,
+    settings: Settings,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    if (command.args or "").strip() or message.reply_to_message is not None:
+        target, error = await _resolve_stats_target_user(message, command=command, activity_repo=activity_repo)
+        if target is None:
+            await message.answer(error or "Не удалось определить пользователя.")
+            return
+    else:
+        target = UserSnapshot(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
+        )
+
+    if target.is_bot:
+        await message.answer("Нельзя переносить профиль бота.")
+        return
+
+    target_username = _normalize_username(target.username)
+    if target_username is None:
+        await message.answer("Для переноса из Iris в первой версии у пользователя должен быть актуальный @username.")
+        return
+
+    actor_role_code = None
+    if int(message.from_user.id) != int(target.telegram_user_id):
+        definition, _bootstrapped = await get_actor_role_definition(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            bootstrap_if_missing_owner=True,
+        )
+        actor_role_code = definition.role_code if definition is not None else None
+        if not _can_start_iris_import(
+            actor_user_id=message.from_user.id,
+            target_user_id=target.telegram_user_id,
+            role_code=actor_role_code,
+        ):
+            await message.answer(
+                "Переносить чужой профиль из Iris можно только с ролью owner, co_owner или senior_admin."
+            )
+            return
+
+    try:
+        existing_state = await activity_repo.get_user_chat_iris_import_state(
+            chat_id=message.chat.id,
+            user_id=target.telegram_user_id,
+        )
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        await message.answer("Не удалось подготовить перенос из Iris. Попробуйте позже.")
+        return
+
+    if existing_state is not None:
+        await message.answer(
+            _format_iris_already_imported_message(
+                state=existing_state,
+                timezone_name=settings.bot_timezone,
+                is_self=int(message.from_user.id) == int(target.telegram_user_id),
+            )
+        )
+        return
+
+    target_label = display_name_from_parts(
+        user_id=target.telegram_user_id,
+        username=target.username,
+        first_name=target.first_name,
+        last_name=target.last_name,
+        chat_display_name=target.chat_display_name,
+    )
+    session = _PendingIrisImportSession(
+        source_chat_id=message.chat.id,
+        source_chat_type=message.chat.type,
+        source_chat_title=message.chat.title,
+        target_user_id=target.telegram_user_id,
+        target_username=target_username,
+        target_label=target_label,
+        target_first_name=target.first_name,
+        target_last_name=target.last_name,
+        target_chat_display_name=target.chat_display_name,
+        actor_user_id=message.from_user.id,
+        step="profile",
+        expires_at=_now_utc() + _IRIS_IMPORT_TTL,
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=_build_iris_import_intro(session=session),
+            parse_mode="HTML",
+        )
+    except (TelegramForbiddenError, TelegramBadRequest):
+        await message.answer(
+            "Не могу написать вам в личку. Откройте диалог с ботом, нажмите /start и повторите /iris_perenos."
+        )
+        return
+
+    _set_pending_iris_import(importer_user_id=message.from_user.id, session=session)
+    await message.answer("Инструкцию отправила в ЛС. Перешлите туда два ответа Iris по шагам.")
+
+
+@router.message(PendingIrisImportFilter())
+async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot, settings: Settings) -> None:
+    if message.from_user is None:
+        return
+
+    session = _get_pending_iris_import(message.from_user.id)
+    if session is None:
+        return
+    if _is_pending_iris_import_expired(session):
+        _clear_pending_iris_import(message.from_user.id)
+        await message.answer("Сессия переноса из Iris истекла. Запустите /iris_perenos заново в группе.")
+        return
+
+    raw_text, entities = _message_text_and_entities(message)
+    if (raw_text or "").strip().lower() in {"/cancel", "отмена", "cancel"}:
+        _clear_pending_iris_import(message.from_user.id)
+        await message.answer("Перенос из Iris отменён.")
+        return
+    if not raw_text.strip():
+        await message.answer("Нужен пересланный текстовый ответ Iris.")
+        return
+    if not _is_forwarded_message(message):
+        await message.answer(_build_iris_unrelated_message_text())
+        return
+
+    source_error = _validate_iris_forward_source(message)
+    if source_error is not None:
+        await message.answer(source_error)
+        return
+
+    step_error = _validate_iris_message_step(
+        expected_step=session.step,
+        text=raw_text,
+        target_username=session.target_username,
+    )
+    if step_error is not None:
+        await message.answer(step_error, parse_mode="HTML")
+        return
+
+    if session.step == "profile":
+        try:
+            profile = parse_forwarded_profile_message(
+                text=raw_text,
+                entities=list(entities),
+                timezone_name=settings.bot_timezone,
+                now=_now_utc(),
+            )
+        except ValueError as exc:
+            await message.answer(
+                f"Не удалось распознать карточку Iris: <code>{escape(str(exc))}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        target_error = _validate_iris_target_username(
+            expected_username=session.target_username,
+            actual_username=profile.target_username,
+        )
+        if target_error is not None:
+            await message.answer(target_error, parse_mode="HTML")
+            return
+
+        session.profile_data = profile
+        session.profile_text = raw_text
+        session.step = "awards"
+        session.expires_at = _now_utc() + _IRIS_IMPORT_TTL
+        await message.answer(_build_iris_awards_step_prompt(session=session), parse_mode="HTML")
+        return
+
+    try:
+        awards_data = parse_forwarded_awards_message(
+            text=raw_text,
+            entities=list(entities),
+            timezone_name=settings.bot_timezone,
+        )
+    except ValueError as exc:
+        await message.answer(
+            f"Не удалось распознать список наград Iris: <code>{escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    target_error = _validate_iris_target_username(
+        expected_username=session.target_username,
+        actual_username=awards_data.target_username,
+    )
+    if target_error is not None:
+        await message.answer(target_error, parse_mode="HTML")
+        return
+
+    if session.profile_data is None or session.profile_text is None:
+        _clear_pending_iris_import(message.from_user.id)
+        await message.answer("Сессия переноса повреждена. Запустите /iris_perenos заново в группе.")
+        return
+
+    imported_at = _now_utc()
+    try:
+        state = await activity_repo.apply_user_chat_iris_import(
+            chat=ChatSnapshot(
+                telegram_chat_id=session.source_chat_id,
+                chat_type=session.source_chat_type,
+                title=session.source_chat_title,
+            ),
+            target=UserSnapshot(
+                telegram_user_id=session.target_user_id,
+                username=session.target_username,
+                first_name=session.target_first_name,
+                last_name=session.target_last_name,
+                is_bot=False,
+                chat_display_name=session.target_chat_display_name,
+            ),
+            imported_by_user_id=session.actor_user_id,
+            source_bot_username=_IRIS_SOURCE_BOT_USERNAME,
+            source_target_username=awards_data.target_username,
+            imported_at=imported_at,
+            profile_text=session.profile_text,
+            awards_text=raw_text,
+            karma_base_all_time=session.profile_data.karma_all_time,
+            first_seen_at=session.profile_data.first_seen_at,
+            last_seen_at=session.profile_data.last_seen_at or imported_at,
+            activity_1d=session.profile_data.activity_1d,
+            activity_7d=session.profile_data.activity_7d,
+            activity_30d=session.profile_data.activity_30d,
+            activity_all=session.profile_data.activity_all,
+            awards=list(awards_data.awards),
+        )
+        await log_chat_action(
+            activity_repo,
+            chat_id=session.source_chat_id,
+            chat_type=session.source_chat_type,
+            chat_title=session.source_chat_title,
+            action_code="iris_import",
+            description=f"Импорт из Iris для пользователя {session.target_user_id}.",
+            actor_user_id=session.actor_user_id,
+            target_user_id=session.target_user_id,
+            meta_json={
+                "source_bot_username": state.source_bot_username,
+                "source_target_username": state.source_target_username,
+                "karma_base_all_time": state.karma_base_all_time,
+                "activity_1d": session.profile_data.activity_1d,
+                "activity_7d": session.profile_data.activity_7d,
+                "activity_30d": session.profile_data.activity_30d,
+                "activity_all": session.profile_data.activity_all,
+                "awards_count": len(awards_data.awards),
+            },
+        )
+    except ValueError:
+        try:
+            existing_state = await activity_repo.get_user_chat_iris_import_state(
+                chat_id=session.source_chat_id,
+                user_id=session.target_user_id,
+            )
+        except SQLAlchemyError:
+            await safe_rollback(activity_repo)
+            _clear_pending_iris_import(message.from_user.id)
+            await message.answer("Не удалось завершить перенос из Iris. Попробуйте позже.")
+            return
+
+        _clear_pending_iris_import(message.from_user.id)
+        if existing_state is not None:
+            await message.answer(
+                _format_iris_already_imported_message(
+                    state=existing_state,
+                    timezone_name=settings.bot_timezone,
+                    is_self=int(message.from_user.id) == int(session.target_user_id),
+                )
+            )
+            return
+        await message.answer("Не удалось завершить перенос из Iris. Запустите /iris_perenos заново.")
+        return
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        await message.answer("Не удалось завершить перенос из Iris. Попробуйте позже.")
+        return
+
+    _clear_pending_iris_import(message.from_user.id)
+    await message.answer(
+        _build_iris_import_success_text(
+            session=session,
+            profile=session.profile_data,
+            awards_count=len(awards_data.awards),
+            imported_at=imported_at,
+            timezone_name=settings.bot_timezone,
+        ),
+        parse_mode="HTML",
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=session.source_chat_id,
+            text=(
+                f"Перенос из Iris завершён для "
+                f"{format_user_link(user_id=session.target_user_id, label=session.target_label)}."
+            ),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except TelegramBadRequest:
+        pass
 
 
 @router.message(Command("awards"))

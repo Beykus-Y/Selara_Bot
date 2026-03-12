@@ -39,6 +39,7 @@ from selara.domain.entities import (
     FamilyGraphEdge,
     GraphRelationType,
     GraphRelationship,
+    IrisImportState,
     InlinePrivateMessage,
     LeaderboardItem,
     LeaderboardMode,
@@ -105,6 +106,8 @@ from selara.infrastructure.db.models import (
     UserChatAwardModel,
     UserChatBotRoleModel,
     UserChatModerationStateModel,
+    UserChatIrisImportHistoryModel,
+    UserChatIrisImportStateModel,
     UserChatProfileModel,
     UserGlobalAchievementModel,
     UserKarmaVoteModel,
@@ -154,6 +157,75 @@ def _latest_datetime(left: datetime, right: datetime) -> datetime:
     normalized_left = _coerce_utc_datetime(left)
     normalized_right = _coerce_utc_datetime(right)
     return max(normalized_left, normalized_right)
+
+
+def _serialize_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _coerce_utc_datetime(value).isoformat()
+
+
+def _distribute_activity(total: int, days: Sequence[date]) -> dict[date, int]:
+    if total <= 0 or not days:
+        return {}
+    base, remainder = divmod(total, len(days))
+    values: dict[date, int] = {}
+    for index, activity_date in enumerate(days):
+        values[activity_date] = base + (1 if index < remainder else 0)
+    return values
+
+
+def _build_synthetic_activity_daily_rows(
+    *,
+    imported_at: datetime,
+    last_seen_at: datetime,
+    activity_1d: int,
+    activity_7d: int,
+    activity_30d: int,
+) -> list[tuple[date, int, datetime]]:
+    today = _coerce_utc_datetime(imported_at).date()
+    normalized_last_seen = _coerce_utc_datetime(last_seen_at)
+    values: dict[date, int] = {}
+    values.update(_distribute_activity(activity_30d - activity_7d, [today - timedelta(days=offset) for offset in range(7, 30)]))
+    values.update(_distribute_activity(activity_7d - activity_1d, [today - timedelta(days=offset) for offset in range(1, 7)]))
+    values[today] = max(0, int(activity_1d))
+
+    rows: list[tuple[date, int, datetime]] = []
+    for activity_date, message_count in sorted(values.items()):
+        if message_count <= 0:
+            continue
+        if activity_date == today:
+            row_last_seen = normalized_last_seen
+        else:
+            row_last_seen = datetime.combine(activity_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
+        rows.append((activity_date, message_count, row_last_seen))
+    return rows
+
+
+def _build_synthetic_activity_minute_rows(
+    *,
+    daily_rows: Sequence[tuple[date, int, datetime]],
+) -> list[tuple[datetime, int, datetime]]:
+    values: dict[datetime, tuple[int, datetime]] = {}
+    for _activity_date, message_count, row_last_seen in daily_rows:
+        if message_count <= 0:
+            continue
+        normalized_last_seen = _coerce_utc_datetime(row_last_seen)
+        minute_bucket = normalized_last_seen.replace(second=0, microsecond=0)
+        existing = values.get(minute_bucket)
+        if existing is None:
+            values[minute_bucket] = (int(message_count), normalized_last_seen)
+            continue
+        previous_count, previous_last_seen = existing
+        values[minute_bucket] = (
+            previous_count + int(message_count),
+            _latest_datetime(previous_last_seen, normalized_last_seen),
+        )
+
+    return [
+        (activity_minute, message_count, last_seen_at)
+        for activity_minute, (message_count, last_seen_at) in sorted(values.items())
+    ]
 
 
 class SqlAlchemyActivityRepository:
@@ -1374,7 +1446,10 @@ class SqlAlchemyActivityRepository:
         if period != "all" and since is not None:
             stmt = stmt.where(UserKarmaVoteModel.created_at >= since)
 
-        return int((await self._session.execute(stmt)).scalar_one() or 0)
+        karma_value = int((await self._session.execute(stmt)).scalar_one() or 0)
+        if period == "all":
+            karma_value += await self._get_iris_karma_base(chat_id=chat_id, user_id=user_id)
+        return karma_value
 
     async def get_representation_stats(
         self,
@@ -1412,6 +1487,8 @@ class SqlAlchemyActivityRepository:
             karma_stmt = karma_stmt.where(UserKarmaVoteModel.created_at >= since)
 
         karma_value = int((await self._session.execute(karma_stmt)).scalar_one() or 0)
+        if since is None:
+            karma_value += await self._get_iris_karma_base(chat_id=chat_id, user_id=user_id)
         return activity_value, karma_value, last_seen_at
 
     async def get_leaderboard(
@@ -1752,6 +1829,285 @@ class SqlAlchemyActivityRepository:
         await self._session.delete(row)
         await self._session.flush()
         return True
+
+    async def get_user_chat_iris_import_state(self, *, chat_id: int, user_id: int) -> IrisImportState | None:
+        row = await self._session.get(
+            UserChatIrisImportStateModel,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        if row is None:
+            return None
+        return self._to_iris_import_state(row)
+
+    async def apply_user_chat_iris_import(
+        self,
+        *,
+        chat: ChatSnapshot,
+        target: UserSnapshot,
+        imported_by_user_id: int | None,
+        source_bot_username: str,
+        source_target_username: str,
+        imported_at: datetime,
+        profile_text: str,
+        awards_text: str,
+        karma_base_all_time: int,
+        first_seen_at: datetime,
+        last_seen_at: datetime,
+        activity_1d: int,
+        activity_7d: int,
+        activity_30d: int,
+        activity_all: int,
+        awards: list[tuple[str, datetime]],
+    ) -> IrisImportState:
+        if not (0 <= int(activity_1d) <= int(activity_7d) <= int(activity_30d) <= int(activity_all)):
+            raise ValueError("Активность Iris не проходит базовую проверку.")
+
+        normalized_source_bot_username = (source_bot_username or "").strip().lstrip("@").lower()
+        normalized_source_target_username = (source_target_username or "").strip().lstrip("@").lower()
+        if not normalized_source_bot_username:
+            raise ValueError("Не указан username исходного бота.")
+        if not normalized_source_target_username:
+            raise ValueError("Не указан username целевого пользователя Iris.")
+
+        normalized_imported_at = _coerce_utc_datetime(imported_at)
+        normalized_first_seen_at = _coerce_utc_datetime(first_seen_at)
+        normalized_last_seen_at = _latest_datetime(last_seen_at, normalized_first_seen_at)
+        normalized_awards = [
+            (_normalize_award_title(title), _coerce_utc_datetime(created_at))
+            for title, created_at in awards
+        ]
+
+        await self._upsert_chat(chat)
+        await self._upsert_user(target)
+        if imported_by_user_id is not None:
+            await self._upsert_user(
+                UserSnapshot(
+                    telegram_user_id=imported_by_user_id,
+                    username=None,
+                    first_name=None,
+                    last_name=None,
+                    is_bot=False,
+                )
+            )
+
+        existing_state = await self._session.get(
+            UserChatIrisImportStateModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": target.telegram_user_id},
+        )
+        if existing_state is not None:
+            raise ValueError("Профиль Iris уже был перенесён для этого пользователя.")
+
+        existing_activity = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": target.telegram_user_id},
+        )
+        previous_was_active = bool(existing_activity.is_active_member) if existing_activity is not None else False
+
+        daily_stmt = (
+            select(UserChatActivityDailyModel)
+            .where(
+                UserChatActivityDailyModel.chat_id == chat.telegram_chat_id,
+                UserChatActivityDailyModel.user_id == target.telegram_user_id,
+            )
+            .order_by(UserChatActivityDailyModel.activity_date.asc())
+        )
+        existing_daily_rows = (await self._session.execute(daily_stmt)).scalars().all()
+
+        minute_stmt = (
+            select(UserChatActivityMinuteModel)
+            .where(
+                UserChatActivityMinuteModel.chat_id == chat.telegram_chat_id,
+                UserChatActivityMinuteModel.user_id == target.telegram_user_id,
+            )
+            .order_by(UserChatActivityMinuteModel.activity_minute.asc())
+        )
+        existing_minute_rows = (await self._session.execute(minute_stmt)).scalars().all()
+
+        awards_stmt = (
+            select(UserChatAwardModel)
+            .where(
+                UserChatAwardModel.chat_id == chat.telegram_chat_id,
+                UserChatAwardModel.user_id == target.telegram_user_id,
+            )
+            .order_by(UserChatAwardModel.created_at.desc(), UserChatAwardModel.id.desc())
+        )
+        existing_awards = (await self._session.execute(awards_stmt)).scalars().all()
+
+        archived_snapshot_json = {
+            "activity_row": (
+                {
+                    "message_count": int(existing_activity.message_count),
+                    "is_active_member": bool(existing_activity.is_active_member),
+                    "created_at": _serialize_datetime(existing_activity.created_at),
+                    "last_seen_at": _serialize_datetime(existing_activity.last_seen_at),
+                    "display_name_override": existing_activity.display_name_override,
+                    "title_prefix": existing_activity.title_prefix,
+                }
+                if existing_activity is not None
+                else None
+            ),
+            "daily_rows": [
+                {
+                    "activity_date": row.activity_date.isoformat(),
+                    "message_count": int(row.message_count),
+                    "last_seen_at": _serialize_datetime(row.last_seen_at),
+                }
+                for row in existing_daily_rows
+            ],
+            "minute_rows_summary": {
+                "count": len(existing_minute_rows),
+                "first_activity_minute": (
+                    _serialize_datetime(existing_minute_rows[0].activity_minute) if existing_minute_rows else None
+                ),
+                "last_activity_minute": (
+                    _serialize_datetime(existing_minute_rows[-1].activity_minute) if existing_minute_rows else None
+                ),
+                "total_messages": sum(int(row.message_count) for row in existing_minute_rows),
+            },
+            "awards": [
+                {
+                    "id": int(row.id),
+                    "title": row.title,
+                    "granted_by_user_id": int(row.granted_by_user_id) if row.granted_by_user_id is not None else None,
+                    "created_at": _serialize_datetime(row.created_at),
+                }
+                for row in existing_awards
+            ],
+        }
+
+        synthetic_daily_rows = _build_synthetic_activity_daily_rows(
+            imported_at=normalized_imported_at,
+            last_seen_at=normalized_last_seen_at,
+            activity_1d=int(activity_1d),
+            activity_7d=int(activity_7d),
+            activity_30d=int(activity_30d),
+        )
+        synthetic_minute_rows = _build_synthetic_activity_minute_rows(daily_rows=synthetic_daily_rows)
+        imported_snapshot_json = {
+            "source_bot_username": normalized_source_bot_username,
+            "source_target_username": normalized_source_target_username,
+            "imported_by_user_id": int(imported_by_user_id) if imported_by_user_id is not None else None,
+            "karma_base_all_time": int(karma_base_all_time),
+            "first_seen_at": _serialize_datetime(normalized_first_seen_at),
+            "last_seen_at": _serialize_datetime(normalized_last_seen_at),
+            "activity": {
+                "1d": int(activity_1d),
+                "7d": int(activity_7d),
+                "30d": int(activity_30d),
+                "all": int(activity_all),
+            },
+            "daily_rows": [
+                {
+                    "activity_date": activity_date.isoformat(),
+                    "message_count": int(message_count),
+                    "last_seen_at": _serialize_datetime(row_last_seen),
+                }
+                for activity_date, message_count, row_last_seen in synthetic_daily_rows
+            ],
+            "awards": [
+                {
+                    "title": title,
+                    "created_at": _serialize_datetime(created_at),
+                }
+                for title, created_at in normalized_awards
+            ],
+        }
+
+        state_row = UserChatIrisImportStateModel(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            imported_at=normalized_imported_at,
+            imported_by_user_id=imported_by_user_id,
+            source_bot_username=normalized_source_bot_username,
+            source_target_username=normalized_source_target_username,
+            karma_base_all_time=int(karma_base_all_time),
+        )
+        self._session.add(state_row)
+        self._session.add(
+            UserChatIrisImportHistoryModel(
+                chat_id=chat.telegram_chat_id,
+                user_id=target.telegram_user_id,
+                imported_at=normalized_imported_at,
+                archived_snapshot_json=archived_snapshot_json,
+                imported_snapshot_json=imported_snapshot_json,
+                raw_profile_text=profile_text,
+                raw_awards_text=awards_text,
+            )
+        )
+
+        if existing_activity is None:
+            self._session.add(
+                UserChatActivityModel(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=target.telegram_user_id,
+                    message_count=int(activity_all),
+                    is_active_member=True,
+                    last_seen_at=normalized_last_seen_at,
+                    display_name_override=None,
+                    title_prefix=None,
+                    created_at=normalized_first_seen_at,
+                    updated_at=normalized_imported_at,
+                )
+            )
+        else:
+            existing_activity.message_count = int(activity_all)
+            existing_activity.is_active_member = True
+            existing_activity.created_at = normalized_first_seen_at
+            existing_activity.last_seen_at = normalized_last_seen_at
+            existing_activity.updated_at = normalized_imported_at
+
+        await self._session.execute(
+            delete(UserChatActivityDailyModel).where(
+                UserChatActivityDailyModel.chat_id == chat.telegram_chat_id,
+                UserChatActivityDailyModel.user_id == target.telegram_user_id,
+            )
+        )
+        await self._session.execute(
+            delete(UserChatActivityMinuteModel).where(
+                UserChatActivityMinuteModel.chat_id == chat.telegram_chat_id,
+                UserChatActivityMinuteModel.user_id == target.telegram_user_id,
+            )
+        )
+
+        for activity_date, message_count, row_last_seen in synthetic_daily_rows:
+            self._session.add(
+                UserChatActivityDailyModel(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=target.telegram_user_id,
+                    activity_date=activity_date,
+                    message_count=message_count,
+                    last_seen_at=row_last_seen,
+                )
+            )
+
+        for activity_minute, message_count, row_last_seen in synthetic_minute_rows:
+            self._session.add(
+                UserChatActivityMinuteModel(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=target.telegram_user_id,
+                    activity_minute=activity_minute,
+                    message_count=message_count,
+                    last_seen_at=row_last_seen,
+                )
+            )
+
+        for title, created_at in normalized_awards:
+            self._session.add(
+                UserChatAwardModel(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=target.telegram_user_id,
+                    title=title,
+                    granted_by_user_id=None,
+                    created_at=created_at,
+                )
+            )
+
+        await self._session.flush()
+
+        if existing_activity is None or not previous_was_active:
+            await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=1)
+
+        return self._to_iris_import_state(state_row)
 
     @staticmethod
     def _relationship_chat_match(column, chat_id: int | None):
@@ -3379,7 +3735,30 @@ class SqlAlchemyActivityRepository:
 
         stmt = stmt.group_by(UserKarmaVoteModel.target_user_id)
         rows = (await self._session.execute(stmt)).all()
-        return {int(user_id): int(karma_value or 0) for user_id, karma_value in rows}
+        values = {int(user_id): int(karma_value or 0) for user_id, karma_value in rows}
+        if period == "all":
+            bases = await self._get_iris_karma_bases(chat_id=chat_id, user_ids=None)
+            for user_id, karma_base in bases.items():
+                values[user_id] = values.get(user_id, 0) + karma_base
+        return values
+
+    async def _get_iris_karma_base(self, *, chat_id: int, user_id: int) -> int:
+        row = await self._session.get(
+            UserChatIrisImportStateModel,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        if row is None:
+            return 0
+        return int(row.karma_base_all_time or 0)
+
+    async def _get_iris_karma_bases(self, *, chat_id: int, user_ids: Sequence[int] | None) -> dict[int, int]:
+        stmt = select(UserChatIrisImportStateModel).where(UserChatIrisImportStateModel.chat_id == chat_id)
+        if user_ids is not None:
+            if not user_ids:
+                return {}
+            stmt = stmt.where(UserChatIrisImportStateModel.user_id.in_(list(user_ids)))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {int(row.user_id): int(row.karma_base_all_time or 0) for row in rows}
 
     async def _get_users_by_ids(self, user_ids: Sequence[int]) -> dict[int, UserModel]:
         if not user_ids:
@@ -3687,6 +4066,18 @@ class SqlAlchemyActivityRepository:
             title=row.title,
             granted_by_user_id=int(row.granted_by_user_id) if row.granted_by_user_id is not None else None,
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_iris_import_state(row: UserChatIrisImportStateModel) -> IrisImportState:
+        return IrisImportState(
+            chat_id=int(row.chat_id),
+            user_id=int(row.user_id),
+            imported_at=row.imported_at,
+            imported_by_user_id=int(row.imported_by_user_id) if row.imported_by_user_id is not None else None,
+            source_bot_username=row.source_bot_username,
+            source_target_username=row.source_target_username,
+            karma_base_all_time=int(row.karma_base_all_time),
         )
 
     @staticmethod

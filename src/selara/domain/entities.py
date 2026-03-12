@@ -105,6 +105,17 @@ class UserChatAward:
 
 
 @dataclass(frozen=True)
+class IrisImportState:
+    chat_id: int
+    user_id: int
+    imported_at: datetime
+    imported_by_user_id: int | None
+    source_bot_username: str
+    source_target_username: str
+    karma_base_all_time: int
+
+
+@dataclass(frozen=True)
 class ChatRoleAssignment:
     chat_id: int
     user_id: int

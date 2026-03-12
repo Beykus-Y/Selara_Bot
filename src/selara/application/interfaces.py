@@ -14,6 +14,7 @@ from selara.domain.entities import (
     FamilyBundle,
     FamilyGraph,
     GraphRelationType,
+    IrisImportState,
     GraphRelationship,
     InlinePrivateMessage,
     PairState,
@@ -156,6 +157,27 @@ class ActivityRepository(Protocol):
     ) -> UserChatAward: ...
     async def list_user_chat_awards(self, *, chat_id: int, user_id: int, limit: int = 10) -> list[UserChatAward]: ...
     async def remove_user_chat_award(self, *, chat_id: int, award_id: int) -> bool: ...
+    async def get_user_chat_iris_import_state(self, *, chat_id: int, user_id: int) -> IrisImportState | None: ...
+    async def apply_user_chat_iris_import(
+        self,
+        *,
+        chat: ChatSnapshot,
+        target: UserSnapshot,
+        imported_by_user_id: int | None,
+        source_bot_username: str,
+        source_target_username: str,
+        imported_at: datetime,
+        profile_text: str,
+        awards_text: str,
+        karma_base_all_time: int,
+        first_seen_at: datetime,
+        last_seen_at: datetime,
+        activity_1d: int,
+        activity_7d: int,
+        activity_30d: int,
+        activity_all: int,
+        awards: list[tuple[str, datetime]],
+    ) -> IrisImportState: ...
     async def get_active_pair(self, *, user_id: int, chat_id: int | None = None) -> PairState | None: ...
     async def get_active_marriage(self, *, user_id: int, chat_id: int | None = None) -> MarriageState | None: ...
     async def get_active_relationship(self, *, user_id: int, chat_id: int | None = None) -> RelationshipState | None: ...

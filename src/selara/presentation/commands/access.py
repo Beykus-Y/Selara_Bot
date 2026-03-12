@@ -22,6 +22,7 @@ _RESET_COMMAND_RANK_RE = re.compile(
 SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "start": "start",
     "me": "me",
+    "iris_perenos": "iris_perenos",
     "rep": "rep",
     "top": "top",
     "active": "active",

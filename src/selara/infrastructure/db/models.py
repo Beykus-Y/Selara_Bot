@@ -137,6 +137,64 @@ Index("idx_user_chat_profiles_chat_user", UserChatProfileModel.chat_id, UserChat
 Index("idx_user_chat_awards_chat_user_created", UserChatAwardModel.chat_id, UserChatAwardModel.user_id, UserChatAwardModel.created_at)
 
 
+class UserChatIrisImportStateModel(Base):
+    __tablename__ = "user_chat_iris_import_state"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    imported_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_bot_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_target_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    karma_base_all_time: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+
+
+class UserChatIrisImportHistoryModel(Base):
+    __tablename__ = "user_chat_iris_import_history"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    archived_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    imported_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_profile_text: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_awards_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+Index(
+    "idx_user_chat_iris_import_state_chat_user",
+    UserChatIrisImportStateModel.chat_id,
+    UserChatIrisImportStateModel.user_id,
+)
+Index(
+    "idx_user_chat_iris_import_history_chat_user_imported",
+    UserChatIrisImportHistoryModel.chat_id,
+    UserChatIrisImportHistoryModel.user_id,
+    UserChatIrisImportHistoryModel.imported_at,
+)
+
+
 class UserChatActivityDailyModel(Base):
     __tablename__ = "user_chat_activity_daily"
 

@@ -2,10 +2,12 @@ from datetime import datetime, timedelta, timezone
 import os
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.models import UserChatActivityDailyModel, UserChatIrisImportHistoryModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 
@@ -297,6 +299,145 @@ async def test_repository_pair_to_marriage_transition_and_action_usage() -> None
             )
             == used_at
         )
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_applies_iris_import_and_merges_awards() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100700, chat_type="group", title="Iris Group")
+    actor = UserSnapshot(telegram_user_id=501, username="admin501", first_name="Admin", last_name=None, is_bot=False)
+    target = UserSnapshot(telegram_user_id=777, username="nigh_cord25", first_name="Kykold", last_name=None, is_bot=False)
+    imported_at = datetime(2026, 3, 12, 10, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=target, event_at=datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc))
+        await repo.upsert_activity(chat=chat, user=target, event_at=datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc))
+        await repo.add_user_chat_award(
+            chat=chat,
+            target=target,
+            title="Старая награда",
+            granted_by_user_id=actor.telegram_user_id,
+            created_at=datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc),
+        )
+
+        state = await repo.apply_user_chat_iris_import(
+            chat=chat,
+            target=target,
+            imported_by_user_id=actor.telegram_user_id,
+            source_bot_username="iris_moon_bot",
+            source_target_username="nigh_cord25",
+            imported_at=imported_at,
+            profile_text="profile raw",
+            awards_text="awards raw",
+            karma_base_all_time=14,
+            first_seen_at=datetime(2026, 1, 18, 5, 0, tzinfo=timezone.utc),
+            last_seen_at=datetime(2026, 3, 12, 9, 0, tzinfo=timezone.utc),
+            activity_1d=4,
+            activity_7d=11,
+            activity_30d=30,
+            activity_all=99,
+            awards=[
+                ("🎗₁ Ждун яйца", datetime(2026, 3, 1, 5, 0, tzinfo=timezone.utc)),
+                ("🎗₁ Лучший влд", datetime(2026, 2, 1, 5, 0, tzinfo=timezone.utc)),
+            ],
+        )
+
+        await session.flush()
+
+        assert state.chat_id == chat.telegram_chat_id
+        assert state.user_id == target.telegram_user_id
+        assert state.karma_base_all_time == 14
+
+        stats = await repo.get_user_stats(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id)
+        assert stats is not None
+        assert stats.message_count == 99
+        assert stats.first_seen_at == datetime(2026, 1, 18, 5, 0, tzinfo=timezone.utc)
+        assert stats.last_seen_at == datetime(2026, 3, 12, 9, 0, tzinfo=timezone.utc)
+
+        daily_rows = (
+            await session.execute(
+                select(UserChatActivityDailyModel).where(
+                    UserChatActivityDailyModel.chat_id == chat.telegram_chat_id,
+                    UserChatActivityDailyModel.user_id == target.telegram_user_id,
+                )
+            )
+        ).scalars().all()
+        assert sum(row.message_count for row in daily_rows if row.activity_date >= imported_at.date()) == 4
+        assert sum(row.message_count for row in daily_rows if row.activity_date >= imported_at.date() - timedelta(days=6)) == 11
+        assert sum(row.message_count for row in daily_rows if row.activity_date >= imported_at.date() - timedelta(days=29)) == 30
+
+        awards = await repo.list_user_chat_awards(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id, limit=10)
+        assert len(awards) == 3
+        assert {award.title for award in awards} >= {"Старая награда", "🎗₁ Ждун яйца", "🎗₁ Лучший влд"}
+
+        history_rows = (
+            await session.execute(
+                select(UserChatIrisImportHistoryModel).where(
+                    UserChatIrisImportHistoryModel.chat_id == chat.telegram_chat_id,
+                    UserChatIrisImportHistoryModel.user_id == target.telegram_user_id,
+                )
+            )
+        ).scalars().all()
+        assert len(history_rows) == 1
+        assert history_rows[0].archived_snapshot_json["activity_row"]["message_count"] == 2
+        assert history_rows[0].archived_snapshot_json["minute_rows_summary"]["count"] >= 1
+        assert len(history_rows[0].archived_snapshot_json["awards"]) == 1
+
+        assert await repo.get_karma_value(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            period="all",
+            since=None,
+        ) == 14
+        assert await repo.get_karma_value(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            period="7d",
+            since=imported_at - timedelta(days=7),
+        ) == 0
+
+        leaderboard = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="karma",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=1.0,
+            activity_weight=0.0,
+        )
+        assert leaderboard
+        assert leaderboard[0].user_id == target.telegram_user_id
+        assert leaderboard[0].karma_value == 14
+
+        day_leaderboard = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="activity",
+            period="day",
+            since=imported_at - timedelta(days=1),
+            limit=10,
+            karma_weight=0.0,
+            activity_weight=1.0,
+        )
+        assert day_leaderboard
+        assert day_leaderboard[0].user_id == target.telegram_user_id
+        assert day_leaderboard[0].activity_value == 4
 
         await session.commit()
 
