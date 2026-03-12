@@ -69,12 +69,14 @@ class _FakeActivityRepo:
 
 
 class _DummyMessage:
-    def __init__(self) -> None:
+    def __init__(self, *, text: str | None = None) -> None:
         self.chat = SimpleNamespace(type="group", id=-100123)
         self.from_user = SimpleNamespace(id=1, username="actor", first_name="Actor", last_name=None, is_bot=False)
         self.reply_to_message = SimpleNamespace(
             from_user=SimpleNamespace(id=2, username="target", first_name="Target", last_name=None, is_bot=False)
         )
+        self.text = text
+        self.caption = None
         self.answers: list[tuple[str, dict[str, object]]] = []
 
     async def answer(self, text: str, **kwargs) -> None:
@@ -112,4 +114,36 @@ async def test_send_social_action_allows_explicit_actions_when_18_enabled(action
 
     assert len(message.answers) == 1
     assert "18+ действия отключены" not in message.answers[0][0]
+    assert message.answers[0][1]["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action_key", "text", "action_fragment", "replica"),
+    [
+        ("hug", "обнять\nБедолага ты наша", "обнял", "Бедолага ты наша"),
+        ("kiss", "поцеловать\nты сегодня лапочка", "поцеловал", "ты сегодня лапочка"),
+        ("hit", "ударить\nэто за мем", "ударил", "это за мем"),
+    ],
+)
+async def test_send_social_action_includes_replica_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    action_key: str,
+    text: str,
+    action_fragment: str,
+    replica: str,
+) -> None:
+    message = _DummyMessage(text=text)
+    monkeypatch.setattr("selara.presentation.handlers.text_commands.random.choice", lambda seq: seq[0])
+
+    await _send_social_action(
+        message,
+        _FakeActivityRepo(),
+        _chat_settings(actions_18_enabled=True),
+        action_key=action_key,
+    )
+
+    assert len(message.answers) == 1
+    assert action_fragment in message.answers[0][0]
+    assert f"С репликой: «{replica}»" in message.answers[0][0]
     assert message.answers[0][1]["parse_mode"] == "HTML"

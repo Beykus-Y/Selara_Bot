@@ -1,4 +1,10 @@
-from selara.presentation.handlers.text_commands import _extract_social_action
+import pytest
+
+from selara.presentation.handlers.text_commands import (
+    _build_social_action_replica_line,
+    _extract_social_action,
+    _extract_social_action_request,
+)
 
 
 def test_extract_social_action_basic_commands() -> None:
@@ -37,3 +43,26 @@ def test_extract_social_action_supports_new_multiword_actions() -> None:
 def test_extract_social_action_ignores_unknown_or_slash() -> None:
     assert _extract_social_action("привет") is None
     assert _extract_social_action("/шлепнуть") is None
+
+
+def test_extract_social_action_request_supports_multiline_replica() -> None:
+    action_key, replica = _extract_social_action_request("Обнять\nБедолага ты наша")
+
+    assert action_key == "hug"
+    assert replica == "Бедолага ты наша"
+
+
+def test_extract_social_action_request_supports_inline_replica_with_punctuation() -> None:
+    action_key, replica = _extract_social_action_request("обнять! бедолага ты наша")
+
+    assert action_key == "hug"
+    assert replica == "бедолага ты наша"
+
+
+def test_build_social_action_replica_line_uses_alternative_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "selara.presentation.handlers.text_commands.random.choice",
+        lambda seq: seq[1],
+    )
+
+    assert _build_social_action_replica_line("привет") == "🗣 И добавил(а): «привет»"

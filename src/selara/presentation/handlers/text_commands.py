@@ -203,6 +203,12 @@ _INLINE_RP_QUERY_ACTIONS: dict[str, str] = {
     **{action_key: action_key for action_key in _SOCIAL_ACTION_CANONICAL},
 }
 _SOCIAL_ACTION_18_PLUS: set[str] = {"fuck", "seduce", "makeout", "night"}
+_SOCIAL_ACTION_REPLICA_TEMPLATES: tuple[str, ...] = (
+    "💬 С репликой: «{replica}»",
+    "🗣 И добавил(а): «{replica}»",
+    "🎙 При этом сказал(а): «{replica}»",
+    "✨ И шепнул(а): «{replica}»",
+)
 _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
     "slap": (
         "👏 | {actor} шлёпнул(а) {target}.",
@@ -950,14 +956,33 @@ def _extract_zhmyh_level(text: str) -> tuple[bool, int | None, str | None]:
 
 
 def _extract_social_action(text: str) -> str | None:
+    action_key, _replica = _extract_social_action_request(text)
+    return action_key
+
+
+def _extract_social_action_request(text: str) -> tuple[str | None, str | None]:
+    raw_text = (text or "").strip()
     normalized = normalize_text_command(text)
     if not normalized or normalized.startswith("/"):
-        return None
+        return None, None
 
     for trigger in sorted(_SOCIAL_ACTION_ALIASES, key=len, reverse=True):
-        if normalized == trigger or normalized.startswith(f"{trigger} "):
-            return _SOCIAL_ACTION_ALIASES[trigger]
-    return None
+        pattern = (
+            r"^\s*"
+            + r"\s+".join(re.escape(part) for part in trigger.split())
+            + r"(?:[?!.,:;…]+)?(?:\s+(?P<tail>[\s\S]*))?\s*$"
+        )
+        match = re.match(pattern, raw_text, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        tail_raw = " ".join(((match.group("tail") or "")).split()).strip() or None
+        return _SOCIAL_ACTION_ALIASES[trigger], tail_raw
+    return None, None
+
+
+def _build_social_action_replica_line(replica: str) -> str:
+    template = random.choice(_SOCIAL_ACTION_REPLICA_TEMPLATES)
+    return template.format(replica=escape(replica))
 
 
 def _extract_today_randomizer_predicate(text: str) -> tuple[bool, str | None, str | None]:
@@ -1655,6 +1680,7 @@ async def _social_action_user_snapshot(message: Message, activity_repo, *, user)
 
 async def _send_social_action(message: Message, activity_repo, chat_settings: ChatSettings, *, action_key: str) -> None:
     canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, "действие")
+    _, replica = _extract_social_action_request(message.text or message.caption or "")
     if message.chat.type not in {"group", "supergroup"}:
         await _answer_quiet(message, "Эта команда работает только в группе.")
         return
@@ -1689,9 +1715,12 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
     actor = await _social_action_user_snapshot(message, activity_repo, user=message.from_user)
     target = await _social_action_user_snapshot(message, activity_repo, user=target_user)
     template = random.choice(_SOCIAL_ACTION_TEMPLATES[action_key])
+    response_text = template.format(actor=_social_action_mention(actor), target=_social_action_mention(target))
+    if replica:
+        response_text = f"{response_text}\n{_build_social_action_replica_line(replica)}"
     await _answer_quiet(
         message,
-        template.format(actor=_social_action_mention(actor), target=_social_action_mention(target)),
+        response_text,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
