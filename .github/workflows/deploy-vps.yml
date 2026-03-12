@@ -22,7 +22,30 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.VPS_APP_DIR }}
+            if [ -f .env ]; then
+              set -a
+              . ./.env
+              set +a
+            fi
+            web_port="${WEB_PORT:-8080}"
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
             docker compose pull app
             docker compose up -d app
+            sleep 10
+            if [ "$(docker inspect -f '{{.State.Running}}' selara-app 2>/dev/null)" != "true" ]; then
+              echo "selara-app is not running after deploy"
+              docker logs selara-app --tail 200 || true
+              exit 1
+            fi
+            for attempt in 1 2 3 4 5 6; do
+              if curl -fsS "http://127.0.0.1:${web_port}/healthz" >/dev/null; then
+                break
+              fi
+              if [ "$attempt" -eq 6 ]; then
+                echo "healthcheck failed for selara-app"
+                docker logs selara-app --tail 200 || true
+                exit 1
+              fi
+              sleep 5
+            done
             docker image prune -f
