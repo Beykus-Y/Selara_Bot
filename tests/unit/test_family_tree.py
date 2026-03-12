@@ -3,7 +3,12 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from selara.presentation.family_tree import _font_candidates, _load_font, build_family_tree_image
+from selara.presentation.family_tree import (
+    _font_candidates,
+    _load_font,
+    _split_text_runs,
+    build_family_tree_image,
+)
 
 
 def test_build_family_tree_image_uses_dashboard_palette() -> None:
@@ -57,3 +62,29 @@ def test_family_tree_prefers_same_font_as_charts() -> None:
     )
 
     assert _font_candidates(bold=True)[0] == expected_path
+
+
+def test_split_text_runs_keeps_emoji_clusters_together() -> None:
+    assert _split_text_runs("Родитель 👨‍👩‍👧 😀") == [
+        ("Родитель ", False),
+        ("👨‍👩‍👧", True),
+        (" ", False),
+        ("😀", True),
+    ]
+
+
+def test_build_family_tree_image_accepts_emoji_labels() -> None:
+    image_bytes = build_family_tree_image(
+        subject_label="😀 @BeykusY",
+        parents=["👨 Папа", "👩 Мама"],
+        step_parents=["🧑 Отчим"],
+        spouse="💛 Партнёр",
+        siblings=["😎 Сиблинг"],
+        children=["👶 Ребёнок"],
+        pets=["🐈 Кот"],
+        grandparents=["🧓 Дедушка"],
+    )
+
+    image = Image.open(BytesIO(image_bytes))
+
+    assert image.format == "PNG"

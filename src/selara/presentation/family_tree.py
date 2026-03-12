@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import unicodedata
 
 from selara.presentation.charts import (
     _ACCENT_CYAN,
@@ -20,6 +21,29 @@ _CARD_RADIUS = 24
 _CARD_OUTLINE_WIDTH = 2
 _LINE_WIDTH = 4
 _DASHED_WIDTH = 3
+_EMOJI_FONT_FAMILIES = (
+    "Noto Color Emoji",
+    "Segoe UI Emoji",
+    "Apple Color Emoji",
+    "Noto Emoji",
+    "Twemoji Mozilla",
+    "EmojiOne Color",
+    "Symbola",
+)
+_EMOJI_FIXED_SIZES = (109, 128, 96, 72, 64)
+_EMOJI_RANGES = (
+    (0x1F1E6, 0x1F1FF),
+    (0x1F300, 0x1F5FF),
+    (0x1F600, 0x1F64F),
+    (0x1F680, 0x1F6FF),
+    (0x1F700, 0x1F77F),
+    (0x1F780, 0x1F7FF),
+    (0x1F800, 0x1F8FF),
+    (0x1F900, 0x1F9FF),
+    (0x1FA70, 0x1FAFF),
+    (0x2600, 0x26FF),
+    (0x2700, 0x27BF),
+)
 
 
 def _font_candidates(*, bold: bool) -> tuple[str, ...]:
@@ -40,6 +64,26 @@ def _font_candidates(*, bold: bool) -> tuple[str, ...]:
     return ()
 
 
+def _emoji_font_candidates() -> tuple[str, ...]:
+    try:
+        from matplotlib import font_manager
+    except Exception:
+        return ()
+
+    candidates: list[str] = []
+    for family in _EMOJI_FONT_FAMILIES:
+        try:
+            resolved = font_manager.findfont(
+                font_manager.FontProperties(family=[family]),
+                fallback_to_default=False,
+            )
+        except Exception:
+            continue
+        if resolved and resolved not in candidates:
+            candidates.append(resolved)
+    return tuple(candidates)
+
+
 def _load_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
@@ -49,6 +93,92 @@ def _load_font(size: int, *, bold: bool = False):
         except OSError:
             continue
     return ImageFont.load_default()
+
+
+def _load_emoji_font(size: int):
+    from PIL import ImageFont
+
+    load_sizes = (size, *[candidate for candidate in _EMOJI_FIXED_SIZES if candidate != size])
+    for candidate in _emoji_font_candidates():
+        for load_size in load_sizes:
+            try:
+                return ImageFont.truetype(candidate, size=load_size), load_size
+            except OSError:
+                continue
+    return None
+
+
+def _is_emoji_char(value: str) -> bool:
+    if not value:
+        return False
+    codepoint = ord(value)
+    return any(start <= codepoint <= end for start, end in _EMOJI_RANGES)
+
+
+def _is_regional_indicator(value: str) -> bool:
+    return bool(value) and 0x1F1E6 <= ord(value) <= 0x1F1FF
+
+
+def _is_emoji_modifier(value: str) -> bool:
+    return bool(value) and 0x1F3FB <= ord(value) <= 0x1F3FF
+
+
+def _is_variation_selector(value: str) -> bool:
+    return value in {"\ufe0e", "\ufe0f"}
+
+
+def _is_keycap_base(value: str) -> bool:
+    return value in set("0123456789#*")
+
+
+def _is_emoji_start(text: str, index: int) -> bool:
+    value = text[index]
+    if _is_emoji_char(value) or _is_regional_indicator(value):
+        return True
+    if _is_keycap_base(value):
+        next_value = text[index + 1] if index + 1 < len(text) else ""
+        after_next = text[index + 2] if index + 2 < len(text) else ""
+        return next_value == "\ufe0f" or next_value == "\u20e3" or after_next == "\u20e3"
+    return False
+
+
+def _consume_emoji_cluster(text: str, start: int) -> tuple[str, int]:
+    cluster = [text[start]]
+    index = start + 1
+
+    if _is_regional_indicator(cluster[0]) and index < len(text) and _is_regional_indicator(text[index]):
+        cluster.append(text[index])
+        index += 1
+
+    while index < len(text):
+        value = text[index]
+        if _is_variation_selector(value) or value == "\u20e3" or _is_emoji_modifier(value) or unicodedata.combining(value):
+            cluster.append(value)
+            index += 1
+            continue
+        if value == "\u200d" and index + 1 < len(text):
+            cluster.append(value)
+            cluster.append(text[index + 1])
+            index += 2
+            continue
+        break
+    return "".join(cluster), index
+
+
+def _split_text_runs(text: str) -> list[tuple[str, bool]]:
+    runs: list[tuple[str, bool]] = []
+    index = 0
+    while index < len(text):
+        if _is_emoji_start(text, index):
+            cluster, index = _consume_emoji_cluster(text, index)
+            runs.append((cluster, True))
+            continue
+        start = index
+        index += 1
+        while index < len(text) and not _is_emoji_start(text, index):
+            index += 1
+        runs.append((text[start:index], False))
+    return runs
 
 
 def _wrap_lines(text: str, *, line_len: int = 20) -> list[str]:
@@ -99,7 +229,7 @@ def build_family_tree_image(
     width = max(1320, 280 + content_slots * 220)
     height = 980
 
-    image = Image.new("RGB", (width, height), _FIGURE_BG)
+    image = Image.new("RGBA", (width, height), _FIGURE_BG)
     draw = ImageDraw.Draw(image)
 
     title_font = _load_font(34, bold=True)
@@ -107,12 +237,113 @@ def build_family_tree_image(
     name_font = _load_font(20, bold=True)
     small_font = _load_font(15)
     chip_font = _load_font(15, bold=True)
+    emoji_font_cache: dict[int, tuple[object, int] | None] = {}
+    emoji_render_cache: dict[tuple[str, int, str], Image.Image | None] = {}
 
-    draw.text((64, 48), "Семья и династия", fill=_TEXT_MAIN, font=title_font)
+    def _font_size(font, fallback: int = 16) -> int:
+        return int(getattr(font, "size", fallback))
+
+    def _line_height(font) -> int:
+        _left, _top, _right, bottom = draw.textbbox((0, 0), "Ag", font=font)
+        return bottom - _top
+
+    def _get_emoji_font(font):
+        size = _font_size(font)
+        if size not in emoji_font_cache:
+            emoji_font_cache[size] = _load_emoji_font(size)
+        return emoji_font_cache[size]
+
+    def _render_emoji(text: str, *, font, fill: str) -> Image.Image | None:
+        size = _font_size(font)
+        cache_key = (text, size, fill)
+        if cache_key in emoji_render_cache:
+            cached = emoji_render_cache[cache_key]
+            return None if cached is None else cached.copy()
+
+        emoji_font_info = _get_emoji_font(font)
+        if emoji_font_info is None:
+            emoji_render_cache[cache_key] = None
+            return None
+
+        emoji_font, load_size = emoji_font_info
+        measure = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        measure_draw = ImageDraw.Draw(measure)
+        try:
+            bbox = measure_draw.textbbox((0, 0), text, font=emoji_font, embedded_color=True)
+        except TypeError:
+            bbox = measure_draw.textbbox((0, 0), text, font=emoji_font)
+
+        width_local = max(1, bbox[2] - bbox[0])
+        height_local = max(1, bbox[3] - bbox[1])
+        temp = Image.new("RGBA", (width_local + 8, height_local + 8), (0, 0, 0, 0))
+        temp_draw = ImageDraw.Draw(temp)
+        try:
+            temp_draw.text((4 - bbox[0], 4 - bbox[1]), text, font=emoji_font, fill=fill, embedded_color=True)
+        except TypeError:
+            temp_draw.text((4 - bbox[0], 4 - bbox[1]), text, font=emoji_font, fill=fill)
+
+        alpha_bbox = temp.getbbox()
+        if alpha_bbox is None:
+            emoji_render_cache[cache_key] = None
+            return None
+
+        rendered = temp.crop(alpha_bbox)
+        if load_size != size:
+            scale = size / load_size
+            rendered = rendered.resize(
+                (
+                    max(1, round(rendered.width * scale)),
+                    max(1, round(rendered.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+
+        emoji_render_cache[cache_key] = rendered
+        return rendered.copy()
+
+    def _measure_text(text: str, *, font) -> tuple[int, int]:
+        if not text:
+            return (0, _line_height(font))
+
+        width_local = 0
+        height_local = _line_height(font)
+        for segment, is_emoji in _split_text_runs(text):
+            if not segment:
+                continue
+            if is_emoji:
+                rendered = _render_emoji(segment, font=font, fill=_TEXT_MAIN)
+                if rendered is not None:
+                    width_local += rendered.width
+                    height_local = max(height_local, rendered.height)
+                    continue
+            bbox = draw.textbbox((0, 0), segment, font=font)
+            width_local += max(0, bbox[2] - bbox[0])
+            height_local = max(height_local, bbox[3] - bbox[1])
+        return width_local, height_local
+
+    def _draw_text(x: float, y: float, text: str, *, fill: str, font) -> tuple[int, int]:
+        width_local, height_local = _measure_text(text, font=font)
+        cursor_x = x
+        line_height = _line_height(font)
+        for segment, is_emoji in _split_text_runs(text):
+            if not segment:
+                continue
+            if is_emoji:
+                rendered = _render_emoji(segment, font=font, fill=fill)
+                if rendered is not None:
+                    emoji_y = y + max(0, (line_height - rendered.height) / 2)
+                    image.alpha_composite(rendered, dest=(int(round(cursor_x)), int(round(emoji_y))))
+                    cursor_x += rendered.width
+                    continue
+            draw.text((cursor_x, y), segment, fill=fill, font=font)
+            bbox = draw.textbbox((0, 0), segment, font=font)
+            cursor_x += max(0, bbox[2] - bbox[0])
+        return width_local, height_local
+
+    _draw_text(64, 48, "Семья и династия", fill=_TEXT_MAIN, font=title_font)
 
     def _text_height(text: str, font) -> int:
-        _left, _top, _right, bottom = draw.textbbox((0, 0), text, font=font)
-        return bottom - _top
+        return _measure_text(text, font=font)[1]
 
     def draw_pill(
         x: int,
@@ -126,7 +357,7 @@ def build_family_tree_image(
         padding_x: int = 14,
         height_local: int = 34,
     ) -> int:
-        text_width = int(draw.textlength(text, font=font))
+        text_width, text_height = _measure_text(text, font=font)
         width_local = text_width + padding_x * 2
         draw.rounded_rectangle(
             (x, y, x + width_local, y + height_local),
@@ -135,9 +366,9 @@ def build_family_tree_image(
             outline=outline,
             width=2,
         )
-        text_height = _text_height(text, font)
-        draw.text(
-            (x + (width_local - text_width) / 2, y + (height_local - text_height) / 2 - 1),
+        _draw_text(
+            x + (width_local - text_width) / 2,
+            y + (height_local - text_height) / 2 - 1,
             text,
             fill=text_fill,
             font=font,
@@ -174,9 +405,15 @@ def build_family_tree_image(
             outline=outline,
             width=_CARD_OUTLINE_WIDTH,
         )
-        draw.text((x + 18, y + 16), subtitle, fill=subtitle_fill, font=small_font)
+        _draw_text(x + 18, y + 16, subtitle, fill=subtitle_fill, font=small_font)
         for index, line in enumerate(_wrap_lines(label)):
-            draw.text((x + 18, y + 40 + index * 24), line, fill=text_fill, font=name_font if text_fill == _TEXT_MAIN else small_font)
+            _draw_text(
+                x + 18,
+                y + 40 + index * 24,
+                line,
+                fill=text_fill,
+                font=name_font if text_fill == _TEXT_MAIN else small_font,
+            )
         return (x, y, x + _CARD_WIDTH, y + card_height)
 
     def draw_dashed_line(start: tuple[int, int], end: tuple[int, int], *, color: str, width_local: int = 3) -> None:
@@ -210,7 +447,7 @@ def build_family_tree_image(
     ):
         stat_x += draw_pill(stat_x, stats_y, text, outline=outline, font=chip_font) + 12
 
-    draw.text((64, top_y - 34), "Родители и супруги", fill=_TEXT_MUTED, font=section_font)
+    _draw_text(64, top_y - 34, "Родители и супруги", fill=_TEXT_MUTED, font=section_font)
     top_cards: list[tuple[int, int, int, int]] = []
     top_people = [*(("Родитель", label) for label in direct_parents), *(("Отчим/мачеха", label) for label in indirect_parents)]
     top_positions = centered_positions(max(1, len(top_people)), row_width=content_width, card_width=_CARD_WIDTH)
@@ -233,7 +470,7 @@ def build_family_tree_image(
     if grandparent_labels:
         chip_x = 64
         chip_y = top_y + 142
-        draw.text((chip_x, chip_y), "Предки", fill=_TEXT_MUTED, font=small_font)
+        _draw_text(chip_x, chip_y, "Предки", fill=_TEXT_MUTED, font=small_font)
         chip_cursor = chip_x
         for label in grandparent_labels:
             chip_cursor += draw_badge(chip_cursor, chip_y + 26, label) + 10
@@ -262,7 +499,7 @@ def build_family_tree_image(
         )
 
     if sibling_labels:
-        draw.text((64, subject_y + 12), "Братья и сёстры", fill=_TEXT_MUTED, font=section_font)
+        _draw_text(64, subject_y + 12, "Братья и сёстры", fill=_TEXT_MUTED, font=section_font)
         chip_x = 64
         chip_y = subject_y + 52
         for label in sibling_labels:
@@ -270,7 +507,7 @@ def build_family_tree_image(
 
     lower_people = [*(("Ребёнок", label) for label in children[:8]), *(("Питомец", label) for label in pets[:6])]
     lower_positions = centered_positions(max(1, len(lower_people)), row_width=content_width, card_width=_CARD_WIDTH)
-    draw.text((64, bottom_y - 34), "Дети и питомцы", fill=_TEXT_MUTED, font=section_font)
+    _draw_text(64, bottom_y - 34, "Дети и питомцы", fill=_TEXT_MUTED, font=section_font)
     lower_cards: list[tuple[int, int, int, int]] = []
     if lower_people:
         for index, (subtitle, label) in enumerate(lower_people):
@@ -317,8 +554,8 @@ def build_family_tree_image(
             width_local=2,
         )
 
-    draw.text((width - 272, height - 54), "Selara • family graph", fill=_TEXT_MUTED, font=small_font)
+    _draw_text(width - 272, height - 54, "Selara • family graph", fill=_TEXT_MUTED, font=small_font)
 
     buffer = BytesIO()
-    image.save(buffer, format="PNG")
+    image.convert("RGB").save(buffer, format="PNG")
     return buffer.getvalue()
