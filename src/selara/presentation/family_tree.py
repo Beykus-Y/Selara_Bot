@@ -22,14 +22,28 @@ _LINE_WIDTH = 4
 _DASHED_WIDTH = 3
 
 
+def _font_candidates(*, bold: bool) -> tuple[str, ...]:
+    try:
+        from matplotlib import font_manager, rcParams
+
+        families = rcParams.get("font.family") or ["sans-serif"]
+        if not isinstance(families, list):
+            families = [families]
+        resolved = font_manager.findfont(
+            font_manager.FontProperties(family=families, weight="bold" if bold else "normal"),
+            fallback_to_default=True,
+        )
+        if resolved:
+            return (resolved,)
+    except Exception:
+        pass
+    return ()
+
+
 def _load_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
-    if bold:
-        candidates = ("DejaVuSans-Bold.ttf", "arialbd.ttf", "arial.ttf", "DejaVuSans.ttf")
-    else:
-        candidates = ("DejaVuSans.ttf", "arial.ttf")
-    for candidate in candidates:
+    for candidate in _font_candidates(bold=bold):
         try:
             return ImageFont.truetype(candidate, size=size)
         except OSError:
