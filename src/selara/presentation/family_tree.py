@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import unicodedata
 
+from selara.presentation.font_support import resolve_emoji_font_paths, resolve_matplotlib_font_path
 from selara.presentation.charts import (
     _ACCENT_CYAN,
     _ACCENT_GOLD,
@@ -21,15 +22,6 @@ _CARD_RADIUS = 24
 _CARD_OUTLINE_WIDTH = 2
 _LINE_WIDTH = 4
 _DASHED_WIDTH = 3
-_EMOJI_FONT_FAMILIES = (
-    "Noto Color Emoji",
-    "Segoe UI Emoji",
-    "Apple Color Emoji",
-    "Noto Emoji",
-    "Twemoji Mozilla",
-    "EmojiOne Color",
-    "Symbola",
-)
 _EMOJI_FIXED_SIZES = (109, 128, 96, 72, 64)
 _EMOJI_RANGES = (
     (0x1F1E6, 0x1F1FF),
@@ -47,41 +39,14 @@ _EMOJI_RANGES = (
 
 
 def _font_candidates(*, bold: bool) -> tuple[str, ...]:
-    try:
-        from matplotlib import font_manager, rcParams
-
-        families = rcParams.get("font.family") or ["sans-serif"]
-        if not isinstance(families, list):
-            families = [families]
-        resolved = font_manager.findfont(
-            font_manager.FontProperties(family=families, weight="bold" if bold else "normal"),
-            fallback_to_default=True,
-        )
-        if resolved:
-            return (resolved,)
-    except Exception:
-        pass
-    return ()
+    resolved = resolve_matplotlib_font_path(bold=bold)
+    if resolved is None:
+        return ()
+    return (resolved,)
 
 
 def _emoji_font_candidates() -> tuple[str, ...]:
-    try:
-        from matplotlib import font_manager
-    except Exception:
-        return ()
-
-    candidates: list[str] = []
-    for family in _EMOJI_FONT_FAMILIES:
-        try:
-            resolved = font_manager.findfont(
-                font_manager.FontProperties(family=[family]),
-                fallback_to_default=False,
-            )
-        except Exception:
-            continue
-        if resolved and resolved not in candidates:
-            candidates.append(resolved)
-    return tuple(candidates)
+    return resolve_emoji_font_paths()
 
 
 def _load_font(size: int, *, bold: bool = False):

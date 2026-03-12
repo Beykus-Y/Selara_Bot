@@ -5,6 +5,7 @@ from typing import Sequence
 
 from selara.domain.entities import LeaderboardItem, LeaderboardMode
 from selara.domain.value_objects import display_name_from_parts
+from selara.presentation.font_support import matplotlib_text_families
 
 
 def _safe_import_matplotlib():
@@ -12,6 +13,7 @@ def _safe_import_matplotlib():
         import matplotlib
 
         matplotlib.use("Agg")
+        matplotlib.rcParams["font.family"] = list(matplotlib_text_families())
         import matplotlib.pyplot as plt
 
         return plt
