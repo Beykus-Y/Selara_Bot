@@ -32,7 +32,7 @@ from selara.application.use_cases.iris_import import (
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.core.timezone import to_timezone
-from selara.domain.entities import AchievementView, ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
+from selara.domain.entities import ActivityStats, AchievementView, ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import get_actor_role_definition
@@ -64,6 +64,19 @@ _ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|
 _IRIS_IMPORT_TTL = timedelta(minutes=15)
 _IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
 _IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
+_INACTIVE_THRESHOLD = timedelta(days=1)
+_INACTIVE_HEADER_VARIANTS: tuple[str, ...] = (
+    "✖️ <b>Кто в чате не писал больше суток:</b>",
+    "✖️ <b>Список тех, кто молчит в чате уже дольше дня:</b>",
+    "✖️ <b>Кого чат не видел в сообщениях больше 24 часов:</b>",
+    "✖️ <b>Неактив чата старше одних суток:</b>",
+)
+_INACTIVE_EMPTY_VARIANTS: tuple[str, ...] = (
+    "✅ <b>За последние сутки в чате все успели написать хотя бы одно сообщение.</b>",
+    "✅ <b>Неактива старше суток сейчас нет.</b>",
+    "✅ <b>Все участники были активны в течение последних 24 часов.</b>",
+)
+_INACTIVE_CONTINUATION_TITLE = "✖️ <b>Продолжение списка неактива:</b>"
 _ACTIVITY_TOP_PERIOD_ALIASES: dict[str, LeaderboardPeriod] = {
     "week": "week",
     "неделя": "week",
@@ -359,6 +372,86 @@ async def _resolve_profile_mention(activity_repo, *, chat_id: int, user_id: int,
 
 def _join_profile_sections(sections: list[str]) -> str:
     return "\n\n".join(section for section in sections if section.strip())
+
+
+def _pick_variant(*, values: tuple[str, ...], seed: int) -> str:
+    if not values:
+        return ""
+    return values[abs(seed) % len(values)]
+
+
+def _ru_plural(value: int, one: str, few: str, many: str) -> str:
+    mod10 = value % 10
+    mod100 = value % 100
+    if mod10 == 1 and mod100 != 11:
+        return one
+    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+        return few
+    return many
+
+
+def _format_inactive_duration(*, last_seen_at: datetime, now: datetime) -> str:
+    total_seconds = max(0, int((now - last_seen_at).total_seconds()))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} {_ru_plural(days, 'день', 'дня', 'дней')}")
+    if hours:
+        parts.append(f"{hours} ч")
+    elif not days and minutes:
+        parts.append(f"{minutes} мин")
+    return " ".join(parts) or "меньше минуты"
+
+
+def _inactive_member_label(item: ActivityStats) -> str:
+    label = preferred_mention_label_from_parts(
+        user_id=item.user_id,
+        username=item.username,
+        first_name=item.first_name,
+        last_name=item.last_name,
+        chat_display_name=item.chat_display_name,
+    )
+    if label == f"user:{item.user_id}":
+        return "Неизвестный"
+    return label
+
+
+def _build_inactive_members_messages(
+    *,
+    chat_id: int,
+    members: list[ActivityStats],
+    now: datetime,
+) -> list[str]:
+    seed = abs(int(chat_id)) + now.date().toordinal() + len(members)
+    if not members:
+        return [_pick_variant(values=_INACTIVE_EMPTY_VARIANTS, seed=seed)]
+
+    header = _pick_variant(values=_INACTIVE_HEADER_VARIANTS, seed=seed)
+    footer = f"🗓 <b>Всего неактивных:</b> {len(members)}"
+    chunks: list[str] = []
+    current_lines = [header]
+    current_len = len(header)
+
+    for index, item in enumerate(members, start=1):
+        mention = format_user_link(user_id=item.user_id, label=_inactive_member_label(item))
+        inactive_for = escape(_format_inactive_duration(last_seen_at=item.last_seen_at, now=now))
+        line = f"{index}. {mention} (<code>{inactive_for}</code>)"
+        extra_len = len(line) + 1
+        footer_len = len(footer) + 2 if index == len(members) else 0
+        if current_lines and current_len + extra_len + footer_len > 3900:
+            chunks.append("\n".join(current_lines))
+            current_lines = [_INACTIVE_CONTINUATION_TITLE]
+            current_len = len(_INACTIVE_CONTINUATION_TITLE)
+        current_lines.append(line)
+        current_len += extra_len
+
+    current_lines.append("")
+    current_lines.append(footer)
+    chunks.append("\n".join(current_lines))
+    return chunks
 
 
 def _profile_callback_data(*, action: str, user_id: int) -> str:
@@ -1182,6 +1275,31 @@ async def send_last_seen(
         ),
         parse_mode="HTML",
     )
+
+
+async def send_inactive_members(message: Message, activity_repo) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда работает только в группе.")
+        return
+
+    now = _now_utc()
+    inactive_since = now - _INACTIVE_THRESHOLD
+    members = await activity_repo.list_inactive_members(
+        chat_id=message.chat.id,
+        inactive_since=inactive_since,
+    )
+    messages = _build_inactive_members_messages(
+        chat_id=message.chat.id,
+        members=members,
+        now=now,
+    )
+    for chunk in messages:
+        await message.answer(
+            chunk,
+            parse_mode="HTML",
+            disable_notification=True,
+            disable_web_page_preview=True,
+        )
 
 
 async def _resolve_last_seen_command_target(

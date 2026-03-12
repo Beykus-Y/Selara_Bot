@@ -92,6 +92,7 @@ from selara.presentation.handlers.relationships import (
 )
 from selara.presentation.handlers.stats import (
     achievements_command,
+    send_inactive_members,
     award_reply_text_command,
     send_last_seen,
     send_me_stats,
@@ -2877,6 +2878,10 @@ async def text_commands_handler(
     if intent.name == "active":
         limit = int(intent.args.get("limit", chat_settings.top_limit_default))
         await send_top_stats(message, activity_repo, settings, chat_settings, limit, mode="activity")
+        return
+
+    if intent.name == "inactive":
+        await send_inactive_members(message, activity_repo)
         return
 
     if intent.name == "top":

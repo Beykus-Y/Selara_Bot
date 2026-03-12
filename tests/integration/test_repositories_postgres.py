@@ -204,6 +204,49 @@ async def test_repository_lists_user_manageable_game_chats() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_repository_lists_inactive_members_oldest_first_and_skips_bots_and_inactive_members() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-10077, chat_type="group", title="Inactive Group")
+    oldest = UserSnapshot(telegram_user_id=1001, username="oldest", first_name="Old", last_name="One", is_bot=False)
+    recent = UserSnapshot(telegram_user_id=1002, username="recent", first_name="Recent", last_name="One", is_bot=False)
+    left_user = UserSnapshot(telegram_user_id=1003, username="left", first_name="Left", last_name="User", is_bot=False)
+    bot_user = UserSnapshot(telegram_user_id=1004, username="service_bot", first_name="Service", last_name="Bot", is_bot=True)
+    active_user = UserSnapshot(telegram_user_id=1005, username="active", first_name="Active", last_name="User", is_bot=False)
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=oldest, event_at=now - timedelta(days=5))
+        await repo.set_chat_display_name(chat=chat, user=oldest, display_name="Старый ник")
+        await repo.upsert_activity(chat=chat, user=recent, event_at=now - timedelta(days=2, hours=3))
+        await repo.upsert_activity(chat=chat, user=left_user, event_at=now - timedelta(days=4))
+        await repo.set_chat_member_active(chat=chat, user=left_user, is_active=False, event_at=now - timedelta(days=1))
+        await repo.upsert_activity(chat=chat, user=bot_user, event_at=now - timedelta(days=3))
+        await repo.upsert_activity(chat=chat, user=active_user, event_at=now - timedelta(hours=10))
+
+        rows = await repo.list_inactive_members(chat_id=chat.telegram_chat_id, inactive_since=now - timedelta(days=1))
+
+        assert [row.user_id for row in rows] == [oldest.telegram_user_id, recent.telegram_user_id]
+        assert rows[0].chat_display_name == "Старый ник"
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repository_pair_to_marriage_transition_and_action_usage() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:

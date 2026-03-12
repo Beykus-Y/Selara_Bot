@@ -17,6 +17,10 @@ BotPermission = Literal[
     "manage_role_templates",
 ]
 
+_DEFAULT_MIN_ROLE_BY_COMMAND_KEY: dict[str, str] = {
+    "inactive": "junior_admin",
+}
+
 
 def build_chat_snapshot(*, chat_id: int, chat_type: str, chat_title: str | None) -> ChatSnapshot:
     return ChatSnapshot(
@@ -192,15 +196,16 @@ async def has_command_access(
     except SQLAlchemyError:
         await safe_rollback(activity_repo)
         return True, definition.role_code, None, bootstrapped
-    if rule is None:
+    required_role_code = rule.min_role_code if rule is not None else _DEFAULT_MIN_ROLE_BY_COMMAND_KEY.get(command_key)
+    if required_role_code is None:
         return True, definition.role_code, None, bootstrapped
 
     try:
-        required = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=rule.min_role_code)
+        required = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=required_role_code)
     except SQLAlchemyError:
         await safe_rollback(activity_repo)
-        return False, definition.role_code, rule.min_role_code, bootstrapped
+        return False, definition.role_code, required_role_code, bootstrapped
     if required is None:
-        return False, definition.role_code, rule.min_role_code, bootstrapped
+        return False, definition.role_code, required_role_code, bootstrapped
 
     return definition.rank >= required.rank, definition.role_code, required.role_code, bootstrapped

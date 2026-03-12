@@ -644,6 +644,32 @@ class SqlAlchemyActivityRepository:
         rows = (await self._session.execute(stmt)).all()
         return [self._to_stats(activity, user) for activity, user in rows]
 
+    async def list_inactive_members(
+        self,
+        *,
+        chat_id: int,
+        inactive_since: datetime,
+        limit: int | None = None,
+    ) -> list[ActivityStats]:
+        stmt = (
+            select(UserChatActivityModel, UserModel)
+            .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
+                UserChatActivityModel.last_seen_at < _coerce_utc_datetime(inactive_since),
+                UserModel.is_bot.is_(False),
+            )
+            .order_by(
+                UserChatActivityModel.last_seen_at.asc(),
+                UserChatActivityModel.user_id.asc(),
+            )
+        )
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
+        rows = (await self._session.execute(stmt)).all()
+        return [self._to_stats(activity, user) for activity, user in rows]
+
     async def get_last_seen(self, *, chat_id: int, user_id: int) -> datetime | None:
         stmt = select(UserChatActivityModel.last_seen_at).where(
             UserChatActivityModel.chat_id == chat_id,

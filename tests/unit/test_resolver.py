@@ -67,6 +67,12 @@ def test_resolver_maps_last_seen_alias() -> None:
     assert intent.name == "lastseen"
 
 
+def test_resolver_maps_inactive_alias() -> None:
+    intent = resolve_text_command("кто неактив", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "inactive"
+
+
 def test_resolver_maps_rep_alias() -> None:
     intent = resolve_text_command("репутация", top_default=10, top_max=50)
     assert intent is not None

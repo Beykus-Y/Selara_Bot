@@ -132,6 +132,7 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "rep": "репутация",
     "achievements": "достижения",
     "lastseen": "когда был",
+    "inactive": "кто неактив",
     "eco": "баланс",
     "farm": "ферма",
     "shop": "магазин",
