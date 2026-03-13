@@ -7,6 +7,7 @@ from aiogram.types import BotCommand
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
+from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.routers import build_router
@@ -154,6 +155,7 @@ async def run() -> None:
 
     try:
         async with asyncio.TaskGroup() as tg:
+            tg.create_task(run_message_event_backfill(session_factory))
             tg.create_task(_run_bot(settings, session_factory))
             tg.create_task(_run_web_panel(settings, session_factory))
     finally:

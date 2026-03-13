@@ -16,6 +16,7 @@ async def execute(
     last_name: str | None,
     is_bot: bool,
     event_at: datetime,
+    telegram_message_id: int | None = None,
 ) -> ActivityStats:
     chat = ChatSnapshot(telegram_chat_id=chat_id, chat_type=chat_type, title=chat_title)
     user = UserSnapshot(
@@ -25,4 +26,9 @@ async def execute(
         last_name=last_name,
         is_bot=is_bot,
     )
-    return await repo.upsert_activity(chat=chat, user=user, event_at=event_at)
+    return await repo.upsert_activity(
+        chat=chat,
+        user=user,
+        event_at=event_at,
+        telegram_message_id=telegram_message_id,
+    )

@@ -44,6 +44,7 @@ class ActivityRepository(Protocol):
         chat: ChatSnapshot,
         user: UserSnapshot,
         event_at: datetime,
+        telegram_message_id: int | None = None,
     ) -> ActivityStats: ...
 
     async def get_user_stats(self, *, chat_id: int, user_id: int) -> ActivityStats | None: ...

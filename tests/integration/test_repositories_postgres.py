@@ -2,12 +2,18 @@ from datetime import datetime, timedelta, timezone
 import os
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import MarriageModel, UserChatActivityDailyModel, UserChatIrisImportHistoryModel
+from selara.infrastructure.db.models import (
+    ChatActivityEventSyncStateModel,
+    MarriageModel,
+    UserChatActivityDailyModel,
+    UserChatIrisImportHistoryModel,
+    UserChatMessageEventModel,
+)
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 
@@ -40,6 +46,54 @@ async def test_repository_upsert_and_top_ordering() -> None:
         assert top[0].user_id == 11
         assert top[0].message_count == 2
         assert top[1].user_id == 22
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_upsert_deduplicates_real_message_id() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=2, chat_type="group", title="Dedup Group")
+    user = UserSnapshot(telegram_user_id=33, username="dup_user", first_name="Dup", last_name=None, is_bot=False)
+    event_at = datetime(2026, 2, 12, 10, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(
+            chat=chat,
+            user=user,
+            event_at=event_at,
+            telegram_message_id=101,
+        )
+        await repo.upsert_activity(
+            chat=chat,
+            user=user,
+            event_at=event_at + timedelta(minutes=1),
+            telegram_message_id=101,
+        )
+
+        stats = await repo.get_user_stats(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id)
+        event_count = await session.scalar(
+            select(func.count(UserChatMessageEventModel.id)).where(UserChatMessageEventModel.chat_id == chat.telegram_chat_id)
+        )
+
+        assert stats is not None
+        assert stats.message_count == 1
+        assert int(event_count or 0) == 1
 
         await session.commit()
 
@@ -239,6 +293,78 @@ async def test_repository_lists_inactive_members_oldest_first_and_skips_bots_and
 
         assert [row.user_id for row in rows] == [oldest.telegram_user_id, recent.telegram_user_id]
         assert rows[0].chat_display_name == "Старый ник"
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_backfill_syncs_event_reads_for_chat() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-10088, chat_type="group", title="Backfill Group")
+    user_one = UserSnapshot(telegram_user_id=2011, username="one_bf", first_name="One", last_name=None, is_bot=False)
+    user_two = UserSnapshot(telegram_user_id=2012, username="two_bf", first_name="Two", last_name=None, is_bot=False)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=user_one, event_at=now - timedelta(hours=5))
+        await repo.upsert_activity(chat=chat, user=user_one, event_at=now - timedelta(hours=1))
+        await repo.upsert_activity(chat=chat, user=user_two, event_at=now - timedelta(hours=3))
+        await repo.set_chat_display_name(chat=chat, user=user_one, display_name="One Local")
+
+        await session.execute(delete(UserChatMessageEventModel).where(UserChatMessageEventModel.chat_id == chat.telegram_chat_id))
+
+        synced = await repo.backfill_message_events_for_chat(chat_id=chat.telegram_chat_id)
+        sync_state = await session.get(ChatActivityEventSyncStateModel, chat.telegram_chat_id)
+
+        top = await repo.get_top(chat_id=chat.telegram_chat_id, limit=10)
+        summary = await repo.get_chat_activity_summary(chat_id=chat.telegram_chat_id)
+        day_series = await repo.get_chat_activity_daily_series(chat_id=chat.telegram_chat_id, days=1)
+        rep_all, _, rep_last_seen = await repo.get_representation_stats(
+            chat_id=chat.telegram_chat_id,
+            user_id=user_one.telegram_user_id,
+            since=None,
+        )
+        rep_recent, _, _ = await repo.get_representation_stats(
+            chat_id=chat.telegram_chat_id,
+            user_id=user_one.telegram_user_id,
+            since=now - timedelta(hours=2),
+        )
+        inactive_rows = await repo.list_inactive_members(
+            chat_id=chat.telegram_chat_id,
+            inactive_since=now - timedelta(minutes=30),
+        )
+        activity_chats = await repo.list_user_activity_chats(user_id=user_one.telegram_user_id, limit=10)
+
+        assert synced is True
+        assert sync_state is not None
+        assert sync_state.status == "synced"
+        assert top[0].user_id == user_one.telegram_user_id
+        assert top[0].message_count == 2
+        assert top[0].chat_display_name == "One Local"
+        assert summary.total_messages == 3
+        assert summary.last_activity_at == now - timedelta(hours=1)
+        assert day_series[-1][1] == 3
+        assert rep_all == 2
+        assert rep_last_seen == now - timedelta(hours=1)
+        assert rep_recent == 1
+        assert [row.user_id for row in inactive_rows] == [user_two.telegram_user_id, user_one.telegram_user_id]
+        assert activity_chats[0].chat_id == chat.telegram_chat_id
+        assert activity_chats[0].message_count == 2
 
         await session.commit()
 
@@ -559,6 +685,14 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
         assert sum(row.message_count for row in daily_rows if row.activity_date >= imported_at.date() - timedelta(days=6)) == 11
         assert sum(row.message_count for row in daily_rows if row.activity_date >= imported_at.date() - timedelta(days=29)) == 30
 
+        imported_event_count = await session.scalar(
+            select(func.count(UserChatMessageEventModel.id)).where(
+                UserChatMessageEventModel.chat_id == chat.telegram_chat_id,
+                UserChatMessageEventModel.user_id == target.telegram_user_id,
+            )
+        )
+        assert int(imported_event_count or 0) == 99
+
         awards = await repo.list_user_chat_awards(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id, limit=10)
         assert len(awards) == 3
         assert {award.title for award in awards} >= {"Старая награда", "🎗₁ Ждун яйца", "🎗₁ Лучший влд"}
@@ -639,6 +773,32 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
         assert seven_day_leaderboard
         assert seven_day_leaderboard[0].user_id == target.telegram_user_id
         assert seven_day_leaderboard[0].activity_value == 11
+
+        await session.execute(
+            delete(UserChatMessageEventModel).where(
+                UserChatMessageEventModel.chat_id == chat.telegram_chat_id,
+                UserChatMessageEventModel.user_id == target.telegram_user_id,
+            )
+        )
+        assert await repo.backfill_message_events_for_chat(chat_id=chat.telegram_chat_id) is True
+
+        rebuilt_event_count = await session.scalar(
+            select(func.count(UserChatMessageEventModel.id)).where(
+                UserChatMessageEventModel.chat_id == chat.telegram_chat_id,
+                UserChatMessageEventModel.user_id == target.telegram_user_id,
+            )
+        )
+        sync_state = await session.get(ChatActivityEventSyncStateModel, chat.telegram_chat_id)
+        rebuilt_activity_7d, _, _ = await repo.get_representation_stats(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            since=imported_at - timedelta(days=7),
+        )
+
+        assert int(rebuilt_event_count or 0) == 99
+        assert sync_state is not None
+        assert sync_state.status == "synced"
+        assert rebuilt_activity_7d == 11
 
         await session.commit()
 

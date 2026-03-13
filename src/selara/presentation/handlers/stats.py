@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from functools import partial
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
@@ -29,6 +30,7 @@ from selara.application.use_cases.iris_import import (
     parse_forwarded_awards_message,
     parse_forwarded_profile_message,
 )
+from selara.core.roles import SYSTEM_ROLE_BY_CODE
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.core.timezone import to_timezone
@@ -63,6 +65,7 @@ _PROFILE_CALLBACK_PREFIX = "profile"
 _ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N]"
 _IRIS_IMPORT_TTL = timedelta(minutes=15)
 _IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
+_AWARD_MIN_ACTOR_RANK = SYSTEM_ROLE_BY_CODE["junior_admin"].rank + 1
 _IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
 _INACTIVE_THRESHOLD = timedelta(days=1)
 _INACTIVE_HEADER_VARIANTS: tuple[str, ...] = (
@@ -309,6 +312,43 @@ def _message_text_and_entities(message: Message) -> tuple[str, tuple]:
     return "", ()
 
 
+def _extract_linked_user_label_from_message(message: Message | None, *, user_id: int) -> str | None:
+    if message is None:
+        return None
+
+    text, entities = _message_text_and_entities(message)
+    if not text or not entities:
+        return None
+
+    for entity in entities:
+        entity_type = str(getattr(entity, "type", "") or "").lower()
+        if entity_type == "text_mention":
+            entity_user = getattr(entity, "user", None)
+            if entity_user is None or int(getattr(entity_user, "id", 0) or 0) != int(user_id):
+                continue
+        elif entity_type == "text_link":
+            parsed = urlparse(str(getattr(entity, "url", "") or ""))
+            if parsed.scheme != "tg" or parsed.netloc != "user":
+                continue
+            linked_user_id = (parse_qs(parsed.query).get("id") or [None])[0]
+            if linked_user_id is None or not str(linked_user_id).lstrip("-").isdigit():
+                continue
+            if int(linked_user_id) != int(user_id):
+                continue
+        else:
+            continue
+
+        offset = int(getattr(entity, "offset", 0) or 0)
+        length = int(getattr(entity, "length", 0) or 0)
+        if length <= 0:
+            continue
+        label = text[offset : offset + length].strip()
+        if label:
+            return label
+
+    return None
+
+
 class PendingIrisImportFilter(Filter):
     async def __call__(self, message: Message) -> bool:
         if message.chat.type != "private" or message.from_user is None:
@@ -333,7 +373,14 @@ def _relationship_partner_id(*, user_id: int, user_low_id: int, user_high_id: in
     return user_high_id if user_low_id == user_id else user_low_id
 
 
-async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, cache: dict[int, str]) -> str:
+async def _resolve_profile_label(
+    activity_repo,
+    *,
+    chat_id: int,
+    user_id: int,
+    cache: dict[int, str],
+    fallback_user: UserSnapshot | None = None,
+) -> str:
     cached = cache.get(user_id)
     if cached is not None:
         return cached
@@ -343,7 +390,9 @@ async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, c
         cache[user_id] = display_name
         return display_name
 
-    user = await activity_repo.get_user_snapshot(user_id=user_id)
+    user = fallback_user
+    if user is None:
+        user = await activity_repo.get_user_snapshot(user_id=user_id)
     if user is not None:
         label = preferred_mention_label_from_parts(
             user_id=user.telegram_user_id,
@@ -359,12 +408,25 @@ async def _resolve_profile_label(activity_repo, *, chat_id: int, user_id: int, c
     return label
 
 
-async def _resolve_profile_mention(activity_repo, *, chat_id: int, user_id: int, cache: dict[int, str]) -> str:
+async def _resolve_profile_mention(
+    activity_repo,
+    *,
+    chat_id: int,
+    user_id: int,
+    cache: dict[int, str],
+    fallback_user: UserSnapshot | None = None,
+) -> str:
     cached = cache.get(user_id)
     if cached is not None:
         return cached
 
-    label = await _resolve_profile_label(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    label = await _resolve_profile_label(
+        activity_repo,
+        chat_id=chat_id,
+        user_id=user_id,
+        cache={},
+        fallback_user=fallback_user,
+    )
     mention = format_user_link(user_id=user_id, label=label)
     cache[user_id] = mention
     return mention
@@ -575,8 +637,15 @@ async def _build_achievements_message(
     chat_id: int,
     user_id: int,
     timezone_name: str,
+    fallback_user: UserSnapshot | None = None,
 ) -> str:
-    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+    target_mention = await _resolve_profile_mention(
+        activity_repo,
+        chat_id=chat_id,
+        user_id=user_id,
+        cache={},
+        fallback_user=fallback_user,
+    )
     chat_views, global_views = await _build_achievement_views(
         activity_repo=activity_repo,
         settings=settings,
@@ -722,8 +791,20 @@ async def _ensure_chat_admin(message: Message, bot: Bot) -> bool:
     return True
 
 
-async def _build_profile_about_message(*, activity_repo, chat_id: int, user_id: int) -> str:
-    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+async def _build_profile_about_message(
+    *,
+    activity_repo,
+    chat_id: int,
+    user_id: int,
+    fallback_user: UserSnapshot | None = None,
+) -> str:
+    target_mention = await _resolve_profile_mention(
+        activity_repo,
+        chat_id=chat_id,
+        user_id=user_id,
+        cache={},
+        fallback_user=fallback_user,
+    )
     profile = await activity_repo.get_user_chat_profile(chat_id=chat_id, user_id=user_id)
     description = " ".join(((profile.description if profile is not None else "") or "").split()).strip()
     if not description:
@@ -731,8 +812,21 @@ async def _build_profile_about_message(*, activity_repo, chat_id: int, user_id: 
     return f"<b>О себе:</b> {target_mention}\n{escape(description)}"
 
 
-async def _build_profile_awards_message(*, activity_repo, chat_id: int, user_id: int, timezone_name: str) -> str:
-    target_mention = await _resolve_profile_mention(activity_repo, chat_id=chat_id, user_id=user_id, cache={})
+async def _build_profile_awards_message(
+    *,
+    activity_repo,
+    chat_id: int,
+    user_id: int,
+    timezone_name: str,
+    fallback_user: UserSnapshot | None = None,
+) -> str:
+    target_mention = await _resolve_profile_mention(
+        activity_repo,
+        chat_id=chat_id,
+        user_id=user_id,
+        cache={},
+        fallback_user=fallback_user,
+    )
     awards = await activity_repo.list_user_chat_awards(chat_id=chat_id, user_id=user_id, limit=_PROFILE_AWARDS_LIMIT)
     if not awards:
         return f"У пользователя <b>{target_mention}</b> пока нет наград."
@@ -805,6 +899,21 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         await message.answer('Нужно сделать reply на сообщение участника и написать <code>наградить текст</code>.', parse_mode="HTML")
         return
     if not await _ensure_chat_admin(message, bot):
+        return
+    actor_role_definition, _bootstrapped = await get_actor_role_definition(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        bootstrap_if_missing_owner=True,
+    )
+    if actor_role_definition is None or int(actor_role_definition.rank) < _AWARD_MIN_ACTOR_RANK:
+        await message.answer("Выдавать награды могут только админы бота выше «Мл. админ».")
         return
 
     target_user = message.reply_to_message.from_user
@@ -1336,13 +1445,16 @@ async def _resolve_last_seen_command_target(
         user_id = int(token)
         snapshot = await activity_repo.get_user_snapshot(user_id=user_id)
         if snapshot is not None:
-            label = display_name_from_parts(
-                user_id=snapshot.telegram_user_id,
-                username=snapshot.username,
-                first_name=snapshot.first_name,
-                last_name=snapshot.last_name,
-                chat_display_name=snapshot.chat_display_name,
-            )
+            if snapshot.username:
+                label = f"@{snapshot.username}"
+            else:
+                label = display_name_from_parts(
+                    user_id=snapshot.telegram_user_id,
+                    username=snapshot.username,
+                    first_name=snapshot.first_name,
+                    last_name=snapshot.last_name,
+                    chat_display_name=snapshot.chat_display_name,
+                )
             return user_id, label, None
         return user_id, f"user:{user_id}", None
 
@@ -1836,11 +1948,33 @@ async def profile_card_callback(query: CallbackQuery, activity_repo, settings: S
         await query.answer("Некорректная кнопка", show_alert=False)
         return
 
+    fallback_user: UserSnapshot | None = None
+    message_label = _extract_linked_user_label_from_message(query.message, user_id=target_user_id)
+    if message_label:
+        fallback_user = UserSnapshot(
+            telegram_user_id=target_user_id,
+            username=None,
+            first_name=None,
+            last_name=None,
+            is_bot=False,
+            chat_display_name=message_label,
+        )
+    elif query.from_user is not None and int(query.from_user.id) == int(target_user_id):
+        fallback_user = UserSnapshot(
+            telegram_user_id=query.from_user.id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+            is_bot=bool(query.from_user.is_bot),
+            chat_display_name=None,
+        )
+
     if action == "about":
         text = await _build_profile_about_message(
             activity_repo=activity_repo,
             chat_id=query.message.chat.id,
             user_id=target_user_id,
+            fallback_user=fallback_user,
         )
     elif action == "achievements":
         await _refresh_achievements_for_user(
@@ -1855,6 +1989,7 @@ async def profile_card_callback(query: CallbackQuery, activity_repo, settings: S
             chat_id=query.message.chat.id,
             user_id=target_user_id,
             timezone_name=settings.bot_timezone,
+            fallback_user=fallback_user,
         )
     else:
         text = await _build_profile_awards_message(
@@ -1862,6 +1997,7 @@ async def profile_card_callback(query: CallbackQuery, activity_repo, settings: S
             chat_id=query.message.chat.id,
             user_id=target_user_id,
             timezone_name=settings.bot_timezone,
+            fallback_user=fallback_user,
         )
 
     await query.message.answer(

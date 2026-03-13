@@ -54,6 +54,7 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                     last_name=event.from_user.last_name,
                     is_bot=event.from_user.is_bot,
                     event_at=event.date,
+                    telegram_message_id=event.message_id,
                 )
                 if achievement_orchestrator is not None and event.from_user is not None:
                     await achievement_orchestrator.process_message(

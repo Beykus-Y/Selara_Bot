@@ -1,3 +1,4 @@
+from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
@@ -70,6 +71,7 @@ from selara.domain.economy_entities import (
 )
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
+    ChatActivityEventSyncStateModel,
     ChatAuditLogModel,
     ChatAchievementStatsModel,
     ChatAuctionModel,
@@ -108,6 +110,7 @@ from selara.infrastructure.db.models import (
     UserChatModerationStateModel,
     UserChatIrisImportHistoryModel,
     UserChatIrisImportStateModel,
+    UserChatMessageEventModel,
     UserChatProfileModel,
     UserGlobalAchievementModel,
     UserKarmaVoteModel,
@@ -120,6 +123,16 @@ from selara.infrastructure.db.achievement_metrics import (
     set_chat_active_members_count,
     set_global_users_base_count,
 )
+
+_ACTIVITY_EVENT_SYNCED = "synced"
+_ACTIVITY_EVENT_PENDING = "pending"
+_ACTIVITY_EVENT_MISMATCH = "mismatch"
+_ACTIVITY_EVENT_FAILED = "failed"
+_ACTIVITY_EVENT_SOURCE_LEGACY_MINUTE = "legacy_minute"
+_ACTIVITY_EVENT_SOURCE_LEGACY_DAY = "legacy_day"
+_ACTIVITY_EVENT_SOURCE_LEGACY_TOTAL = "legacy_total"
+_ACTIVITY_EVENT_SOURCE_IMPORT_MINUTE = "import_minute"
+_ACTIVITY_EVENT_SOURCE_IMPORT_TOTAL = "import_total"
 
 
 def _normalize_free_text(value: str) -> str:
@@ -165,6 +178,12 @@ def _serialize_datetime(value: datetime | None) -> str | None:
     return _coerce_utc_datetime(value).isoformat()
 
 
+def _normalize_optional_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return _coerce_utc_datetime(value)
+
+
 def _distribute_activity(total: int, days: Sequence[date]) -> dict[date, int]:
     if total <= 0 or not days:
         return {}
@@ -197,7 +216,9 @@ def _build_synthetic_activity_daily_rows(
         if activity_date == today:
             row_last_seen = normalized_last_seen
         else:
-            row_last_seen = datetime.combine(activity_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
+            # Keep historical synthetic buckets at day start so rolling windows
+            # like imported_at - 7 days don't accidentally include the 8th day.
+            row_last_seen = datetime.combine(activity_date, datetime.min.time(), tzinfo=timezone.utc)
         rows.append((activity_date, message_count, row_last_seen))
     return rows
 
@@ -228,9 +249,48 @@ def _build_synthetic_activity_minute_rows(
     ]
 
 
+def _normalize_sql_date(value: object) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return _coerce_utc_datetime(value).date()
+    return date.fromisoformat(str(value))
+
+
+def _build_synthetic_activity_total_rows(
+    *,
+    first_seen_at: datetime,
+    residual_total: int,
+    earliest_covered_date: date | None,
+) -> list[tuple[datetime, int, datetime]]:
+    normalized_first_seen = _coerce_utc_datetime(first_seen_at)
+    if residual_total <= 0:
+        return []
+
+    start_date = normalized_first_seen.date()
+    end_date = start_date
+    if earliest_covered_date is not None and earliest_covered_date > start_date:
+        end_date = earliest_covered_date - timedelta(days=1)
+
+    day_count = max(1, (end_date - start_date).days + 1)
+    days = [start_date + timedelta(days=offset) for offset in range(day_count)]
+    distributed = _distribute_activity(int(residual_total), days)
+
+    rows: list[tuple[datetime, int, datetime]] = []
+    for activity_date in days:
+        message_count = int(distributed.get(activity_date, 0))
+        if message_count <= 0:
+            continue
+        bucket_at = datetime.combine(activity_date, datetime.min.time(), tzinfo=timezone.utc)
+        sent_at = normalized_first_seen if activity_date == start_date else bucket_at + timedelta(hours=12)
+        rows.append((bucket_at, message_count, sent_at))
+    return rows
+
+
 class SqlAlchemyActivityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self._chat_event_sync_cache: dict[int, str | None] = {}
 
     async def upsert_activity(
         self,
@@ -238,10 +298,174 @@ class SqlAlchemyActivityRepository:
         chat: ChatSnapshot,
         user: UserSnapshot,
         event_at: datetime,
+        telegram_message_id: int | None = None,
     ) -> ActivityStats:
         # Keep entity upserts in a stable order to reduce PostgreSQL deadlock risk.
         await self._upsert_chat(chat)
         await self._upsert_user(user)
+        inserted = await self._insert_message_event(
+            chat_id=chat.telegram_chat_id,
+            user_id=user.telegram_user_id,
+            sent_at=event_at,
+            telegram_message_id=telegram_message_id,
+            is_synthetic=False,
+        )
+        if inserted:
+            await self._upsert_activity_legacy(chat=chat, user=user, event_at=event_at)
+
+        stats = await self.get_user_stats(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id)
+        if stats is None:
+            raise RuntimeError("Failed to load user stats after upsert")
+        return stats
+
+    async def _insert_message_event(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        sent_at: datetime,
+        telegram_message_id: int | None,
+        is_synthetic: bool,
+        source_kind: str | None = None,
+        source_bucket_at: datetime | None = None,
+        source_seq: int | None = None,
+    ) -> bool:
+        normalized_sent_at = _coerce_utc_datetime(sent_at)
+        normalized_bucket = _coerce_utc_datetime(source_bucket_at) if source_bucket_at is not None else None
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+
+        if dialect == "postgresql":
+            stmt = pg_insert(UserChatMessageEventModel).values(
+                chat_id=chat_id,
+                user_id=user_id,
+                telegram_message_id=telegram_message_id,
+                sent_at=normalized_sent_at,
+                is_synthetic=is_synthetic,
+                source_kind=source_kind,
+                source_bucket_at=normalized_bucket,
+                source_seq=source_seq,
+            )
+            if is_synthetic:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=[
+                        UserChatMessageEventModel.chat_id,
+                        UserChatMessageEventModel.user_id,
+                        UserChatMessageEventModel.source_kind,
+                        UserChatMessageEventModel.source_bucket_at,
+                        UserChatMessageEventModel.source_seq,
+                    ]
+                )
+            elif telegram_message_id is not None:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=[
+                        UserChatMessageEventModel.chat_id,
+                        UserChatMessageEventModel.telegram_message_id,
+                    ]
+                )
+            result = await self._session.execute(stmt.returning(UserChatMessageEventModel.id))
+            inserted_id = result.scalar_one_or_none()
+            if inserted_id is not None:
+                return True
+            if is_synthetic or telegram_message_id is not None:
+                return False
+            self._session.add(
+                UserChatMessageEventModel(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    telegram_message_id=telegram_message_id,
+                    sent_at=normalized_sent_at,
+                    is_synthetic=is_synthetic,
+                    source_kind=source_kind,
+                    source_bucket_at=normalized_bucket,
+                    source_seq=source_seq,
+                )
+            )
+            return True
+
+        if is_synthetic:
+            existing = (
+                await self._session.execute(
+                    select(UserChatMessageEventModel.id).where(
+                        UserChatMessageEventModel.chat_id == chat_id,
+                        UserChatMessageEventModel.user_id == user_id,
+                        UserChatMessageEventModel.source_kind == source_kind,
+                        UserChatMessageEventModel.source_bucket_at == normalized_bucket,
+                        UserChatMessageEventModel.source_seq == source_seq,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return False
+        elif telegram_message_id is not None:
+            existing = (
+                await self._session.execute(
+                    select(UserChatMessageEventModel.id).where(
+                        UserChatMessageEventModel.chat_id == chat_id,
+                        UserChatMessageEventModel.telegram_message_id == telegram_message_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return False
+
+        self._session.add(
+            UserChatMessageEventModel(
+                chat_id=chat_id,
+                user_id=user_id,
+                telegram_message_id=telegram_message_id,
+                sent_at=normalized_sent_at,
+                is_synthetic=is_synthetic,
+                source_kind=source_kind,
+                source_bucket_at=normalized_bucket,
+                source_seq=source_seq,
+            )
+        )
+        return True
+
+    async def _append_synthetic_message_events(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        source_kind: str,
+        rows: Sequence[tuple[datetime, int, datetime]],
+    ) -> None:
+        for source_bucket_at, message_count, sent_at in rows:
+            normalized_bucket = _coerce_utc_datetime(source_bucket_at)
+            normalized_sent_at = _coerce_utc_datetime(sent_at)
+            for seq in range(int(message_count)):
+                await self._insert_message_event(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    sent_at=normalized_sent_at,
+                    telegram_message_id=None,
+                    is_synthetic=True,
+                    source_kind=source_kind,
+                    source_bucket_at=normalized_bucket,
+                    source_seq=seq,
+                )
+
+    async def _delete_synthetic_message_events(
+        self,
+        *,
+        chat_id: int,
+        user_id: int | None = None,
+    ) -> None:
+        stmt = delete(UserChatMessageEventModel).where(
+            UserChatMessageEventModel.chat_id == chat_id,
+            UserChatMessageEventModel.is_synthetic.is_(True),
+        )
+        if user_id is not None:
+            stmt = stmt.where(UserChatMessageEventModel.user_id == user_id)
+        await self._session.execute(stmt)
+
+    async def _upsert_activity_legacy(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot,
+        event_at: datetime,
+    ) -> None:
         existing_activity = await self._session.get(
             UserChatActivityModel,
             {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
@@ -293,11 +517,6 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         if existing_activity is None or not previous_is_active:
             await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=1)
-
-        stats = await self.get_user_stats(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id)
-        if stats is None:
-            raise RuntimeError("Failed to load user stats after upsert")
-        return stats
 
     async def set_chat_member_active(
         self,
@@ -363,7 +582,89 @@ class SqlAlchemyActivityRepository:
         if delta != 0:
             await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=delta)
 
+    async def _get_chat_event_sync_status(self, *, chat_id: int) -> str | None:
+        cached = self._chat_event_sync_cache.get(chat_id)
+        if chat_id in self._chat_event_sync_cache:
+            return cached
+
+        row = await self._session.get(ChatActivityEventSyncStateModel, chat_id)
+        status = row.status if row is not None else None
+        self._chat_event_sync_cache[chat_id] = status
+        return status
+
+    async def _is_chat_event_synced(self, *, chat_id: int) -> bool:
+        return await self._get_chat_event_sync_status(chat_id=chat_id) == _ACTIVITY_EVENT_SYNCED
+
+    async def _set_chat_event_sync_state(
+        self,
+        *,
+        chat_id: int,
+        status: str,
+        legacy_total_messages: int | None,
+        event_total_messages: int | None,
+        last_checked_at: datetime | None,
+        last_synced_at: datetime | None,
+        last_error: str | None,
+    ) -> None:
+        row = await self._session.get(ChatActivityEventSyncStateModel, chat_id)
+        if row is None:
+            row = ChatActivityEventSyncStateModel(chat_id=chat_id, status=status)
+            self._session.add(row)
+
+        row.status = status
+        row.legacy_total_messages = legacy_total_messages
+        row.event_total_messages = event_total_messages
+        row.last_checked_at = last_checked_at
+        row.last_synced_at = last_synced_at
+        row.last_error = last_error
+        self._chat_event_sync_cache[chat_id] = status
+
+    async def mark_chat_message_event_sync_failed(self, *, chat_id: int, error: str) -> None:
+        now = datetime.now(timezone.utc)
+        await self._set_chat_event_sync_state(
+            chat_id=chat_id,
+            status=_ACTIVITY_EVENT_FAILED,
+            legacy_total_messages=await self._get_legacy_chat_total_messages(chat_id=chat_id),
+            event_total_messages=await self._get_event_chat_total_messages(chat_id=chat_id),
+            last_checked_at=now,
+            last_synced_at=None,
+            last_error=(error or "").strip()[:2000] or None,
+        )
+
+    async def _refresh_chat_event_sync_state(self, *, chat_id: int, checked_at: datetime | None = None) -> bool:
+        normalized_checked_at = _coerce_utc_datetime(checked_at or datetime.now(timezone.utc))
+        legacy_total = await self._get_legacy_chat_total_messages(chat_id=chat_id)
+        event_total = await self._get_event_chat_total_messages(chat_id=chat_id)
+        synced = int(event_total) == int(legacy_total)
+        await self._set_chat_event_sync_state(
+            chat_id=chat_id,
+            status=_ACTIVITY_EVENT_SYNCED if synced else _ACTIVITY_EVENT_MISMATCH,
+            legacy_total_messages=legacy_total,
+            event_total_messages=event_total,
+            last_checked_at=normalized_checked_at,
+            last_synced_at=normalized_checked_at if synced else None,
+            last_error=None if synced else f"legacy_total={legacy_total}, event_total={event_total}",
+        )
+        return synced
+
+    async def _get_legacy_chat_total_messages(self, *, chat_id: int) -> int:
+        stmt = select(func.coalesce(func.sum(UserChatActivityModel.message_count), 0)).where(
+            UserChatActivityModel.chat_id == chat_id
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
+    async def _get_event_chat_total_messages(self, *, chat_id: int) -> int:
+        stmt = select(func.count(UserChatMessageEventModel.id)).where(UserChatMessageEventModel.chat_id == chat_id)
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def get_user_stats(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            stats = await self._get_user_stats_from_events(chat_id=chat_id, user_id=user_id)
+            if stats is not None:
+                return stats
+        return await self._get_user_stats_legacy(chat_id=chat_id, user_id=user_id)
+
+    async def _get_user_stats_legacy(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
@@ -377,6 +678,11 @@ class SqlAlchemyActivityRepository:
         return self._to_stats(activity, user)
 
     async def get_user_message_streak_days(self, *, chat_id: int, user_id: int) -> int:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_user_message_streak_days_from_events(chat_id=chat_id, user_id=user_id)
+        return await self._get_user_message_streak_days_legacy(chat_id=chat_id, user_id=user_id)
+
+    async def _get_user_message_streak_days_legacy(self, *, chat_id: int, user_id: int) -> int:
         stmt = (
             select(UserChatActivityDailyModel.activity_date)
             .where(
@@ -400,12 +706,99 @@ class SqlAlchemyActivityRepository:
         return streak
 
     async def get_user_message_count_for_day(self, *, chat_id: int, user_id: int, activity_date: date) -> int:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_user_message_count_for_day_from_events(
+                chat_id=chat_id,
+                user_id=user_id,
+                activity_date=activity_date,
+            )
+        return await self._get_user_message_count_for_day_legacy(chat_id=chat_id, user_id=user_id, activity_date=activity_date)
+
+    async def _get_user_message_count_for_day_legacy(self, *, chat_id: int, user_id: int, activity_date: date) -> int:
         stmt = select(UserChatActivityDailyModel.message_count).where(
             UserChatActivityDailyModel.chat_id == chat_id,
             UserChatActivityDailyModel.user_id == user_id,
             UserChatActivityDailyModel.activity_date == activity_date,
         )
         return int((await self._session.execute(stmt)).scalar_one_or_none() or 0)
+
+    async def _get_user_stats_from_events(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
+        stats_stmt = select(
+            func.count(UserChatMessageEventModel.id),
+            func.min(UserChatMessageEventModel.sent_at),
+            func.max(UserChatMessageEventModel.sent_at),
+        ).where(
+            UserChatMessageEventModel.chat_id == chat_id,
+            UserChatMessageEventModel.user_id == user_id,
+        )
+        message_count, first_seen_at, last_seen_at = (await self._session.execute(stats_stmt)).one()
+        if int(message_count or 0) <= 0 or first_seen_at is None or last_seen_at is None:
+            return None
+
+        user = await self._session.get(UserModel, user_id)
+        if user is None:
+            return None
+
+        activity = await self._session.get(UserChatActivityModel, {"chat_id": chat_id, "user_id": user_id})
+        return ActivityStats(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_count=int(message_count or 0),
+            last_seen_at=_coerce_utc_datetime(last_seen_at),
+            first_seen_at=_coerce_utc_datetime(first_seen_at),
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            chat_display_name=self._compose_chat_display_name(
+                user_id=int(user.telegram_user_id),
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                chat_display_name=activity.display_name_override if activity is not None else None,
+                title_prefix=activity.title_prefix if activity is not None else None,
+            ),
+        )
+
+    async def _get_user_message_streak_days_from_events(self, *, chat_id: int, user_id: int) -> int:
+        grouped = (
+            select(func.date(UserChatMessageEventModel.sent_at))
+            .where(
+                UserChatMessageEventModel.chat_id == chat_id,
+                UserChatMessageEventModel.user_id == user_id,
+            )
+            .group_by(func.date(UserChatMessageEventModel.sent_at))
+            .order_by(func.date(UserChatMessageEventModel.sent_at).desc())
+        )
+        rows = (await self._session.execute(grouped)).scalars().all()
+        if not rows:
+            return 0
+
+        dates = [_normalize_sql_date(value) for value in rows]
+        streak = 0
+        expected_day = dates[0]
+        for current_day in dates:
+            if current_day != expected_day:
+                break
+            streak += 1
+            expected_day = expected_day - timedelta(days=1)
+        return streak
+
+    async def _get_user_message_count_for_day_from_events(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        activity_date: date,
+    ) -> int:
+        start_at = datetime.combine(activity_date, datetime.min.time(), tzinfo=timezone.utc)
+        end_at = start_at + timedelta(days=1)
+        stmt = select(func.count(UserChatMessageEventModel.id)).where(
+            UserChatMessageEventModel.chat_id == chat_id,
+            UserChatMessageEventModel.user_id == user_id,
+            UserChatMessageEventModel.sent_at >= start_at,
+            UserChatMessageEventModel.sent_at < end_at,
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
 
     async def count_total_achievements(self, *, user_id: int, chat_id: int | None = None) -> int:
         chat_count_stmt = select(func.count()).select_from(UserChatAchievementModel).where(UserChatAchievementModel.user_id == user_id)
@@ -590,6 +983,11 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
 
     async def get_user_activity_daily_series(self, *, chat_id: int, user_id: int, days: int) -> list[tuple[date, int]]:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_user_activity_daily_series_from_events(chat_id=chat_id, user_id=user_id, days=days)
+        return await self._get_user_activity_daily_series_legacy(chat_id=chat_id, user_id=user_id, days=days)
+
+    async def _get_user_activity_daily_series_legacy(self, *, chat_id: int, user_id: int, days: int) -> list[tuple[date, int]]:
         normalized_days = max(1, int(days))
         today = datetime.now(timezone.utc).date()
         start_date = today - timedelta(days=normalized_days - 1)
@@ -615,7 +1013,83 @@ class SqlAlchemyActivityRepository:
             values.append((day, int(counts_by_day.get(day, 0))))
         return values
 
+    async def _get_user_activity_daily_series_from_events(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        days: int,
+    ) -> list[tuple[date, int]]:
+        normalized_days = max(1, int(days))
+        today = datetime.now(timezone.utc).date()
+        start_date = today - timedelta(days=normalized_days - 1)
+        counts_by_day = await self._get_event_daily_counts(chat_id=chat_id, user_id=user_id, start_date=start_date)
+        return [(start_date + timedelta(days=offset), int(counts_by_day.get(start_date + timedelta(days=offset), 0))) for offset in range(normalized_days)]
+
+    async def get_chat_activity_daily_series(self, *, chat_id: int, days: int = 7) -> list[tuple[date, int]]:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_chat_activity_daily_series_from_events(chat_id=chat_id, days=days)
+        return await self._get_chat_activity_daily_series_legacy(chat_id=chat_id, days=days)
+
+    async def _get_chat_activity_daily_series_legacy(self, *, chat_id: int, days: int = 7) -> list[tuple[date, int]]:
+        window_days = max(1, int(days))
+        today = datetime.now(timezone.utc).date()
+        start_date = today - timedelta(days=window_days - 1)
+        stmt = (
+            select(
+                UserChatActivityDailyModel.activity_date,
+                func.coalesce(func.sum(UserChatActivityDailyModel.message_count), 0),
+            )
+            .where(
+                UserChatActivityDailyModel.chat_id == chat_id,
+                UserChatActivityDailyModel.activity_date >= start_date,
+            )
+            .group_by(UserChatActivityDailyModel.activity_date)
+            .order_by(UserChatActivityDailyModel.activity_date.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        counts_by_day = {activity_date: int(message_count or 0) for activity_date, message_count in rows}
+        return [(start_date + timedelta(days=offset), int(counts_by_day.get(start_date + timedelta(days=offset), 0))) for offset in range(window_days)]
+
+    async def _get_chat_activity_daily_series_from_events(self, *, chat_id: int, days: int = 7) -> list[tuple[date, int]]:
+        window_days = max(1, int(days))
+        today = datetime.now(timezone.utc).date()
+        start_date = today - timedelta(days=window_days - 1)
+        counts_by_day = await self._get_event_daily_counts(chat_id=chat_id, user_id=None, start_date=start_date)
+        return [(start_date + timedelta(days=offset), int(counts_by_day.get(start_date + timedelta(days=offset), 0))) for offset in range(window_days)]
+
+    async def _get_event_daily_counts(
+        self,
+        *,
+        chat_id: int,
+        user_id: int | None,
+        start_date: date,
+    ) -> dict[date, int]:
+        start_at = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+        grouped_day = func.date(UserChatMessageEventModel.sent_at)
+        stmt = (
+            select(
+                grouped_day,
+                func.count(UserChatMessageEventModel.id),
+            )
+            .where(
+                UserChatMessageEventModel.chat_id == chat_id,
+                UserChatMessageEventModel.sent_at >= start_at,
+            )
+            .group_by(grouped_day)
+            .order_by(grouped_day.asc())
+        )
+        if user_id is not None:
+            stmt = stmt.where(UserChatMessageEventModel.user_id == user_id)
+        rows = (await self._session.execute(stmt)).all()
+        return {_normalize_sql_date(grouped_value): int(message_count or 0) for grouped_value, message_count in rows}
+
     async def get_chat_activity_summary(self, *, chat_id: int) -> ChatActivitySummary:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_chat_activity_summary_from_events(chat_id=chat_id)
+        return await self._get_chat_activity_summary_legacy(chat_id=chat_id)
+
+    async def _get_chat_activity_summary_legacy(self, *, chat_id: int) -> ChatActivitySummary:
         stmt = select(
             func.count(UserChatActivityModel.user_id),
             func.coalesce(func.sum(UserChatActivityModel.message_count), 0),
@@ -630,6 +1104,11 @@ class SqlAlchemyActivityRepository:
         )
 
     async def get_top(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._get_top_from_events(chat_id=chat_id, limit=limit)
+        return await self._get_top_legacy(chat_id=chat_id, limit=limit)
+
+    async def _get_top_legacy(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
@@ -644,7 +1123,74 @@ class SqlAlchemyActivityRepository:
         rows = (await self._session.execute(stmt)).all()
         return [self._to_stats(activity, user) for activity, user in rows]
 
+    async def _get_top_from_events(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        stmt = (
+            select(
+                UserChatMessageEventModel.user_id,
+                func.count(UserChatMessageEventModel.id),
+                func.min(UserChatMessageEventModel.sent_at),
+                func.max(UserChatMessageEventModel.sent_at),
+            )
+            .where(UserChatMessageEventModel.chat_id == chat_id)
+            .group_by(UserChatMessageEventModel.user_id)
+            .order_by(
+                func.count(UserChatMessageEventModel.id).desc(),
+                func.max(UserChatMessageEventModel.sent_at).desc(),
+                UserChatMessageEventModel.user_id.asc(),
+            )
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        if not rows:
+            return []
+
+        user_ids = tuple(int(row[0]) for row in rows)
+        users = await self._get_users_by_ids(user_ids)
+        activity_rows = await self._get_chat_activity_rows(chat_id=chat_id, user_ids=user_ids)
+        values: list[ActivityStats] = []
+        for user_id, message_count, first_seen_at, last_seen_at in rows:
+            user = users.get(int(user_id))
+            if user is None:
+                continue
+            activity = activity_rows.get(int(user_id))
+            values.append(
+                ActivityStats(
+                    chat_id=chat_id,
+                    user_id=int(user_id),
+                    message_count=int(message_count or 0),
+                    last_seen_at=_coerce_utc_datetime(last_seen_at),
+                    first_seen_at=_coerce_utc_datetime(first_seen_at),
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    chat_display_name=self._compose_chat_display_name(
+                        user_id=int(user.telegram_user_id),
+                        username=user.username,
+                        first_name=user.first_name,
+                        last_name=user.last_name,
+                        chat_display_name=activity.display_name_override if activity is not None else None,
+                        title_prefix=activity.title_prefix if activity is not None else None,
+                    ),
+                )
+            )
+        return values
+
     async def list_inactive_members(
+        self,
+        *,
+        chat_id: int,
+        inactive_since: datetime,
+        limit: int | None = None,
+    ) -> list[ActivityStats]:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            return await self._list_inactive_members_from_events(
+                chat_id=chat_id,
+                inactive_since=inactive_since,
+                limit=limit,
+            )
+        return await self._list_inactive_members_legacy(chat_id=chat_id, inactive_since=inactive_since, limit=limit)
+
+    async def _list_inactive_members_legacy(
         self,
         *,
         chat_id: int,
@@ -671,11 +1217,115 @@ class SqlAlchemyActivityRepository:
         return [self._to_stats(activity, user) for activity, user in rows]
 
     async def get_last_seen(self, *, chat_id: int, user_id: int) -> datetime | None:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            stmt = select(func.max(UserChatMessageEventModel.sent_at)).where(
+                UserChatMessageEventModel.chat_id == chat_id,
+                UserChatMessageEventModel.user_id == user_id,
+            )
+            value = (await self._session.execute(stmt)).scalar_one_or_none()
+            if value is not None:
+                return _coerce_utc_datetime(value)
+        return await self._get_last_seen_legacy(chat_id=chat_id, user_id=user_id)
+
+    async def _get_last_seen_legacy(self, *, chat_id: int, user_id: int) -> datetime | None:
         stmt = select(UserChatActivityModel.last_seen_at).where(
             UserChatActivityModel.chat_id == chat_id,
             UserChatActivityModel.user_id == user_id,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _get_chat_activity_summary_from_events(self, *, chat_id: int) -> ChatActivitySummary:
+        participant_stmt = select(func.count(UserChatActivityModel.user_id)).where(UserChatActivityModel.chat_id == chat_id)
+        participants_count = int((await self._session.execute(participant_stmt)).scalar_one() or 0)
+        event_stmt = select(
+            func.count(UserChatMessageEventModel.id),
+            func.max(UserChatMessageEventModel.sent_at),
+        ).where(UserChatMessageEventModel.chat_id == chat_id)
+        total_messages, last_activity_at = (await self._session.execute(event_stmt)).one()
+        return ChatActivitySummary(
+            chat_id=chat_id,
+            participants_count=participants_count,
+            total_messages=int(total_messages or 0),
+            last_activity_at=_normalize_optional_datetime(last_activity_at),
+        )
+
+    async def _get_chat_activity_rows(self, *, chat_id: int, user_ids: Sequence[int]) -> dict[int, UserChatActivityModel]:
+        if not user_ids:
+            return {}
+        stmt = select(UserChatActivityModel).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.user_id.in_(list(user_ids)),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {int(row.user_id): row for row in rows}
+
+    async def _list_inactive_members_from_events(
+        self,
+        *,
+        chat_id: int,
+        inactive_since: datetime,
+        limit: int | None = None,
+    ) -> list[ActivityStats]:
+        normalized_inactive_since = _coerce_utc_datetime(inactive_since)
+        stmt = (
+            select(UserChatActivityModel, UserModel)
+            .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
+                UserModel.is_bot.is_(False),
+            )
+        )
+        rows = (await self._session.execute(stmt)).all()
+        if not rows:
+            return []
+
+        user_ids = [int(activity.user_id) for activity, _user in rows]
+        last_seen_stmt = (
+            select(
+                UserChatMessageEventModel.user_id,
+                func.max(UserChatMessageEventModel.sent_at),
+            )
+            .where(
+                UserChatMessageEventModel.chat_id == chat_id,
+                UserChatMessageEventModel.user_id.in_(user_ids),
+            )
+            .group_by(UserChatMessageEventModel.user_id)
+        )
+        last_seen_rows = (await self._session.execute(last_seen_stmt)).all()
+        last_seen_by_user = {int(user_id): last_seen_at for user_id, last_seen_at in last_seen_rows}
+
+        values: list[ActivityStats] = []
+        for activity, user in rows:
+            last_seen_at = last_seen_by_user.get(int(activity.user_id), activity.last_seen_at)
+            last_seen_at = _normalize_optional_datetime(last_seen_at)
+            if last_seen_at is None or last_seen_at >= normalized_inactive_since:
+                continue
+            values.append(
+                ActivityStats(
+                    chat_id=int(activity.chat_id),
+                    user_id=int(activity.user_id),
+                    message_count=int(activity.message_count),
+                    last_seen_at=last_seen_at,
+                    first_seen_at=activity.created_at,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    chat_display_name=self._compose_chat_display_name(
+                        user_id=int(user.telegram_user_id),
+                        username=user.username,
+                        first_name=user.first_name,
+                        last_name=user.last_name,
+                        chat_display_name=activity.display_name_override,
+                        title_prefix=activity.title_prefix,
+                    ),
+                )
+            )
+
+        values.sort(key=lambda item: (item.last_seen_at, item.user_id))
+        if limit is not None and limit > 0:
+            return values[:limit]
+        return values
 
     async def get_chat_settings(self, *, chat_id: int) -> ChatSettings | None:
         row = await self._session.get(ChatSettingsModel, chat_id)
@@ -1485,7 +2135,31 @@ class SqlAlchemyActivityRepository:
         user_id: int,
         since: datetime | None = None,
     ) -> tuple[int, int, datetime | None]:
-        if since is None:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            if since is None:
+                activity_stmt = select(
+                    func.count(UserChatMessageEventModel.id),
+                    func.max(UserChatMessageEventModel.sent_at),
+                ).where(
+                    UserChatMessageEventModel.chat_id == chat_id,
+                    UserChatMessageEventModel.user_id == user_id,
+                )
+                row = (await self._session.execute(activity_stmt)).one()
+                activity_value = int(row[0] or 0)
+                last_seen_at = _normalize_optional_datetime(row[1])
+            else:
+                activity_stmt = select(
+                    func.count(UserChatMessageEventModel.id),
+                    func.max(UserChatMessageEventModel.sent_at),
+                ).where(
+                    UserChatMessageEventModel.chat_id == chat_id,
+                    UserChatMessageEventModel.user_id == user_id,
+                    UserChatMessageEventModel.sent_at >= since,
+                )
+                row = (await self._session.execute(activity_stmt)).one()
+                activity_value = int(row[0] or 0)
+                last_seen_at = _normalize_optional_datetime(row[1])
+        elif since is None:
             activity_stmt = select(UserChatActivityModel.message_count, UserChatActivityModel.last_seen_at).where(
                 UserChatActivityModel.chat_id == chat_id,
                 UserChatActivityModel.user_id == user_id,
@@ -2010,6 +2684,7 @@ class SqlAlchemyActivityRepository:
             activity_30d=int(activity_30d),
         )
         synthetic_minute_rows = _build_synthetic_activity_minute_rows(daily_rows=synthetic_daily_rows)
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
         imported_snapshot_json = {
             "source_bot_username": normalized_source_bot_username,
             "source_target_username": normalized_source_target_username,
@@ -2095,28 +2770,56 @@ class SqlAlchemyActivityRepository:
                 UserChatActivityMinuteModel.user_id == target.telegram_user_id,
             )
         )
+        await self._session.execute(
+            delete(UserChatMessageEventModel).where(
+                UserChatMessageEventModel.chat_id == chat.telegram_chat_id,
+                UserChatMessageEventModel.user_id == target.telegram_user_id,
+            )
+        )
 
         for activity_date, message_count, row_last_seen in synthetic_daily_rows:
-            self._session.add(
-                UserChatActivityDailyModel(
-                    chat_id=chat.telegram_chat_id,
-                    user_id=target.telegram_user_id,
-                    activity_date=activity_date,
-                    message_count=message_count,
-                    last_seen_at=row_last_seen,
-                )
+            row = UserChatActivityDailyModel(
+                chat_id=chat.telegram_chat_id,
+                user_id=target.telegram_user_id,
+                activity_date=activity_date,
+                message_count=message_count,
+                last_seen_at=row_last_seen,
             )
+            self._session.add(row)
+            if dialect == "sqlite":
+                await self._session.flush()
 
         for activity_minute, message_count, row_last_seen in synthetic_minute_rows:
-            self._session.add(
-                UserChatActivityMinuteModel(
-                    chat_id=chat.telegram_chat_id,
-                    user_id=target.telegram_user_id,
-                    activity_minute=activity_minute,
-                    message_count=message_count,
-                    last_seen_at=row_last_seen,
-                )
+            row = UserChatActivityMinuteModel(
+                chat_id=chat.telegram_chat_id,
+                user_id=target.telegram_user_id,
+                activity_minute=activity_minute,
+                message_count=message_count,
+                last_seen_at=row_last_seen,
             )
+            self._session.add(row)
+            if dialect == "sqlite":
+                await self._session.flush()
+
+        await self._append_synthetic_message_events(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            source_kind=_ACTIVITY_EVENT_SOURCE_IMPORT_MINUTE,
+            rows=synthetic_minute_rows,
+        )
+
+        imported_minute_total = sum(int(message_count) for _activity_minute, message_count, _row_last_seen in synthetic_minute_rows)
+        imported_total_rows = _build_synthetic_activity_total_rows(
+            first_seen_at=normalized_first_seen_at,
+            residual_total=max(0, int(activity_all) - imported_minute_total),
+            earliest_covered_date=synthetic_daily_rows[0][0] if synthetic_daily_rows else None,
+        )
+        await self._append_synthetic_message_events(
+            chat_id=chat.telegram_chat_id,
+            user_id=target.telegram_user_id,
+            source_kind=_ACTIVITY_EVENT_SOURCE_IMPORT_TOTAL,
+            rows=imported_total_rows,
+        )
 
         for title, created_at in normalized_awards:
             self._session.add(
@@ -2134,7 +2837,170 @@ class SqlAlchemyActivityRepository:
         if existing_activity is None or not previous_was_active:
             await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=1)
 
+        await self._refresh_chat_event_sync_state(
+            chat_id=chat.telegram_chat_id,
+            checked_at=datetime.now(timezone.utc),
+        )
+
         return self._to_iris_import_state(state_row)
+
+    async def list_message_event_sync_chat_ids(self, *, limit: int | None = None) -> list[int]:
+        legacy_totals = (
+            select(
+                UserChatActivityModel.chat_id.label("chat_id"),
+                func.coalesce(func.sum(UserChatActivityModel.message_count), 0).label("legacy_total"),
+            )
+            .group_by(UserChatActivityModel.chat_id)
+            .subquery()
+        )
+        event_totals = (
+            select(
+                UserChatMessageEventModel.chat_id.label("chat_id"),
+                func.count(UserChatMessageEventModel.id).label("event_total"),
+            )
+            .group_by(UserChatMessageEventModel.chat_id)
+            .subquery()
+        )
+        stmt = (
+            select(legacy_totals.c.chat_id)
+            .outerjoin(event_totals, event_totals.c.chat_id == legacy_totals.c.chat_id)
+            .outerjoin(ChatActivityEventSyncStateModel, ChatActivityEventSyncStateModel.chat_id == legacy_totals.c.chat_id)
+            .where(
+                or_(
+                    ChatActivityEventSyncStateModel.chat_id.is_(None),
+                    ChatActivityEventSyncStateModel.status != _ACTIVITY_EVENT_SYNCED,
+                    legacy_totals.c.legacy_total != func.coalesce(event_totals.c.event_total, 0),
+                )
+            )
+            .order_by(legacy_totals.c.chat_id.asc())
+        )
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [int(chat_id) for chat_id in rows]
+
+    async def backfill_message_events_for_chat(self, *, chat_id: int) -> bool:
+        now = datetime.now(timezone.utc)
+        legacy_total = await self._get_legacy_chat_total_messages(chat_id=chat_id)
+        current_event_total = await self._get_event_chat_total_messages(chat_id=chat_id)
+        await self._set_chat_event_sync_state(
+            chat_id=chat_id,
+            status=_ACTIVITY_EVENT_PENDING,
+            legacy_total_messages=legacy_total,
+            event_total_messages=current_event_total,
+            last_checked_at=now,
+            last_synced_at=None,
+            last_error=None,
+        )
+
+        await self._delete_synthetic_message_events(chat_id=chat_id)
+        await self._session.flush()
+
+        activity_rows = (
+            await self._session.execute(
+                select(UserChatActivityModel).where(UserChatActivityModel.chat_id == chat_id)
+            )
+        ).scalars().all()
+        minute_rows = (
+            await self._session.execute(
+                select(UserChatActivityMinuteModel)
+                .where(UserChatActivityMinuteModel.chat_id == chat_id)
+                .order_by(UserChatActivityMinuteModel.user_id.asc(), UserChatActivityMinuteModel.activity_minute.asc())
+            )
+        ).scalars().all()
+        daily_rows = (
+            await self._session.execute(
+                select(UserChatActivityDailyModel)
+                .where(UserChatActivityDailyModel.chat_id == chat_id)
+                .order_by(UserChatActivityDailyModel.user_id.asc(), UserChatActivityDailyModel.activity_date.asc())
+            )
+        ).scalars().all()
+        real_event_rows = (
+            await self._session.execute(
+                select(UserChatMessageEventModel.user_id, UserChatMessageEventModel.sent_at).where(
+                    UserChatMessageEventModel.chat_id == chat_id,
+                    UserChatMessageEventModel.is_synthetic.is_(False),
+                )
+            )
+        ).all()
+
+        real_minute_counts: dict[tuple[int, datetime], int] = defaultdict(int)
+        real_day_counts: dict[tuple[int, date], int] = defaultdict(int)
+        real_total_counts: dict[int, int] = defaultdict(int)
+        for raw_user_id, raw_sent_at in real_event_rows:
+            user_id = int(raw_user_id)
+            sent_at = _coerce_utc_datetime(raw_sent_at)
+            real_minute_counts[(user_id, sent_at.replace(second=0, microsecond=0))] += 1
+            real_day_counts[(user_id, sent_at.date())] += 1
+            real_total_counts[user_id] += 1
+
+        minute_rows_by_user: dict[int, list[UserChatActivityMinuteModel]] = defaultdict(list)
+        for row in minute_rows:
+            minute_rows_by_user[int(row.user_id)].append(row)
+
+        daily_rows_by_user: dict[int, list[UserChatActivityDailyModel]] = defaultdict(list)
+        for row in daily_rows:
+            daily_rows_by_user[int(row.user_id)].append(row)
+
+        for activity_row in activity_rows:
+            user_id = int(activity_row.user_id)
+            minute_synthetic_total = 0
+            daily_synthetic_total = 0
+            synthetic_counts_by_day: dict[date, int] = defaultdict(int)
+            earliest_covered_date: date | None = None
+
+            for minute_row in minute_rows_by_user.get(user_id, []):
+                minute_bucket = _coerce_utc_datetime(minute_row.activity_minute)
+                residual_count = int(minute_row.message_count) - int(real_minute_counts.get((user_id, minute_bucket), 0))
+                if residual_count <= 0:
+                    continue
+                await self._append_synthetic_message_events(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    source_kind=_ACTIVITY_EVENT_SOURCE_LEGACY_MINUTE,
+                    rows=[(minute_bucket, residual_count, minute_row.last_seen_at)],
+                )
+                minute_synthetic_total += residual_count
+                synthetic_counts_by_day[minute_bucket.date()] += residual_count
+                if earliest_covered_date is None or minute_bucket.date() < earliest_covered_date:
+                    earliest_covered_date = minute_bucket.date()
+
+            for daily_row in daily_rows_by_user.get(user_id, []):
+                covered_count = int(real_day_counts.get((user_id, daily_row.activity_date), 0)) + int(
+                    synthetic_counts_by_day.get(daily_row.activity_date, 0)
+                )
+                residual_count = int(daily_row.message_count) - covered_count
+                if residual_count <= 0:
+                    continue
+                bucket_at = datetime.combine(daily_row.activity_date, datetime.min.time(), tzinfo=timezone.utc)
+                await self._append_synthetic_message_events(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    source_kind=_ACTIVITY_EVENT_SOURCE_LEGACY_DAY,
+                    rows=[(bucket_at, residual_count, daily_row.last_seen_at)],
+                )
+                daily_synthetic_total += residual_count
+                synthetic_counts_by_day[daily_row.activity_date] += residual_count
+                if earliest_covered_date is None or daily_row.activity_date < earliest_covered_date:
+                    earliest_covered_date = daily_row.activity_date
+
+            residual_total = int(activity_row.message_count) - int(real_total_counts.get(user_id, 0)) - minute_synthetic_total - daily_synthetic_total
+            if residual_total > 0:
+                total_rows = _build_synthetic_activity_total_rows(
+                    first_seen_at=activity_row.created_at,
+                    residual_total=residual_total,
+                    earliest_covered_date=earliest_covered_date,
+                )
+                await self._append_synthetic_message_events(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    source_kind=_ACTIVITY_EVENT_SOURCE_LEGACY_TOTAL,
+                    rows=total_rows,
+                )
+
+        await self._session.flush()
+        synced = await self._refresh_chat_event_sync_state(chat_id=chat_id, checked_at=now)
+        return synced
 
     @staticmethod
     def _relationship_chat_match(column, chat_id: int | None):
@@ -3057,20 +3923,72 @@ class SqlAlchemyActivityRepository:
                 UserChatActivityModel.last_seen_at.desc(),
                 UserChatActivityModel.chat_id.desc(),
             )
-            .limit(normalized_limit)
+            .limit(200)
         )
         rows = (await self._session.execute(stmt)).all()
-        return [
-            UserChatOverview(
-                chat_id=int(chat_id),
-                chat_type=str(chat_type),
-                chat_title=chat_title,
-                bot_role=(normalize_assigned_role_code(role) or normalize_role_code(role)) if role is not None else None,
-                message_count=int(message_count),
-                last_seen_at=last_seen_at,
+        chat_ids = [int(chat_id) for chat_id, _chat_type, _chat_title, _message_count, _last_seen_at, _role in rows]
+        synced_chat_ids: set[int] = set()
+        if chat_ids:
+            status_rows = (
+                await self._session.execute(
+                    select(ChatActivityEventSyncStateModel.chat_id).where(
+                        ChatActivityEventSyncStateModel.chat_id.in_(chat_ids),
+                        ChatActivityEventSyncStateModel.status == _ACTIVITY_EVENT_SYNCED,
+                    )
+                )
+            ).scalars().all()
+            synced_chat_ids = {int(chat_id) for chat_id in status_rows}
+
+        event_counts_by_chat: dict[int, tuple[int, datetime | None]] = {}
+        if synced_chat_ids:
+            event_rows = (
+                await self._session.execute(
+                    select(
+                        UserChatMessageEventModel.chat_id,
+                        func.count(UserChatMessageEventModel.id),
+                        func.max(UserChatMessageEventModel.sent_at),
+                    )
+                    .where(
+                        UserChatMessageEventModel.user_id == user_id,
+                        UserChatMessageEventModel.chat_id.in_(list(synced_chat_ids)),
+                    )
+                    .group_by(UserChatMessageEventModel.chat_id)
+                )
+            ).all()
+            event_counts_by_chat = {
+                int(chat_id): (int(message_count or 0), _normalize_optional_datetime(last_seen_at))
+                for chat_id, message_count, last_seen_at in event_rows
+            }
+
+        values: list[UserChatOverview] = []
+        for chat_id, chat_type, chat_title, message_count, last_seen_at, role in rows:
+            normalized_chat_id = int(chat_id)
+            effective_count = int(message_count)
+            effective_last_seen = last_seen_at
+            if normalized_chat_id in synced_chat_ids:
+                synced_count, synced_last_seen = event_counts_by_chat.get(normalized_chat_id, (0, last_seen_at))
+                effective_count = int(synced_count)
+                effective_last_seen = synced_last_seen or last_seen_at
+            values.append(
+                UserChatOverview(
+                    chat_id=normalized_chat_id,
+                    chat_type=str(chat_type),
+                    chat_title=chat_title,
+                    bot_role=(normalize_assigned_role_code(role) or normalize_role_code(role)) if role is not None else None,
+                    message_count=effective_count,
+                    last_seen_at=effective_last_seen,
+                )
             )
-            for chat_id, chat_type, chat_title, message_count, last_seen_at, role in rows
-        ]
+
+        values.sort(
+            key=lambda item: (
+                item.last_seen_at is not None,
+                item.last_seen_at or datetime.min.replace(tzinfo=timezone.utc),
+                item.chat_id,
+            ),
+            reverse=True,
+        )
+        return values[:normalized_limit]
 
     async def find_chat_user_by_username(self, *, chat_id: int, username: str) -> UserSnapshot | None:
         lowered = username.lstrip("@").strip().lower()
@@ -3723,6 +4641,26 @@ class SqlAlchemyActivityRepository:
         period: LeaderboardPeriod,
         since: datetime | None,
     ) -> dict[int, tuple[int, datetime | None]]:
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            stmt = (
+            select(
+                UserChatMessageEventModel.user_id,
+                func.count(UserChatMessageEventModel.id),
+                func.max(UserChatMessageEventModel.sent_at),
+            )
+                .where(UserChatMessageEventModel.chat_id == chat_id)
+                .group_by(UserChatMessageEventModel.user_id)
+            )
+            if period != "all":
+                if since is None:
+                    return {}
+                stmt = stmt.where(UserChatMessageEventModel.sent_at >= since)
+            rows = (await self._session.execute(stmt)).all()
+            return {
+                int(user_id): (int(message_count), _normalize_optional_datetime(last_seen_at))
+                for user_id, message_count, last_seen_at in rows
+            }
+
         if period == "all":
             stmt = select(
                 UserChatActivityModel.user_id,

@@ -41,7 +41,8 @@ from selara.core.web_auth import (
 )
 from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.domain.economy_entities import FarmState
-from selara.infrastructure.db.models import EconomyAccountModel, UserChatActivityDailyModel, UserChatActivityModel, UserModel
+from selara.domain.value_objects import display_name_from_parts
+from selara.infrastructure.db.models import EconomyAccountModel, UserChatActivityModel, UserModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.presentation.auth import has_permission
@@ -134,35 +135,16 @@ async def _build_chat_daily_activity_series(
     chat_id: int,
     days: int = 7,
 ) -> list[dict[str, object]]:
-    window_days = max(1, days)
-    today = datetime.now(_UTC).date()
-    start_date = today - timedelta(days=window_days - 1)
-    stmt = (
-        select(
-            UserChatActivityDailyModel.activity_date,
-            func.coalesce(func.sum(UserChatActivityDailyModel.message_count), 0),
-        )
-        .where(
-            UserChatActivityDailyModel.chat_id == chat_id,
-            UserChatActivityDailyModel.activity_date >= start_date,
-        )
-        .group_by(UserChatActivityDailyModel.activity_date)
-        .order_by(UserChatActivityDailyModel.activity_date.asc())
-    )
-    rows = (await session.execute(stmt)).all()
-    counts_by_day = {
-        activity_date: int(message_count or 0)
-        for activity_date, message_count in rows
-    }
+    activity_repo = SqlAlchemyActivityRepository(session)
+    rows = await activity_repo.get_chat_activity_daily_series(chat_id=chat_id, days=days)
 
     series: list[dict[str, object]] = []
-    for offset in range(window_days):
-        day = start_date + timedelta(days=offset)
+    for day, message_count in rows:
         series.append(
             {
                 "date": day.isoformat(),
                 "label": day.strftime("%d.%m"),
-                "messages": counts_by_day.get(day, 0),
+                "messages": int(message_count),
             }
         )
     return series
@@ -925,7 +907,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         snapshot = await activity_repo.get_user_snapshot(user_id=user_id)
         if snapshot is None:
             return f"user:{user_id}"
-        return snapshot.chat_display_name or snapshot.username or snapshot.first_name or f"user:{user_id}"
+        if snapshot.username:
+            return f"@{snapshot.username}"
+        return display_name_from_parts(
+            user_id=snapshot.telegram_user_id,
+            username=snapshot.username,
+            first_name=snapshot.first_name,
+            last_name=snapshot.last_name,
+            chat_display_name=snapshot.chat_display_name,
+        )
 
     def _market_filter_group(item_code: str) -> str:
         if item_code.startswith("seed:"):

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from selara.infrastructure.db.models import (
+    ChatActivityEventSyncStateModel,
     ChatModel,
     ChatSettingsModel,
     ChatTextAliasModel,
@@ -22,6 +23,7 @@ from selara.infrastructure.db.models import (
     UserChatActivityDailyModel,
     UserChatActivityMinuteModel,
     UserChatActivityModel,
+    UserChatMessageEventModel,
     UserChatAnnouncementSubscriptionModel,
     UserChatBotRoleModel,
     UserChatModerationStateModel,
@@ -108,10 +110,12 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _merge_activity_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_daily_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_minute_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_activity_events_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_announce_subscriptions_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_text_aliases_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_bot_roles_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_moderation_state_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -122,10 +126,12 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _merge_activity_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_daily_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_minute_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_activity_events_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_announce_subscriptions_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_text_aliases_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_bot_roles_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_moderation_state_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -223,6 +229,40 @@ async def _merge_activity_minute_postgresql(session: AsyncSession, *, old_chat_i
     )
     await session.execute(stmt)
     await session.execute(delete(UserChatActivityMinuteModel).where(UserChatActivityMinuteModel.chat_id == old_chat_id))
+
+
+async def _merge_activity_events_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    source = (
+        select(
+            literal(new_chat_id).label("chat_id"),
+            UserChatMessageEventModel.user_id,
+            UserChatMessageEventModel.telegram_message_id,
+            UserChatMessageEventModel.sent_at,
+            UserChatMessageEventModel.is_synthetic,
+            UserChatMessageEventModel.source_kind,
+            UserChatMessageEventModel.source_bucket_at,
+            UserChatMessageEventModel.source_seq,
+            UserChatMessageEventModel.created_at,
+        )
+        .where(UserChatMessageEventModel.chat_id == old_chat_id)
+    )
+    stmt = pg_insert(UserChatMessageEventModel).from_select(
+        [
+            "chat_id",
+            "user_id",
+            "telegram_message_id",
+            "sent_at",
+            "is_synthetic",
+            "source_kind",
+            "source_bucket_at",
+            "source_seq",
+            "created_at",
+        ],
+        source,
+    )
+    stmt = stmt.on_conflict_do_nothing()
+    await session.execute(stmt)
+    await session.execute(delete(UserChatMessageEventModel).where(UserChatMessageEventModel.chat_id == old_chat_id))
 
 
 async def _merge_announce_subscriptions_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
@@ -392,6 +432,62 @@ async def _merge_activity_minute_generic(session: AsyncSession, *, old_chat_id: 
         current.message_count += row.message_count
         current.last_seen_at = max(current.last_seen_at, row.last_seen_at)
         await session.delete(row)
+
+
+async def _merge_activity_events_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    rows = (
+        await session.execute(select(UserChatMessageEventModel).where(UserChatMessageEventModel.chat_id == old_chat_id))
+    ).scalars().all()
+    for row in rows:
+        conflict_stmt = select(UserChatMessageEventModel.id).where(UserChatMessageEventModel.chat_id == new_chat_id)
+        if row.telegram_message_id is not None:
+            conflict_stmt = conflict_stmt.where(UserChatMessageEventModel.telegram_message_id == row.telegram_message_id)
+        elif row.is_synthetic:
+            conflict_stmt = conflict_stmt.where(
+                UserChatMessageEventModel.user_id == row.user_id,
+                UserChatMessageEventModel.source_kind == row.source_kind,
+                UserChatMessageEventModel.source_bucket_at == row.source_bucket_at,
+                UserChatMessageEventModel.source_seq == row.source_seq,
+            )
+        else:
+            conflict_stmt = None
+
+        if conflict_stmt is not None:
+            existing = (await session.execute(conflict_stmt)).scalar_one_or_none()
+            if existing is not None:
+                await session.delete(row)
+                continue
+
+        row.chat_id = new_chat_id
+
+
+async def _merge_activity_event_sync_state(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    old_row = await session.get(ChatActivityEventSyncStateModel, old_chat_id)
+    new_row = await session.get(ChatActivityEventSyncStateModel, new_chat_id)
+
+    if old_row is not None:
+        await session.delete(old_row)
+
+    if new_row is None:
+        session.add(
+            ChatActivityEventSyncStateModel(
+                chat_id=new_chat_id,
+                status="mismatch",
+                legacy_total_messages=None,
+                event_total_messages=None,
+                last_checked_at=None,
+                last_synced_at=None,
+                last_error="chat_id_migrated",
+            )
+        )
+        return
+
+    new_row.status = "mismatch"
+    new_row.legacy_total_messages = None
+    new_row.event_total_messages = None
+    new_row.last_checked_at = None
+    new_row.last_synced_at = None
+    new_row.last_error = "chat_id_migrated"
 
 
 async def _merge_announce_subscriptions_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:

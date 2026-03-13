@@ -227,6 +227,8 @@ async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_dm:
 
 
 def _user_label(user_id: int, username: str | None, first_name: str | None, last_name: str | None) -> str:
+    if username:
+        return f"@{username}"
     return display_name_from_parts(
         user_id=user_id,
         username=username,

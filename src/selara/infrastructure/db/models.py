@@ -244,6 +244,57 @@ class UserChatActivityMinuteModel(Base):
     )
 
 
+class UserChatMessageEventModel(Base):
+    __tablename__ = "user_chat_message_events"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    source_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_bucket_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "telegram_message_id", name="uq_user_chat_message_events_chat_message"),
+        UniqueConstraint(
+            "chat_id",
+            "user_id",
+            "source_kind",
+            "source_bucket_at",
+            "source_seq",
+            name="uq_user_chat_message_events_synthetic_source",
+        ),
+    )
+
+
+class ChatActivityEventSyncStateModel(Base):
+    __tablename__ = "chat_activity_event_sync_state"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    legacy_total_messages: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    event_total_messages: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class UserKarmaVoteModel(Base):
     __tablename__ = "user_karma_votes"
 
@@ -271,6 +322,8 @@ class UserKarmaVoteModel(Base):
 
 Index("idx_user_chat_activity_daily_chat_date", UserChatActivityDailyModel.chat_id, UserChatActivityDailyModel.activity_date)
 Index("idx_user_chat_activity_minute_chat_minute", UserChatActivityMinuteModel.chat_id, UserChatActivityMinuteModel.activity_minute)
+Index("idx_user_chat_message_events_chat_sent", UserChatMessageEventModel.chat_id, UserChatMessageEventModel.sent_at)
+Index("idx_user_chat_message_events_chat_user_sent", UserChatMessageEventModel.chat_id, UserChatMessageEventModel.user_id, UserChatMessageEventModel.sent_at)
 Index("idx_user_karma_votes_chat_target_created", UserKarmaVoteModel.chat_id, UserKarmaVoteModel.target_user_id, UserKarmaVoteModel.created_at)
 Index("idx_user_karma_votes_chat_voter_created", UserKarmaVoteModel.chat_id, UserKarmaVoteModel.voter_user_id, UserKarmaVoteModel.created_at)
 
