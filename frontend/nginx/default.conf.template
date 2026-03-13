@@ -1,6 +1,7 @@
 server {
     listen ${LISTEN_PORT};
     server_name _;
+    absolute_redirect off;
 
     root /usr/share/nginx/html;
     index index.html;
