@@ -65,7 +65,7 @@ _PROFILE_CALLBACK_PREFIX = "profile"
 _ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N]"
 _IRIS_IMPORT_TTL = timedelta(minutes=15)
 _IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
-_AWARD_MIN_ACTOR_RANK = SYSTEM_ROLE_BY_CODE["junior_admin"].rank + 1
+_AWARD_MIN_ACTOR_RANK = SYSTEM_ROLE_BY_CODE["junior_admin"].rank
 _IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
 _INACTIVE_THRESHOLD = timedelta(days=1)
 _INACTIVE_HEADER_VARIANTS: tuple[str, ...] = (
@@ -913,7 +913,7 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         bootstrap_if_missing_owner=True,
     )
     if actor_role_definition is None or int(actor_role_definition.rank) < _AWARD_MIN_ACTOR_RANK:
-        await message.answer("Выдавать награды могут только админы бота выше «Мл. админ».")
+        await message.answer("Выдавать награды могут только админы бота с ролью «Мл. админ» и выше.")
         return
 
     target_user = message.reply_to_message.from_user

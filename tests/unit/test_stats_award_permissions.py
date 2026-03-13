@@ -39,11 +39,32 @@ def _message() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_award_reply_text_command_blocks_junior_admin(monkeypatch) -> None:
+async def test_award_reply_text_command_blocks_user_without_internal_role(monkeypatch) -> None:
     message = _message()
     activity_repo = SimpleNamespace(
         get_chat_display_name=AsyncMock(return_value=None),
         add_user_chat_award=AsyncMock(),
+    )
+
+    monkeypatch.setattr(stats_module, "_ensure_chat_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        stats_module,
+        "get_actor_role_definition",
+        AsyncMock(return_value=(None, False)),
+    )
+
+    await stats_module.award_reply_text_command(message, activity_repo, bot=SimpleNamespace(), title="Лучшая шутка")
+
+    assert activity_repo.add_user_chat_award.await_count == 0
+    assert message.answers == [("Выдавать награды могут только админы бота с ролью «Мл. админ» и выше.", {})]
+
+
+@pytest.mark.asyncio
+async def test_award_reply_text_command_allows_junior_admin(monkeypatch) -> None:
+    message = _message()
+    activity_repo = SimpleNamespace(
+        get_chat_display_name=AsyncMock(return_value=None),
+        add_user_chat_award=AsyncMock(return_value=SimpleNamespace(id=77)),
     )
 
     monkeypatch.setattr(stats_module, "_ensure_chat_admin", AsyncMock(return_value=True))
@@ -59,39 +80,6 @@ async def test_award_reply_text_command_blocks_junior_admin(monkeypatch) -> None
                     rank=10,
                     permissions=("announce",),
                     is_system=True,
-                ),
-                False,
-            )
-        ),
-    )
-
-    await stats_module.award_reply_text_command(message, activity_repo, bot=SimpleNamespace(), title="Лучшая шутка")
-
-    assert activity_repo.add_user_chat_award.await_count == 0
-    assert message.answers == [("Выдавать награды могут только админы бота выше «Мл. админ».", {})]
-
-
-@pytest.mark.asyncio
-async def test_award_reply_text_command_allows_role_above_junior_admin(monkeypatch) -> None:
-    message = _message()
-    activity_repo = SimpleNamespace(
-        get_chat_display_name=AsyncMock(return_value=None),
-        add_user_chat_award=AsyncMock(return_value=SimpleNamespace(id=77)),
-    )
-
-    monkeypatch.setattr(stats_module, "_ensure_chat_admin", AsyncMock(return_value=True))
-    monkeypatch.setattr(
-        stats_module,
-        "get_actor_role_definition",
-        AsyncMock(
-            return_value=(
-                ChatRoleDefinition(
-                    chat_id=-100,
-                    role_code="custom_admin",
-                    title_ru="Админ",
-                    rank=15,
-                    permissions=("announce",),
-                    is_system=False,
                 ),
                 False,
             )
