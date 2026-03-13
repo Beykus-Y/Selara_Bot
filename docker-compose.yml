@@ -54,6 +54,7 @@ services:
       - edge
 
   web:
+    image: ${SELARA_WEB_IMAGE:-selara-web:local}
     build:
       context: ./frontend
       dockerfile: Dockerfile

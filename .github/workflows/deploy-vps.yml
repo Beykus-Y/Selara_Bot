@@ -27,6 +27,8 @@ jobs:
               . ./.env
               set +a
             fi
+            export SELARA_IMAGE="${SELARA_IMAGE:-ghcr.io/${{ github.repository_owner }}/selara:latest}"
+            export SELARA_WEB_IMAGE="${SELARA_WEB_IMAGE:-ghcr.io/${{ github.repository_owner }}/selara-web:latest}"
             web_port="${WEB_PORT:-8080}"
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
             docker compose pull app web
