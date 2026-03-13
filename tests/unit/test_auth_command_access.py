@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 from selara.domain.entities import ChatRoleDefinition
-from selara.presentation.auth import has_command_access
+from selara.presentation.auth import get_actor_role_definition, has_command_access
 
 
 def _role(*, role_code: str, title_ru: str, rank: int) -> ChatRoleDefinition:
@@ -33,6 +36,20 @@ class _FakeActivityRepo:
     async def get_chat_role_definition(self, *, chat_id: int, role_code: str) -> ChatRoleDefinition | None:
         _ = chat_id
         return self._roles.get(role_code)
+
+
+class _BootstrapRepo:
+    def __init__(self) -> None:
+        self.bootstrapped_user_id: int | None = None
+
+    async def bootstrap_chat_owner_role(self, *, chat, user):
+        _ = chat
+        self.bootstrapped_user_id = user.telegram_user_id
+        return "owner", True
+
+    async def get_effective_role_definition(self, *, chat_id: int, user_id: int):
+        _ = chat_id, user_id
+        return None
 
 
 async def test_inactive_command_requires_junior_admin_by_default() -> None:
@@ -75,3 +92,41 @@ async def test_inactive_command_allows_junior_admin() -> None:
     assert actor_role_code == "junior_admin"
     assert required_role_code == "junior_admin"
     assert bootstrapped is False
+
+
+async def test_get_actor_role_definition_bootstraps_actual_chat_creator_when_bot_is_available() -> None:
+    repo = _BootstrapRepo()
+    bot = SimpleNamespace(
+        get_chat_administrators=AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    status="creator",
+                    user=SimpleNamespace(
+                        id=77,
+                        username="creator",
+                        first_name="Chat",
+                        last_name="Owner",
+                        is_bot=False,
+                    ),
+                )
+            ]
+        )
+    )
+
+    definition, bootstrapped = await get_actor_role_definition(
+        repo,
+        chat_id=-100,
+        chat_type="group",
+        chat_title="Test",
+        user_id=1,
+        username="actor",
+        first_name="Actor",
+        last_name=None,
+        is_bot=False,
+        bootstrap_if_missing_owner=True,
+        bot=bot,
+    )
+
+    assert definition is None
+    assert bootstrapped is True
+    assert repo.bootstrapped_user_id == 77

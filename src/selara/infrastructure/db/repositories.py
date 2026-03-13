@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -124,6 +124,7 @@ from selara.infrastructure.db.achievement_metrics import (
     set_chat_active_members_count,
     set_global_users_base_count,
 )
+from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult, ActivityBatchMessage
 
 _ACTIVITY_EVENT_SYNCED = "synced"
 _ACTIVITY_EVENT_PENDING = "pending"
@@ -322,6 +323,397 @@ class SqlAlchemyActivityRepository:
         if stats is None:
             raise RuntimeError("Failed to load user stats after upsert")
         return stats
+
+    async def flush_activity_batch(self, events: Sequence[ActivityBatchMessage]) -> ActivityBatchFlushResult:
+        if not events:
+            return ActivityBatchFlushResult()
+
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if dialect == "postgresql":
+            return await self._flush_activity_batch_postgresql(events)
+        return await self._flush_activity_batch_generic(events)
+
+    async def _flush_activity_batch_generic(self, events: Sequence[ActivityBatchMessage]) -> ActivityBatchFlushResult:
+        latest_event_at_by_pair: dict[tuple[int, int], datetime] = {}
+        impacted_chat_ids: set[int] = set()
+
+        for event in events:
+            chat = ChatSnapshot(
+                telegram_chat_id=event.chat_id,
+                chat_type=event.chat_type,
+                title=event.chat_title,
+            )
+            user = UserSnapshot(
+                telegram_user_id=event.user_id,
+                username=event.username,
+                first_name=event.first_name,
+                last_name=event.last_name,
+                is_bot=event.is_bot,
+            )
+            await self._upsert_chat(chat)
+            await self._upsert_user(user)
+            inserted = await self._insert_message_event(
+                chat_id=event.chat_id,
+                user_id=event.user_id,
+                sent_at=event.event_at,
+                telegram_message_id=event.telegram_message_id,
+                is_synthetic=False,
+            )
+            if not inserted:
+                continue
+
+            await self._upsert_activity_legacy(chat=chat, user=user, event_at=event.event_at)
+            key = (event.chat_id, event.user_id)
+            normalized_event_at = _coerce_utc_datetime(event.event_at)
+            current_last_seen = latest_event_at_by_pair.get(key)
+            latest_event_at_by_pair[key] = (
+                normalized_event_at
+                if current_last_seen is None
+                else _latest_datetime(current_last_seen, normalized_event_at)
+            )
+            impacted_chat_ids.add(event.chat_id)
+
+        return ActivityBatchFlushResult(
+            latest_event_at_by_pair=latest_event_at_by_pair,
+            impacted_chat_ids=impacted_chat_ids,
+        )
+
+    async def _flush_activity_batch_postgresql(self, events: Sequence[ActivityBatchMessage]) -> ActivityBatchFlushResult:
+        chats_by_id: dict[int, ChatSnapshot] = {}
+        users_by_id: dict[int, UserSnapshot] = {}
+        for event in events:
+            existing_chat = chats_by_id.get(event.chat_id)
+            chats_by_id[event.chat_id] = ChatSnapshot(
+                telegram_chat_id=event.chat_id,
+                chat_type=event.chat_type,
+                title=event.chat_title if event.chat_title is not None else (existing_chat.title if existing_chat is not None else None),
+            )
+            existing_user = users_by_id.get(event.user_id)
+            if existing_user is None:
+                users_by_id[event.user_id] = UserSnapshot(
+                    telegram_user_id=event.user_id,
+                    username=event.username,
+                    first_name=event.first_name,
+                    last_name=event.last_name,
+                    is_bot=event.is_bot,
+                )
+                continue
+            users_by_id[event.user_id] = UserSnapshot(
+                telegram_user_id=event.user_id,
+                username=_preserve_optional_text(existing_user.username, event.username),
+                first_name=_preserve_optional_text(existing_user.first_name, event.first_name),
+                last_name=_preserve_optional_text(existing_user.last_name, event.last_name),
+                is_bot=existing_user.is_bot or event.is_bot,
+            )
+
+        await self._upsert_chats_batch_postgresql(tuple(chats_by_id.values()))
+        inserted_users = await self._upsert_users_batch_postgresql(tuple(users_by_id.values()))
+        if inserted_users > 0:
+            base_count = int((await self._session.execute(select(func.count()).select_from(UserModel))).scalar_one() or 0)
+            await set_global_users_base_count(self._session, base_count=base_count)
+
+        inserted_rows = await self._insert_message_events_batch_postgresql(self._dedupe_activity_batch_events(events))
+        if not inserted_rows:
+            return ActivityBatchFlushResult()
+
+        latest_event_at_by_pair: dict[tuple[int, int], datetime] = {}
+        impacted_chat_ids: set[int] = set()
+        pair_rows: dict[tuple[int, int], tuple[int, datetime]] = {}
+        daily_rows: dict[tuple[int, int, date], tuple[int, datetime]] = {}
+        minute_rows: dict[tuple[int, int, datetime], tuple[int, datetime]] = {}
+
+        for chat_id, user_id, sent_at in inserted_rows:
+            normalized_sent_at = _coerce_utc_datetime(sent_at)
+            pair_key = (chat_id, user_id)
+            current_pair = pair_rows.get(pair_key)
+            pair_rows[pair_key] = (
+                (1, normalized_sent_at)
+                if current_pair is None
+                else (current_pair[0] + 1, _latest_datetime(current_pair[1], normalized_sent_at))
+            )
+
+            activity_date = normalized_sent_at.date()
+            daily_key = (chat_id, user_id, activity_date)
+            current_day = daily_rows.get(daily_key)
+            daily_rows[daily_key] = (
+                (1, normalized_sent_at)
+                if current_day is None
+                else (current_day[0] + 1, _latest_datetime(current_day[1], normalized_sent_at))
+            )
+
+            minute_bucket = normalized_sent_at.replace(second=0, microsecond=0)
+            minute_key = (chat_id, user_id, minute_bucket)
+            current_minute = minute_rows.get(minute_key)
+            minute_rows[minute_key] = (
+                (1, normalized_sent_at)
+                if current_minute is None
+                else (current_minute[0] + 1, _latest_datetime(current_minute[1], normalized_sent_at))
+            )
+
+            current_last_seen = latest_event_at_by_pair.get(pair_key)
+            latest_event_at_by_pair[pair_key] = (
+                normalized_sent_at
+                if current_last_seen is None
+                else _latest_datetime(current_last_seen, normalized_sent_at)
+            )
+            impacted_chat_ids.add(chat_id)
+
+        existing_activity_state = await self._get_existing_activity_state_batch_postgresql(tuple(pair_rows.keys()))
+        active_member_delta_by_chat: dict[int, int] = defaultdict(int)
+        for chat_id, user_id in pair_rows:
+            if existing_activity_state.get((chat_id, user_id), False):
+                continue
+            active_member_delta_by_chat[chat_id] += 1
+
+        await self._upsert_activity_batch_postgresql(
+            [
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "message_count": message_count,
+                    "is_active_member": True,
+                    "last_seen_at": last_seen_at,
+                }
+                for (chat_id, user_id), (message_count, last_seen_at) in pair_rows.items()
+            ]
+        )
+        await self._upsert_activity_daily_batch_postgresql(
+            [
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "activity_date": activity_date,
+                    "message_count": message_count,
+                    "last_seen_at": last_seen_at,
+                }
+                for (chat_id, user_id, activity_date), (message_count, last_seen_at) in daily_rows.items()
+            ]
+        )
+        await self._upsert_activity_minute_batch_postgresql(
+            [
+                {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "activity_minute": activity_minute,
+                    "message_count": message_count,
+                    "last_seen_at": last_seen_at,
+                }
+                for (chat_id, user_id, activity_minute), (message_count, last_seen_at) in minute_rows.items()
+            ]
+        )
+        for chat_id, delta in sorted(active_member_delta_by_chat.items()):
+            if delta != 0:
+                await adjust_chat_active_members_count(self._session, chat_id=chat_id, delta=delta)
+
+        return ActivityBatchFlushResult(
+            latest_event_at_by_pair=latest_event_at_by_pair,
+            impacted_chat_ids=impacted_chat_ids,
+        )
+
+    @staticmethod
+    def _dedupe_activity_batch_events(events: Sequence[ActivityBatchMessage]) -> list[ActivityBatchMessage]:
+        deduped: list[ActivityBatchMessage] = []
+        seen_message_ids: set[tuple[int, int]] = set()
+        for event in events:
+            if event.telegram_message_id is not None:
+                message_key = (event.chat_id, event.telegram_message_id)
+                if message_key in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_key)
+            deduped.append(event)
+        return deduped
+
+    async def _upsert_chats_batch_postgresql(self, chats: Sequence[ChatSnapshot]) -> None:
+        if not chats:
+            return
+
+        stmt = pg_insert(ChatModel).values(
+            [
+                {
+                    "telegram_chat_id": chat.telegram_chat_id,
+                    "type": chat.chat_type,
+                    "title": chat.title,
+                }
+                for chat in chats
+            ]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ChatModel.telegram_chat_id],
+            set_={
+                "type": stmt.excluded.type,
+                "title": func.coalesce(stmt.excluded.title, ChatModel.title),
+                "updated_at": func.now(),
+            },
+        )
+        await self._session.execute(stmt)
+
+    async def _upsert_users_batch_postgresql(self, users: Sequence[UserSnapshot]) -> int:
+        if not users:
+            return 0
+
+        rows = [
+            {
+                "telegram_user_id": user.telegram_user_id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "is_bot": user.is_bot,
+            }
+            for user in users
+        ]
+        insert_stmt = (
+            pg_insert(UserModel)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+            .returning(UserModel.telegram_user_id)
+        )
+        inserted_count = len((await self._session.execute(insert_stmt)).scalars().all())
+
+        profile_rows = [
+            row
+            for row in rows
+            if not (
+                row["username"] is None
+                and row["first_name"] is None
+                and row["last_name"] is None
+                and not bool(row["is_bot"])
+            )
+        ]
+        if profile_rows:
+            update_stmt = pg_insert(UserModel).values(profile_rows)
+            update_stmt = update_stmt.on_conflict_do_update(
+                index_elements=[UserModel.telegram_user_id],
+                set_={
+                    "username": func.coalesce(update_stmt.excluded.username, UserModel.username),
+                    "first_name": func.coalesce(update_stmt.excluded.first_name, UserModel.first_name),
+                    "last_name": func.coalesce(update_stmt.excluded.last_name, UserModel.last_name),
+                    "is_bot": update_stmt.excluded.is_bot,
+                    "updated_at": func.now(),
+                },
+            )
+            await self._session.execute(update_stmt)
+
+        return inserted_count
+
+    async def _insert_message_events_batch_postgresql(
+        self,
+        events: Sequence[ActivityBatchMessage],
+    ) -> list[tuple[int, int, datetime]]:
+        if not events:
+            return []
+
+        stmt = pg_insert(UserChatMessageEventModel).values(
+            [
+                {
+                    "chat_id": event.chat_id,
+                    "user_id": event.user_id,
+                    "telegram_message_id": event.telegram_message_id,
+                    "sent_at": _coerce_utc_datetime(event.event_at),
+                    "is_synthetic": False,
+                    "source_kind": None,
+                    "source_bucket_at": None,
+                    "source_seq": None,
+                }
+                for event in events
+            ]
+        )
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=[
+                UserChatMessageEventModel.chat_id,
+                UserChatMessageEventModel.telegram_message_id,
+            ]
+        )
+        rows = (
+            await self._session.execute(
+                stmt.returning(
+                    UserChatMessageEventModel.chat_id,
+                    UserChatMessageEventModel.user_id,
+                    UserChatMessageEventModel.sent_at,
+                )
+            )
+        ).all()
+        return [
+            (
+                int(chat_id),
+                int(user_id),
+                _coerce_utc_datetime(sent_at),
+            )
+            for chat_id, user_id, sent_at in rows
+        ]
+
+    async def _get_existing_activity_state_batch_postgresql(
+        self,
+        pairs: Sequence[tuple[int, int]],
+    ) -> dict[tuple[int, int], bool]:
+        if not pairs:
+            return {}
+
+        stmt = select(
+            UserChatActivityModel.chat_id,
+            UserChatActivityModel.user_id,
+            UserChatActivityModel.is_active_member,
+        ).where(
+            tuple_(UserChatActivityModel.chat_id, UserChatActivityModel.user_id).in_(list(pairs))
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {
+            (int(chat_id), int(user_id)): bool(is_active_member)
+            for chat_id, user_id, is_active_member in rows
+        }
+
+    async def _upsert_activity_batch_postgresql(self, rows: Sequence[dict[str, object]]) -> None:
+        if not rows:
+            return
+
+        stmt = pg_insert(UserChatActivityModel).values(list(rows))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[UserChatActivityModel.chat_id, UserChatActivityModel.user_id],
+            set_={
+                "message_count": UserChatActivityModel.message_count + stmt.excluded.message_count,
+                "is_active_member": True,
+                "last_seen_at": func.greatest(UserChatActivityModel.last_seen_at, stmt.excluded.last_seen_at),
+                "updated_at": func.now(),
+            },
+        )
+        await self._session.execute(stmt)
+
+    async def _upsert_activity_daily_batch_postgresql(self, rows: Sequence[dict[str, object]]) -> None:
+        if not rows:
+            return
+
+        stmt = pg_insert(UserChatActivityDailyModel).values(list(rows))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                UserChatActivityDailyModel.chat_id,
+                UserChatActivityDailyModel.user_id,
+                UserChatActivityDailyModel.activity_date,
+            ],
+            set_={
+                "message_count": UserChatActivityDailyModel.message_count + stmt.excluded.message_count,
+                "last_seen_at": func.greatest(UserChatActivityDailyModel.last_seen_at, stmt.excluded.last_seen_at),
+                "updated_at": func.now(),
+            },
+        )
+        await self._session.execute(stmt)
+
+    async def _upsert_activity_minute_batch_postgresql(self, rows: Sequence[dict[str, object]]) -> None:
+        if not rows:
+            return
+
+        stmt = pg_insert(UserChatActivityMinuteModel).values(list(rows))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                UserChatActivityMinuteModel.chat_id,
+                UserChatActivityMinuteModel.user_id,
+                UserChatActivityMinuteModel.activity_minute,
+            ],
+            set_={
+                "message_count": UserChatActivityMinuteModel.message_count + stmt.excluded.message_count,
+                "last_seen_at": func.greatest(UserChatActivityMinuteModel.last_seen_at, stmt.excluded.last_seen_at),
+                "updated_at": func.now(),
+            },
+        )
+        await self._session.execute(stmt)
 
     async def _insert_message_event(
         self,
@@ -1117,7 +1509,10 @@ class SqlAlchemyActivityRepository:
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
-            .where(UserChatActivityModel.chat_id == chat_id)
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
+            )
             .order_by(
                 UserChatActivityModel.message_count.desc(),
                 UserChatActivityModel.last_seen_at.desc(),
@@ -1136,7 +1531,15 @@ class SqlAlchemyActivityRepository:
                 func.min(UserChatMessageEventModel.sent_at),
                 func.max(UserChatMessageEventModel.sent_at),
             )
+            .join(
+                UserChatActivityModel,
+                and_(
+                    UserChatActivityModel.chat_id == UserChatMessageEventModel.chat_id,
+                    UserChatActivityModel.user_id == UserChatMessageEventModel.user_id,
+                ),
+            )
             .where(UserChatMessageEventModel.chat_id == chat_id)
+            .where(UserChatActivityModel.is_active_member.is_(True))
             .group_by(UserChatMessageEventModel.user_id)
             .order_by(
                 func.count(UserChatMessageEventModel.id).desc(),
@@ -4648,12 +5051,20 @@ class SqlAlchemyActivityRepository:
     ) -> dict[int, tuple[int, datetime | None]]:
         if await self._is_chat_event_synced(chat_id=chat_id):
             stmt = (
-            select(
-                UserChatMessageEventModel.user_id,
-                func.count(UserChatMessageEventModel.id),
-                func.max(UserChatMessageEventModel.sent_at),
-            )
+                select(
+                    UserChatMessageEventModel.user_id,
+                    func.count(UserChatMessageEventModel.id),
+                    func.max(UserChatMessageEventModel.sent_at),
+                )
+                .join(
+                    UserChatActivityModel,
+                    and_(
+                        UserChatActivityModel.chat_id == UserChatMessageEventModel.chat_id,
+                        UserChatActivityModel.user_id == UserChatMessageEventModel.user_id,
+                    ),
+                )
                 .where(UserChatMessageEventModel.chat_id == chat_id)
+                .where(UserChatActivityModel.is_active_member.is_(True))
                 .group_by(UserChatMessageEventModel.user_id)
             )
             if period != "all":
@@ -4671,7 +5082,10 @@ class SqlAlchemyActivityRepository:
                 UserChatActivityModel.user_id,
                 UserChatActivityModel.message_count,
                 UserChatActivityModel.last_seen_at,
-            ).where(UserChatActivityModel.chat_id == chat_id)
+            ).where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
+            )
             rows = (await self._session.execute(stmt)).all()
             return {int(user_id): (int(message_count), last_seen_at) for user_id, message_count, last_seen_at in rows}
 
@@ -4684,9 +5098,17 @@ class SqlAlchemyActivityRepository:
                     func.coalesce(func.sum(UserChatActivityMinuteModel.message_count), 0),
                     func.max(UserChatActivityMinuteModel.last_seen_at),
                 )
+                .join(
+                    UserChatActivityModel,
+                    and_(
+                        UserChatActivityModel.chat_id == UserChatActivityMinuteModel.chat_id,
+                        UserChatActivityModel.user_id == UserChatActivityMinuteModel.user_id,
+                    ),
+                )
                 .where(
                     UserChatActivityMinuteModel.chat_id == chat_id,
                     UserChatActivityMinuteModel.activity_minute >= since,
+                    UserChatActivityModel.is_active_member.is_(True),
                 )
                 .group_by(UserChatActivityMinuteModel.user_id)
             )
@@ -4699,9 +5121,17 @@ class SqlAlchemyActivityRepository:
                 func.coalesce(func.sum(UserChatActivityDailyModel.message_count), 0),
                 func.max(UserChatActivityDailyModel.last_seen_at),
             )
+            .join(
+                UserChatActivityModel,
+                and_(
+                    UserChatActivityModel.chat_id == UserChatActivityDailyModel.chat_id,
+                    UserChatActivityModel.user_id == UserChatActivityDailyModel.user_id,
+                ),
+            )
             .where(
                 UserChatActivityDailyModel.chat_id == chat_id,
                 UserChatActivityDailyModel.activity_date >= since.date(),
+                UserChatActivityModel.is_active_member.is_(True),
             )
             .group_by(UserChatActivityDailyModel.user_id)
         )
@@ -4718,7 +5148,16 @@ class SqlAlchemyActivityRepository:
         stmt = select(
             UserKarmaVoteModel.target_user_id,
             func.coalesce(func.sum(UserKarmaVoteModel.vote_value), 0),
-        ).where(UserKarmaVoteModel.chat_id == chat_id)
+        ).join(
+            UserChatActivityModel,
+            and_(
+                UserChatActivityModel.chat_id == UserKarmaVoteModel.chat_id,
+                UserChatActivityModel.user_id == UserKarmaVoteModel.target_user_id,
+            ),
+        ).where(
+            UserKarmaVoteModel.chat_id == chat_id,
+            UserChatActivityModel.is_active_member.is_(True),
+        )
 
         if period != "all" and since is not None:
             stmt = stmt.where(UserKarmaVoteModel.created_at >= since)

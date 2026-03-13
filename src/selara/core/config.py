@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
+    activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")
+    activity_batch_max_events: int = Field(default=1000, validation_alias="ACTIVITY_BATCH_MAX_EVENTS")
     achievements_catalog_path: str = Field(
         default="src/selara/core/achievements.json",
         validation_alias="ACHIEVEMENTS_CATALOG_PATH",

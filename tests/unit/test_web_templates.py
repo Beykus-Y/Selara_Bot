@@ -79,9 +79,28 @@ def test_chat_template_renders_settings_sections_items_key() -> None:
                 ],
             }
         ],
+        alias_mode_setting={
+            "key": "alias_mode",
+            "title": "Режим алиасов команд",
+            "description": "Описание режима алиасов.",
+            "current_value": "both",
+            "default_value": "both",
+            "current_value_display": "смешанный режим",
+            "default_value_display": "смешанный режим",
+            "hint": "aliases_if_exists / both / standard_only.",
+            "editable": True,
+            "input_kind": "select",
+            "options": [
+                {"value": "aliases_if_exists", "label": "только алиасы группы", "selected": False},
+                {"value": "both", "label": "смешанный режим", "selected": True},
+                {"value": "standard_only", "label": "только стандартные команды", "selected": False},
+            ],
+            "doc_href": "#docs-aliases",
+        },
     )
 
     assert "Режим экономики" in html
+    assert "Режим алиасов команд" in html
     assert "Смарт-триггеры" in html
     assert "{user}" in html
     assert "/app/docs/admin?chat_id=123#docs-trigger-variables" in html

@@ -426,6 +426,53 @@
           <p class="panel-subtitle">Веб-редактор слоя алиасов без кавычек и ручного ввода в чате.</p>
         </div>
       </div>
+      <div class="settings-grid">
+        <article
+          class="setting-card"
+          data-setting-card
+          data-setting-key="{{ alias_mode_setting.key }}"
+          data-setting-title="{{ alias_mode_setting.title }}"
+          data-setting-input-kind="{{ alias_mode_setting.input_kind }}"
+          data-setting-saved-value="{{ alias_mode_setting.current_value|lower }}"
+        >
+          <div class="setting-head">
+            <div class="setting-title-row">
+              <strong>{{ alias_mode_setting.title }}</strong>
+              <a
+                class="setting-doc-link"
+                href="{{ admin_docs_url }}{{ alias_mode_setting.doc_href }}"
+                data-docs-link
+                aria-label="Открыть документацию по настройке {{ alias_mode_setting.title }}"
+                title="Открыть документацию"
+              >?</a>
+            </div>
+            <div class="setting-meta-strip">
+              <span class="setting-status">{{ alias_mode_setting.current_value_display }}</span>
+              <span class="setting-format">Формат: {{ alias_mode_setting.hint }}</span>
+            </div>
+            <code>{{ alias_mode_setting.key }}</code>
+          </div>
+          <p class="setting-description">{{ alias_mode_setting.description }}</p>
+          <p class="helper-text setting-values">
+            Сейчас: <strong data-setting-current>{{ alias_mode_setting.current_value_display }}</strong> • по умолчанию:
+            <strong data-setting-default>{{ alias_mode_setting.default_value_display }}</strong>
+          </p>
+          <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
+            <input type="hidden" name="key" value="{{ alias_mode_setting.key }}">
+            <select name="value">
+              {% for option in alias_mode_setting.options %}
+                <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="button primary small">Сохранить режим</button>
+          </form>
+          <form class="setting-reset" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="reset">
+            <input type="hidden" name="key" value="{{ alias_mode_setting.key }}">
+            <input type="hidden" name="value" value="default">
+            <button type="submit" class="button ghost small">Сбросить</button>
+          </form>
+        </article>
+      </div>
       {% if can_manage_settings %}
         <form class="settings-grid" method="post" action="/app/chat/{{ chat_id }}/aliases">
           <article class="setting-card">
@@ -865,6 +912,18 @@
         }
         if (key === "text_commands_locale") {
           return lowered === "ru" ? "русский" : lowered === "en" ? "english" : normalized;
+        }
+        if (key === "alias_mode") {
+          if (lowered === "aliases_if_exists") {
+            return "только алиасы группы";
+          }
+          if (lowered === "both") {
+            return "смешанный режим";
+          }
+          if (lowered === "standard_only") {
+            return "только стандартные команды";
+          }
+          return normalized;
         }
         if (key === "economy_mode") {
           return lowered === "global" ? "общая" : lowered === "local" ? "по группе" : normalized;

@@ -1,16 +1,12 @@
-import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import Message
 
-from selara.application.use_cases.track_activity import execute as track_activity
+from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.filters import is_trackable_message
-from selara.presentation.game_state import GAME_STORE
-
-logger = logging.getLogger(__name__)
 
 
 def _is_profile_lookup_message(message: Message) -> bool:
@@ -29,46 +25,36 @@ def _is_profile_lookup_message(message: Message) -> bool:
 
 
 class ActivityTrackerMiddleware(BaseMiddleware):
+    def __init__(self, activity_batcher: ActivityBatcher) -> None:
+        self._activity_batcher = activity_batcher
+
     async def __call__(
         self,
         handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
         event: Any,
         data: dict[str, Any],
     ) -> Any:
-        if isinstance(event, Message):
-            settings = data.get("settings")
-            repo = data.get("activity_repo")
-            achievement_orchestrator = data.get("achievement_orchestrator")
+        result = await handler(event, data)
 
-            if settings is not None and repo is not None and is_trackable_message(event, settings.supported_chat_types):
-                if _is_profile_lookup_message(event):
-                    return await handler(event, data)
-                await track_activity(
-                    repo=repo,
-                    chat_id=event.chat.id,
-                    chat_type=event.chat.type,
-                    chat_title=event.chat.title,
-                    user_id=event.from_user.id,
-                    username=event.from_user.username,
-                    first_name=event.from_user.first_name,
-                    last_name=event.from_user.last_name,
-                    is_bot=event.from_user.is_bot,
-                    event_at=event.date,
-                    telegram_message_id=event.message_id,
-                )
-                if achievement_orchestrator is not None and event.from_user is not None:
-                    await achievement_orchestrator.process_message(
-                        chat_id=event.chat.id,
-                        user_id=event.from_user.id,
-                        event_at=event.date,
-                    )
-                try:
-                    await GAME_STORE.publish_event(
-                        event_type="chat_activity",
-                        scope="chat",
-                        chat_id=event.chat.id,
-                    )
-                except Exception:
-                    logger.exception("Failed to publish chat activity live event", extra={"chat_id": event.chat.id})
+        if not isinstance(event, Message):
+            return result
 
-        return await handler(event, data)
+        settings = data.get("settings")
+        if settings is None or not is_trackable_message(event, settings.supported_chat_types):
+            return result
+        if _is_profile_lookup_message(event):
+            return result
+
+        await self._activity_batcher.enqueue_message(
+            chat_id=event.chat.id,
+            chat_type=event.chat.type,
+            chat_title=event.chat.title,
+            user_id=event.from_user.id,
+            username=event.from_user.username,
+            first_name=event.from_user.first_name,
+            last_name=event.from_user.last_name,
+            is_bot=event.from_user.is_bot,
+            event_at=event.date,
+            telegram_message_id=event.message_id,
+        )
+        return result

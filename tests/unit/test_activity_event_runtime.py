@@ -6,9 +6,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.infrastructure.db.activity_batching import ActivityBatchMessage
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
+    ChatMetricsModel,
+    UserChatActivityDailyModel,
+    UserChatActivityMinuteModel,
     UserChatActivityModel,
     UserChatMessageEventModel,
 )
@@ -220,5 +224,270 @@ async def test_activity_event_runtime_economy_does_not_wipe_known_username() -> 
         assert leaderboard
         assert leaderboard[0].username == "known_user"
         assert leaderboard[0].first_name == "Known"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_deduplicates_duplicate_message_ids() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    event_at = datetime(2026, 3, 13, 10, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        result = await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=505,
+                    chat_type="group",
+                    chat_title="Batch",
+                    user_id=909,
+                    username="alice",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at,
+                    telegram_message_id=77,
+                ),
+                ActivityBatchMessage(
+                    chat_id=505,
+                    chat_type="group",
+                    chat_title="Batch",
+                    user_id=909,
+                    username="alice_new",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at + timedelta(minutes=1),
+                    telegram_message_id=77,
+                ),
+            ]
+        )
+
+        event_count = await session.scalar(
+            select(func.count(UserChatMessageEventModel.id)).where(UserChatMessageEventModel.chat_id == 505)
+        )
+        activity_row = await session.get(UserChatActivityModel, {"chat_id": 505, "user_id": 909})
+
+        assert int(event_count or 0) == 1
+        assert activity_row is not None
+        assert int(activity_row.message_count) == 1
+        assert result.impacted_chat_ids == {505}
+        assert result.latest_event_at_by_pair == {(505, 909): event_at}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_updates_aggregates_across_users_and_chats() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    start = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        result = await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=606,
+                    chat_type="group",
+                    chat_title="One",
+                    user_id=701,
+                    username="one",
+                    first_name="One",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=start,
+                    telegram_message_id=1,
+                ),
+                ActivityBatchMessage(
+                    chat_id=606,
+                    chat_type="group",
+                    chat_title="One",
+                    user_id=701,
+                    username="one",
+                    first_name="One",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=start + timedelta(minutes=1),
+                    telegram_message_id=2,
+                ),
+                ActivityBatchMessage(
+                    chat_id=606,
+                    chat_type="group",
+                    chat_title="One",
+                    user_id=702,
+                    username="two",
+                    first_name="Two",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=start + timedelta(minutes=1),
+                    telegram_message_id=3,
+                ),
+                ActivityBatchMessage(
+                    chat_id=607,
+                    chat_type="group",
+                    chat_title="Two",
+                    user_id=703,
+                    username="three",
+                    first_name="Three",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=start + timedelta(minutes=2),
+                    telegram_message_id=4,
+                ),
+            ]
+        )
+
+        activity_one = await session.get(UserChatActivityModel, {"chat_id": 606, "user_id": 701})
+        activity_two = await session.get(UserChatActivityModel, {"chat_id": 606, "user_id": 702})
+        activity_three = await session.get(UserChatActivityModel, {"chat_id": 607, "user_id": 703})
+        daily_rows = (
+            await session.execute(
+                select(UserChatActivityDailyModel).where(UserChatActivityDailyModel.chat_id.in_([606, 607]))
+            )
+        ).scalars().all()
+        minute_rows = (
+            await session.execute(
+                select(UserChatActivityMinuteModel).where(UserChatActivityMinuteModel.chat_id.in_([606, 607]))
+            )
+        ).scalars().all()
+
+        assert activity_one is not None
+        assert activity_two is not None
+        assert activity_three is not None
+        assert int(activity_one.message_count) == 2
+        assert int(activity_two.message_count) == 1
+        assert int(activity_three.message_count) == 1
+        assert len(daily_rows) == 3
+        assert len(minute_rows) == 4
+        assert result.impacted_chat_ids == {606, 607}
+        assert result.latest_event_at_by_pair[(606, 701)] == start + timedelta(minutes=1)
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_reactivates_inactive_member_and_updates_metrics() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=808, chat_type="group", title="Reactivate")
+    user = UserSnapshot(telegram_user_id=909, username="react", first_name="React", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_activity(chat=chat, user=user, event_at=now - timedelta(days=1), telegram_message_id=1)
+        await repo.set_chat_member_active(chat=chat, user=user, is_active=False, event_at=now - timedelta(hours=1))
+
+        metrics = await session.get(ChatMetricsModel, chat.telegram_chat_id)
+        assert metrics is not None
+        assert int(metrics.active_members_count) == 0
+
+        result = await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=chat.telegram_chat_id,
+                    chat_type=chat.chat_type,
+                    chat_title=chat.title,
+                    user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                    event_at=now,
+                    telegram_message_id=2,
+                )
+            ]
+        )
+
+        refreshed_metrics = await session.get(ChatMetricsModel, chat.telegram_chat_id)
+        refreshed_activity = await session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
+        )
+
+        assert refreshed_metrics is not None
+        assert refreshed_activity is not None
+        assert int(refreshed_metrics.active_members_count) == 1
+        assert refreshed_activity.is_active_member is True
+        assert int(refreshed_activity.message_count) == 2
+        assert result.latest_event_at_by_pair[(chat.telegram_chat_id, user.telegram_user_id)] == now
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_tops_exclude_inactive_members_without_deleting_history() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=9090, chat_type="group", title="Top Filter")
+    active_user = UserSnapshot(telegram_user_id=1001, username="active", first_name="Active", last_name=None, is_bot=False)
+    inactive_user = UserSnapshot(telegram_user_id=1002, username="inactive", first_name="Inactive", last_name=None, is_bot=False)
+    voter_user = UserSnapshot(telegram_user_id=1003, username="voter", first_name="Voter", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 13, 18, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_activity(chat=chat, user=active_user, event_at=now - timedelta(hours=2), telegram_message_id=1)
+        await repo.upsert_activity(chat=chat, user=inactive_user, event_at=now - timedelta(hours=3), telegram_message_id=2)
+        await repo.upsert_activity(chat=chat, user=voter_user, event_at=now - timedelta(hours=4), telegram_message_id=3)
+        await repo.record_vote(chat=chat, voter=voter_user, target=active_user, vote_value=1, event_at=now - timedelta(minutes=5))
+        await repo.record_vote(chat=chat, voter=active_user, target=inactive_user, vote_value=1, event_at=now - timedelta(minutes=4))
+        await repo.set_chat_member_active(chat=chat, user=inactive_user, is_active=False, event_at=now - timedelta(minutes=1))
+
+        legacy_top = await repo.get_top(chat_id=chat.telegram_chat_id, limit=10)
+        legacy_karma = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="karma",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=1.0,
+            activity_weight=0.0,
+        )
+
+        assert inactive_user.telegram_user_id not in {item.user_id for item in legacy_top}
+        assert inactive_user.telegram_user_id not in {item.user_id for item in legacy_karma}
+
+        synced = await repo.backfill_message_events_for_chat(chat_id=chat.telegram_chat_id)
+        synced_top = await repo.get_top(chat_id=chat.telegram_chat_id, limit=10)
+        synced_karma = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="karma",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=1.0,
+            activity_weight=0.0,
+        )
+        inactive_row = await session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": inactive_user.telegram_user_id},
+        )
+
+        assert synced is True
+        assert inactive_row is not None
+        assert int(inactive_row.message_count) == 1
+        assert inactive_row.is_active_member is False
+        assert inactive_user.telegram_user_id not in {item.user_id for item in synced_top}
+        assert inactive_user.telegram_user_id not in {item.user_id for item in synced_karma}
 
     await engine.dispose()

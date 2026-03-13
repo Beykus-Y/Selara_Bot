@@ -479,6 +479,7 @@ async def _apply_role_step_action(*, message: Message, activity_repo, action: st
         is_bot=bool(message.from_user.is_bot),
         command_key=command_key,
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not command_allowed:
         actor_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=actor_role_code)
@@ -505,6 +506,7 @@ async def _apply_role_step_action(*, message: Message, activity_repo, action: st
         is_bot=bool(message.from_user.is_bot),
         permission="manage_roles",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для управления ролями.")
@@ -620,6 +622,7 @@ async def roles_command(message: Message, activity_repo) -> None:
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
 
     items = await activity_repo.list_bot_roles(chat_id=message.chat.id)
@@ -660,6 +663,7 @@ async def role_add_command(message: Message, command: CommandObject, activity_re
         is_bot=bool(message.from_user.is_bot),
         permission="manage_roles",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed or actor_role is None:
         await message.answer("Недостаточно прав для управления ролями.")
@@ -749,6 +753,7 @@ async def role_remove_command(message: Message, command: CommandObject, activity
         is_bot=bool(message.from_user.is_bot),
         permission="manage_roles",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed or actor_role is None:
         await message.answer("Недостаточно прав для управления ролями.")
@@ -845,6 +850,7 @@ async def role_templates_command(message: Message, activity_repo) -> None:
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для управления шаблонами ролей.")
@@ -886,6 +892,7 @@ async def role_create_command(message: Message, command: CommandObject, activity
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для создания кастомных ролей.")
@@ -949,6 +956,7 @@ async def role_set_title_command(message: Message, command: CommandObject, activ
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для редактирования кастомных ролей.")
@@ -999,6 +1007,7 @@ async def role_set_rank_command(message: Message, command: CommandObject, activi
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для редактирования кастомных ролей.")
@@ -1052,6 +1061,7 @@ async def role_permissions_command(message: Message, command: CommandObject, act
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для редактирования кастомных ролей.")
@@ -1138,6 +1148,7 @@ async def role_delete_command(message: Message, command: CommandObject, activity
         is_bot=bool(message.from_user.is_bot),
         permission="manage_role_templates",
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if not allowed:
         await message.answer("Недостаточно прав для удаления кастомных ролей.")

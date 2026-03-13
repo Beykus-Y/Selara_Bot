@@ -33,6 +33,7 @@ from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
+from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.core.web_auth import (
     digest_login_code,
     digest_session_token,
@@ -68,6 +69,7 @@ from selara.web.admin_docs import build_admin_docs_context
 from selara.web.presenters import (
     build_achievement_rows,
     build_alias_rows,
+    build_alias_mode_setting,
     build_audit_rows,
     build_chat_context,
     build_home_context,
@@ -4773,6 +4775,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             roles = await activity_repo.list_chat_role_definitions(chat_id=chat_id)
             command_rules = await activity_repo.list_command_access_rules(chat_id=chat_id)
+            alias_mode = await activity_repo.get_chat_alias_mode(chat_id=chat_id)
             aliases = await activity_repo.list_chat_aliases(chat_id=chat_id)
             triggers = await activity_repo.list_chat_triggers(chat_id=chat_id)
             audit_entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=20)
@@ -4850,6 +4853,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             local_achievement_sections=local_achievement_sections,
             flash=request.query_params.get("flash"),
             error=request.query_params.get("error"),
+        )
+        page_context["alias_mode_setting"] = build_alias_mode_setting(
+            current_mode=alias_mode,
+            editable=can_manage_settings,
         )
         if requested_tab == "settings" and not can_manage_settings:
             requested_tab = "overview"
@@ -5173,6 +5180,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat=chat,
                 user=user,
             )
+            alias_mode = await activity_repo.get_chat_alias_mode(chat_id=chat_id)
             aliases = await activity_repo.list_chat_aliases(chat_id=chat_id) if can_manage_settings else []
             triggers = await activity_repo.list_chat_triggers(chat_id=chat_id) if can_manage_settings else []
             audit_entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=10)
@@ -5199,6 +5207,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "settings_sections": build_settings_sections(
                     current=current_settings,
                     defaults=chat_settings_defaults,
+                    editable=can_manage_settings,
+                ),
+                "alias_mode_setting": build_alias_mode_setting(
+                    current_mode=alias_mode,
                     editable=can_manage_settings,
                 ),
                 "aliases": build_alias_rows(aliases),
@@ -6216,6 +6228,69 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             form = await _parse_form(request)
             key = (form.get("key") or "").strip()
             raw_value = form.get("value") or ""
+            chat_snapshot = ChatSnapshot(
+                telegram_chat_id=chat_id,
+                chat_type=chat.chat_type,
+                title=chat.chat_title,
+            )
+
+            if key == "alias_mode":
+                current_mode = await activity_repo.get_chat_alias_mode(chat_id=chat_id)
+                normalized_value = ALIAS_MODE_DEFAULT if str(raw_value).strip().lower() == "default" else str(raw_value).strip().lower()
+                if normalized_value not in ALIAS_MODE_VALUES:
+                    await session.commit()
+                    message = (
+                        "Режим алиасов должен быть одним из: "
+                        + ", ".join(ALIAS_MODE_VALUES)
+                    )
+                    redirect_path = _with_message(
+                        f"/app/chat/{chat_id}",
+                        key="error",
+                        text=message,
+                    )
+                    if prefers_json:
+                        return _json_result(ok=False, message=message, status_code=400, redirect=redirect_path)
+                    return _redirect(redirect_path)
+
+                updated_mode = await activity_repo.set_chat_alias_mode(
+                    chat=chat_snapshot,
+                    mode=normalized_value,  # type: ignore[arg-type]
+                )
+                setting_payload = build_alias_mode_setting(current_mode=updated_mode, editable=True)
+                await log_chat_action(
+                    activity_repo,
+                    chat_id=chat_id,
+                    chat_type=chat.chat_type,
+                    chat_title=chat.chat_title,
+                    action_code="web_setting_updated",
+                    description=(
+                        f"Через веб обновлена настройка «{setting_payload['title']}»: "
+                        f"{current_mode} -> {updated_mode}"
+                    ),
+                    actor_user_id=user.telegram_user_id,
+                )
+                await session.commit()
+                message = f"Настройка «{setting_payload['title']}» обновлена."
+                if prefers_json:
+                    return _json_result(
+                        ok=True,
+                        message=message,
+                        status_code=200,
+                        setting={
+                            "key": setting_payload["key"],
+                            "title": setting_payload["title"],
+                            "current_value": str(setting_payload["current_value"]),
+                            "default_value": str(setting_payload["default_value"]),
+                        },
+                    )
+                return _redirect(
+                    _with_message(
+                        f"/app/chat/{chat_id}",
+                        key="flash",
+                        text=message,
+                    )
+                )
+
             defaults = default_chat_settings(settings)
             current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or defaults
             current_map = settings_to_dict(current_settings)
@@ -6239,11 +6314,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             await activity_repo.upsert_chat_settings(
-                chat=ChatSnapshot(
-                    telegram_chat_id=chat_id,
-                    chat_type=chat.chat_type,
-                    title=chat.chat_title,
-                ),
+                chat=chat_snapshot,
                 values=updated,
             )
             await log_chat_action(

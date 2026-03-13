@@ -8,6 +8,7 @@ import pytest
 
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
+from selara.core.text_aliases import ALIAS_MODE_DEFAULT
 from selara.application.dto import RepStats
 from selara.domain.entities import ActivityStats, ChatActivitySummary, ChatRoleDefinition, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.web import app as web_app_module
@@ -43,10 +44,12 @@ class ChatHubState:
     activity_groups: list[UserChatOverview] = field(default_factory=list)
     admin_groups: list[UserChatOverview] = field(default_factory=list)
     chat_settings_by_chat: dict[int, ChatSettings] = field(default_factory=dict)
+    alias_mode_by_chat: dict[int, str] = field(default_factory=dict)
     summaries: dict[int, ChatActivitySummary] = field(default_factory=dict)
     leaderboards: dict[tuple[int, str, str], list[LeaderboardItem]] = field(default_factory=dict)
     daily_activity: list[dict[str, object]] = field(default_factory=list)
     richest_payload: dict[str, object] | None = None
+    audit_log_calls: list[dict[str, object]] = field(default_factory=list)
 
 
 class FakeActivityRepo:
@@ -61,6 +64,9 @@ class FakeActivityRepo:
 
     async def get_chat_settings(self, *, chat_id: int):
         return self._state.chat_settings_by_chat.get(chat_id)
+
+    async def get_chat_alias_mode(self, *, chat_id: int):
+        return self._state.alias_mode_by_chat.get(chat_id, ALIAS_MODE_DEFAULT)
 
     async def get_chat_activity_summary(self, *, chat_id: int):
         return self._state.summaries[chat_id]
@@ -81,6 +87,14 @@ class FakeActivityRepo:
         return []
 
     async def list_command_access_rules(self, *, chat_id: int):
+        _ = chat_id
+        return []
+
+    async def list_chat_aliases(self, *, chat_id: int):
+        _ = chat_id
+        return []
+
+    async def list_chat_triggers(self, *, chat_id: int):
         _ = chat_id
         return []
 
@@ -105,6 +119,32 @@ class FakeActivityRepo:
     ):
         _ = since, limit, karma_weight, activity_weight
         return list(self._state.leaderboards.get((chat_id, mode, period), []))
+
+    async def set_chat_alias_mode(self, *, chat, mode: str):
+        self._state.alias_mode_by_chat[chat.telegram_chat_id] = mode
+        return mode
+
+    async def add_audit_log(
+        self,
+        *,
+        chat,
+        action_code: str,
+        description: str,
+        actor_user_id: int | None = None,
+        target_user_id: int | None = None,
+        meta_json=None,
+    ):
+        self._state.audit_log_calls.append(
+            {
+                "chat_id": chat.telegram_chat_id,
+                "action_code": action_code,
+                "description": description,
+                "actor_user_id": actor_user_id,
+                "target_user_id": target_user_id,
+                "meta_json": meta_json,
+            }
+        )
+        return None
 
 
 class FakeEconomyRepo:
@@ -201,6 +241,7 @@ async def _web_client(monkeypatch, state: ChatHubState):
     monkeypatch.setattr(web_app_module, "SqlAlchemyActivityRepository", lambda session: FakeActivityRepo(state))
     monkeypatch.setattr(web_app_module, "SqlAlchemyEconomyRepository", lambda session: FakeEconomyRepo(state))
     monkeypatch.setattr(web_app_module, "SqlAlchemyWebAuthRepository", lambda session: FakeWebAuthRepo(state))
+    monkeypatch.setattr(web_app_module, "has_permission", _has_permission)
     monkeypatch.setattr(web_app_module, "_build_chat_daily_activity_series", _daily_activity)
     monkeypatch.setattr(web_app_module, "_build_richest_user_payload", _richest_payload)
     monkeypatch.setattr(web_app_module, "get_my_stats", _my_stats)
@@ -215,6 +256,11 @@ async def _web_client(monkeypatch, state: ChatHubState):
     finally:
         await client.aclose()
         await app.router.shutdown()
+
+
+async def _has_permission(*args, **kwargs):
+    _ = args, kwargs
+    return True, None, None
 
 
 def _leaderboard_item(user_id: int, name: str, *, username: str | None, activity: int, karma: int, score: float) -> LeaderboardItem:
@@ -304,3 +350,61 @@ async def test_chat_leaderboard_api_supports_find_me_and_search(monkeypatch) -> 
     search_payload = search_response.json()
     assert search_payload["total_rows"] == 1
     assert search_payload["rows"][0]["user_id"] == 500
+
+
+@pytest.mark.asyncio
+async def test_chat_settings_api_includes_alias_mode_setting(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        summaries={
+            -1001: ChatActivitySummary(
+                chat_id=-1001,
+                participants_count=12,
+                total_messages=345,
+                last_activity_at=datetime(2026, 3, 9, 10, 30, tzinfo=timezone.utc),
+            )
+        },
+        alias_mode_by_chat={-1001: "aliases_if_exists"},
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get("/api/chat/-1001/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["alias_mode_setting"]["key"] == "alias_mode"
+    assert payload["alias_mode_setting"]["current_value"] == "aliases_if_exists"
+    assert payload["alias_mode_setting"]["current_value_display"] == "только алиасы группы"
+
+
+@pytest.mark.asyncio
+async def test_update_chat_setting_persists_alias_mode(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        alias_mode_by_chat={-1001: "both"},
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(
+            "/app/chat/-1001/settings",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            data={"key": "alias_mode", "value": "standard_only"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["setting"]["key"] == "alias_mode"
+    assert payload["setting"]["current_value"] == "standard_only"
+    assert state.alias_mode_by_chat[-1001] == "standard_only"
+    assert state.audit_log_calls[-1]["action_code"] == "web_setting_updated"
+    assert "both -> standard_only" in str(state.audit_log_calls[-1]["description"])

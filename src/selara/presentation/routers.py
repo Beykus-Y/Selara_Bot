@@ -1,6 +1,7 @@
 from aiogram import Router
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.presentation.handlers.engagement import router as engagement_router
 from selara.presentation.handlers.economy import router as economy_router
 from selara.presentation.handlers.game import router as game_router
@@ -23,7 +24,11 @@ from selara.presentation.middlewares.db_session import DBSessionMiddleware
 from selara.presentation.middlewares.error_handler import ErrorHandlerMiddleware
 
 
-def build_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
+def build_router(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    activity_batcher: ActivityBatcher,
+) -> Router:
     root = Router(name="root")
 
     root.message.outer_middleware(ErrorHandlerMiddleware(session_factory))
@@ -33,7 +38,7 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     root.message.outer_middleware(ChatSettingsMiddleware())
     root.message.outer_middleware(CommandCleanupMiddleware())
     root.message.outer_middleware(CommandAccessMiddleware())
-    root.message.outer_middleware(ActivityTrackerMiddleware())
+    root.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
     root.callback_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.callback_query.outer_middleware(DBSessionMiddleware(session_factory))

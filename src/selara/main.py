@@ -7,6 +7,7 @@ from aiogram.types import BotCommand
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
+from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.presentation.game_state import GAME_STORE
@@ -98,14 +99,24 @@ def build_bot_commands() -> list[BotCommand]:
 
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
+    achievement_catalog = get_achievement_catalog_from_settings(settings)
+    activity_batcher = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=achievement_catalog,
+        flush_seconds=settings.activity_batch_flush_seconds,
+        max_events=settings.activity_batch_max_events,
+        live_event_publisher=GAME_STORE.publish_event,
+    )
     dispatcher = Dispatcher()
-    dispatcher.include_router(build_router(session_factory))
+    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher))
 
     await bot.set_my_commands(build_bot_commands())
+    await activity_batcher.start()
 
     try:
         await dispatcher.start_polling(bot, settings=settings)
     finally:
+        await activity_batcher.close()
         await bot.session.close()
 
 

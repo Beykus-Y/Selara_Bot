@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
+from aiogram import Bot
 from sqlalchemy.exc import SQLAlchemyError
 
 from selara.domain.entities import BotRole, ChatRoleDefinition, ChatSnapshot, UserSnapshot
@@ -20,6 +22,8 @@ BotPermission = Literal[
 _DEFAULT_MIN_ROLE_BY_COMMAND_KEY: dict[str, str] = {
     "inactive": "junior_admin",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def build_chat_snapshot(*, chat_id: int, chat_type: str, chat_title: str | None) -> ChatSnapshot:
@@ -49,6 +53,32 @@ def build_user_snapshot(
     )
 
 
+async def _resolve_owner_bootstrap_user(*, bot: Bot | None, chat: ChatSnapshot, fallback_user: UserSnapshot) -> UserSnapshot:
+    if bot is None or chat.chat_type not in {"group", "supergroup"}:
+        return fallback_user
+
+    try:
+        administrators = await bot.get_chat_administrators(chat_id=chat.telegram_chat_id)
+    except Exception:
+        logger.exception("Failed to resolve chat creator for owner bootstrap", extra={"chat_id": chat.telegram_chat_id})
+        return fallback_user
+
+    for member in administrators:
+        if getattr(member, "status", None) != "creator":
+            continue
+        creator = getattr(member, "user", None)
+        if creator is None:
+            continue
+        return build_user_snapshot(
+            user_id=creator.id,
+            username=getattr(creator, "username", None),
+            first_name=getattr(creator, "first_name", None),
+            last_name=getattr(creator, "last_name", None),
+            is_bot=bool(getattr(creator, "is_bot", False)),
+        )
+    return fallback_user
+
+
 async def get_actor_role(
     activity_repo,
     *,
@@ -61,6 +91,7 @@ async def get_actor_role(
     last_name: str | None,
     is_bot: bool,
     bootstrap_if_missing_owner: bool,
+    bot: Bot | None = None,
 ) -> tuple[BotRole | None, bool]:
     definition, bootstrapped = await get_actor_role_definition(
         activity_repo,
@@ -73,6 +104,7 @@ async def get_actor_role(
         last_name=last_name,
         is_bot=is_bot,
         bootstrap_if_missing_owner=bootstrap_if_missing_owner,
+        bot=bot,
     )
     if definition is None:
         return None, bootstrapped
@@ -91,6 +123,7 @@ async def get_actor_role_definition(
     last_name: str | None,
     is_bot: bool,
     bootstrap_if_missing_owner: bool,
+    bot: Bot | None = None,
 ) -> tuple[ChatRoleDefinition | None, bool]:
     chat = build_chat_snapshot(chat_id=chat_id, chat_type=chat_type, chat_title=chat_title)
     user = build_user_snapshot(
@@ -104,11 +137,8 @@ async def get_actor_role_definition(
     try:
         bootstrapped = False
         if bootstrap_if_missing_owner:
-            role, bootstrapped = await activity_repo.bootstrap_chat_owner_role(chat=chat, user=user)
-            if role is not None:
-                definition = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=role)
-                if definition is not None:
-                    return definition, bootstrapped
+            owner_user = await _resolve_owner_bootstrap_user(bot=bot, chat=chat, fallback_user=user)
+            _role, bootstrapped = await activity_repo.bootstrap_chat_owner_role(chat=chat, user=owner_user)
 
         definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user_id)
         return definition, bootstrapped
@@ -144,6 +174,7 @@ async def has_permission(
     is_bot: bool,
     permission: BotPermission,
     bootstrap_if_missing_owner: bool,
+    bot: Bot | None = None,
 ) -> tuple[bool, BotRole | None, bool]:
     definition, bootstrapped = await get_actor_role_definition(
         activity_repo,
@@ -156,6 +187,7 @@ async def has_permission(
         last_name=last_name,
         is_bot=is_bot,
         bootstrap_if_missing_owner=bootstrap_if_missing_owner,
+        bot=bot,
     )
     if definition is None:
         return False, None, bootstrapped
@@ -175,6 +207,7 @@ async def has_command_access(
     is_bot: bool,
     command_key: str,
     bootstrap_if_missing_owner: bool,
+    bot: Bot | None = None,
 ) -> tuple[bool, BotRole | None, str | None, bool]:
     definition, bootstrapped = await get_actor_role_definition(
         activity_repo,
@@ -187,6 +220,7 @@ async def has_command_access(
         last_name=last_name,
         is_bot=is_bot,
         bootstrap_if_missing_owner=bootstrap_if_missing_owner,
+        bot=bot,
     )
     if definition is None:
         return True, None, None, bootstrapped

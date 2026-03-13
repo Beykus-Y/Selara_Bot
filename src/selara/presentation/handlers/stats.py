@@ -913,6 +913,7 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
         bootstrap_if_missing_owner=True,
+        bot=message.bot,
     )
     if actor_role_definition is None or int(actor_role_definition.rank) < _AWARD_MIN_ACTOR_RANK:
         await message.answer("Выдавать награды могут только админы бота с ролью «Мл. админ» и выше.")
@@ -1567,6 +1568,7 @@ async def iris_import_command(
             last_name=message.from_user.last_name,
             is_bot=bool(message.from_user.is_bot),
             bootstrap_if_missing_owner=True,
+            bot=message.bot,
         )
         actor_role_code = definition.role_code if definition is not None else None
         if not _can_start_iris_import(

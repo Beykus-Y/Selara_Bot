@@ -7,6 +7,7 @@ from selara.application.dto import RepStats
 from selara.application.use_cases.economy.growth import effective_growth_stress_pct
 from selara.application.use_cases.economy.results import EconomyDashboard
 from selara.core.chat_settings import CHAT_SETTINGS_KEYS, ChatSettings
+from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.core.trigger_templates import build_trigger_template_variable_rows
 from selara.domain.entities import (
     ActivityStats,
@@ -56,6 +57,11 @@ _BOT_ROLE_LABELS_RU: dict[str, str] = {
     "senior_admin": "старший админ",
     "co_owner": "совладелец",
     "owner": "владелец",
+}
+_ALIAS_MODE_LABELS_RU: dict[str, str] = {
+    "aliases_if_exists": "только алиасы группы",
+    "both": "смешанный режим",
+    "standard_only": "только стандартные команды",
 }
 _ACHIEVEMENT_RARITY_LABELS_RU: dict[str, str] = {
     "common": "обычное",
@@ -107,11 +113,17 @@ def achievement_rarity_label_ru(value: str) -> str:
     return _ACHIEVEMENT_RARITY_LABELS_RU.get(value, value)
 
 
+def alias_mode_label_ru(value: str) -> str:
+    return _ALIAS_MODE_LABELS_RU.get(value, value)
+
+
 def setting_value_display(key: str, value: Any) -> str:
     normalized = str(value)
     lowered = normalized.lower()
     if key in CFG_BOOL_KEYS:
         return "включено" if lowered == "true" else "выключено"
+    if key == "alias_mode":
+        return alias_mode_label_ru(lowered)
     if key == "text_commands_locale":
         return "русский" if lowered == "ru" else "english" if lowered == "en" else normalized
     if key == "economy_mode":
@@ -337,6 +349,33 @@ def build_alias_rows(aliases: list[ChatTextAlias]) -> list[dict[str, str]]:
         }
         for alias in aliases
     ]
+
+
+def build_alias_mode_setting(*, current_mode: str, editable: bool) -> dict[str, Any]:
+    return {
+        "key": "alias_mode",
+        "title": "Режим алиасов команд",
+        "description": (
+            "Определяет, использовать ли только кастомные алиасы группы, смешанный режим "
+            "или только стандартные текстовые команды."
+        ),
+        "hint": "aliases_if_exists / both / standard_only.",
+        "current_value": current_mode,
+        "default_value": ALIAS_MODE_DEFAULT,
+        "current_value_display": setting_value_display("alias_mode", current_mode),
+        "default_value_display": setting_value_display("alias_mode", ALIAS_MODE_DEFAULT),
+        "editable": editable,
+        "input_kind": "select",
+        "options": [
+            {
+                "value": item,
+                "label": alias_mode_label_ru(item),
+                "selected": current_mode == item,
+            }
+            for item in ALIAS_MODE_VALUES
+        ],
+        "doc_href": "#docs-aliases",
+    }
 
 
 def build_audit_rows(entries: list[ChatAuditLogEntry]) -> list[dict[str, str]]:
