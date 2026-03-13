@@ -26,6 +26,8 @@ EXACT_ALIASES: dict[str, str] = {
     "дейлик": "daily",
     "лотерея": "lottery",
     "рынок": "market",
+    "моя статья": "article",
+    "статья": "article",
     "жмых": "zhmyh",
     "рост": "growth",
     "профиль": "growth",

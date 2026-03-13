@@ -2638,14 +2638,6 @@ async def text_commands_handler(
 
         rewritten = _apply_alias_mode_to_text(text=text, mode=alias_mode, aliases=aliases)
         if rewritten is None:
-            await _answer_quiet(
-                message,
-                (
-                    "Не могу выполнить: для этой команды отключён стандартный триггер.\n"
-                    "Причина: в группе включён режим <code>aliases_if_exists</code> и задан кастомный алиас."
-                ),
-                parse_mode="HTML",
-            )
             return
         text = rewritten
 

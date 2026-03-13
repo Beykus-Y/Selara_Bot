@@ -24,6 +24,8 @@ def test_catalog_resolves_standard_triggers() -> None:
     assert resolve_builtin_command_key("старт") == "start"
     assert resolve_builtin_command_key("нейминг") == "naming"
     assert resolve_builtin_command_key("Кто Я") == "me"
+    assert resolve_builtin_command_key("моя статья") == "article"
+    assert resolve_builtin_command_key("статья") == "article"
     assert resolve_builtin_command_key("топ") == "top"
     assert resolve_builtin_command_key("актив") == "active"
 

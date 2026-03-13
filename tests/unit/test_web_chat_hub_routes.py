@@ -11,6 +11,7 @@ from selara.core.config import Settings
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT
 from selara.application.dto import RepStats
 from selara.domain.entities import ActivityStats, ChatActivitySummary, ChatRoleDefinition, LeaderboardItem, UserChatOverview, UserSnapshot
+from selara.domain.entities import ChatTextAliasUpsertResult
 from selara.web import app as web_app_module
 
 
@@ -50,6 +51,7 @@ class ChatHubState:
     daily_activity: list[dict[str, object]] = field(default_factory=list)
     richest_payload: dict[str, object] | None = None
     audit_log_calls: list[dict[str, object]] = field(default_factory=list)
+    alias_upsert_calls: list[dict[str, object]] = field(default_factory=list)
 
 
 class FakeActivityRepo:
@@ -123,6 +125,33 @@ class FakeActivityRepo:
     async def set_chat_alias_mode(self, *, chat, mode: str):
         self._state.alias_mode_by_chat[chat.telegram_chat_id] = mode
         return mode
+
+    async def upsert_chat_alias(
+        self,
+        *,
+        chat,
+        command_key: str,
+        source_trigger_norm: str,
+        alias_text_norm: str,
+        actor_user_id: int | None,
+        force: bool,
+    ):
+        self._state.alias_upsert_calls.append(
+            {
+                "chat_id": chat.telegram_chat_id,
+                "command_key": command_key,
+                "source_trigger_norm": source_trigger_norm,
+                "alias_text_norm": alias_text_norm,
+                "actor_user_id": actor_user_id,
+                "force": force,
+            }
+        )
+        return ChatTextAliasUpsertResult(
+            alias=None,
+            conflict_alias=None,
+            created=True,
+            reassigned=False,
+        )
 
     async def add_audit_log(
         self,
@@ -408,3 +437,28 @@ async def test_update_chat_setting_persists_alias_mode(monkeypatch) -> None:
     assert state.alias_mode_by_chat[-1001] == "standard_only"
     assert state.audit_log_calls[-1]["action_code"] == "web_setting_updated"
     assert "both -> standard_only" in str(state.audit_log_calls[-1]["description"])
+
+
+@pytest.mark.asyncio
+async def test_chat_alias_route_accepts_daily_article_source(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(
+            "/app/chat/-1001/aliases",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            data={"source_trigger": "моя статья", "alias_text": "за что сужусь"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert state.alias_upsert_calls[-1]["command_key"] == "article"
+    assert state.alias_upsert_calls[-1]["source_trigger_norm"] == "моя статья"
+    assert state.alias_upsert_calls[-1]["alias_text_norm"] == "за что сужусь"

@@ -131,3 +131,39 @@ async def test_text_commands_handler_passes_bot_to_economy_routes(
 
     target_handler.assert_awaited_once()
     assert target_handler.await_args.kwargs["bot"] is bot
+
+
+@pytest.mark.asyncio
+async def test_text_commands_handler_silently_skips_disabled_standard_trigger_for_alias_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _DummyMessage(text="кто я")
+    activity_repo = SimpleNamespace(
+        get_chat_alias_mode=AsyncMock(return_value="aliases_if_exists"),
+        list_chat_aliases=AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    alias_text_norm="мой профиль",
+                    command_key="me",
+                    source_trigger_norm="кто я",
+                )
+            ]
+        ),
+    )
+    quiet_answer = AsyncMock()
+
+    monkeypatch.setattr(text_commands, "_answer_quiet", quiet_answer)
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=activity_repo,
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=replace(_BASE_CHAT_SETTINGS, custom_rp_enabled=False, smart_triggers_enabled=False),
+        session_factory=object(),
+    )
+
+    quiet_answer.assert_not_awaited()
+    assert message.answers == []
