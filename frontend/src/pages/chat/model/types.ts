@@ -17,6 +17,12 @@ export type ChatInfoRow = {
   value: string
 }
 
+export type ChatSectionLink = {
+  href: string
+  label: string
+  variant: string
+}
+
 export type ChatDashboardPanel = {
   title: string
   empty_text: string | null
@@ -180,6 +186,11 @@ export type ChatSettingOption = {
   selected: boolean
 }
 
+export type ChatAliasSourceOption = {
+  value: string
+  label: string
+}
+
 export type ChatAliasRow = {
   id: string
   alias: string
@@ -210,10 +221,27 @@ export type ChatSettingItem = {
   hint: string
   current_value: string
   default_value: string
+  current_value_display: string
+  default_value_display: string
   editable: boolean
   input_kind: string
   options: ChatSettingOption[]
   doc_anchor: string
+}
+
+export type ChatAliasModeSetting = {
+  key: string
+  title: string
+  description: string
+  hint: string
+  current_value: string
+  default_value: string
+  current_value_display: string
+  default_value_display: string
+  editable: boolean
+  input_kind: string
+  options: ChatSettingOption[]
+  doc_href: string
 }
 
 export type ChatSettingsSection = {
@@ -228,13 +256,17 @@ export type ChatSettingsData = {
   manage_settings_note: string
   manage_settings_tone: string
   admin_docs_url: string
-  settings_sections: ChatSettingsSection[]
-  aliases: ChatAliasRow[]
-  triggers: ChatTriggerRow[]
-  trigger_template_quick_rows: ChatTriggerTemplateQuickRow[]
-  trigger_template_examples: string[]
-  trigger_template_docs_url: string
-  audit_rows: ChatAuditRow[]
+  chat_section_links?: ChatSectionLink[]
+  settings_overview?: ChatInfoRow[]
+  settings_sections?: ChatSettingsSection[]
+  alias_mode_setting?: ChatAliasModeSetting
+  alias_source_options?: ChatAliasSourceOption[]
+  aliases?: ChatAliasRow[]
+  triggers?: ChatTriggerRow[]
+  trigger_template_quick_rows?: ChatTriggerTemplateQuickRow[]
+  trigger_template_examples?: string[]
+  trigger_template_docs_url?: string
+  audit_rows?: ChatAuditRow[]
 }
 
 export type ChatSettingsSuccessResponse = {

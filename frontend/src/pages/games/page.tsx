@@ -1,20 +1,24 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { createGame, runGameAction } from '@/pages/games/api/actions'
 import { getGamesPage } from '@/pages/games/api/get-games-page'
+import { useGamesLiveRefresh } from '@/pages/games/lib/use-games-live-refresh'
 import { GamesPageView } from '@/pages/games/ui/GamesPageView'
-import { useNamedEventSource } from '@/shared/lib/use-named-event-source'
-
-const GAMES_LIVE_EVENT_NAMES = ['new_vote', 'phase_change', 'game_updated'] as const
+import { usePageTitle } from '@/shared/lib/use-page-title'
+import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function GamesPage() {
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
+  usePageTitle('Игры')
   const gamesQuery = useQuery({
     queryKey: ['games-page'],
     queryFn: getGamesPage,
-    refetchInterval: 10000,
   })
+  const liveGameIds = useMemo(
+    () => gamesQuery.data?.game_cards.filter((item) => item.status_badge === 'active').map((item) => item.game_id) ?? [],
+    [gamesQuery.data?.game_cards],
+  )
 
   const createGameMutation = useMutation({
     mutationFn: createGame,
@@ -32,17 +36,16 @@ export function GamesPage() {
     },
   })
 
-  useNamedEventSource({
+  useGamesLiveRefresh({
     enabled: true,
-    path: '/api/live/stream?scope=games',
-    eventNames: GAMES_LIVE_EVENT_NAMES,
-    onEvent: () => {
+    gameIds: liveGameIds,
+    onRefresh: () => {
       void gamesQuery.refetch()
     },
   })
 
   if (gamesQuery.isLoading) {
-    return <section className="games-loading">Загружаю игры…</section>
+    return <LoadingShell eyebrow="Игры" title="Поднимаю игровой центр" />
   }
 
   if (gamesQuery.isError) {
@@ -50,7 +53,7 @@ export function GamesPage() {
   }
 
   if (!gamesQuery.data) {
-    return <section className="games-loading">Данные игр пока недоступны.</section>
+    return <LoadingShell eyebrow="Игры" title="Подгружаю live-сцены" />
   }
 
   return (

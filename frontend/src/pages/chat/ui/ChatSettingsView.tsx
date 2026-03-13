@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
 
-import type { ChatSettingsData } from '@/pages/chat/model/types'
+import type { ChatAliasModeSetting, ChatAliasSourceOption, ChatSettingsData } from '@/pages/chat/model/types'
 import { resolveAppPath } from '@/shared/config/app-base-path'
-import { routes } from '@/shared/config/routes'
+import { ChatSectionNav } from '@/shared/ui/chat-section-nav/ChatSectionNav'
 
 import './chat-page.css'
 
@@ -35,13 +34,41 @@ type ChatSettingsViewProps = {
   onDeleteTrigger: (triggerId: string) => Promise<void>
 }
 
-function tabHref(chatId: string, tab: 'overview' | 'achievements' | 'settings') {
-  return `/app/chat/${chatId}?tab=${tab}`
+type DirtyEntry = {
+  key: string
+  title: string
+  note: string
 }
 
+const FALLBACK_ALIAS_MODE_SETTING: ChatAliasModeSetting = {
+  key: 'alias_mode',
+  title: 'Режим алиасов',
+  description: 'Параметр ещё не загружен полностью. Можно открыть страницу позже после повторного обновления.',
+  hint: '',
+  current_value: 'default',
+  default_value: 'default',
+  current_value_display: 'По умолчанию',
+  default_value_display: 'По умолчанию',
+  editable: false,
+  input_kind: 'select',
+  options: [{ value: 'default', label: 'По умолчанию', selected: true }],
+  doc_href: '',
+}
+
+const EMPTY_SETTINGS_SECTIONS: NonNullable<ChatSettingsData['settings_sections']> = []
+const EMPTY_ALIASES: NonNullable<ChatSettingsData['aliases']> = []
+const EMPTY_TRIGGERS: NonNullable<ChatSettingsData['triggers']> = []
+const EMPTY_ALIAS_SOURCE_OPTIONS: NonNullable<ChatSettingsData['alias_source_options']> = []
+const EMPTY_TRIGGER_TEMPLATE_ROWS: NonNullable<ChatSettingsData['trigger_template_quick_rows']> = []
+const EMPTY_TRIGGER_TEMPLATE_EXAMPLES: NonNullable<ChatSettingsData['trigger_template_examples']> = []
+const EMPTY_SECTION_LINKS: NonNullable<ChatSettingsData['chat_section_links']> = []
+const EMPTY_AUDIT_ROWS: NonNullable<ChatSettingsData['audit_rows']> = []
+
 function buildInitialTriggerDrafts(data: ChatSettingsData) {
+  const triggers = data.triggers ?? EMPTY_TRIGGERS
+
   return Object.fromEntries(
-    data.triggers.map((trigger) => [
+    triggers.map((trigger) => [
       trigger.id,
       {
         keyword: trigger.keyword,
@@ -52,6 +79,32 @@ function buildInitialTriggerDrafts(data: ChatSettingsData) {
       },
     ]),
   ) as Record<string, TriggerDraft>
+}
+
+function hasTriggerDraftChanged(left: TriggerDraft, right: TriggerDraft) {
+  return (
+    left.keyword !== right.keyword ||
+    left.match_type !== right.match_type ||
+    left.response_text !== right.response_text ||
+    left.media_file_id !== right.media_file_id ||
+    left.media_type !== right.media_type
+  )
+}
+
+function optionValues(options: ChatAliasSourceOption[], fallbackValue: string) {
+  if (options.some((option) => option.value === fallbackValue)) {
+    return options
+  }
+
+  return [{ value: fallbackValue, label: fallbackValue }, ...options]
+}
+
+function buildDocHref(baseHref: string, suffix: string) {
+  if (!suffix) {
+    return baseHref
+  }
+
+  return suffix.startsWith('#') ? `${baseHref}${suffix}` : `${baseHref}#${suffix}`
 }
 
 export function ChatSettingsView({
@@ -66,24 +119,61 @@ export function ChatSettingsView({
   onSaveTrigger,
   onDeleteTrigger,
 }: ChatSettingsViewProps) {
+  const settingsSections = data.settings_sections ?? EMPTY_SETTINGS_SECTIONS
+  const aliases = data.aliases ?? EMPTY_ALIASES
+  const triggers = data.triggers ?? EMPTY_TRIGGERS
+  const aliasSourceOptions = data.alias_source_options ?? EMPTY_ALIAS_SOURCE_OPTIONS
+  const triggerTemplateQuickRows = data.trigger_template_quick_rows ?? EMPTY_TRIGGER_TEMPLATE_ROWS
+  const triggerTemplateExamples = data.trigger_template_examples ?? EMPTY_TRIGGER_TEMPLATE_EXAMPLES
+  const chatSectionLinks = data.chat_section_links ?? EMPTY_SECTION_LINKS
+  const auditRows = data.audit_rows ?? EMPTY_AUDIT_ROWS
+  const aliasModeSetting = data.alias_mode_setting ?? FALLBACK_ALIAS_MODE_SETTING
+  const docsTemplateHref = data.trigger_template_docs_url ?? data.admin_docs_url
+  const settingsOverview =
+    data.settings_overview && data.settings_overview.length > 0
+      ? data.settings_overview
+      : [
+          {
+            title: 'Доступ',
+            value: data.can_manage_settings ? 'Редактирование' : 'Только просмотр',
+            meta: data.manage_settings_note,
+          },
+          {
+            title: 'Алиасы',
+            value: String(aliases.length),
+            meta: 'кастомных сокращений',
+          },
+          {
+            title: 'Триггеры',
+            value: String(triggers.length),
+            meta: 'смарт-правил ответа',
+          },
+          {
+            title: 'Аудит',
+            value: String(auditRows.length),
+            meta: 'свежих записей журнала',
+          },
+        ]
+  const docsBaseHref = resolveAppPath(data.admin_docs_url)
   const initialValues = useMemo(
     () =>
       Object.fromEntries(
-        data.settings_sections.flatMap((section) =>
+        settingsSections.flatMap((section) =>
           section.items.map((item) => [item.key, item.current_value]),
         ),
       ) as Record<string, string>,
-    [data.settings_sections],
+    [settingsSections],
   )
   const initialAliasDrafts = useMemo(
     () =>
       Object.fromEntries(
-        data.aliases.map((alias) => [alias.alias, alias.source]),
+        aliases.map((alias) => [alias.alias, alias.source]),
       ) as Record<string, string>,
-    [data.aliases],
+    [aliases],
   )
   const initialTriggerDrafts = useMemo(() => buildInitialTriggerDrafts(data), [data])
   const [draftValues, setDraftValues] = useState<Record<string, string>>(initialValues)
+  const [aliasModeValue, setAliasModeValue] = useState(aliasModeSetting.current_value)
   const [aliasDrafts, setAliasDrafts] = useState<Record<string, string>>(initialAliasDrafts)
   const [newAlias, setNewAlias] = useState({ alias_text: '', source_trigger: '' })
   const [triggerDrafts, setTriggerDrafts] = useState<Record<string, TriggerDraft>>(initialTriggerDrafts)
@@ -94,10 +184,17 @@ export function ChatSettingsView({
     media_file_id: '',
     media_type: '',
   })
+  const [docsGuardOpen, setDocsGuardOpen] = useState(false)
+  const [pendingDocsHref, setPendingDocsHref] = useState<string | null>(null)
+  const [isSavingDirtyChanges, setIsSavingDirtyChanges] = useState(false)
 
   useEffect(() => {
     setDraftValues(initialValues)
   }, [initialValues])
+
+  useEffect(() => {
+    setAliasModeValue(aliasModeSetting.current_value)
+  }, [aliasModeSetting.current_value])
 
   useEffect(() => {
     setAliasDrafts(initialAliasDrafts)
@@ -106,6 +203,185 @@ export function ChatSettingsView({
   useEffect(() => {
     setTriggerDrafts(initialTriggerDrafts)
   }, [initialTriggerDrafts])
+
+  const dirtyEntries = useMemo(() => {
+    const entries: DirtyEntry[] = []
+
+    for (const section of settingsSections) {
+      for (const item of section.items) {
+        const draftValue = draftValues[item.key] ?? item.current_value
+        if (draftValue !== item.current_value) {
+          entries.push({
+            key: `setting:${item.key}`,
+            title: item.title,
+            note: `новое значение: ${draftValue || 'пусто'}`,
+          })
+        }
+      }
+    }
+
+    if (aliasModeValue !== aliasModeSetting.current_value) {
+      entries.push({
+        key: 'setting:alias_mode',
+        title: aliasModeSetting.title,
+        note: `новый режим: ${aliasModeValue}`,
+      })
+    }
+
+    for (const alias of aliases) {
+      const draftSource = aliasDrafts[alias.alias] ?? alias.source
+      if (draftSource !== alias.source) {
+        entries.push({
+          key: `alias:${alias.alias}`,
+          title: `Алиас ${alias.alias}`,
+          note: `источник: ${draftSource}`,
+        })
+      }
+    }
+
+    if (newAlias.alias_text.trim() || newAlias.source_trigger.trim()) {
+      entries.push({
+        key: 'alias:new',
+        title: 'Новый алиас',
+        note: `${newAlias.alias_text || 'без имени'} -> ${newAlias.source_trigger || 'без источника'}`,
+      })
+    }
+
+    for (const trigger of triggers) {
+      const draft = triggerDrafts[trigger.id]
+      if (draft && hasTriggerDraftChanged(draft, initialTriggerDrafts[trigger.id])) {
+        entries.push({
+          key: `trigger:${trigger.id}`,
+          title: `Триггер ${trigger.keyword}`,
+          note: 'есть несохранённые правки в форме триггера',
+        })
+      }
+    }
+
+    if (
+      newTrigger.keyword.trim() ||
+      newTrigger.response_text.trim() ||
+      newTrigger.media_file_id.trim() ||
+      newTrigger.media_type.trim()
+    ) {
+      entries.push({
+        key: 'trigger:new',
+        title: 'Новый триггер',
+        note: newTrigger.keyword.trim() || 'черновик без ключевой фразы',
+      })
+    }
+
+    return entries
+  }, [
+    aliasDrafts,
+    aliasModeValue,
+    aliasModeSetting.current_value,
+    aliasModeSetting.title,
+    aliases,
+    draftValues,
+    initialTriggerDrafts,
+    newAlias,
+    newTrigger,
+    settingsSections,
+    triggerDrafts,
+    triggers,
+  ])
+
+  const hasUnsavedChanges = dirtyEntries.length > 0
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [hasUnsavedChanges])
+
+  const openDocsHref = (href: string) => {
+    window.location.assign(resolveAppPath(href))
+  }
+
+  const handleDocsNavigation = (href: string, event?: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!hasUnsavedChanges) {
+      return
+    }
+
+    event?.preventDefault()
+    setPendingDocsHref(href)
+    setDocsGuardOpen(true)
+  }
+
+  const saveDirtyChanges = async () => {
+    setIsSavingDirtyChanges(true)
+
+    try {
+      if (aliasModeValue !== aliasModeSetting.current_value) {
+        await onSave(aliasModeSetting.key, aliasModeValue)
+      }
+
+      for (const section of settingsSections) {
+        for (const item of section.items) {
+          const draftValue = draftValues[item.key] ?? item.current_value
+          if (draftValue !== item.current_value) {
+            await onSave(item.key, draftValue)
+          }
+        }
+      }
+
+      for (const alias of aliases) {
+        const draftSource = aliasDrafts[alias.alias] ?? alias.source
+        if (draftSource !== alias.source) {
+          await onSaveAlias({
+            alias_text: alias.alias,
+            source_trigger: draftSource,
+          })
+        }
+      }
+
+      if (newAlias.alias_text.trim() && newAlias.source_trigger.trim()) {
+        await onSaveAlias(newAlias)
+        setNewAlias({ alias_text: '', source_trigger: '' })
+      }
+
+      for (const trigger of triggers) {
+        const draft = triggerDrafts[trigger.id]
+        if (draft && hasTriggerDraftChanged(draft, initialTriggerDrafts[trigger.id])) {
+          await onSaveTrigger({
+            trigger_id: trigger.id,
+            ...draft,
+          })
+        }
+      }
+
+      if (newTrigger.keyword.trim()) {
+        await onSaveTrigger(newTrigger)
+        setNewTrigger({
+          keyword: '',
+          match_type: 'contains',
+          response_text: '',
+          media_file_id: '',
+          media_type: '',
+        })
+      }
+
+      setDocsGuardOpen(false)
+
+      if (pendingDocsHref) {
+        openDocsHref(pendingDocsHref)
+      }
+    } finally {
+      setIsSavingDirtyChanges(false)
+    }
+  }
 
   return (
     <div className="chat-page">
@@ -122,23 +398,7 @@ export function ChatSettingsView({
         </div>
       </section>
 
-      <section className="chat-tabs">
-        <Link className="button" to={tabHref(chatId, 'overview')}>
-          Обзор
-        </Link>
-        <Link className="button" to={tabHref(chatId, 'achievements')}>
-          Достижения
-        </Link>
-        <Link className="button button--primary" to={tabHref(chatId, 'settings')}>
-          Настройки
-        </Link>
-        <Link className="button" to={routes.economy(chatId)}>
-          Экономика
-        </Link>
-        <Link className="button" to={routes.family(chatId)}>
-          Моя семья
-        </Link>
-      </section>
+      <ChatSectionNav links={chatSectionLinks} />
 
       <section className={data.manage_settings_tone === 'ok' ? 'chat-banner chat-banner--ok' : 'chat-banner chat-banner--error'}>
         <div>
@@ -146,12 +406,90 @@ export function ChatSettingsView({
           <p>{data.manage_settings_note}</p>
           {feedbackMessage ? <p className="chat-status">{feedbackMessage}</p> : null}
         </div>
-        <a className="button" href={resolveAppPath(data.admin_docs_url)}>
+        <a
+          className="button button--secondary"
+          href={docsBaseHref}
+          onClick={(event) => handleDocsNavigation(data.admin_docs_url, event)}
+        >
           Открыть справку по настройкам
         </a>
       </section>
 
-      {data.settings_sections.map((section) => (
+      <section className="chat-settings-summary">
+        {settingsOverview.map((item) => (
+          <article key={item.title} className="chat-summary-card">
+            <span className="chat-metric__label">{item.title}</span>
+            <strong>{item.value}</strong>
+            <p>{item.meta}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="chat-panel chat-settings-section">
+        <div className="chat-panel__head">
+          <div>
+            <h2>{aliasModeSetting.title}</h2>
+            <p>{aliasModeSetting.description}</p>
+          </div>
+          <span className="chat-panel__tag">{aliasModeSetting.current_value_display}</span>
+        </div>
+
+        <article className="chat-setting-card">
+          <div className="chat-setting-values">
+            <div>
+              <span className="chat-metric__label">Сейчас</span>
+              <strong>{aliasModeSetting.current_value_display}</strong>
+            </div>
+            <div>
+              <span className="chat-metric__label">По умолчанию</span>
+              <strong>{aliasModeSetting.default_value_display}</strong>
+            </div>
+          </div>
+
+          {data.can_manage_settings ? (
+            <form
+              className="chat-setting-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void onSave(aliasModeSetting.key, aliasModeValue)
+              }}
+            >
+              <select value={aliasModeValue} onChange={(event) => setAliasModeValue(event.target.value)}>
+                {aliasModeSetting.options.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <div className="chat-setting-actions">
+                <button className="button" type="submit" disabled={isSaving && pendingKey === aliasModeSetting.key}>
+                  {isSaving && pendingKey === aliasModeSetting.key ? 'Сохраняю…' : 'Сохранить режим'}
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={isSaving}
+                  onClick={() => {
+                    void onSave(aliasModeSetting.key, 'default')
+                  }}
+                >
+                  Сбросить
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          <a
+            className="chat-setting-doc"
+            href={buildDocHref(docsBaseHref, aliasModeSetting.doc_href)}
+            onClick={(event) => handleDocsNavigation(buildDocHref(data.admin_docs_url, aliasModeSetting.doc_href), event)}
+          >
+            Открыть раздел документации
+          </a>
+        </article>
+      </section>
+
+      {settingsSections.map((section) => (
         <section key={section.title} className="chat-panel chat-settings-section">
           <div className="chat-panel__head">
             <div>
@@ -178,11 +516,11 @@ export function ChatSettingsView({
                   <div className="chat-setting-values">
                     <div>
                       <span className="chat-metric__label">Текущее значение</span>
-                      <strong>{item.current_value || '—'}</strong>
+                      <strong>{item.current_value_display || '—'}</strong>
                     </div>
                     <div>
                       <span className="chat-metric__label">По умолчанию</span>
-                      <strong>{item.default_value || '—'}</strong>
+                      <strong>{item.default_value_display || '—'}</strong>
                     </div>
                   </div>
 
@@ -256,7 +594,11 @@ export function ChatSettingsView({
 
                   <p className="chat-status">{item.hint}</p>
 
-                  <a className="chat-setting-doc" href={`${resolveAppPath(data.admin_docs_url)}#${item.doc_anchor}`}>
+                  <a
+                    className="chat-setting-doc"
+                    href={`${docsBaseHref}#${item.doc_anchor}`}
+                    onClick={(event) => handleDocsNavigation(`${data.admin_docs_url}#${item.doc_anchor}`, event)}
+                  >
                     Открыть описание параметра
                   </a>
                 </article>
@@ -274,7 +616,7 @@ export function ChatSettingsView({
             <h2>Алиасы команд</h2>
             <p>Свои короткие вызовы для стандартных текстовых команд группы.</p>
           </div>
-          <span className="chat-panel__tag">{data.aliases.length}</span>
+          <span className="chat-panel__tag">{aliases.length}</span>
         </div>
 
         {data.can_manage_settings ? (
@@ -291,19 +633,24 @@ export function ChatSettingsView({
             <div className="chat-setting-head">
               <div>
                 <h3>Новый алиас</h3>
-                <p>Например: `топ` → `рейтинг`</p>
+                <p>Источник берётся только из встроенных текстовых триггеров.</p>
               </div>
             </div>
-            <input
-              type="text"
+            <select
               value={newAlias.source_trigger}
-              placeholder="Исходная команда или триггер"
               onChange={(event) => setNewAlias((current) => ({ ...current, source_trigger: event.target.value }))}
-            />
+            >
+              <option value="">Выберите встроенный триггер</option>
+              {aliasSourceOptions.map((option) => (
+                <option key={`new-alias-${option.value}`} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
             <input
               type="text"
               value={newAlias.alias_text}
-              placeholder="Новый алиас"
+              placeholder="Новый алиас, например: рейтинг"
               onChange={(event) => setNewAlias((current) => ({ ...current, alias_text: event.target.value }))}
             />
             <button
@@ -316,9 +663,9 @@ export function ChatSettingsView({
           </form>
         ) : null}
 
-        {data.aliases.length > 0 ? (
+        {aliases.length > 0 ? (
           <div className="chat-settings-grid">
-            {data.aliases.map((alias) => (
+            {aliases.map((alias) => (
               <article key={alias.id} className="chat-setting-card">
                 <div className="chat-setting-head">
                   <div>
@@ -339,13 +686,18 @@ export function ChatSettingsView({
                       })
                     }}
                   >
-                    <input
-                      type="text"
+                    <select
                       value={aliasDrafts[alias.alias] ?? alias.source}
                       onChange={(event) =>
                         setAliasDrafts((current) => ({ ...current, [alias.alias]: event.target.value }))
                       }
-                    />
+                    >
+                      {optionValues(aliasSourceOptions, alias.source).map((option) => (
+                        <option key={`${alias.id}-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
                     <div className="chat-setting-actions">
                       <button className="button" type="submit" disabled={isSaving}>
                         Обновить
@@ -377,7 +729,7 @@ export function ChatSettingsView({
             <h2>Смарт-триггеры</h2>
             <p>Автоответы по точному совпадению, вхождению или началу сообщения.</p>
           </div>
-          <span className="chat-panel__tag">{data.triggers.length}</span>
+          <span className="chat-panel__tag">{triggers.length}</span>
         </div>
 
         <article className="chat-setting-card">
@@ -388,20 +740,24 @@ export function ChatSettingsView({
             </div>
           </div>
           <div className="chat-setting-options">
-            {data.trigger_template_quick_rows.map((item) => (
+            {triggerTemplateQuickRows.map((item) => (
               <span key={item.token} className="chat-chip" title={item.description}>
                 {item.token}
               </span>
             ))}
           </div>
           <div className="chat-trigger-example-list">
-            {data.trigger_template_examples.map((example) => (
+            {triggerTemplateExamples.map((example) => (
               <code key={example} className="chat-trigger-example">
                 {example}
               </code>
             ))}
           </div>
-          <a className="chat-setting-doc" href={resolveAppPath(data.trigger_template_docs_url)}>
+          <a
+            className="chat-setting-doc"
+            href={resolveAppPath(docsTemplateHref)}
+            onClick={(event) => handleDocsNavigation(docsTemplateHref, event)}
+          >
             Открыть полный каталог переменных
           </a>
         </article>
@@ -467,16 +823,10 @@ export function ChatSettingsView({
           </form>
         ) : null}
 
-        {data.triggers.length > 0 ? (
+        {triggers.length > 0 ? (
           <div className="chat-settings-grid">
-            {data.triggers.map((trigger) => {
-              const draft = triggerDrafts[trigger.id] ?? {
-                keyword: trigger.keyword,
-                match_type: trigger.match_type,
-                response_text: trigger.response_text,
-                media_file_id: trigger.media_file_id,
-                media_type: trigger.media_type,
-              }
+            {triggers.map((trigger) => {
+              const draft = triggerDrafts[trigger.id] ?? initialTriggerDrafts[trigger.id]
 
               return (
                 <article key={trigger.id} className="chat-setting-card">
@@ -570,16 +920,7 @@ export function ChatSettingsView({
                         </button>
                       </div>
                     </form>
-                  ) : (
-                    <>
-                      {trigger.response_text ? <p>{trigger.response_text}</p> : null}
-                      {trigger.media_type || trigger.media_file_id ? (
-                        <p className="chat-status">
-                          Медиа: {trigger.media_type || 'не указан'} {trigger.media_file_id ? `• ${trigger.media_file_id}` : ''}
-                        </p>
-                      ) : null}
-                    </>
-                  )}
+                  ) : null}
                 </article>
               )
             })}
@@ -592,30 +933,94 @@ export function ChatSettingsView({
       <section className="chat-panel">
         <div className="chat-panel__head">
           <div>
-            <h2>Свежие действия</h2>
-            <p>Последние изменения настроек и автоматизации в этой группе.</p>
+            <h2>Журнал аудита</h2>
+            <p>Свежие действия бота и админов в этой группе.</p>
           </div>
-          <Link className="button" to={routes.audit(chatId)}>
-            Открыть журнал
-          </Link>
         </div>
 
-        {data.audit_rows.length > 0 ? (
+        {auditRows.length > 0 ? (
           <div className="chat-audit-list">
-            {data.audit_rows.map((row, index) => (
+            {auditRows.slice(0, 10).map((row, index) => (
               <div key={`${row.when}-${row.action}-${index}`} className="chat-audit-row">
                 <div>
                   <strong>{row.action}</strong>
                   <p>{row.description}</p>
+                  <p>Инициатор: {row.actor} • Цель: {row.target}</p>
                 </div>
                 <span>{row.when}</span>
               </div>
             ))}
           </div>
         ) : (
-          <p className="chat-status">Журнал действий пока пуст.</p>
+          <p className="chat-status">Логи пока пусты.</p>
         )}
       </section>
+
+      {docsGuardOpen ? (
+        <div className="docs-guard" role="dialog" aria-modal="true" aria-labelledby="docs-guard-title">
+          <div className="docs-guard__card">
+            <div className="chat-panel__head">
+              <div>
+                <h2 id="docs-guard-title">Есть несохранённые изменения</h2>
+                <p>Перед переходом в документацию можно сохранить черновики или открыть справку без сохранения.</p>
+              </div>
+            </div>
+
+            <div className="chat-banner chat-banner--error">
+              <div>
+                <strong>Список правок</strong>
+                <p>Ниже собраны формы, которые отличаются от текущего сохранённого состояния.</p>
+              </div>
+            </div>
+
+            <div className="docs-guard__list">
+              {dirtyEntries.map((item) => (
+                <div key={item.key} className="docs-guard__row">
+                  <strong>{item.title}</strong>
+                  <p>{item.note}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="docs-guard__actions">
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={() => {
+                  void saveDirtyChanges()
+                }}
+                disabled={isSavingDirtyChanges || isSaving}
+              >
+                {isSavingDirtyChanges ? 'Сохраняю…' : 'Сохранить и перейти'}
+              </button>
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={() => {
+                  setDocsGuardOpen(false)
+                  if (pendingDocsHref) {
+                    openDocsHref(pendingDocsHref)
+                  }
+                }}
+                disabled={isSavingDirtyChanges}
+              >
+                Перейти без сохранения
+              </button>
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  setDocsGuardOpen(false)
+                  setPendingDocsHref(null)
+                }}
+                disabled={isSavingDirtyChanges}
+              >
+                Остаться
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

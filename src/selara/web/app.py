@@ -75,6 +75,7 @@ from selara.web.presenters import (
     build_chat_context,
     build_home_context,
     build_landing_context,
+    build_settings_overview,
     build_settings_sections,
     build_trigger_rows,
     build_trigger_template_examples,
@@ -396,6 +397,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "href": f"/app/family/{chat_id}",
                     "label": "Моя семья",
                     "variant": "primary" if active == "family" else "ghost",
+                },
+                {
+                    "href": f"/app/chat/{chat_id}/audit",
+                    "label": "Аудит",
+                    "variant": "primary" if active == "audit" else "ghost",
                 },
             ]
         )
@@ -3900,6 +3906,29 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
         return _render_template("landing.html", **page_context)
 
+    @app.get("/api/landing/context")
+    async def landing_context_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=False)
+            await session.commit()
+        context = build_landing_context(
+            bot_username=bot_username,
+            bot_dm_url=f"https://t.me/{bot_username}",
+            user=user,
+            flash=request.query_params.get("flash"),
+            error=request.query_params.get("error"),
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    key: value
+                    for key, value in context.items()
+                    if key not in {"page_title", "page_name", "flash", "error", "home_href", "brand_subtitle"}
+                },
+            }
+        )
+
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
         async with session_factory() as session:
@@ -3938,20 +3967,35 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     async def login_submit(request: Request):
         now = _now_utc()
         host = request.client.host if request.client is not None and request.client.host else "unknown"
+        prefers_json = _prefers_json(request)
         if _check_rate_limit(host, now):
-            return _redirect(
-                _with_message(
-                    "/login",
-                    key="error",
-                    text="Слишком много попыток. Подождите и запросите новый код у бота.",
-                )
+            redirect_path = _with_message(
+                "/login",
+                key="error",
+                text="Слишком много попыток. Подождите и запросите новый код у бота.",
             )
+            if prefers_json:
+                return _json_result(
+                    ok=False,
+                    message="Слишком много попыток. Подождите и запросите новый код у бота.",
+                    status_code=429,
+                    redirect=redirect_path,
+                )
+            return _redirect(redirect_path)
 
         form = await _parse_form(request)
         code = normalize_login_code(form.get("code"))
         if len(code) != 6:
             _register_failed_attempt(host, now)
-            return _redirect(_with_message("/login", key="error", text="Введите корректный шестизначный код."))
+            redirect_path = _with_message("/login", key="error", text="Введите корректный шестизначный код.")
+            if prefers_json:
+                return _json_result(
+                    ok=False,
+                    message="Введите корректный шестизначный код.",
+                    status_code=400,
+                    redirect=redirect_path,
+                )
+            return _redirect(redirect_path)
 
         async with session_factory() as session:
             auth_repo = SqlAlchemyWebAuthRepository(session)
@@ -3963,13 +4007,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if user is None:
                 await session.commit()
                 _register_failed_attempt(host, now)
-                return _redirect(
-                    _with_message(
-                        "/login",
-                        key="error",
-                        text="Код не найден, уже использован или истёк. Запросите новый через /login у бота.",
-                    )
+                redirect_path = _with_message(
+                    "/login",
+                    key="error",
+                    text="Код не найден, уже использован или истёк. Запросите новый через /login у бота.",
                 )
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Код не найден, уже использован или истёк. Запросите новый через /login у бота.",
+                        status_code=400,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
 
             token = generate_session_token()
             await auth_repo.create_session(
@@ -3981,7 +4031,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
             failed_attempts.pop(host, None)
 
-        response = _redirect(_with_message("/app", key="flash", text="Вход выполнен."))
+        redirect_path = _with_message("/app", key="flash", text="Вход выполнен.")
+        response = (
+            _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect=redirect_path)
+            if prefers_json
+            else _redirect(redirect_path)
+        )
         response.set_cookie(
             settings.web_session_cookie_name,
             token,
@@ -3994,6 +4049,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.post("/logout")
     async def logout(request: Request):
+        prefers_json = _prefers_json(request)
         token = request.cookies.get(settings.web_session_cookie_name)
         if token:
             async with session_factory() as session:
@@ -4004,7 +4060,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 await session.commit()
 
-        response = _redirect(_with_message("/login", key="flash", text="Сессия завершена."))
+        redirect_path = _with_message("/login", key="flash", text="Сессия завершена.")
+        response = (
+            _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect=redirect_path)
+            if prefers_json
+            else _redirect(redirect_path)
+        )
         response.delete_cookie(settings.web_session_cookie_name)
         return response
 
@@ -5207,6 +5268,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     active="settings",
                     can_manage_settings=can_manage_settings,
                 ),
+                "settings_overview": build_settings_overview(current=current_settings, defaults=chat_settings_defaults),
                 "settings_sections": build_settings_sections(
                     current=current_settings,
                     defaults=chat_settings_defaults,
@@ -5913,7 +5975,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ],
             "chat_section_links": _build_chat_section_links(
                 chat.chat_id,
-                active="overview",
+                active="audit",
                 can_manage_settings=can_manage_settings,
             ),
         }

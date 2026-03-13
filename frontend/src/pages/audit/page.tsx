@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 
 import { getAuditPage } from '@/pages/audit/api/get-audit-page'
 import { AuditPageView } from '@/pages/audit/ui/AuditPageView'
+import { usePageTitle } from '@/shared/lib/use-page-title'
 import { useNamedEventSource } from '@/shared/lib/use-named-event-source'
 
 const AUDIT_LIVE_EVENT_NAMES = ['chat_activity', 'new_vote', 'chat_refresh'] as const
@@ -15,6 +16,7 @@ export function AuditPage() {
     queryFn: () => getAuditPage(chatId!),
     enabled: Boolean(chatId),
   })
+  usePageTitle(auditQuery.data?.chat_title ? `${auditQuery.data.chat_title} / Аудит` : 'Журнал аудита')
 
   useNamedEventSource({
     enabled: Boolean(chatId),

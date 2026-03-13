@@ -1,3 +1,5 @@
+import type { ChatSectionLink } from '@/pages/chat/model/types'
+
 export type AuditRow = {
   when: string
   action: string
@@ -10,6 +12,7 @@ export type AuditPageData = {
   chat_id: number
   chat_title: string
   audit_rows: AuditRow[]
+  chat_section_links: ChatSectionLink[]
 }
 
 export type AuditPageSuccessResponse = {

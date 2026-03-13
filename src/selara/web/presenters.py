@@ -475,6 +475,38 @@ def build_settings_sections(
     return sections
 
 
+def build_settings_overview(*, current: ChatSettings, defaults: ChatSettings) -> list[dict[str, str]]:
+    current_map = settings_to_dict(current)
+    default_map = settings_to_dict(defaults)
+    customized_settings = sum(1 for key, value in current_map.items() if default_map.get(key) != value)
+
+    return [
+        {
+            "title": "Своих правок",
+            "meta": "значения, отличающиеся от серверных дефолтов",
+            "value": str(customized_settings),
+        },
+        {
+            "title": "Текстовые команды",
+            "meta": f"язык: {setting_value_display('text_commands_locale', current.text_commands_locale)}",
+            "value": setting_value_display("text_commands_enabled", current.text_commands_enabled),
+        },
+        {
+            "title": "Экономика",
+            "meta": f"режим: {setting_value_display('economy_mode', current.economy_mode)}",
+            "value": setting_value_display("economy_enabled", current.economy_enabled),
+        },
+        {
+            "title": "Социальные механики",
+            "meta": (
+                f"семья: {setting_value_display('family_tree_enabled', current.family_tree_enabled)} • "
+                f"титулы: {setting_value_display('titles_enabled', current.titles_enabled)}"
+            ),
+            "value": setting_value_display("actions_18_enabled", current.actions_18_enabled),
+        },
+    ]
+
+
 def build_home_context(
     *,
     user: UserSnapshot,
@@ -793,9 +825,6 @@ def build_chat_context(
     error: str | None,
 ) -> dict[str, Any]:
     role_titles = {role.role_code: role.title_ru for role in roles}
-    current_map = settings_to_dict(current_settings)
-    default_map = settings_to_dict(defaults)
-    customized_settings = sum(1 for key, value in current_map.items() if default_map.get(key) != value)
     metrics = [
         build_metric(
             label="Участники",
@@ -851,31 +880,7 @@ def build_chat_context(
                 "value": "включена" if current_settings.economy_enabled else "выключена",
             },
         ],
-        "settings_overview": [
-            {
-                "title": "Своих правок",
-                "meta": "значения, отличающиеся от серверных дефолтов",
-                "value": str(customized_settings),
-            },
-            {
-                "title": "Текстовые команды",
-                "meta": f"язык: {setting_value_display('text_commands_locale', current_settings.text_commands_locale)}",
-                "value": setting_value_display("text_commands_enabled", current_settings.text_commands_enabled),
-            },
-            {
-                "title": "Экономика",
-                "meta": f"режим: {setting_value_display('economy_mode', current_settings.economy_mode)}",
-                "value": setting_value_display("economy_enabled", current_settings.economy_enabled),
-            },
-            {
-                "title": "Социальные механики",
-                "meta": (
-                    f"семья: {setting_value_display('family_tree_enabled', current_settings.family_tree_enabled)} • "
-                    f"титулы: {setting_value_display('titles_enabled', current_settings.titles_enabled)}"
-                ),
-                "value": setting_value_display("actions_18_enabled", current_settings.actions_18_enabled),
-            },
-        ],
+        "settings_overview": build_settings_overview(current=current_settings, defaults=defaults),
         "dashboard_panels": [
             build_dashboard_panel(
                 title="Локальная экономика",

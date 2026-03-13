@@ -1,3 +1,5 @@
+import type { ChatSectionLink } from '@/pages/chat/model/types'
+
 export type FamilyNode = {
   id: number
   label: string
@@ -26,6 +28,7 @@ export type FamilyPageData = {
   family_nodes: FamilyNode[]
   family_edges: FamilyEdge[]
   bundle_summary: FamilySummaryItem[]
+  chat_section_links: ChatSectionLink[]
 }
 
 export type FamilyPageSuccessResponse = {

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import type { EconomyPageData, EconomyTradePoint } from '@/pages/economy/model/types'
 import { routes } from '@/shared/config/routes'
+import { ChatSectionNav } from '@/shared/ui/chat-section-nav/ChatSectionNav'
 
 import './economy-page.css'
 
@@ -160,6 +161,8 @@ export function EconomyPageView({
           </Link>
         </div>
       </section>
+
+      <ChatSectionNav links={data.chat_section_links} />
 
       <section className="economy-metrics">
         <article className="economy-metric economy-metric--violet">

@@ -1,3 +1,5 @@
+import type { ChatSectionLink } from '@/pages/chat/model/types'
+
 export type EconomyDashboardSummary = {
   balance: number
   growth_size_mm: number
@@ -53,6 +55,7 @@ export type EconomyPageData = {
   market_rows: EconomyMarketRow[]
   trade_points: EconomyTradePoints
   last_crop_label: string
+  chat_section_links: ChatSectionLink[]
 }
 
 export type EconomyPageSuccessResponse = {

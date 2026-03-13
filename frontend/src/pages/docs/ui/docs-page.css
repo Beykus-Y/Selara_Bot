@@ -14,10 +14,13 @@
 }
 
 .docs-hero {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
   gap: 1.5rem;
-  padding: 2rem;
+  padding: 2rem 2.1rem;
+  background:
+    linear-gradient(145deg, rgba(8, 14, 29, 0.96), rgba(11, 18, 34, 0.76)),
+    radial-gradient(circle at top right, rgba(124, 140, 255, 0.2), transparent 36%);
 }
 
 .docs-hero p,
@@ -33,25 +36,59 @@
   margin: 0.4rem 0 0;
 }
 
+.docs-hero__copy,
+.docs-hero__aside {
+  display: grid;
+  gap: 1rem;
+}
+
+.docs-hero__aside {
+  align-content: space-between;
+  padding-left: 1rem;
+  border-left: 1px solid rgba(168, 181, 255, 0.14);
+}
+
 .docs-hero__actions,
 .docs-hero__chips,
 .docs-chip-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 0.75rem;
+}
+
+.docs-hero__summary {
+  display: grid;
+  gap: 0.45rem;
+  padding: 1rem 1.05rem;
+  border: 1px solid rgba(168, 181, 255, 0.12);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.docs-hero__summary strong {
+  font-family: 'Manrope', 'IBM Plex Sans', sans-serif;
+  font-size: 1.2rem;
+}
+
+.docs-hero__summary-label {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .docs-layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 1rem;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 1.1rem;
   align-items: start;
 }
 
 .docs-nav,
 .docs-section,
 .docs-card {
-  padding: 1.5rem;
+  padding: 1.5rem 1.55rem;
 }
 
 .docs-panel-head {
@@ -77,6 +114,10 @@
   gap: 1rem;
 }
 
+.docs-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
 .docs-nav-group a:hover {
   color: var(--text);
 }
@@ -90,6 +131,7 @@
 .docs-chip {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   min-height: 34px;
   padding: 0.4rem 0.7rem;
   border: 1px solid rgba(168, 181, 255, 0.18);
@@ -197,6 +239,15 @@
 }
 
 @media (max-width: 980px) {
+  .docs-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-hero__aside {
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .docs-layout {
     grid-template-columns: 1fr;
   }
@@ -213,7 +264,6 @@
 
 @media (max-width: 760px) {
   .docs-hero {
-    flex-direction: column;
-    align-items: flex-start;
+    padding: 1.5rem;
   }
 }

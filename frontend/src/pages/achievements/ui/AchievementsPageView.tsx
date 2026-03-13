@@ -1,4 +1,5 @@
 import type { AchievementsPageData } from '@/pages/achievements/model/types'
+import { AchievementCard } from '@/shared/ui/achievement-card/AchievementCard'
 
 import './achievements-page.css'
 
@@ -61,14 +62,7 @@ export function AchievementsPageView({ data }: AchievementsPageViewProps) {
             {section.rows.length > 0 ? (
               <div className="achievements-list">
                 {section.rows.map((row) => (
-                  <div key={`${section.title}-${row.title}`} className="achievements-row">
-                    <div>
-                      <strong>{row.title}</strong>
-                      <p>{row.meta}</p>
-                      <p>{row.description}</p>
-                    </div>
-                    <span>{row.value}</span>
-                  </div>
+                  <AchievementCard key={`${section.title}-${row.title}`} row={row} />
                 ))}
               </div>
             ) : (

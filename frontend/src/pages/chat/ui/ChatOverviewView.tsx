@@ -7,6 +7,7 @@ import type {
   ChatOverviewData,
 } from '@/pages/chat/model/types'
 import { routes } from '@/shared/config/routes'
+import { ChatSectionNav } from '@/shared/ui/chat-section-nav/ChatSectionNav'
 
 import './chat-page.css'
 
@@ -29,10 +30,6 @@ function activityBarHeight(point: ChatDailyActivityPoint, maxMessages: number) {
   }
 
   return Math.max(12, Math.round((point.messages / maxMessages) * 140))
-}
-
-function tabHref(chatId: string, tab: 'overview' | 'achievements' | 'settings') {
-  return `/app/chat/${chatId}?tab=${tab}`
 }
 
 export function ChatOverviewView({
@@ -68,25 +65,7 @@ export function ChatOverviewView({
         </div>
       </section>
 
-      <section className="chat-tabs">
-        <Link className={activeTab === 'overview' ? 'button button--primary' : 'button'} to={tabHref(chatId, 'overview')}>
-          Обзор
-        </Link>
-        <Link className={activeTab === 'achievements' ? 'button button--primary' : 'button'} to={tabHref(chatId, 'achievements')}>
-          Достижения
-        </Link>
-        {overview.can_manage_settings ? (
-          <Link className={activeTab === 'settings' ? 'button button--primary' : 'button'} to={tabHref(chatId, 'settings')}>
-            Настройки
-          </Link>
-        ) : null}
-        <Link className="button" to={routes.economy(chatId)}>
-          Экономика
-        </Link>
-        <Link className="button" to={routes.family(chatId)}>
-          Моя семья
-        </Link>
-      </section>
+      <ChatSectionNav chatId={chatId} active={activeTab} canManageSettings={overview.can_manage_settings} />
 
       <section className="chat-metrics">
         {overview.metrics.map((metric) => (

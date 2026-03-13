@@ -9,6 +9,7 @@ import {
 } from '@/pages/economy/api/actions'
 import { getEconomyPage } from '@/pages/economy/api/get-economy-page'
 import { EconomyPageView } from '@/pages/economy/ui/EconomyPageView'
+import { usePageTitle } from '@/shared/lib/use-page-title'
 import { useNamedEventSource } from '@/shared/lib/use-named-event-source'
 import { useState } from 'react'
 
@@ -23,6 +24,9 @@ export function EconomyPage() {
     queryFn: () => getEconomyPage(chatId!),
     enabled: Boolean(chatId),
   })
+  usePageTitle(
+    economyQuery.data?.chat_title ? `${economyQuery.data.chat_title} / Экономика` : 'Экономика группы',
+  )
 
   const applyMutation = useMutation({
     mutationFn: (payload: { item_code: string; target_type: string; plot_no?: number | null }) =>

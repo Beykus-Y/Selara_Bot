@@ -1,8 +1,11 @@
 import { Link } from 'react-router-dom'
 
 import { routes } from '@/shared/config/routes'
+import { usePageTitle } from '@/shared/lib/use-page-title'
 
 export function NotFoundPage() {
+  usePageTitle('404')
+
   return (
     <section className="public-page">
       <div className="public-card">

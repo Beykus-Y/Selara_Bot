@@ -5,6 +5,7 @@ import { getAdminDocsPage } from '@/pages/docs/api/get-admin-docs-page'
 import { getUserDocsPage } from '@/pages/docs/api/get-user-docs-page'
 import { AdminDocsPageView } from '@/pages/docs/ui/AdminDocsPageView'
 import { UserDocsPageView } from '@/pages/docs/ui/UserDocsPageView'
+import { usePageTitle } from '@/shared/lib/use-page-title'
 
 type DocsPageProps = {
   variant: 'user' | 'admin'
@@ -13,6 +14,7 @@ type DocsPageProps = {
 export function DocsPage({ variant }: DocsPageProps) {
   const [searchParams] = useSearchParams()
   const chatId = searchParams.get('chat_id')
+  usePageTitle(variant === 'admin' ? 'Админ-справка' : 'Справка')
 
   const userDocsQuery = useQuery({
     queryKey: ['user-docs-page', chatId],

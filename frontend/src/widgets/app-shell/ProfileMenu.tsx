@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 
-import { resolveAppPath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
+import { LogoutButton } from '@/widgets/app-shell/LogoutButton'
 import type { AppViewer } from '@/widgets/app-shell/model/types'
 
 type ProfileMenuProps = {
@@ -67,18 +67,28 @@ export function ProfileMenu({ viewer }: ProfileMenuProps) {
 
       {isOpen ? (
         <div className="app-profile__menu">
+          <div className="app-profile__menu-header">
+            <strong>{viewer.display_name}</strong>
+            <span>{viewer.username || `Telegram ID ${viewer.telegram_user_id}`}</span>
+          </div>
+          <Link
+            className={location.pathname === routes.home ? 'app-profile__menu-item app-profile__menu-item--active' : 'app-profile__menu-item'}
+            to={routes.home}
+            onClick={() => setIsOpen(false)}
+          >
+            Главная
+          </Link>
           <Link
             className={location.pathname === routes.settings ? 'app-profile__menu-item app-profile__menu-item--active' : 'app-profile__menu-item'}
             to={routes.settings}
             onClick={() => setIsOpen(false)}
           >
-            Настройки
+            Настройки панели
           </Link>
-          <form method="post" action={resolveAppPath('/logout')}>
-            <button type="submit" className="app-profile__menu-item">
-              Выйти
-            </button>
-          </form>
+          <Link className="app-profile__menu-item" to={routes.appDocs('user')} onClick={() => setIsOpen(false)}>
+            Справка
+          </Link>
+          <LogoutButton className="app-profile__menu-item" />
         </div>
       ) : null}
     </div>

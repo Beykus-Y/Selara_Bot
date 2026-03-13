@@ -49,10 +49,12 @@ function DocsCard({ item }: { item: UserDocsItem }) {
 }
 
 export function UserDocsPageView({ data }: UserDocsPageViewProps) {
+  const itemCount = data.docs_sections.reduce((total, section) => total + section.items.length, 0)
+
   return (
     <div className="docs-page">
       <section className="docs-hero">
-        <div>
+        <div className="docs-hero__copy">
           <span className="page-card__eyebrow">Документация</span>
           <h1>{data.hero_title}</h1>
           <p>{data.hero_subtitle}</p>
@@ -64,12 +66,21 @@ export function UserDocsPageView({ data }: UserDocsPageViewProps) {
             </div>
           ) : null}
         </div>
-        <div className="docs-hero__chips">
-          {data.hero_chips.map((chip) => (
-            <span key={chip} className="docs-chip">
-              {chip}
-            </span>
-          ))}
+
+        <div className="docs-hero__aside">
+          <div className="docs-hero__chips">
+            {data.hero_chips.map((chip) => (
+              <span key={chip} className="docs-chip">
+                {chip}
+              </span>
+            ))}
+          </div>
+
+          <div className="docs-hero__summary">
+            <span className="docs-hero__summary-label">Что внутри</span>
+            <strong>{itemCount} пользовательских сценариев</strong>
+            <p>{data.docs_sections.length} тематических разделов с командами, триггерами, примерами и важными заметками.</p>
+          </div>
         </div>
       </section>
 

@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 
 import type { AuditPageData } from '@/pages/audit/model/types'
 import { routes } from '@/shared/config/routes'
+import { ChatSectionNav } from '@/shared/ui/chat-section-nav/ChatSectionNav'
 
 import './audit-page.css'
 
@@ -27,6 +28,8 @@ export function AuditPageView({ chatId, data }: AuditPageViewProps) {
           </Link>
         </div>
       </section>
+
+      <ChatSectionNav links={data.chat_section_links} />
 
       <section className="audit-panel">
         <div className="audit-panel__head">

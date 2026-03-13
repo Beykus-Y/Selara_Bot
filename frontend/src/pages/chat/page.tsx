@@ -18,6 +18,8 @@ import { ChatAchievementsView } from '@/pages/chat/ui/ChatAchievementsView'
 import { ChatOverviewView } from '@/pages/chat/ui/ChatOverviewView'
 import { ChatSettingsView } from '@/pages/chat/ui/ChatSettingsView'
 import { useNamedEventSource } from '@/shared/lib/use-named-event-source'
+import { usePageTitle } from '@/shared/lib/use-page-title'
+import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 type ChatTab = 'overview' | 'achievements' | 'settings'
 const CHAT_LIVE_EVENT_NAMES = ['chat_activity', 'new_vote', 'chat_refresh'] as const
@@ -69,6 +71,18 @@ export function ChatPage() {
     queryFn: () => getChatSettings(chatId!),
     enabled: Boolean(chatId) && activeTab === 'settings',
   })
+  const activeChatTitle =
+    settingsQuery.data?.chat_title ?? achievementsQuery.data?.chat_title ?? overviewQuery.data?.chat_title
+
+  usePageTitle(
+    activeChatTitle
+      ? activeTab === 'settings'
+        ? `${activeChatTitle} / Настройки`
+        : activeTab === 'achievements'
+          ? `${activeChatTitle} / Достижения`
+          : `${activeChatTitle} / Обзор`
+      : 'Группа',
+  )
 
   const updateSettingMutation = useMutation({
     mutationFn: ({ key, value }: { key: string; value: string }) => updateChatSetting(chatId!, key, value),
@@ -143,7 +157,7 @@ export function ChatPage() {
 
   if (activeTab === 'settings') {
     if (settingsQuery.isLoading) {
-      return <section className="chat-loading">Загружаю настройки группы…</section>
+      return <LoadingShell eyebrow="Чат" title="Загружаю настройки группы" />
     }
 
     if (settingsQuery.isError) {
@@ -151,7 +165,7 @@ export function ChatPage() {
     }
 
     if (!settingsQuery.data) {
-      return <section className="chat-loading">Данные настроек группы пока недоступны.</section>
+      return <LoadingShell eyebrow="Чат" title="Подгружаю настройки группы" />
     }
 
     return (
@@ -193,7 +207,7 @@ export function ChatPage() {
 
   if (activeTab === 'achievements') {
     if (achievementsQuery.isLoading) {
-      return <section className="chat-loading">Загружаю достижения группы…</section>
+      return <LoadingShell eyebrow="Чат" title="Собираю достижения группы" />
     }
 
     if (achievementsQuery.isError) {
@@ -201,14 +215,14 @@ export function ChatPage() {
     }
 
     if (!achievementsQuery.data) {
-      return <section className="chat-loading">Данные достижений группы пока недоступны.</section>
+      return <LoadingShell eyebrow="Чат" title="Подгружаю достижения группы" />
     }
 
     return <ChatAchievementsView chatId={chatId} data={achievementsQuery.data} />
   }
 
   if (overviewQuery.isLoading || leaderboardQuery.isLoading) {
-    return <section className="chat-loading">Загружаю обзор группы…</section>
+    return <LoadingShell eyebrow="Чат" title="Собираю обзор группы" />
   }
 
   if (overviewQuery.isError) {
@@ -220,7 +234,7 @@ export function ChatPage() {
   }
 
   if (!overviewQuery.data || !leaderboardQuery.data) {
-    return <section className="chat-loading">Данные группы пока недоступны.</section>
+    return <LoadingShell eyebrow="Чат" title="Подгружаю рабочую область чата" />
   }
 
   return (

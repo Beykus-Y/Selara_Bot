@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import type { FamilyPageData } from '@/pages/family/model/types'
 import { routes } from '@/shared/config/routes'
+import { ChatSectionNav } from '@/shared/ui/chat-section-nav/ChatSectionNav'
 
 import './family-page.css'
 
@@ -166,6 +167,8 @@ export function FamilyPageView({ chatId, data }: FamilyPageViewProps) {
           </Link>
         </div>
       </section>
+
+      <ChatSectionNav links={data.chat_section_links} />
 
       <section className="family-metrics">
         {data.bundle_summary.map((item) => (

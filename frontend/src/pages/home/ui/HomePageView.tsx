@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom'
 
 import type { HomeGroupLink, HomePageData } from '@/pages/home/model/types'
+import { routes } from '@/shared/config/routes'
+import { PanelGlyph } from '@/shared/ui/PanelGlyph'
 
 import './home-page.css'
 
@@ -8,12 +10,51 @@ type HomePageViewProps = {
   data: HomePageData
 }
 
+type GroupMetaToken = {
+  value: string
+  dimmed?: boolean
+}
+
 function badgeLabel(value: string) {
   if (value === 'admin') {
-    return 'админ'
+    return 'Админ'
   }
 
-  return 'участник'
+  return 'Обычное'
+}
+
+function splitGroupTitle(title: string) {
+  const cleanTitle = title.trim()
+  const match = cleanTitle.match(/^(\S+)\s+(.+)$/u)
+
+  if (!match) {
+    return { emoji: null, label: cleanTitle }
+  }
+
+  const [, lead, label] = match
+
+  if (!/[\p{Extended_Pictographic}]/u.test(lead)) {
+    return { emoji: null, label: cleanTitle }
+  }
+
+  return { emoji: lead, label }
+}
+
+function splitGroupMeta(meta: string): GroupMetaToken[] {
+  const cleanMeta = meta.trim()
+
+  if (!cleanMeta) {
+    return []
+  }
+
+  return cleanMeta
+    .split(/\s*(?:•|·|\|)\s*/u)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((value) => ({
+      value,
+      dimmed: /\bID\b/i.test(value) || /-?\d{7,}/.test(value),
+    }))
 }
 
 function GroupSection({ title, groups }: { title: string; groups: HomeGroupLink[] }) {
@@ -26,15 +67,37 @@ function GroupSection({ title, groups }: { title: string; groups: HomeGroupLink[
 
       {groups.length > 0 ? (
         <div className="home-list">
-          {groups.map((group) => (
-            <Link key={group.href} className="home-list-card" to={group.href}>
-              <div>
-                <strong>{group.title}</strong>
-                <p>{group.meta}</p>
-              </div>
-              <span className={`home-pill home-pill--${group.badge}`}>{badgeLabel(group.badge)}</span>
-            </Link>
-          ))}
+          {groups.map((group) => {
+            const titleParts = splitGroupTitle(group.title)
+            const metaTokens = splitGroupMeta(group.meta)
+
+            return (
+              <Link key={group.href} className="home-list-card" to={group.href}>
+                <div className="home-list-card__title">
+                  {titleParts.emoji ? <span className="home-list-card__emoji">{titleParts.emoji}</span> : null}
+
+                  <div className="home-list-card__copy">
+                    <strong>{titleParts.label}</strong>
+
+                    {metaTokens.length > 0 ? (
+                      <div className="home-list-card__meta">
+                        {metaTokens.map((token) => (
+                          <span
+                            key={`${group.href}-${token.value}`}
+                            className={token.dimmed ? 'home-list-card__meta-item home-list-card__meta-item--dim' : 'home-list-card__meta-item'}
+                          >
+                            {token.value}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <span className={`home-pill home-pill--${group.badge}`}>{badgeLabel(group.badge)}</span>
+              </Link>
+            )
+          })}
         </div>
       ) : (
         <p className="home-empty">Пока нет данных для этого блока.</p>
@@ -44,19 +107,87 @@ function GroupSection({ title, groups }: { title: string; groups: HomeGroupLink[
 }
 
 export function HomePageView({ data }: HomePageViewProps) {
+  const spotlightMetrics = data.metrics.slice(0, 2)
+  const quickActions = [
+    {
+      title: 'Игровой центр',
+      text: 'Лобби, live-сцены и архив последних партий в одном контуре.',
+      label: 'Открыть игры',
+      href: routes.games,
+      icon: 'gamepad' as const,
+    },
+    {
+      title: 'Глобальные достижения',
+      text: 'Каталог аккаунта, редкость ачивок и статус получения.',
+      label: 'К достижениям',
+      href: routes.achievements,
+      icon: 'trophy' as const,
+    },
+    {
+      title: 'Настройки панели',
+      text: 'Профиль, текущая сессия браузера и быстрые переходы.',
+      label: 'Открыть настройки',
+      href: routes.settings,
+      icon: 'settings' as const,
+    },
+    {
+      title: 'Справка пользователя',
+      text: 'Команды, игровые сценарии и основные механики Selara.',
+      label: 'Читать справку',
+      href: routes.appDocs('user'),
+      icon: 'docs' as const,
+    },
+  ]
+
   return (
     <div className="home-page">
       <section className="home-hero">
-        <div>
-          <span className="page-card__eyebrow">Личный кабинет</span>
-          <h1>{data.hero_title}</h1>
-          <p>{data.hero_subtitle}</p>
+        <div className="home-hero__main">
+          <div className="home-hero__copy">
+            <span className="page-card__eyebrow">Личный кабинет</span>
+            <h1>{data.hero_title}</h1>
+            <p>{data.hero_subtitle}</p>
+          </div>
+
+          <div className="home-hero__chips">
+            <span className="home-chip">Web + Telegram</span>
+            <span className="home-chip">Одноразовый код</span>
+            <span className="home-chip">Сводка по группам</span>
+          </div>
         </div>
-        <div className="home-hero__chips">
-          <span className="home-chip">Web и Telegram</span>
-          <span className="home-chip">Вход по одноразовому коду</span>
-          <span className="home-chip">Статистика по группам</span>
+
+        <div className="home-hero__aside">
+          <div className="home-hero__support">
+            <span className="home-hero__support-label">Рабочий контур</span>
+            <strong>Единая панель управления группами</strong>
+            <p>React-панель использует те же серверные маршруты, но собирает навигацию, статистику и настройки в одно плотное рабочее пространство.</p>
+          </div>
+
+          <div className="home-hero__spotlight">
+            {spotlightMetrics.map((metric) => (
+              <article key={`spotlight-${metric.label}`} className="home-hero__spotlight-card">
+                <span>{metric.label}</span>
+                <strong>{metric.value}</strong>
+                <p>{metric.note}</p>
+              </article>
+            ))}
+          </div>
         </div>
+      </section>
+
+      <section className="home-action-grid" aria-label="Быстрые действия">
+        {quickActions.map((card) => (
+          <Link key={card.title} className="home-action-card" to={card.href}>
+            <span className="home-action-card__icon">
+              <PanelGlyph kind={card.icon} />
+            </span>
+            <div className="home-action-card__copy">
+              <span className="home-action-card__label">{card.label}</span>
+              <strong>{card.title}</strong>
+              <p>{card.text}</p>
+            </div>
+          </Link>
+        ))}
       </section>
 
       <section className="home-metrics">

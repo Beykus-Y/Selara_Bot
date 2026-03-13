@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from 'react-router-dom'
 
 import { getFamilyPage } from '@/pages/family/api/get-family-page'
 import { FamilyPageView } from '@/pages/family/ui/FamilyPageView'
+import { usePageTitle } from '@/shared/lib/use-page-title'
 
 export function FamilyPage() {
   const { chatId } = useParams()
@@ -14,6 +15,7 @@ export function FamilyPage() {
     queryFn: () => getFamilyPage(chatId!, userId),
     enabled: Boolean(chatId),
   })
+  usePageTitle(familyQuery.data?.chat_title ? `${familyQuery.data.chat_title} / Моя семья` : 'Моя семья')
 
   if (!chatId) {
     return <section className="family-error">Не удалось определить ID чата.</section>

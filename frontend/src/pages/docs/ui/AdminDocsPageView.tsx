@@ -19,10 +19,13 @@ function AdminFeatureCard({ item }: { item: AdminDocsFeatureItem }) {
 }
 
 export function AdminDocsPageView({ data }: AdminDocsPageViewProps) {
+  const featureCount = data.docs_sections.reduce((total, section) => total + section.items.length, 0)
+  const settingCount = data.settings_docs_sections.reduce((total, section) => total + section.items.length, 0)
+
   return (
     <div className="docs-page">
       <section className="docs-hero">
-        <div>
+        <div className="docs-hero__copy">
           <span className="page-card__eyebrow">Документация</span>
           <h1>{data.hero_title}</h1>
           <p>{data.hero_subtitle}</p>
@@ -34,10 +37,19 @@ export function AdminDocsPageView({ data }: AdminDocsPageViewProps) {
             </div>
           ) : null}
         </div>
-        <div className="docs-hero__chips">
-          <span className="docs-chip">руководство администратора</span>
-          <span className="docs-chip">настройки и доступы</span>
-          <span className="docs-chip">сценарии панели</span>
+
+        <div className="docs-hero__aside">
+          <div className="docs-hero__chips">
+            <span className="docs-chip">руководство администратора</span>
+            <span className="docs-chip">настройки и доступы</span>
+            <span className="docs-chip">сценарии панели</span>
+          </div>
+
+          <div className="docs-hero__summary">
+            <span className="docs-hero__summary-label">Что внутри</span>
+            <strong>{featureCount + settingCount} материалов</strong>
+            <p>{data.docs_sections.length} разделов интерфейса, {data.settings_docs_sections.length} групп настроек и отдельные справки по триггерам.</p>
+          </div>
         </div>
       </section>
 

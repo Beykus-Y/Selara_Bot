@@ -10,6 +10,13 @@ export type GamesSpotlightMetric = {
   value: string
 }
 
+export type GamesRevealCard = {
+  eyebrow: string
+  title: string
+  text: string
+  note: string
+}
+
 export type GamesSpotlight = {
   eyebrow: string
   title: string
@@ -17,6 +24,7 @@ export type GamesSpotlight = {
   prompt_title: string | null
   prompt_text: string | null
   metrics: GamesSpotlightMetric[]
+  reveal_card?: GamesRevealCard | null
 }
 
 export type GamesButton = {
@@ -47,6 +55,16 @@ export type GamesBadge = {
   tone: string
 }
 
+export type GamesRoleCard = {
+  title: string
+  tone: string
+  team: string
+  intel_label?: string
+  intel_value?: string
+  objective: string
+  ability: string
+}
+
 export type GamesScoreRow = {
   position: string
   label: string
@@ -69,7 +87,54 @@ export type GamesRevealRow = {
   tone: string
 }
 
+export type GamesWhoamiTableRow = {
+  label: string
+  identity: string
+  tone: string
+  badges: GamesBadge[]
+  title: string
+}
+
+export type GamesWhoamiHistoryRow = {
+  title: string
+  text: string
+  meta: string
+  tone: string
+}
+
+export type GamesSpySuspectRow = {
+  label: string
+  votes: string
+  meter: string
+  tone: string
+  badges: GamesBadge[]
+}
+
+export type GamesSpySummary = {
+  category: string
+  votes: string
+  majority: string
+  leader: string
+}
+
+export type GamesMafiaRosterRow = {
+  label: string
+  tone: string
+  badges: GamesBadge[]
+}
+
+export type GamesRoleRevealRow = {
+  player: string
+  role: string
+  team: string
+  tone: string
+  winner: boolean
+}
+
 export type GamesSpyView = {
+  role_card: GamesRoleCard
+  suspect_rows: GamesSpySuspectRow[]
+  summary: GamesSpySummary
   status_title: string
   status_text: string
   status_tone: string
@@ -85,6 +150,13 @@ export type GamesSpyView = {
 }
 
 export type GamesWhoamiView = {
+  category: string
+  current_actor: string
+  pending_question: string | null
+  solved_count: string
+  players_total: string
+  table_rows: GamesWhoamiTableRow[]
+  history_rows: GamesWhoamiHistoryRow[]
   status_title: string
   status_text: string
   status_tone: string
@@ -102,6 +174,9 @@ export type GamesWhoamiView = {
 }
 
 export type GamesMafiaView = {
+  role_card: GamesRoleCard
+  report_html: string | null
+  roster_rows: GamesMafiaRosterRow[]
   status_title: string
   status_text: string
   status_tone: string
@@ -111,6 +186,11 @@ export type GamesMafiaView = {
 }
 
 export type GamesZlobView = {
+  category: string
+  round_label: string
+  target_score: string
+  black_text: string
+  black_slots: number
   status_title: string
   status_text: string
   status_tone: string
@@ -121,7 +201,9 @@ export type GamesZlobView = {
     slots: number
     hand: Array<{ index: string; text: string }>
   } | null
+  submission_rows: GamesSubmissionRow[]
   option_rows: GamesRevealRow[]
+  voted_option_label: string | null
   show_vote: boolean
 }
 
@@ -162,6 +244,9 @@ export type GamesCard = {
   whoami_view: GamesWhoamiView | null
   mafia_view: GamesMafiaView | null
   zlob_view: GamesZlobView | null
+  role_reveal_rows: GamesRoleRevealRow[]
+  role_reveal_note: string
+  secret_lines: string[]
   score_rows: GamesScoreRow[]
 }
 
@@ -173,6 +258,11 @@ export type GamesRecentCard = {
   chat_id: string
   started_at: string
   result_text: string
+  personal_notes: string[]
+  score_rows: GamesScoreRow[]
+  role_reveal_rows: GamesRoleRevealRow[]
+  role_reveal_note: string
+  bred_reveal_rows: GamesRevealRow[]
 }
 
 export type GamesCatalogItem = {

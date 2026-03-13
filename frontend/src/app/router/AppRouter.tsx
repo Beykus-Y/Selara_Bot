@@ -1,5 +1,6 @@
 import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 
+import { RouteErrorBoundary } from '@/app/router/RouteErrorBoundary'
 import { AchievementsPage } from '@/pages/achievements/page'
 import { AuditPage } from '@/pages/audit/page'
 import { ChatPage } from '@/pages/chat/page'
@@ -21,22 +22,27 @@ const router = createBrowserRouter(
     {
       path: routes.landing,
       element: <LandingPage />,
+      errorElement: <RouteErrorBoundary />,
     },
     {
       path: routes.login,
       element: <LoginPage />,
+      errorElement: <RouteErrorBoundary />,
     },
     {
       path: routes.userDocs,
       element: <DocsPage variant="user" />,
+      errorElement: <RouteErrorBoundary />,
     },
     {
       path: routes.adminDocs,
       element: <DocsPage variant="admin" />,
+      errorElement: <RouteErrorBoundary />,
     },
     {
       path: routes.app,
       element: <AppShell />,
+      errorElement: <RouteErrorBoundary />,
       children: [
         { index: true, element: <HomePage /> },
         { path: 'settings', element: <SettingsPage /> },
@@ -54,6 +60,7 @@ const router = createBrowserRouter(
     {
       path: '*',
       element: <NotFoundPage />,
+      errorElement: <RouteErrorBoundary />,
     },
   ],
   {
