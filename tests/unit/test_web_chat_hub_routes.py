@@ -409,6 +409,7 @@ async def test_chat_settings_api_includes_alias_mode_setting(monkeypatch) -> Non
     assert payload["alias_mode_setting"]["key"] == "alias_mode"
     assert payload["alias_mode_setting"]["current_value"] == "aliases_if_exists"
     assert payload["alias_mode_setting"]["current_value_display"] == "только алиасы группы"
+    assert any(option["value"] == "моя статья" for option in payload["alias_source_options"])
 
 
 @pytest.mark.asyncio

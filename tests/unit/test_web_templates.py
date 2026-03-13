@@ -97,10 +97,17 @@ def test_chat_template_renders_settings_sections_items_key() -> None:
             ],
             "doc_href": "#docs-aliases",
         },
+        alias_source_options=[
+            {"value": "моя статья", "label": "моя статья"},
+            {"value": "статья", "label": "статья -> моя статья"},
+            {"value": "топ", "label": "топ"},
+        ],
     )
 
     assert "Режим экономики" in html
     assert "Режим алиасов команд" in html
+    assert 'select name="source_trigger"' in html
+    assert "Выберите встроенный триггер" in html
     assert "Смарт-триггеры" in html
     assert "{user}" in html
     assert "/app/docs/admin?chat_id=123#docs-trigger-variables" in html

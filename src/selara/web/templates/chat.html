@@ -481,7 +481,12 @@
               <code>setalias</code>
             </div>
             <p class="setting-description">Источник должен быть стандартным текстовым триггером, например «топ» или «крафт».</p>
-            <input type="text" name="source_trigger" placeholder="Источник, например: топ">
+            <select name="source_trigger" required>
+              <option value="" selected disabled>Выберите встроенный триггер</option>
+              {% for option in alias_source_options %}
+                <option value="{{ option.value }}">{{ option.label }}</option>
+              {% endfor %}
+            </select>
             <input type="text" name="alias_text" placeholder="Новый алиас, например: рейтинг">
             <button type="submit" class="button primary small">Сохранить алиас</button>
           </article>
@@ -498,7 +503,11 @@
               <p class="helper-text">Источник: {{ alias.source }}</p>
               {% if can_manage_settings %}
                 <input type="hidden" name="alias_text" value="{{ alias.alias }}">
-                <input type="text" name="source_trigger" value="{{ alias.source }}">
+                <select name="source_trigger" required>
+                  {% for option in alias_source_options %}
+                    <option value="{{ option.value }}" {% if option.value == alias.source %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </select>
                 <div class="top-actions">
                   <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
                   <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>

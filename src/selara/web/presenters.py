@@ -33,7 +33,11 @@ from selara.presentation.handlers.settings_common import (
     setting_value_hint_ru,
     settings_to_dict,
 )
-from selara.presentation.commands.catalog import SOCIAL_COMMAND_KEY_TO_ACTION
+from selara.presentation.commands.catalog import (
+    BUILTIN_TRIGGER_TO_COMMAND_KEY,
+    COMMAND_KEY_DEFAULT_SOURCE_TRIGGER,
+    SOCIAL_COMMAND_KEY_TO_ACTION,
+)
 from selara.presentation.game_state import GAME_DEFINITIONS, GAME_LAUNCHABLE_KINDS
 from selara.web.admin_docs import setting_anchor, trigger_match_type_label_ru
 
@@ -349,6 +353,20 @@ def build_alias_rows(aliases: list[ChatTextAlias]) -> list[dict[str, str]]:
         }
         for alias in aliases
     ]
+
+
+def build_alias_source_options() -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    for trigger, command_key in sorted(BUILTIN_TRIGGER_TO_COMMAND_KEY.items()):
+        canonical = COMMAND_KEY_DEFAULT_SOURCE_TRIGGER.get(command_key, trigger)
+        label = trigger if trigger == canonical else f"{trigger} -> {canonical}"
+        options.append(
+            {
+                "value": trigger,
+                "label": label,
+            }
+        )
+    return options
 
 
 def build_alias_mode_setting(*, current_mode: str, editable: bool) -> dict[str, Any]:
@@ -761,6 +779,7 @@ def build_chat_context(
     roles: list[ChatRoleDefinition],
     command_rules: list[ChatCommandAccessRule],
     aliases: list[ChatTextAlias],
+    alias_source_options: list[dict[str, str]],
     triggers: list[ChatTrigger],
     audit_entries: list[ChatAuditLogEntry],
     global_dashboard: EconomyDashboard | None,
@@ -869,6 +888,7 @@ def build_chat_context(
                 empty_text="Глобальный аккаунт ещё не создан.",
             ),
         ],
+        "alias_source_options": alias_source_options,
         "achievement_sections": local_achievement_sections,
         "leaderboards": [
             build_leaderboard_section(

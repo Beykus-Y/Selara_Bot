@@ -6,6 +6,7 @@ from selara.domain.entities import ActivityStats, ChatRoleDefinition, Leaderboar
 from selara.web.presenters import (
     build_activity_rows,
     build_alias_mode_setting,
+    build_alias_source_options,
     build_leaderboard_rows,
     build_roles,
     build_settings_sections,
@@ -113,3 +114,11 @@ def test_build_alias_mode_setting_uses_human_labels() -> None:
     assert item["current_value_display"] == "только алиасы группы"
     assert item["default_value"] == "both"
     assert [option["value"] for option in item["options"]] == ["aliases_if_exists", "both", "standard_only"]
+
+
+def test_build_alias_source_options_include_daily_article_triggers() -> None:
+    options = build_alias_source_options()
+    values = {option["value"]: option["label"] for option in options}
+
+    assert values["моя статья"] == "моя статья"
+    assert values["статья"] == "статья -> моя статья"
