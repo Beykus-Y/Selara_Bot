@@ -16,6 +16,7 @@ from selara.presentation.handlers.text_commands import router as text_commands_r
 from selara.presentation.middlewares.activity_tracker import ActivityTrackerMiddleware
 from selara.presentation.middlewares.bot_ban import BotBanMiddleware
 from selara.presentation.middlewares.chat_migration import ChatMigrationMiddleware
+from selara.presentation.middlewares.command_cleanup import CommandCleanupMiddleware
 from selara.presentation.middlewares.chat_settings import ChatSettingsMiddleware
 from selara.presentation.middlewares.command_access import CommandAccessMiddleware
 from selara.presentation.middlewares.db_session import DBSessionMiddleware
@@ -30,6 +31,7 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     root.message.outer_middleware(ChatMigrationMiddleware())
     root.message.outer_middleware(BotBanMiddleware())
     root.message.outer_middleware(ChatSettingsMiddleware())
+    root.message.outer_middleware(CommandCleanupMiddleware())
     root.message.outer_middleware(CommandAccessMiddleware())
     root.message.outer_middleware(ActivityTrackerMiddleware())
 
