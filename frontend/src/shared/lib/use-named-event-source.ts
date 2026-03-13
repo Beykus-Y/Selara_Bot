@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { resolveAppPath } from '@/shared/config/app-base-path'
 
 type UseNamedEventSourceOptions = {
   enabled: boolean
@@ -24,7 +25,7 @@ export function useNamedEventSource({
       return
     }
 
-    const source = new EventSource(path)
+    const source = new EventSource(resolveAppPath(path))
     const handleEvent = () => {
       onEventRef.current()
     }

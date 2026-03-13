@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
 import { getLoginContext } from '@/pages/login/api/get-login-context'
+import { resolveAppPath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
 
 export function LoginPage() {
@@ -80,7 +81,7 @@ export function LoginPage() {
                   Открыть бота
                 </a>
               ) : null}
-              <a className="button" href={routes.landing}>
+              <a className="button" href={resolveAppPath(routes.landing)}>
                 На главную
               </a>
             </div>
@@ -97,7 +98,7 @@ export function LoginPage() {
               <div className="public-message public-message--error">{loginContextQuery.error.message}</div>
             ) : null}
 
-            <form className="public-form" method="post" action="/backend/app/login">
+            <form className="public-form" method="post" action={resolveAppPath('/backend/app/login')}>
               <label className="public-field">
                 <span>Код из Telegram</span>
                 <input

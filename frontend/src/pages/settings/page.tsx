@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
+import { resolveAppPath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
 import { getAppViewer } from '@/widgets/app-shell/api/get-app-viewer'
 
@@ -45,7 +46,7 @@ export function SettingsPage() {
         <Link className="button button--primary" to={routes.userDocs}>
           Справка
         </Link>
-        <form method="post" action="/logout">
+        <form method="post" action={resolveAppPath('/logout')}>
           <button type="submit" className="button">
             Выйти
           </button>

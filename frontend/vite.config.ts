@@ -5,8 +5,12 @@ import react from '@vitejs/plugin-react'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, '')
   const backendUrl = env.VITE_BACKEND_URL || 'http://127.0.0.1:8080'
+  const basePath = env.VITE_APP_BASE_PATH || '/'
+  const normalizedBasePath = basePath.endsWith('/') ? basePath.slice(0, -1) || '/' : basePath
+  const proxyPrefix = normalizedBasePath === '/' ? '' : normalizedBasePath
 
   return {
+    base: basePath,
     plugins: [react()],
     resolve: {
       alias: {
@@ -15,26 +19,25 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
-        '/backend': {
+        [`${proxyPrefix}/backend`]: {
           target: backendUrl,
           changeOrigin: true,
-          rewrite: (sourcePath) => sourcePath.replace(/^\/backend/, ''),
+          rewrite: (sourcePath) => sourcePath.replace(new RegExp(`^${proxyPrefix}/backend`), ''),
         },
-        '/api': {
+        [`${proxyPrefix}/api`]: {
           target: backendUrl,
           changeOrigin: true,
+          rewrite: (sourcePath) => sourcePath.replace(new RegExp(`^${proxyPrefix}`), ''),
         },
-        '/login': {
+        [`${proxyPrefix}/logout`]: {
           target: backendUrl,
           changeOrigin: true,
+          rewrite: (sourcePath) => sourcePath.replace(new RegExp(`^${proxyPrefix}`), ''),
         },
-        '/logout': {
+        [`${proxyPrefix}/static`]: {
           target: backendUrl,
           changeOrigin: true,
-        },
-        '/static': {
-          target: backendUrl,
-          changeOrigin: true,
+          rewrite: (sourcePath) => sourcePath.replace(new RegExp(`^${proxyPrefix}`), ''),
         },
       },
     },

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 
+import { resolveAppPath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
 import type { AppViewer } from '@/widgets/app-shell/model/types'
 
@@ -73,7 +74,7 @@ export function ProfileMenu({ viewer }: ProfileMenuProps) {
           >
             Настройки
           </Link>
-          <form method="post" action="/logout">
+          <form method="post" action={resolveAppPath('/logout')}>
             <button type="submit" className="app-profile__menu-item">
               Выйти
             </button>

@@ -12,48 +12,54 @@ import { LandingPage } from '@/pages/landing/page'
 import { LoginPage } from '@/pages/login/page'
 import { NotFoundPage } from '@/pages/not-found/page'
 import { SettingsPage } from '@/pages/settings/page'
+import { appBasePath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
 import { AppShell } from '@/widgets/app-shell/AppShell'
 
-const router = createBrowserRouter([
+const router = createBrowserRouter(
+  [
+    {
+      path: routes.landing,
+      element: <LandingPage />,
+    },
+    {
+      path: routes.login,
+      element: <LoginPage />,
+    },
+    {
+      path: routes.userDocs,
+      element: <DocsPage variant="user" />,
+    },
+    {
+      path: routes.adminDocs,
+      element: <DocsPage variant="admin" />,
+    },
+    {
+      path: routes.app,
+      element: <AppShell />,
+      children: [
+        { index: true, element: <HomePage /> },
+        { path: 'settings', element: <SettingsPage /> },
+        { path: 'games', element: <GamesPage /> },
+        { path: 'games/live', element: <GamesPage /> },
+        { path: 'achievements', element: <AchievementsPage /> },
+        { path: 'docs/user', element: <DocsPage variant="user" /> },
+        { path: 'docs/admin', element: <DocsPage variant="admin" /> },
+        { path: 'chat/:chatId', element: <ChatPage /> },
+        { path: 'chat/:chatId/economy', element: <EconomyPage /> },
+        { path: 'chat/:chatId/audit', element: <AuditPage /> },
+        { path: 'family/:chatId', element: <FamilyPage /> },
+      ],
+    },
+    {
+      path: '*',
+      element: <NotFoundPage />,
+    },
+  ],
   {
-    path: routes.landing,
-    element: <LandingPage />,
+    basename: appBasePath || undefined,
   },
-  {
-    path: routes.login,
-    element: <LoginPage />,
-  },
-  {
-    path: routes.userDocs,
-    element: <DocsPage variant="user" />,
-  },
-  {
-    path: routes.adminDocs,
-    element: <DocsPage variant="admin" />,
-  },
-  {
-    path: routes.app,
-    element: <AppShell />,
-    children: [
-      { index: true, element: <HomePage /> },
-      { path: 'settings', element: <SettingsPage /> },
-      { path: 'games', element: <GamesPage /> },
-      { path: 'games/live', element: <GamesPage /> },
-      { path: 'achievements', element: <AchievementsPage /> },
-      { path: 'docs/user', element: <DocsPage variant="user" /> },
-      { path: 'docs/admin', element: <DocsPage variant="admin" /> },
-      { path: 'chat/:chatId', element: <ChatPage /> },
-      { path: 'chat/:chatId/economy', element: <EconomyPage /> },
-      { path: 'chat/:chatId/audit', element: <AuditPage /> },
-      { path: 'family/:chatId', element: <FamilyPage /> },
-    ],
-  },
-  {
-    path: '*',
-    element: <NotFoundPage />,
-  },
-])
+)
 
 export function AppRouter() {
   return <RouterProvider router={router} />

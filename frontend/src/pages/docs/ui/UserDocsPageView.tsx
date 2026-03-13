@@ -1,4 +1,5 @@
 import type { UserDocsPageData, UserDocsItem } from '@/pages/docs/model/types'
+import { resolveAppPath } from '@/shared/config/app-base-path'
 
 import './docs-page.css'
 
@@ -57,7 +58,7 @@ export function UserDocsPageView({ data }: UserDocsPageViewProps) {
           <p>{data.hero_subtitle}</p>
           {data.origin_chat ? (
             <div className="docs-hero__actions">
-              <a className="button button--primary" href={data.origin_chat.href}>
+              <a className="button button--primary" href={resolveAppPath(data.origin_chat.href)}>
                 Вернуться в {data.origin_chat.label}
               </a>
             </div>

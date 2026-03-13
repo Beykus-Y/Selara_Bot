@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import type { ChatSettingsData } from '@/pages/chat/model/types'
+import { resolveAppPath } from '@/shared/config/app-base-path'
 import { routes } from '@/shared/config/routes'
 
 import './chat-page.css'
@@ -145,7 +146,7 @@ export function ChatSettingsView({
           <p>{data.manage_settings_note}</p>
           {feedbackMessage ? <p className="chat-status">{feedbackMessage}</p> : null}
         </div>
-        <a className="button" href={data.admin_docs_url}>
+        <a className="button" href={resolveAppPath(data.admin_docs_url)}>
           Открыть справку по настройкам
         </a>
       </section>
@@ -255,7 +256,7 @@ export function ChatSettingsView({
 
                   <p className="chat-status">{item.hint}</p>
 
-                  <a className="chat-setting-doc" href={`${data.admin_docs_url}#${item.doc_anchor}`}>
+                  <a className="chat-setting-doc" href={`${resolveAppPath(data.admin_docs_url)}#${item.doc_anchor}`}>
                     Открыть описание параметра
                   </a>
                 </article>
@@ -400,7 +401,7 @@ export function ChatSettingsView({
               </code>
             ))}
           </div>
-          <a className="chat-setting-doc" href={data.trigger_template_docs_url}>
+          <a className="chat-setting-doc" href={resolveAppPath(data.trigger_template_docs_url)}>
             Открыть полный каталог переменных
           </a>
         </article>

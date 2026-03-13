@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { NavLink, Outlet } from 'react-router-dom'
 
+import { resolveAppPath } from '@/shared/config/app-base-path'
 import { appNavigation } from '@/shared/config/routes'
 import { getAppViewer } from '@/widgets/app-shell/api/get-app-viewer'
 import { ProfileMenu } from '@/widgets/app-shell/ProfileMenu'
@@ -44,7 +45,7 @@ export function AppShell() {
           {viewerQuery.data ? (
             <ProfileMenu viewer={viewerQuery.data} />
           ) : viewerQuery.isError ? (
-            <form method="post" action="/logout">
+            <form method="post" action={resolveAppPath('/logout')}>
               <button type="submit" className="button app-sidebar__logout">
                 Выйти
               </button>

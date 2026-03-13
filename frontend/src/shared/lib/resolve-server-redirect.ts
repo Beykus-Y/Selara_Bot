@@ -1,3 +1,5 @@
+import { resolveAppPath } from '@/shared/config/app-base-path'
+
 export function resolveServerRedirect(url: string | undefined): string | undefined {
   if (!url) {
     return undefined
@@ -7,7 +9,7 @@ export function resolveServerRedirect(url: string | undefined): string | undefin
     return url
   }
 
-  return url
+  return resolveAppPath(url)
 }
 
 export function redirectToServerPath(url: string | undefined) {

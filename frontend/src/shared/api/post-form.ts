@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { resolveAppPath } from '@/shared/config/app-base-path'
 
 export async function postForm<T>(
   url: string,
@@ -14,7 +15,7 @@ export async function postForm<T>(
     form.set(key, String(value))
   }
 
-  const { data } = await axios.post<T>(url, form.toString(), {
+  const { data } = await axios.post<T>(resolveAppPath(url), form.toString(), {
     withCredentials: true,
     headers: {
       Accept: 'application/json',
