@@ -32,7 +32,7 @@ jobs:
         id: meta_app
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/selara
+          images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-
@@ -52,7 +52,7 @@ jobs:
         id: meta_web
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/selara-web
+          images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-web
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-
