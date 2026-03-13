@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from selara.application.use_cases.iris_import import strip_iris_award_prefix
 from selara.application.use_cases.leaderboard_scoring import compute_hybrid_score, sort_leaderboard_items
 from selara.core.chat_settings import ChatSettings
 from selara.core.trigger_templates import validate_template_variables
@@ -182,6 +183,10 @@ def _normalize_optional_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return _coerce_utc_datetime(value)
+
+
+def _preserve_optional_text(current: str | None, incoming: str | None) -> str | None:
+    return incoming if incoming is not None else current
 
 
 def _distribute_activity(total: int, days: Sequence[date]) -> dict[date, int]:
@@ -2574,7 +2579,7 @@ class SqlAlchemyActivityRepository:
         normalized_first_seen_at = _coerce_utc_datetime(first_seen_at)
         normalized_last_seen_at = _latest_datetime(last_seen_at, normalized_first_seen_at)
         normalized_awards = [
-            (_normalize_award_title(title), _coerce_utc_datetime(created_at))
+            (_normalize_award_title(strip_iris_award_prefix(title)), _coerce_utc_datetime(created_at))
             for title, created_at in awards
         ]
 
@@ -4466,9 +4471,9 @@ class SqlAlchemyActivityRepository:
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[UserModel.telegram_user_id],
                     set_={
-                        "username": stmt.excluded.username,
-                        "first_name": stmt.excluded.first_name,
-                        "last_name": stmt.excluded.last_name,
+                        "username": func.coalesce(stmt.excluded.username, UserModel.username),
+                        "first_name": func.coalesce(stmt.excluded.first_name, UserModel.first_name),
+                        "last_name": func.coalesce(stmt.excluded.last_name, UserModel.last_name),
                         "is_bot": stmt.excluded.is_bot,
                         "updated_at": func.now(),
                     },
@@ -4494,9 +4499,9 @@ class SqlAlchemyActivityRepository:
         if is_minimal_profile:
             return
 
-        user_row.username = user.username
-        user_row.first_name = user.first_name
-        user_row.last_name = user.last_name
+        user_row.username = _preserve_optional_text(user_row.username, user.username)
+        user_row.first_name = _preserve_optional_text(user_row.first_name, user.first_name)
+        user_row.last_name = _preserve_optional_text(user_row.last_name, user.last_name)
         user_row.is_bot = user.is_bot
 
     async def _upsert_chat(self, chat: ChatSnapshot) -> None:
@@ -5955,6 +5960,7 @@ class SqlAlchemyEconomyRepository:
 
     async def _upsert_user(self, user: UserSnapshot) -> None:
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        is_minimal_profile = user.username is None and user.first_name is None and user.last_name is None and not user.is_bot
 
         if dialect == "postgresql":
             insert_stmt = (
@@ -5972,25 +5978,28 @@ class SqlAlchemyEconomyRepository:
             inserted_user_id = (await self._session.execute(insert_stmt)).scalar_one_or_none()
             if inserted_user_id is not None:
                 await increment_global_users_base_count(self._session)
+                if is_minimal_profile:
+                    return
 
-            stmt = pg_insert(UserModel).values(
-                telegram_user_id=user.telegram_user_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name,
-                is_bot=user.is_bot,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[UserModel.telegram_user_id],
-                set_={
-                    "username": stmt.excluded.username,
-                    "first_name": stmt.excluded.first_name,
-                    "last_name": stmt.excluded.last_name,
-                    "is_bot": stmt.excluded.is_bot,
-                    "updated_at": func.now(),
-                },
-            )
-            await self._session.execute(stmt)
+            if not is_minimal_profile:
+                stmt = pg_insert(UserModel).values(
+                    telegram_user_id=user.telegram_user_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    is_bot=user.is_bot,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[UserModel.telegram_user_id],
+                    set_={
+                        "username": func.coalesce(stmt.excluded.username, UserModel.username),
+                        "first_name": func.coalesce(stmt.excluded.first_name, UserModel.first_name),
+                        "last_name": func.coalesce(stmt.excluded.last_name, UserModel.last_name),
+                        "is_bot": stmt.excluded.is_bot,
+                        "updated_at": func.now(),
+                    },
+                )
+                await self._session.execute(stmt)
             return
 
         user_row = await self._session.get(UserModel, user.telegram_user_id)
@@ -6008,9 +6017,12 @@ class SqlAlchemyEconomyRepository:
             await increment_global_users_base_count(self._session)
             return
 
-        user_row.username = user.username
-        user_row.first_name = user.first_name
-        user_row.last_name = user.last_name
+        if is_minimal_profile:
+            return
+
+        user_row.username = _preserve_optional_text(user_row.username, user.username)
+        user_row.first_name = _preserve_optional_text(user_row.first_name, user.first_name)
+        user_row.last_name = _preserve_optional_text(user_row.last_name, user.last_name)
         user_row.is_bot = user.is_bot
 
     async def _upsert_chat(self, chat: ChatSnapshot) -> None:

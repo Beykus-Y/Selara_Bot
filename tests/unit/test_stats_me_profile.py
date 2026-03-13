@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from selara.domain.entities import GraphRelationship, RelationshipState, UserSnapshot
-from selara.presentation.handlers.stats import _build_profile_social_lines, _resolve_profile_mention
+from selara.presentation.handlers.stats import (
+    _build_profile_social_lines,
+    _extract_linked_user_label_from_message,
+    _resolve_profile_mention,
+)
 
 
 def _message() -> SimpleNamespace:
@@ -90,3 +94,47 @@ async def test_resolve_profile_mention_prefers_telegram_name_over_username() -> 
     mention = await _resolve_profile_mention(activity_repo, chat_id=777, user_id=10, cache={})
 
     assert mention == '<a href="tg://user?id=10">Крис</a>'
+
+
+@pytest.mark.asyncio
+async def test_resolve_profile_mention_uses_fallback_user_when_repo_has_no_snapshot() -> None:
+    activity_repo = SimpleNamespace(
+        get_chat_display_name=AsyncMock(return_value=None),
+        get_user_snapshot=AsyncMock(return_value=None),
+    )
+
+    mention = await _resolve_profile_mention(
+        activity_repo,
+        chat_id=777,
+        user_id=10,
+        cache={},
+        fallback_user=UserSnapshot(
+            telegram_user_id=10,
+            username="Hislorr",
+            first_name="Крис",
+            last_name=None,
+            is_bot=False,
+        ),
+    )
+
+    assert mention == '<a href="tg://user?id=10">Крис</a>'
+
+
+def test_extract_linked_user_label_from_message_reads_tg_text_link() -> None:
+    message = SimpleNamespace(
+        text="Крис",
+        caption=None,
+        entities=(
+            SimpleNamespace(
+                type="text_link",
+                offset=0,
+                length=4,
+                url="tg://user?id=10",
+            ),
+        ),
+        caption_entities=(),
+    )
+
+    label = _extract_linked_user_label_from_message(message, user_id=10)
+
+    assert label == "Крис"

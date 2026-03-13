@@ -656,8 +656,8 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
             activity_30d=30,
             activity_all=99,
             awards=[
-                ("🎗₁ Ждун яйца", datetime(2026, 3, 1, 5, 0, tzinfo=timezone.utc)),
-                ("🎗₁ Лучший влд", datetime(2026, 2, 1, 5, 0, tzinfo=timezone.utc)),
+                ("Ждун яйца", datetime(2026, 3, 1, 5, 0, tzinfo=timezone.utc)),
+                ("Лучший влд", datetime(2026, 2, 1, 5, 0, tzinfo=timezone.utc)),
             ],
         )
 
@@ -695,7 +695,7 @@ async def test_repository_applies_iris_import_and_merges_awards() -> None:
 
         awards = await repo.list_user_chat_awards(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id, limit=10)
         assert len(awards) == 3
-        assert {award.title for award in awards} >= {"Старая награда", "🎗₁ Ждун яйца", "🎗₁ Лучший влд"}
+        assert {award.title for award in awards} >= {"Старая награда", "Ждун яйца", "Лучший влд"}
 
         history_rows = (
             await session.execute(

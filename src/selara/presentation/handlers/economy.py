@@ -49,6 +49,7 @@ from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
 from selara.domain.economy_entities import ChatAuction
+from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission
 
@@ -174,7 +175,13 @@ async def _resolve_auction_leader_label(activity_repo, auction: ChatAuction) -> 
     snapshot = await activity_repo.get_user_snapshot(user_id=auction.highest_bid_user_id)
     if snapshot is None:
         return f"user:{auction.highest_bid_user_id}"
-    return snapshot.chat_display_name or snapshot.username or snapshot.first_name or f"user:{auction.highest_bid_user_id}"
+    return display_name_from_parts(
+        user_id=snapshot.telegram_user_id,
+        username=snapshot.username,
+        first_name=snapshot.first_name,
+        last_name=snapshot.last_name,
+        chat_display_name=snapshot.chat_display_name,
+    )
 
 
 async def _finalize_auction_task(

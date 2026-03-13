@@ -97,8 +97,8 @@ def test_parse_forwarded_awards_message_extracts_titles_and_dates() -> None:
     )
 
     assert result.target_username == "nigh_cord25"
-    assert result.awards[0][0] == "🎗₁ Ждун яйца"
-    assert result.awards[1][0] == "🎗₁ Возьми телефон, детка"
+    assert result.awards[0][0] == "Ждун яйца"
+    assert result.awards[1][0] == "Возьми телефон, детка"
     assert result.awards[2][1].astimezone(ZoneInfo("Asia/Barnaul")).strftime("%d.%m.%Y") == "01.02.2026"
 
 

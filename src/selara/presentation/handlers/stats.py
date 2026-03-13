@@ -29,6 +29,7 @@ from selara.application.use_cases.iris_import import (
     IrisProfileImportData,
     parse_forwarded_awards_message,
     parse_forwarded_profile_message,
+    strip_iris_award_prefix,
 )
 from selara.core.roles import SYSTEM_ROLE_BY_CODE
 from selara.core.chat_settings import ChatSettings
@@ -832,10 +833,11 @@ async def _build_profile_awards_message(
         return f"У пользователя <b>{target_mention}</b> пока нет наград."
 
     lines = [f"<b>Награды:</b> {target_mention}"]
-    for award in awards:
+    for index, award in enumerate(awards, start=1):
         award_date = _format_iris_import_date(award.created_at, timezone_name, include_time=False)
         lines.append(
-            f"• {escape(award.title)} — {escape(award_date)} • {escape(format_elapsed_compact(award.created_at, timezone_name))}"
+            f"{index}. {escape(strip_iris_award_prefix(award.title))} — {escape(award_date)} • "
+            f"{escape(format_elapsed_compact(award.created_at, timezone_name))}"
         )
     return "\n".join(lines)
 

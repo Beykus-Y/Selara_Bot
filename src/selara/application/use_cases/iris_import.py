@@ -14,6 +14,7 @@ _FIRST_SEEN_RE = re.compile(r"Первое появление:\s*(\d{2}\.\d{2}\.
 _LAST_ACTIVE_RE = re.compile(r"Последний актив:\s*(.+)", re.IGNORECASE)
 _ACTIVITY_RE = re.compile(r"Актив\s*\(д\|н\|м\|весь\):\s*([^\n]+)", re.IGNORECASE)
 _AWARD_LINE_RE = re.compile(r"^\s*\d+\.\s*(.+?)\s*\|\s*(\d{2}\.\d{2}\.\d{4})\s*$")
+_IRIS_AWARD_PREFIX_RE = re.compile(r"^\s*🎗(?:\ufe0f)?[₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹]*\s*")
 _RELATIVE_PART_RE = re.compile(
     r"(?P<value>\d+)\s*(?P<unit>мин(?:ут[аы]?)?|ч(?:ас(?:а|ов)?)?|д(?:н(?:я|ей)?)?|мес(?:яц(?:а|ев)?)?)",
     re.IGNORECASE,
@@ -36,6 +37,13 @@ class IrisProfileImportData:
 class IrisAwardsImportData:
     target_username: str
     awards: tuple[tuple[str, datetime], ...]
+
+
+def strip_iris_award_prefix(title: str) -> str:
+    normalized = " ".join((title or "").split()).strip()
+    if not normalized:
+        return ""
+    return _IRIS_AWARD_PREFIX_RE.sub("", normalized).strip()
 
 
 def extract_t_me_username(*, text: str, entities: list[Any] | tuple[Any, ...] | None) -> str | None:
@@ -131,7 +139,7 @@ def parse_forwarded_awards_message(
         match = _AWARD_LINE_RE.match(raw_line)
         if match is None:
             continue
-        title = " ".join((match.group(1) or "").split()).strip()
+        title = strip_iris_award_prefix(match.group(1) or "")
         if not title:
             continue
         awards.append((title, _date_to_utc_noon(match.group(2), timezone_name)))

@@ -12,7 +12,7 @@ from selara.infrastructure.db.models import (
     UserChatActivityModel,
     UserChatMessageEventModel,
 )
-from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, reason="aiosqlite is not installed")
 
@@ -173,5 +173,52 @@ async def test_activity_event_runtime_iris_import_creates_events_and_supports_sy
         assert leaderboard
         assert leaderboard[0].user_id == target.telegram_user_id
         assert leaderboard[0].activity_value == 11
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_economy_does_not_wipe_known_username() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=404, chat_type="group", title="Economy")
+    user = UserSnapshot(telegram_user_id=808, username="known_user", first_name="Known", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        activity_repo = SqlAlchemyActivityRepository(session)
+        economy_repo = SqlAlchemyEconomyRepository(session)
+
+        await activity_repo.upsert_activity(chat=chat, user=user, event_at=now)
+        await economy_repo._upsert_user(
+            UserSnapshot(
+                telegram_user_id=user.telegram_user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+            )
+        )
+
+        snapshot = await activity_repo.get_user_snapshot(user_id=user.telegram_user_id)
+        leaderboard = await activity_repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="activity",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=0.0,
+            activity_weight=1.0,
+        )
+
+        assert snapshot is not None
+        assert snapshot.username == "known_user"
+        assert leaderboard
+        assert leaderboard[0].username == "known_user"
+        assert leaderboard[0].first_name == "Known"
 
     await engine.dispose()
