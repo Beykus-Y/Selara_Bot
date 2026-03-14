@@ -298,7 +298,7 @@ class ChatActivityEventSyncStateModel(Base):
 class UserKarmaVoteModel(Base):
     __tablename__ = "user_karma_votes"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
