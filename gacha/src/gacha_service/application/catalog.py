@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from gacha_service.config import settings
 from gacha_service.domain.models import CardRarity, GachaCard
-
-
-CONFIG_DIR = Path(__file__).resolve().parents[3] / "config" / "banners"
 
 
 class CardConfig(BaseModel):
@@ -38,11 +35,12 @@ def _load_banner_file(path: Path) -> BannerConfig:
 
 @lru_cache(maxsize=1)
 def _load_all_banners() -> dict[str, BannerConfig]:
-    if not CONFIG_DIR.exists():
-        raise RuntimeError(f"Каталог конфигов не найден: {CONFIG_DIR}")
+    config_dir = settings.banners_dir
+    if not config_dir.exists():
+        raise RuntimeError(f"Каталог конфигов не найден: {config_dir}")
 
     banners: dict[str, BannerConfig] = {}
-    for path in sorted(CONFIG_DIR.glob("*.json")):
+    for path in sorted(config_dir.glob("*.json")):
         config = _load_banner_file(path)
         banners[config.code] = config
     return banners
