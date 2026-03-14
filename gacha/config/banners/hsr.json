@@ -1,0 +1,57 @@
+{
+  "code": "hsr",
+  "title": "Honkai: Star Rail",
+  "cooldown_seconds": 7200,
+  "cards": [
+    {
+      "code": "march7th",
+      "name": "Март 7",
+      "rarity": "common",
+      "points": 900,
+      "primogems": 3,
+      "adventure_xp": 45,
+      "image_url": "/images/hsr/march7th.jpg",
+      "weight": 30
+    },
+    {
+      "code": "dan_heng",
+      "name": "Дань Хэн",
+      "rarity": "rare",
+      "points": 2100,
+      "primogems": 5,
+      "adventure_xp": 70,
+      "image_url": "/images/hsr/dan_heng.jpg",
+      "weight": 22
+    },
+    {
+      "code": "asta",
+      "name": "Аста",
+      "rarity": "rare",
+      "points": 2300,
+      "primogems": 5,
+      "adventure_xp": 75,
+      "image_url": "/images/hsr/asta.jpg",
+      "weight": 22
+    },
+    {
+      "code": "kafka",
+      "name": "Кафка",
+      "rarity": "epic",
+      "points": 5200,
+      "primogems": 10,
+      "adventure_xp": 130,
+      "image_url": "/images/hsr/kafka.jpg",
+      "weight": 12
+    },
+    {
+      "code": "acheron",
+      "name": "Ахерон",
+      "rarity": "legendary",
+      "points": 11500,
+      "primogems": 22,
+      "adventure_xp": 190,
+      "image_url": "/images/hsr/acheron.jpg",
+      "weight": 4
+    }
+  ]
+}

@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from gacha_service.application.catalog import get_banner_config
+from gacha_service.application.service import GachaService
+from gacha_service.config import settings
+from gacha_service.domain.models import CardRarity, RARITY_LABELS, resolve_rank
+from gacha_service.infrastructure.db import session_dependency
+from gacha_service.infrastructure.repository import GachaRepository
+
+
+class PullRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+    username: str | None = Field(default=None, max_length=64)
+    banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
+
+
+class CardPayload(BaseModel):
+    code: str
+    name: str
+    rarity: str
+    rarity_label: str
+    points: int
+    primogems: int
+    image_url: str
+
+
+class PlayerPayload(BaseModel):
+    user_id: int
+    adventure_rank: int
+    adventure_xp: int
+    xp_into_rank: int
+    xp_for_next_rank: int
+    total_points: int
+    total_primogems: int
+
+
+class PullResponse(BaseModel):
+    status: str
+    message: str
+    card: CardPayload | None
+    player: PlayerPayload
+    cooldown_until: datetime
+    is_new: bool
+    copies_owned: int
+    adventure_xp_gained: int
+
+
+class HistoryEntryPayload(BaseModel):
+    pulled_at: datetime
+    card_name: str
+    rarity: str
+    rarity_label: str
+    points: int
+    primogems: int
+    adventure_xp_gained: int
+    image_url: str
+
+
+class ProfileResponse(BaseModel):
+    status: str
+    banner: str
+    message: str
+    player: PlayerPayload
+    unique_cards: int
+    total_copies: int
+    recent_pulls: list[HistoryEntryPayload]
+
+
+class HistoryResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    entries: list[HistoryEntryPayload]
+
+
+def _to_player_payload(*, player, user_id: int) -> PlayerPayload:
+    rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
+    return PlayerPayload(
+        user_id=user_id,
+        adventure_rank=rank,
+        adventure_xp=player.adventure_xp,
+        xp_into_rank=xp_into_rank,
+        xp_for_next_rank=xp_for_next_rank,
+        total_points=player.total_points,
+        total_primogems=player.total_primogems,
+    )
+
+
+def _to_history_payload(entry) -> HistoryEntryPayload:
+    rarity = CardRarity(entry.rarity)
+    return HistoryEntryPayload(
+        pulled_at=entry.pulled_at,
+        card_name=entry.character_name,
+        rarity=rarity.value,
+        rarity_label=RARITY_LABELS[rarity],
+        points=entry.points,
+        primogems=entry.primogems,
+        adventure_xp_gained=entry.adventure_xp,
+        image_url=entry.image_url,
+    )
+
+
+def _resolve_public_image_url(request: Request, image_url: str) -> str:
+    if image_url.startswith("http://") or image_url.startswith("https://"):
+        return image_url
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}/{image_url.lstrip('/')}"
+
+
+def _render_profile_message(
+    *,
+    banner_title: str,
+    player_payload: PlayerPayload,
+    unique_cards: int,
+    total_copies: int,
+    recent_pulls: list[HistoryEntryPayload],
+) -> str:
+    lines = [
+        f"📒 Статистика гачи: {banner_title}",
+        "",
+        f"🧭 Ранг приключений: {player_payload.adventure_rank} ({player_payload.xp_into_rank}/{player_payload.xp_for_next_rank})",
+        f"🌟 Очки: {player_payload.total_points}",
+        f"💠 Примогемы: {player_payload.total_primogems}",
+        f"🗂 Уникальных карт: {unique_cards}",
+        f"📦 Всего копий: {total_copies}",
+        "",
+        "🕘 Последние крутки:",
+    ]
+    if not recent_pulls:
+        lines.append("Пока пусто.")
+    else:
+        for entry in recent_pulls:
+            lines.append(
+                f"{entry.rarity_label} {entry.card_name} | +{entry.adventure_xp_gained} XP | {entry.pulled_at:%Y-%m-%d %H:%M}"
+            )
+    return "\n".join(lines)
+
+
+router = APIRouter(prefix="/v1/gacha", tags=["gacha"])
+
+
+def build_router(session_factory):
+    async def get_session() -> AsyncSession:
+        async for session in session_dependency(session_factory):
+            yield session
+
+    @router.get("/health")
+    async def healthcheck() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @router.post("/pull", response_model=PullResponse)
+    async def pull(
+        payload: PullRequest,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> PullResponse:
+        repo = GachaRepository(session)
+        service = GachaService(repo)
+        try:
+            result = await service.pull(
+                user_id=payload.user_id,
+                username=payload.username,
+                banner=payload.banner,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        card_payload = None
+        if result.card is not None:
+            card_payload = CardPayload(
+                code=result.card.code,
+                name=result.card.name,
+                rarity=result.card.rarity.value,
+                rarity_label=RARITY_LABELS[result.card.rarity],
+                points=result.card.points,
+                primogems=result.card.primogems,
+                image_url=_resolve_public_image_url(request, result.card.image_url),
+            )
+        return PullResponse(
+            status=result.status,
+            message=result.message,
+            card=card_payload,
+            player=_to_player_payload(player=result.player, user_id=result.player.user_id),
+            cooldown_until=result.cooldown_until,
+            is_new=result.is_new,
+            copies_owned=result.copies_owned,
+            adventure_xp_gained=result.adventure_xp_gained,
+        )
+
+    @router.get("/users/{user_id}/profile", response_model=ProfileResponse)
+    async def profile(
+        user_id: int,
+        banner: str = settings.default_banner,
+        limit: int = 5,
+        request: Request = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> ProfileResponse:
+        repo = GachaRepository(session)
+        try:
+            banner_config = get_banner_config(banner)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        player = await repo.get_or_create_player(user_id=user_id, username=None)
+        unique_cards, total_copies = await repo.get_collection_stats(user_id=user_id, banner=banner)
+        recent_pulls = await repo.get_recent_pulls_by_banner(user_id=user_id, banner=banner, limit=max(1, min(limit, 10)))
+        player_payload = _to_player_payload(player=player, user_id=user_id)
+        history_payload = [
+            _to_history_payload(entry).model_copy(
+                update={"image_url": _resolve_public_image_url(request, entry.image_url)}
+            )
+            for entry in recent_pulls
+        ]
+        return ProfileResponse(
+            status="ok",
+            banner=banner,
+            message=_render_profile_message(
+                banner_title=banner_config.title,
+                player_payload=player_payload,
+                unique_cards=unique_cards,
+                total_copies=total_copies,
+                recent_pulls=history_payload,
+            ),
+            player=player_payload,
+            unique_cards=unique_cards,
+            total_copies=total_copies,
+            recent_pulls=history_payload,
+        )
+
+    @router.get("/users/{user_id}/history", response_model=HistoryResponse)
+    async def history(
+        user_id: int,
+        banner: str = settings.default_banner,
+        limit: int = 10,
+        request: Request = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> HistoryResponse:
+        repo = GachaRepository(session)
+        try:
+            get_banner_config(banner)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        recent_pulls = await repo.get_recent_pulls_by_banner(user_id=user_id, banner=banner, limit=max(1, min(limit, 20)))
+        return HistoryResponse(
+            status="ok",
+            banner=banner,
+            user_id=user_id,
+            entries=[
+                _to_history_payload(entry).model_copy(
+                    update={"image_url": _resolve_public_image_url(request, entry.image_url)}
+                )
+                for entry in recent_pulls
+            ],
+        )
+
+    return router

@@ -1,0 +1,57 @@
+{
+  "code": "genshin",
+  "title": "Genshin Impact",
+  "cooldown_seconds": 10800,
+  "cards": [
+    {
+      "code": "ororon",
+      "name": "Оророн",
+      "rarity": "epic",
+      "points": 5000,
+      "primogems": 10,
+      "adventure_xp": 120,
+      "image_url": "/images/genshin/ororon.jpg",
+      "weight": 12
+    },
+    {
+      "code": "amber",
+      "name": "Эмбер",
+      "rarity": "common",
+      "points": 800,
+      "primogems": 2,
+      "adventure_xp": 40,
+      "image_url": "/images/genshin/amber.jpg",
+      "weight": 30
+    },
+    {
+      "code": "noelle",
+      "name": "Ноэлль",
+      "rarity": "rare",
+      "points": 1800,
+      "primogems": 4,
+      "adventure_xp": 60,
+      "image_url": "/images/genshin/noelle.jpg",
+      "weight": 24
+    },
+    {
+      "code": "fischl",
+      "name": "Фишль",
+      "rarity": "epic",
+      "points": 4200,
+      "primogems": 8,
+      "adventure_xp": 100,
+      "image_url": "/images/genshin/fischl.jpg",
+      "weight": 14
+    },
+    {
+      "code": "nahida",
+      "name": "Нахида",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 20,
+      "adventure_xp": 180,
+      "image_url": "/images/genshin/nahida.jpg",
+      "weight": 4
+    }
+  ]
+}

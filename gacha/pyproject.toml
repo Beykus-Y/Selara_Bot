@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "selara-gacha"
+version = "0.1.0"
+description = "Standalone Gacha service for Selara"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0,<1",
+  "uvicorn>=0.34.0,<1",
+  "SQLAlchemy>=2.0.35,<3",
+  "aiosqlite>=0.20.0,<1",
+  "pydantic>=2.9.2,<3",
+  "pydantic-settings>=2.5.2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3,<9",
+  "pytest-asyncio>=0.24.0,<1",
+  "httpx>=0.28.1,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"

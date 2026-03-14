@@ -1,0 +1,18 @@
+services:
+  gacha:
+    image: ${SELARA_GACHA_IMAGE:-selara-gacha:local}
+    build:
+      context: ..
+      dockerfile: gacha/Dockerfile
+    container_name: selara-gacha
+    restart: unless-stopped
+    environment:
+      GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:-sqlite+aiosqlite:////data/gacha.db}
+      GACHA_DEFAULT_BANNER: ${GACHA_DEFAULT_BANNER:-genshin}
+    ports:
+      - "127.0.0.1:${GACHA_PORT:-8001}:8001"
+    volumes:
+      - gacha_data:/data
+
+volumes:
+  gacha_data:

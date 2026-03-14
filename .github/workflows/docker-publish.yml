@@ -69,3 +69,23 @@ jobs:
           labels: ${{ steps.meta_web.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Extract gacha Docker metadata
+        id: meta_gacha
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-gacha
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push gacha image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./gacha/Dockerfile
+          push: true
+          tags: ${{ steps.meta_gacha.outputs.tags }}
+          labels: ${{ steps.meta_gacha.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
