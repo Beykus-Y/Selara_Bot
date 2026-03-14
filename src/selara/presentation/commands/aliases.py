@@ -4,7 +4,6 @@ EXACT_ALIASES: dict[str, str] = {
     "игра": "game",
     "роль": "role",
     "кто я": "me",
-    "кто ты": "alive",
     "помощь": "help",
     "рег": "announce_reg",
     "анрег": "announce_unreg",

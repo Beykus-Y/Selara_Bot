@@ -85,6 +85,7 @@ PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "нейминг": "naming",
     "объява": "announce",
     "игра": "game",
+    "кто ты": "me",
     "актив": "active",
     "топ": "top",
     "баланс": "eco",
@@ -324,6 +325,9 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
 
     if command_key == "game":
         return normalized_tail in _GAME_KIND_TAILS
+
+    if command_key == "me":
+        return len(tokens) <= 1 and (len(tokens) == 0 or _is_user_ref_token(tokens[0]))
 
     if command_key == "eco":
         rest = _strip_mode_hint(tokens)

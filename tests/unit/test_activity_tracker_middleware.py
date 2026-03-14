@@ -22,9 +22,15 @@ def test_profile_lookup_detects_who_am_i_text() -> None:
     assert _is_profile_lookup_message(_msg("Кто   Я?!"))
 
 
+def test_profile_lookup_detects_who_are_you_text() -> None:
+    assert _is_profile_lookup_message(_msg("кто ты"))
+    assert _is_profile_lookup_message(_msg("кто ты @alice"))
+
+
 def test_profile_lookup_ignores_regular_messages() -> None:
     assert not _is_profile_lookup_message(_msg("/help"))
     assert not _is_profile_lookup_message(_msg("кто я такой"))
+    assert not _is_profile_lookup_message(_msg("кто ты такой"))
 
 
 def _event(*, text: str = "hello", chat_type: str = "group") -> Message:

@@ -31,6 +31,7 @@ services:
       GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:-postgresql+asyncpg://gacha:gacha@postgres:5432/gacha}
       GACHA_DEFAULT_BANNER: ${GACHA_DEFAULT_BANNER:-genshin}
       GACHA_APP_DIR: /app
+      GACHA_ADMIN_TOKEN: ${GACHA_ADMIN_TOKEN:-}
     ports:
       - "${GACHA_BIND_HOST:-0.0.0.0}:${GACHA_PORT:-8001}:8001"
 

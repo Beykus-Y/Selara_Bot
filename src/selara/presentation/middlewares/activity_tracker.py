@@ -21,7 +21,13 @@ def _is_profile_lookup_message(message: Message) -> bool:
             return True
 
     normalized = normalize_text_command(text)
-    return normalized == "кто я"
+    if normalized in {"кто я", "кто ты"}:
+        return True
+    if normalized.startswith("кто ты "):
+        tail = normalized[len("кто ты") :].strip()
+        token = tail.split(maxsplit=1)[0].strip(" ,.;!?")
+        return bool(token) and (token.startswith("@") and len(token) > 1 or token.lstrip("-").isdigit())
+    return False
 
 
 class ActivityTrackerMiddleware(BaseMiddleware):

@@ -24,6 +24,7 @@ def test_catalog_resolves_standard_triggers() -> None:
     assert resolve_builtin_command_key("старт") == "start"
     assert resolve_builtin_command_key("нейминг") == "naming"
     assert resolve_builtin_command_key("Кто Я") == "me"
+    assert resolve_builtin_command_key("Кто Ты") == "me"
     assert resolve_builtin_command_key("моя статья") == "article"
     assert resolve_builtin_command_key("статья") == "article"
     assert resolve_builtin_command_key("топ") == "top"
@@ -35,6 +36,13 @@ def test_catalog_matches_builtin_prefix() -> None:
     assert match is not None
     assert match.command_key == "top"
     assert match.matched_trigger_norm == "топ"
+
+
+def test_catalog_matches_profile_lookup_prefix_with_target() -> None:
+    match = match_builtin_command("кто ты @alice")
+    assert match is not None
+    assert match.command_key == "me"
+    assert match.matched_trigger_norm == "кто ты"
 
 
 def test_catalog_matches_game_prefix_with_tail() -> None:

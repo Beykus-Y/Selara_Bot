@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.filters import CommandObject
 
 from selara.domain.entities import GraphRelationship, RelationshipState, UserSnapshot
+from selara.presentation.handlers import stats as stats_module
 from selara.presentation.handlers.stats import (
     _build_profile_social_lines,
     _extract_linked_user_label_from_message,
@@ -138,3 +140,54 @@ def test_extract_linked_user_label_from_message_reads_tg_text_link() -> None:
     label = _extract_linked_user_label_from_message(message, user_id=10)
 
     assert label == "Крис"
+
+
+@pytest.mark.asyncio
+async def test_me_command_with_username_routes_to_target_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {}
+
+    async def fake_send_user_stats(message, activity_repo, bot, settings, chat_settings, *, user_id: int) -> None:
+        called["user_id"] = user_id
+
+    async def fake_send_me_stats(*args, **kwargs) -> None:
+        raise AssertionError("send_me_stats should not be used for explicit target lookups")
+
+    monkeypatch.setattr(stats_module, "send_user_stats", fake_send_user_stats)
+    monkeypatch.setattr(stats_module, "send_me_stats", fake_send_me_stats)
+
+    activity_repo = SimpleNamespace(
+        find_chat_user_by_username=AsyncMock(
+            return_value=UserSnapshot(
+                telegram_user_id=20,
+                username="alice",
+                first_name="Alice",
+                last_name=None,
+                is_bot=False,
+            )
+        ),
+        get_chat_display_name=AsyncMock(return_value=None),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(
+            id=10,
+            username="actor",
+            first_name="Actor",
+            last_name=None,
+            is_bot=False,
+        ),
+        reply_to_message=None,
+        chat=SimpleNamespace(id=777, type="group", title="Test Chat"),
+        answer=AsyncMock(),
+    )
+
+    await stats_module.me_command(
+        message,
+        CommandObject(prefix="/", command="me", mention=None, args="@alice"),
+        activity_repo,
+        bot=SimpleNamespace(),
+        settings=SimpleNamespace(),
+        chat_settings=SimpleNamespace(),
+    )
+
+    assert called == {"user_id": 20}
+    message.answer.assert_not_called()

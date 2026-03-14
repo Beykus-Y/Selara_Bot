@@ -2098,7 +2098,32 @@ async def leaderboard_callback(query: CallbackQuery, activity_repo, settings: Se
 
 
 @router.message(Command("me"))
-async def me_command(message: Message, activity_repo, bot: Bot, settings: Settings, chat_settings: ChatSettings) -> None:
+async def me_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    bot: Bot,
+    settings: Settings,
+    chat_settings: ChatSettings,
+) -> None:
+    if (command.args or "").strip() or message.reply_to_message is not None:
+        target, error = await _resolve_stats_target_user(message, command=command, activity_repo=activity_repo)
+        if target is None:
+            await message.answer(error or "Не удалось определить пользователя.")
+            return
+        if target.is_bot:
+            await message.answer("Профиль бота недоступен.")
+            return
+        await send_user_stats(
+            message,
+            activity_repo,
+            bot,
+            settings,
+            chat_settings,
+            user_id=target.telegram_user_id,
+        )
+        return
+
     await send_me_stats(message, activity_repo, bot, settings, chat_settings)
 
 

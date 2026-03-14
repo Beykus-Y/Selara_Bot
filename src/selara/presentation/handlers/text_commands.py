@@ -100,6 +100,7 @@ from selara.presentation.handlers.relationships import (
     vow_command as relationship_vow_command,
 )
 from selara.presentation.handlers.stats import (
+    _resolve_stats_target_user,
     achievements_command,
     send_inactive_members,
     award_reply_text_command,
@@ -3029,6 +3030,28 @@ async def text_commands_handler(
         return
 
     if intent.name == "me":
+        raw_args = intent.args.get("raw_args")
+        if isinstance(raw_args, str) and raw_args.strip():
+            target, error = await _resolve_stats_target_user(
+                message,
+                command=_command_object_from_args(raw_args),
+                activity_repo=activity_repo,
+            )
+            if target is None:
+                await _answer_quiet(message, error or "Не удалось определить пользователя.")
+                return
+            if target.is_bot:
+                await _answer_quiet(message, "Профиль бота недоступен.")
+                return
+            await send_user_stats(
+                message,
+                activity_repo,
+                bot,
+                settings,
+                chat_settings,
+                user_id=target.telegram_user_id,
+            )
+            return
         await send_me_stats(message, activity_repo, bot, settings, chat_settings)
         return
 

@@ -9,6 +9,19 @@ def test_resolver_maps_who_am_i() -> None:
     assert intent.name == "me"
 
 
+def test_resolver_maps_who_are_you_to_profile_lookup() -> None:
+    intent = resolve_text_command("Кто ты", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "me"
+
+
+def test_resolver_maps_who_are_you_with_username_args() -> None:
+    intent = resolve_text_command("кто ты @alice", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "me"
+    assert intent.args["raw_args"] == "@alice"
+
+
 def test_resolver_maps_active_default() -> None:
     intent = resolve_text_command("актив", top_default=10, top_max=50)
     assert intent is not None
@@ -213,6 +226,7 @@ def test_resolver_raises_for_invalid_gacha_skip_command() -> None:
 def test_resolver_rejects_non_command_phrases() -> None:
     assert resolve_text_command("активность", top_default=10, top_max=50) is None
     assert resolve_text_command("кто я такой", top_default=10, top_max=50) is None
+    assert resolve_text_command("кто ты такой", top_default=10, top_max=50) is None
     assert resolve_text_command("актив вернулся что ли", top_default=10, top_max=50) is None
     assert resolve_text_command("рынок сегодня шумный", top_default=10, top_max=50) is None
 
