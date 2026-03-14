@@ -3,14 +3,17 @@ import logging
 import random
 import re
 import hashlib
+from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
@@ -27,6 +30,11 @@ from aiogram.types import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 
+from selara.application.use_cases.gacha import (
+    GachaUseCaseError,
+    get_profile as get_gacha_profile,
+    pull_card as pull_gacha_card,
+)
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
@@ -364,6 +372,10 @@ class _InlinePrivatePendingMessage:
 _INLINE_PM_PENDING: dict[str, _InlinePrivatePendingMessage] = {}
 _INLINE_RP_PENDING: dict[str, tuple[int, UserSnapshot, datetime]] = {}
 _INLINE_RP_RECENT_TARGETS: dict[int, list[UserSnapshot]] = {}
+_GACHA_BANNER_LABELS: dict[str, str] = {
+    "genshin": "Геншин",
+    "hsr": "HSR",
+}
 
 
 @dataclass(frozen=True)
@@ -834,6 +846,85 @@ async def _answer_quiet(message: Message, text: str, **kwargs) -> None:
     if message.chat.type in {"group", "supergroup"}:
         kwargs.setdefault("disable_notification", True)
     await message.answer(text, **kwargs)
+
+
+def _gacha_banner_label(banner: str) -> str:
+    return _GACHA_BANNER_LABELS.get((banner or "").strip().lower(), banner)
+
+
+def _gacha_image_filename(image_url: str) -> str:
+    candidate = basename(urlsplit(image_url).path.strip())
+    if candidate:
+        return candidate
+    return "gacha-card.jpg"
+
+
+async def _fetch_gacha_image_file(image_url: str, *, timeout_seconds: float) -> BufferedInputFile:
+    async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+        response = await client.get(image_url)
+        response.raise_for_status()
+    return BufferedInputFile(response.content, filename=_gacha_image_filename(image_url))
+
+
+async def _send_gacha_pull(message: Message, settings: Settings, *, banner: str) -> None:
+    if message.from_user is None:
+        return
+
+    try:
+        response = await pull_gacha_card(
+            settings,
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            banner=banner,
+        )
+    except GachaUseCaseError as exc:
+        await _answer_quiet(message, exc.message)
+        return
+
+    rendered_message = f"🎴 {_gacha_banner_label(banner)}\n\n{response.message}"
+    if response.card is None or not response.card.image_url:
+        await _answer_quiet(message, rendered_message, disable_web_page_preview=True)
+        return
+
+    try:
+        photo = await _fetch_gacha_image_file(
+            response.card.image_url,
+            timeout_seconds=settings.gacha_timeout_seconds,
+        )
+        await message.answer_photo(
+            photo=photo,
+            caption=rendered_message,
+            disable_notification=message.chat.type in {"group", "supergroup"},
+        )
+    except (httpx.HTTPError, TelegramBadRequest) as exc:
+        logger.warning(
+            "Gacha image delivery failed, falling back to text",
+            extra={
+                "chat_id": getattr(message.chat, "id", None),
+                "user_id": message.from_user.id,
+                "banner": banner,
+                "image_url": response.card.image_url,
+                "error": str(exc),
+            },
+        )
+        await _answer_quiet(message, rendered_message, disable_web_page_preview=True)
+
+
+async def _send_gacha_profile(message: Message, settings: Settings, *, banner: str) -> None:
+    if message.from_user is None:
+        return
+
+    try:
+        response = await get_gacha_profile(
+            settings,
+            user_id=message.from_user.id,
+            banner=banner,
+        )
+    except GachaUseCaseError as exc:
+        await _answer_quiet(message, exc.message)
+        return
+
+    await _answer_quiet(message, response.message, disable_web_page_preview=True)
 
 
 def _command_object_from_args(raw_args: str | None):
@@ -2810,6 +2901,14 @@ async def text_commands_handler(
 
     if intent.name == "alive":
         await message.answer("<b>Я на связи и работаю.</b>", parse_mode="HTML")
+        return
+
+    if intent.name == "gacha_pull":
+        await _send_gacha_pull(message, settings, banner=str(intent.args.get("banner", "")))
+        return
+
+    if intent.name == "gacha_profile":
+        await _send_gacha_profile(message, settings, banner=str(intent.args.get("banner", "")))
         return
 
     if intent.name == "start":

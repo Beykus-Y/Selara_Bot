@@ -6,7 +6,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gacha_service.domain.models import GachaCard, PlayerState, resolve_rank
-from gacha_service.infrastructure.models import PlayerCardCollectionModel, PlayerModel, PullHistoryModel
+from gacha_service.infrastructure.models import (
+    PlayerBannerCooldownModel,
+    PlayerCardCollectionModel,
+    PlayerModel,
+    PullHistoryModel,
+)
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
@@ -32,6 +37,18 @@ def _to_player_state(model: PlayerModel) -> PlayerState:
 class GachaRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_banner_cooldown(self, *, user_id: int, banner: str) -> datetime | None:
+        cooldown = await self._session.get(
+            PlayerBannerCooldownModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if cooldown is None:
+            return None
+        return _coerce_utc_datetime(cooldown.next_pull_at)
 
     async def get_or_create_player(self, *, user_id: int, username: str | None) -> PlayerState:
         player = await self._session.get(PlayerModel, user_id)
@@ -79,6 +96,24 @@ class GachaRepository:
         player.adventure_xp += adventure_xp_gained
         player.adventure_rank = resolve_rank(player.adventure_xp)[0]
         player.next_pull_at = next_pull_at
+
+        cooldown_entry = await self._session.get(
+            PlayerBannerCooldownModel,
+            {
+                "user_id": user_id,
+                "banner": card.banner,
+            },
+        )
+        if cooldown_entry is None:
+            cooldown_entry = PlayerBannerCooldownModel(
+                user_id=user_id,
+                banner=card.banner,
+                next_pull_at=next_pull_at,
+            )
+            self._session.add(cooldown_entry)
+            await self._session.flush()
+        else:
+            cooldown_entry.next_pull_at = next_pull_at
 
         collection_entry = await self._session.get(
             PlayerCardCollectionModel,

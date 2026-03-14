@@ -141,6 +141,8 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "craft": "крафт",
     "tap": "тап",
     "daily": "дейлик",
+    "gacha_pull": "гача генш",
+    "gacha_profile": "моя гача генш",
     "lottery": "лотерея",
     "market": "рынок",
     "article": "моя статья",

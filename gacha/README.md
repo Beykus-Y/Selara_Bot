@@ -4,7 +4,7 @@
 
 ## Что делает MVP
 
-- хранит игроков и историю круток в собственной SQLite базе;
+- хранит игроков и историю круток в собственной PostgreSQL базе;
 - выполняет крутку по API;
 - выдает готовый текст для Telegram;
 - начисляет очки, примогемы и опыт приключений;
@@ -17,6 +17,8 @@ cd gacha
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
+export GACHA_DATABASE_URL=postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha
+alembic upgrade head
 uvicorn gacha_service.main:app --reload
 ```
 
@@ -36,7 +38,13 @@ docker build -f gacha/Dockerfile -t selara-gacha:local .
 docker compose -f gacha/docker-compose.yml up --build
 ```
 
-По умолчанию сервис поднимается на `http://127.0.0.1:8001`, а база хранится в Docker volume `gacha_data`.
+По умолчанию compose поднимает:
+
+- `postgres:16-alpine` с базой `gacha`;
+- `gacha` API на `http://0.0.0.0:8001`;
+- схему через `alembic upgrade head` перед стартом приложения.
+
+Данные PostgreSQL хранятся в volume `selara_gacha_postgres_data`.
 
 Конфиги баннеров и героев лежат в `gacha/config/banners/*.json`.
 Локальные изображения кладите в `gacha/images/<banner>/`.
@@ -101,7 +109,7 @@ http://your-vps:8001/images/genshin/amber.jpg
 }
 ```
 
-Для команды вида `гача я геншин` основной бот позже может вызывать:
+Для команды вида `моя гача геншин` основной бот позже может вызывать:
 
 ```text
 GET /v1/gacha/users/12345/profile?banner=genshin
@@ -124,6 +132,23 @@ GET /v1/gacha/users/12345/profile?banner=genshin
 3. получить `message`, `image_url` и отдать их в Telegram.
 
 Основной код Selara этот MVP не меняет.
+
+## Миграции
+
+Инициализация схемы:
+
+```bash
+cd gacha
+export GACHA_DATABASE_URL=postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha
+alembic upgrade head
+```
+
+Создание новой миграции:
+
+```bash
+cd gacha
+alembic revision -m "describe change"
+```
 
 ## Как тестировать
 

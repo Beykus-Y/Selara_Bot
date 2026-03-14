@@ -23,7 +23,7 @@ def _default_app_dir() -> str:
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite+aiosqlite:///./gacha.db"
+    database_url: str = "postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha"
     default_banner: str = "genshin"
     app_dir: str = _default_app_dir()
 

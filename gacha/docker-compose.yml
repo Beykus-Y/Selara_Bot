@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: selara-gacha-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${GACHA_POSTGRES_DB:-gacha}
+      POSTGRES_USER: ${GACHA_POSTGRES_USER:-gacha}
+      POSTGRES_PASSWORD: ${GACHA_POSTGRES_PASSWORD:-gacha}
+    ports:
+      - "${GACHA_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - gacha_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GACHA_POSTGRES_USER:-gacha} -d ${GACHA_POSTGRES_DB:-gacha}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   gacha:
     image: ${SELARA_GACHA_IMAGE:-selara-gacha:local}
     build:
@@ -6,13 +24,16 @@ services:
       dockerfile: gacha/Dockerfile
     container_name: selara-gacha
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:-sqlite+aiosqlite:////data/gacha.db}
+      GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:-postgresql+asyncpg://gacha:gacha@postgres:5432/gacha}
       GACHA_DEFAULT_BANNER: ${GACHA_DEFAULT_BANNER:-genshin}
+      GACHA_APP_DIR: /app
     ports:
-      - "127.0.0.1:${GACHA_PORT:-8001}:8001"
-    volumes:
-      - gacha_data:/data
+      - "${GACHA_BIND_HOST:-0.0.0.0}:${GACHA_PORT:-8001}:8001"
 
 volumes:
-  gacha_data:
+  gacha_postgres_data:
+    name: ${GACHA_POSTGRES_VOLUME_NAME:-selara_gacha_postgres_data}

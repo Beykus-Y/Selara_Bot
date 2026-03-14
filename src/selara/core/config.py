@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     web_port: int = Field(default=8080, validation_alias="WEB_PORT")
     web_domain: str | None = Field(default=None, validation_alias="WEB_DOMAIN")
     web_base_url: str = Field(default="http://127.0.0.1:8080", validation_alias="WEB_BASE_URL")
+    gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
+    gacha_genshin_base_url: str = Field(default="", validation_alias="GACHA_GENSHIN_BASE_URL")
+    gacha_hsr_base_url: str = Field(default="", validation_alias="GACHA_HSR_BASE_URL")
+    gacha_timeout_seconds: float = Field(default=10.0, validation_alias="GACHA_TIMEOUT_SECONDS")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
@@ -118,6 +122,20 @@ class Settings(BaseSettings):
             candidate = domain if "://" in domain else f"https://{domain}"
             return normalize_base_url(candidate)
         return normalize_base_url(self.web_base_url)
+
+    def resolve_gacha_base_url(self, banner: str) -> str | None:
+        normalized_banner = (banner or "").strip().lower()
+        raw_value = {
+            "genshin": self.gacha_genshin_base_url,
+            "hsr": self.gacha_hsr_base_url,
+        }.get(normalized_banner, "")
+        if not raw_value:
+            raw_value = self.gacha_base_url
+        raw_value = raw_value.strip()
+        if not raw_value:
+            return None
+        candidate = raw_value if "://" in raw_value else f"http://{raw_value}"
+        return normalize_base_url(candidate)
 
     @property
     def resolved_achievements_catalog_path(self) -> Path:

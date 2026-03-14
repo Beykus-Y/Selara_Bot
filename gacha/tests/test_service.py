@@ -16,6 +16,10 @@ class FakeGachaRepository:
         self.players: dict[int, PlayerState] = {}
         self.history: list[dict[str, object]] = []
         self.collection: dict[tuple[int, str, str], int] = {}
+        self.banner_cooldowns: dict[tuple[int, str], datetime] = {}
+
+    async def get_banner_cooldown(self, *, user_id: int, banner: str) -> datetime | None:
+        return self.banner_cooldowns.get((user_id, banner))
 
     async def get_or_create_player(self, *, user_id: int, username: str | None) -> PlayerState:
         player = self.players.get(user_id)
@@ -58,6 +62,7 @@ class FakeGachaRepository:
             total_primogems=current.total_primogems + card.primogems,
             next_pull_at=next_pull_at,
         )
+        self.banner_cooldowns[(user_id, card.banner)] = next_pull_at
         self.players[user_id] = updated
         self.history.append({"user_id": user_id, "card_code": card.code, "pulled_at": pulled_at})
         return updated, copies_owned
@@ -132,8 +137,9 @@ async def test_pull_handles_naive_cooldown_datetime_from_storage() -> None:
         adventure_xp=0,
         total_points=0,
         total_primogems=0,
-        next_pull_at=datetime(2026, 3, 14, 14, 0),
+        next_pull_at=None,
     )
+    repo.banner_cooldowns[(777, "genshin")] = datetime(2026, 3, 14, 14, 0)
     service = GachaService(repo)
 
     result = await service.pull(user_id=777, username="tester", banner="genshin", now=now)
@@ -155,6 +161,21 @@ async def test_hsr_uses_banner_specific_cooldown() -> None:
     assert result.card.banner == "hsr"
     assert result.cooldown_until == now + timedelta(hours=2)
     assert result.seconds_remaining == 2 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_cooldowns_are_independent_between_banners() -> None:
+    repo = FakeGachaRepository()
+    service = GachaService(repo)
+    now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+
+    first = await service.pull(user_id=303, username="tester", banner="genshin", now=now)
+    second = await service.pull(user_id=303, username="tester", banner="hsr", now=now + timedelta(minutes=1))
+
+    assert first.status == "ok"
+    assert second.status == "ok"
+    assert second.card is not None
+    assert second.card.banner == "hsr"
 
 
 @pytest.mark.asyncio

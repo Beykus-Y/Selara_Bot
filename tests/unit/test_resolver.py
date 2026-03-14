@@ -163,6 +163,33 @@ def test_resolver_maps_economy_aliases() -> None:
         assert intent.name == expected
 
 
+def test_resolver_maps_gacha_pull_commands() -> None:
+    genshin_intent = resolve_text_command("гача генш", top_default=10, top_max=50)
+    hsr_intent = resolve_text_command("гача хср", top_default=10, top_max=50)
+
+    assert genshin_intent is not None
+    assert genshin_intent.name == "gacha_pull"
+    assert genshin_intent.args["banner"] == "genshin"
+
+    assert hsr_intent is not None
+    assert hsr_intent.name == "gacha_pull"
+    assert hsr_intent.args["banner"] == "hsr"
+
+
+def test_resolver_maps_gacha_profile_commands() -> None:
+    intent = resolve_text_command("моя гача геншин", top_default=10, top_max=50)
+
+    assert intent is not None
+    assert intent.name == "gacha_profile"
+    assert intent.args["banner"] == "genshin"
+
+
+@pytest.mark.parametrize("text", ["гача", "моя гача", "гача завтра", "моя гача завтра"])
+def test_resolver_raises_for_incomplete_or_unknown_gacha_commands(text: str) -> None:
+    with pytest.raises(TextCommandResolutionError, match="Формат: гача"):
+        resolve_text_command(text, top_default=10, top_max=50)
+
+
 def test_resolver_rejects_non_command_phrases() -> None:
     assert resolve_text_command("активность", top_default=10, top_max=50) is None
     assert resolve_text_command("кто я такой", top_default=10, top_max=50) is None

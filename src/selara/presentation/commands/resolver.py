@@ -8,6 +8,13 @@ class TextCommandResolutionError(ValueError):
     pass
 
 
+_GACHA_BANNER_ALIASES = {
+    "генш": "genshin",
+    "геншин": "genshin",
+    "хср": "hsr",
+}
+
+
 def _parse_limit(raw: str, *, top_max: int) -> int:
     if not raw.isdigit():
         raise TextCommandResolutionError("Лимит должен быть числом")
@@ -66,6 +73,30 @@ def _parse_top_command(tokens: list[str], *, top_default: int, top_max: int) -> 
     return CommandIntent(name="top", args={"mode": mode, "period": period, "limit": limit})
 
 
+def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
+    usage = "Формат: гача генш|геншин|хср или моя гача генш|геншин|хср"
+
+    if len(tokens) == 1 and tokens[0] == "гача":
+        raise TextCommandResolutionError(usage)
+
+    if len(tokens) == 2 and tokens[0] == "гача":
+        banner = _GACHA_BANNER_ALIASES.get(tokens[1])
+        if banner is not None:
+            return CommandIntent(name="gacha_pull", args={"banner": banner})
+        raise TextCommandResolutionError(usage)
+
+    if len(tokens) == 2 and tokens[0] == "моя" and tokens[1] == "гача":
+        raise TextCommandResolutionError(usage)
+
+    if len(tokens) == 3 and tokens[0] == "моя" and tokens[1] == "гача":
+        banner = _GACHA_BANNER_ALIASES.get(tokens[2])
+        if banner is not None:
+            return CommandIntent(name="gacha_profile", args={"banner": banner})
+        raise TextCommandResolutionError(usage)
+
+    return None
+
+
 def resolve_text_command(
     text: str,
     *,
@@ -82,6 +113,10 @@ def resolve_text_command(
     tokens = [token for token in normalized.split(" ") if token]
     if not tokens:
         return None
+
+    gacha_command = _parse_gacha_command(tokens)
+    if gacha_command is not None:
+        return gacha_command
 
     if tokens[0] == "актив":
         if len(tokens) > 1 and not prefix_tail_is_valid(command_key="active", tail_text=" ".join(tokens[1:])):

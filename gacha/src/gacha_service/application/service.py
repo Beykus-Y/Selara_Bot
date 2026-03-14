@@ -88,7 +88,7 @@ class GachaService:
     async def pull(self, *, user_id: int, username: str | None, banner: str, now: datetime | None = None) -> PullResult:
         current_time = now or _utc_now()
         player = await self._repo.get_or_create_player(user_id=user_id, username=username)
-        next_pull_at = _coerce_utc_datetime(player.next_pull_at)
+        next_pull_at = _coerce_utc_datetime(await self._repo.get_banner_cooldown(user_id=user_id, banner=banner))
         banner_config = get_banner_config(banner)
         cooldown_seconds = self._default_cooldown_seconds or banner_config.cooldown_seconds
 

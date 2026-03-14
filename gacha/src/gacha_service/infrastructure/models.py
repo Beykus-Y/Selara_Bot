@@ -22,6 +22,14 @@ class PlayerModel(Base):
     next_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PlayerBannerCooldownModel(Base):
+    __tablename__ = "gacha_player_banner_cooldowns"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    banner: Mapped[str] = mapped_column(String(32), primary_key=True)
+    next_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class PullHistoryModel(Base):
     __tablename__ = "gacha_pull_history"
 

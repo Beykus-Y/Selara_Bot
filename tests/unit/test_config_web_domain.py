@@ -20,3 +20,24 @@ def test_resolved_web_base_url_accepts_full_web_domain_url() -> None:
     )
 
     assert settings.resolved_web_base_url == "https://panel.selara.example.com"
+
+
+def test_resolve_gacha_base_url_prefers_banner_specific_value() -> None:
+    settings = Settings(
+        BOT_TOKEN="token",
+        DATABASE_URL="sqlite+aiosqlite:///tmp/test.db",
+        GACHA_BASE_URL="http://127.0.0.1:8001",
+        GACHA_HSR_BASE_URL="hsr.example.com:9000/",
+    )
+
+    assert settings.resolve_gacha_base_url("hsr") == "http://hsr.example.com:9000"
+    assert settings.resolve_gacha_base_url("genshin") == "http://127.0.0.1:8001"
+
+
+def test_resolve_gacha_base_url_returns_none_without_config() -> None:
+    settings = Settings(
+        BOT_TOKEN="token",
+        DATABASE_URL="sqlite+aiosqlite:///tmp/test.db",
+    )
+
+    assert settings.resolve_gacha_base_url("genshin") is None
