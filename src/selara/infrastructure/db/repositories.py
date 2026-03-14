@@ -4670,6 +4670,9 @@ class SqlAlchemyActivityRepository:
                 row.warn_count += auto_warns_added
                 row.total_warns += auto_warns_added
 
+        elif action == "unpred":
+            row.pending_preds = max(0, int(row.pending_preds) - normalized_amount)
+
         elif action == "warn":
             row.warn_count += normalized_amount
             row.total_warns += normalized_amount

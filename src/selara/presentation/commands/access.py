@@ -116,11 +116,15 @@ KNOWN_COMMAND_KEYS.update(
 )
 TEXT_TRIGGER_TO_COMMAND_KEY: dict[str, str] = {
     "пред": "pred",
+    "снять пред": "unpred",
+    "разпред": "unpred",
+    "анпред": "unpred",
     "варн": "warn",
     "снять варн": "unwarn",
     "разварн": "unwarn",
     "анварн": "unwarn",
     "бан": "ban",
+    "снять бан": "unban",
     "разбан": "unban",
     "анбан": "unban",
     "повысить": "roleadd",

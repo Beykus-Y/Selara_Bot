@@ -68,7 +68,7 @@ class VoteResult:
 
 
 BotRole = str
-ModerationAction = Literal["pred", "warn", "unwarn", "ban", "unban"]
+ModerationAction = Literal["pred", "unpred", "warn", "unwarn", "ban", "unban"]
 RelationshipProposalStatus = Literal["pending", "accepted", "rejected", "cancelled", "expired"]
 RelationshipKind = Literal["pair", "marriage"]
 RelationshipActionCode = Literal["care", "date", "gift", "support", "love", "flirt", "surprise", "vow"]

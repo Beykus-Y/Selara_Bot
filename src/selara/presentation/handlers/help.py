@@ -83,7 +83,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• <code>/ban</code>, <code>/unban</code>, <code>/modstat</code>\n"
         "• <code>/roles</code>, <code>/roleadd</code>, <code>/roleremove</code>\n"
         "• <code>/roledefs</code>, <code>/roletemplates</code>, <code>/rolecreate</code>\n"
-        "• По reply без <code>/</code>: пред / варн / снять варн / бан / разбан / повысить / понизить"
+        "• Без <code>/</code>: пред / варн / снять пред / снять варн / бан / снять бан — по reply или с <code>@username/id</code>"
     ),
     "settings": (
         "<b>Настройки и алиасы</b>\n"

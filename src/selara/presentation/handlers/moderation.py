@@ -28,11 +28,16 @@ from selara.presentation.auth import (
 
 router = Router(name="moderation")
 
-_MODERATION_COMMANDS: tuple[str, ...] = ("pred", "warn", "unwarn", "ban", "unban")
+_SLASH_MODERATION_COMMANDS: tuple[str, ...] = ("pred", "warn", "unwarn", "ban", "unban")
+_MODERATION_ACTIONS: tuple[str, ...] = (*_SLASH_MODERATION_COMMANDS, "unpred")
 _TEXT_MOD_ACTIONS: tuple[tuple[str, str], ...] = (
+    ("снять пред", "unpred"),
+    ("разпред", "unpred"),
+    ("анпред", "unpred"),
     ("снять варн", "unwarn"),
     ("разварн", "unwarn"),
     ("анварн", "unwarn"),
+    ("снять бан", "unban"),
     ("разбан", "unban"),
     ("анбан", "unban"),
     ("pred", "pred"),
@@ -45,7 +50,7 @@ _TEXT_MOD_ACTIONS: tuple[tuple[str, str], ...] = (
     ("бан", "ban"),
 )
 _REPLY_MODERATION_PATTERN = re.compile(
-    r"^\s*(?:снять\s+варн|разварн|анварн|разбан|анбан|pred|warn|ban|unban|unwarn|пред|варн|бан)\b",
+    r"^\s*(?:снять\s+пред|разпред|анпред|снять\s+варн|разварн|анварн|снять\s+бан|разбан|анбан|pred|warn|ban|unban|unwarn|пред|варн|бан)\b",
     re.IGNORECASE,
 )
 _REPLY_ROLE_STEP_PATTERN = re.compile(r"^\s*(?:повысить|понизить)\b", re.IGNORECASE)
@@ -262,7 +267,7 @@ async def _try_unrestrict_user(bot: Bot, *, chat_id: int, user_id: int) -> bool:
         return False
 
 
-def _parse_reply_text_action(text: str) -> tuple[str, str] | None:
+def _parse_text_action(text: str) -> tuple[str, str] | None:
     raw = text.strip()
     if not raw or raw.startswith("/"):
         return None
@@ -282,6 +287,10 @@ def _parse_reply_text_action(text: str) -> tuple[str, str] | None:
             return action, reason
 
     return None
+
+
+def _parse_reply_text_action(text: str) -> tuple[str, str] | None:
+    return _parse_text_action(text)
 
 
 def _parse_role_step_action(text: str) -> str | None:
@@ -312,7 +321,7 @@ async def _apply_moderation_action(
     if message.from_user is None:
         return
 
-    if command_name not in _MODERATION_COMMANDS:
+    if command_name not in _MODERATION_ACTIONS:
         return
 
     command_allowed, actor_role_code, required_role_code, _ = await has_command_access(
@@ -429,6 +438,8 @@ async def _apply_moderation_action(
         lines.append("Пред.")
     elif action == "warn":
         lines.append("Варн.")
+    elif action == "unpred":
+        lines.append("Один пред снят.")
     elif action == "unwarn":
         lines.append("Один варн снят.")
     elif action == "ban":
@@ -1212,7 +1223,7 @@ async def modstat_command(message: Message, command: CommandObject, activity_rep
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-@router.message(Command(*_MODERATION_COMMANDS))
+@router.message(Command(*_SLASH_MODERATION_COMMANDS))
 async def moderation_action_command(message: Message, command: CommandObject, activity_repo, bot: Bot) -> None:
     command_name = (command.command or "").lower().strip()
     raw_tail = (command.args or "").strip()
@@ -1226,9 +1237,9 @@ async def moderation_action_command(message: Message, command: CommandObject, ac
     )
 
 
-@router.message(F.reply_to_message, F.text.regexp(_REPLY_MODERATION_PATTERN))
-async def moderation_reply_text_command(message: Message, activity_repo, bot: Bot) -> None:
-    parsed = _parse_reply_text_action(message.text or "")
+@router.message(F.text.regexp(_REPLY_MODERATION_PATTERN))
+async def moderation_text_command(message: Message, activity_repo, bot: Bot) -> None:
+    parsed = _parse_text_action(message.text or "")
     if parsed is None:
         return
 
