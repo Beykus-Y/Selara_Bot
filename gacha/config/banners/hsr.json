@@ -1,8 +1,68 @@
 {
   "code": "hsr",
   "title": "Honkai: Star Rail",
-  "cooldown_seconds": 7200,
+  "cooldown_seconds": 10800,
   "cards": [
+    {
+      "code": "asta",
+      "name": "Аста",
+      "rarity": "common",
+      "points": 200,
+      "primogems": 5,
+      "adventure_xp": 15,
+      "image_url": "/images/hsr/asta.jpg",
+      "weight": 60
+    },
+    {
+      "code": "tingyun",
+      "name": "Тинъюнь",
+      "rarity": "common",
+      "points": 250,
+      "primogems": 6,
+      "adventure_xp": 18,
+      "image_url": "/images/hsr/tingyun.jpg",
+      "weight": 50
+    },
+    {
+      "code": "dan_heng",
+      "name": "Дань Хэн",
+      "rarity": "rare",
+      "points": 800,
+      "primogems": 10,
+      "adventure_xp": 40,
+      "image_url": "/images/hsr/dan_heng.jpg",
+      "weight": 30
+    },
+    {
+      "code": "bailu",
+      "name": "Байлу",
+      "rarity": "rare",
+      "points": 850,
+      "primogems": 12,
+      "adventure_xp": 45,
+      "image_url": "/images/hsr/bailu.jpg",
+      "weight": 20
+    },
+    {
+      "code": "seele",
+      "name": "Зеле",
+      "rarity": "epic",
+      "points": 2000,
+      "primogems": 18,
+      "adventure_xp": 100,
+      "image_url": "/images/hsr/seele.jpg",
+      "weight": 8
+    },
+    {
+      "code": "bronya",
+      "name": "Броня",
+      "rarity": "legendary",
+      "points": 5000,
+      "primogems": 25,
+      "adventure_xp": 150,
+      "image_url": "/images/hsr/bronya.jpg",
+      "weight": 2
+    },
     {
       "code": "march7th",
       "name": "Март 7",
