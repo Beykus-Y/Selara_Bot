@@ -14,18 +14,28 @@
       <span>User ID: <code>{{ admin_user_id }}</code></span>
     </div>
 
-    <div class="admin-tables-grid">
-      {% for table_key, table_title in tables %}
-        <a class="admin-table-card" href="/app/admin/table/{{ table_key }}">
-          <span class="admin-table-icon">📊</span>
-          <div class="admin-table-info">
-            <strong>{{ table_title }}</strong>
-            <small>{{ table_key }}</small>
+    {% for section in table_sections %}
+      <section style="margin-top: 24px;">
+        <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
+          <div>
+            <h3 style="margin: 0;">{{ section.title }}</h3>
+            <p class="panel-subtitle" style="margin: 4px 0 0;">{{ section.tables|length }} таблиц</p>
           </div>
-          <span class="admin-table-arrow">→</span>
-        </a>
-      {% endfor %}
-    </div>
+        </div>
+        <div class="admin-tables-grid">
+          {% for table_key, table_title in section.tables %}
+            <a class="admin-table-card" href="/app/admin/table/{{ table_key }}">
+              <span class="admin-table-icon">📊</span>
+              <div class="admin-table-info">
+                <strong>{{ table_title }}</strong>
+                <small>{{ table_key }}</small>
+              </div>
+              <span class="admin-table-arrow">→</span>
+            </a>
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
 
     <div class="admin-actions">
       <form method="post" action="/app/admin/logout" style="display: inline;">

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from selara.core.config import Settings
-from selara.infrastructure.db.models import ChatModel, MarriageModel, UserModel
+from selara.infrastructure.db.models import ChatModel, MarriageModel, UserChatActivityModel, UserModel
 from selara.web import app as web_app_module
 
 
@@ -88,6 +88,37 @@ class QueueSessionFactory:
                 return False
 
         return _Manager()
+
+
+@pytest.mark.asyncio
+async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin")
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 200
+    assert "Активность и пользователи" in response.text
+    assert "Экономика" in response.text
+    assert "Дневная активность пользователей" in response.text
+    assert "Использование действий отношений" in response.text
+    assert "Коды входа веб-панели" in response.text
 
 
 @pytest.mark.asyncio
@@ -210,6 +241,53 @@ async def test_admin_table_page_shows_reference_labels(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_table_page_builds_composite_pk_links(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    activity = UserChatActivityModel(
+        chat_id=30,
+        user_id=10,
+        message_count=5,
+        is_active_member=True,
+        last_seen_at=datetime(2026, 3, 8, 9, 6),
+        display_name_override=None,
+        title_prefix=None,
+        created_at=datetime(2026, 3, 8, 9, 6),
+        updated_at=datetime(2026, 3, 8, 9, 6),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[activity]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(rows=[UserModel(telegram_user_id=10, username="alice", first_name="Alice", last_name=None, is_bot=False)]),
+            FakeExecuteResult(rows=[ChatModel(telegram_chat_id=30, type="group", title="Family Chat")]),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/user_chat_activity")
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 200
+    assert "/app/admin/table/user_chat_activity/edit?chat_id=30&amp;user_id=10" in response.text
+    assert "/app/admin/table/user_chat_activity/delete?chat_id=30&amp;user_id=10" in response.text
+
+
+@pytest.mark.asyncio
 async def test_admin_table_edit_page_reads_record_id_from_query(monkeypatch) -> None:
     settings = _settings()
     marriage = MarriageModel(
@@ -265,6 +343,56 @@ async def test_admin_table_edit_page_reads_record_id_from_query(monkeypatch) -> 
     assert "Bob Stone" in response.text
     assert "Family Chat" in response.text
     assert data_session.get_calls == [(MarriageModel, 2)]
+
+
+@pytest.mark.asyncio
+async def test_admin_table_update_supports_composite_primary_keys(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    activity = UserChatActivityModel(
+        chat_id=30,
+        user_id=10,
+        message_count=5,
+        is_active_member=True,
+        last_seen_at=datetime(2026, 3, 8, 9, 6),
+        display_name_override=None,
+        title_prefix=None,
+        created_at=datetime(2026, 3, 8, 9, 6),
+        updated_at=datetime(2026, 3, 8, 9, 6),
+    )
+    data_session = FakeSession(records={(UserChatActivityModel, (30, 10)): activity})
+    log_chat_action_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    monkeypatch.setattr(web_app_module, "SqlAlchemyActivityRepository", lambda session: object())
+    monkeypatch.setattr(web_app_module, "log_chat_action", log_chat_action_mock)
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.post(
+            "/app/admin/table/user_chat_activity/update",
+            content="chat_id=30&user_id=10&message_count=12&is_active_member=false",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 303
+    assert activity.message_count == 12
+    assert activity.is_active_member is False
+    assert data_session.get_calls == [(UserChatActivityModel, (30, 10))]
+    log_chat_action_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

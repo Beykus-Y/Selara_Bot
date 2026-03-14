@@ -17,7 +17,9 @@
     </div>
 
     <form class="admin-edit-form" method="post" action="/app/admin/table/{{ table_name }}/update">
-      <input type="hidden" name="id" value="{{ record_id }}">
+      {% for key, value in pk_fields %}
+        <input type="hidden" name="{{ key }}" value="{{ value }}">
+      {% endfor %}
       
       <div class="admin-edit-fields">
         {% for col_name, value in columns %}
@@ -50,7 +52,7 @@
                   name="{{ col_name }}"
                   value="{{ value if value is not none else '' }}"
                   class="admin-field-input"
-                  {% if col_name == 'id' %}readonly{% endif %}
+                  {% if col_name in primary_key_columns %}readonly{% endif %}
                 >
               {% endif %}
               {% set ref_label = reference_labels.get(col_name, {}).get(value) %}

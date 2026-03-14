@@ -44,7 +44,8 @@
           </tr>
         </thead>
         <tbody>
-          {% for row in rows %}
+          {% for entry in row_entries %}
+            {% set row = entry.row %}
             <tr>
               {% for col in columns %}
                 <td>
@@ -70,8 +71,8 @@
               {% endfor %}
               <td class="admin-actions-col">
                 <span class="admin-row-actions">
-                  <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?id={{ row.id|default('') }}">✏️</a>
-                  <button class="button button-small button-danger" data-delete-url="/app/admin/table/{{ table_name }}/delete?id={{ row.id|default('') }}">🗑️</button>
+                  <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?{{ entry.pk_query }}">✏️</a>
+                  <button class="button button-small button-danger" data-delete-url="/app/admin/table/{{ table_name }}/delete?{{ entry.pk_query }}">🗑️</button>
                 </span>
               </td>
             </tr>
@@ -114,7 +115,7 @@
 
   <dialog class="confirm-dialog" id="delete-dialog">
     <form method="post" class="confirm-dialog-form" id="delete-form">
-      <input type="hidden" name="id" value="">
+      <div id="delete-hidden-fields"></div>
       <h3>Подтверждение удаления</h3>
       <p>Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
       <div class="confirm-dialog-actions">
@@ -133,9 +134,16 @@
         const dialog = document.getElementById('delete-dialog');
         const form = document.getElementById('delete-form');
         const urlParams = new URLSearchParams(url.split('?')[1]);
-        const id = urlParams.get('id');
+        const hiddenFields = document.getElementById('delete-hidden-fields');
+        hiddenFields.replaceChildren();
+        for (const [key, value] of urlParams.entries()) {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value;
+          hiddenFields.appendChild(input);
+        }
         form.action = url.split('?')[0];
-        form.querySelector('input[name="id"]').value = id;
         dialog.showModal();
       });
     });

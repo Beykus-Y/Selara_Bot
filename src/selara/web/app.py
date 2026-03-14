@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 from io import BytesIO
 import json
@@ -9,7 +9,7 @@ import logging
 from html import escape
 from importlib import import_module
 from pathlib import Path
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlencode
 
 from aiogram import Bot
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -6421,22 +6421,118 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     # ========== ADMIN PANEL ROUTES ==========
 
-    ADMIN_TABLES = [
-        ("users", "Пользователи"),
-        ("chats", "Чаты"),
-        ("user_chat_activity", "Активность пользователей"),
-        ("user_chat_awards", "Награды"),
-        ("user_chat_bot_role", "Роли бота"),
-        ("chat_settings", "Настройки чатов"),
-        ("economy_accounts", "Счета экономики"),
-        ("economy_inventory", "Инвентарь"),
-        ("economy_market_listings", "Рыночные лоты"),
-        ("pairs", "Пары"),
-        ("marriages", "Браки"),
-        ("chat_audit_logs", "Аудит лог"),
-        ("web_sessions", "Веб-сессии"),
-        ("admin_sessions", "Админ-сессии"),
+    ADMIN_TABLE_GROUP_LABELS = {
+        "core": "Основа",
+        "chat": "Чаты и настройки",
+        "activity": "Активность и пользователи",
+        "achievement": "Достижения",
+        "economy": "Экономика",
+        "relationship": "Отношения",
+        "web": "Веб и доступ",
+        "other": "Прочее",
+    }
+
+    ADMIN_TABLE_GROUP_ORDER = [
+        "core",
+        "chat",
+        "activity",
+        "achievement",
+        "economy",
+        "relationship",
+        "web",
+        "other",
     ]
+
+    ADMIN_TABLE_META = {
+        "admin_sessions": {"title": "Админ-сессии", "group": "web"},
+        "chat_achievement_stats": {"title": "Статистика достижений чата", "group": "achievement"},
+        "chat_activity_event_sync_state": {"title": "Синхронизация событий активности", "group": "activity"},
+        "chat_auctions": {"title": "Аукционы чата", "group": "economy"},
+        "chat_audit_logs": {"title": "Журнал аудита чата", "group": "chat"},
+        "chat_command_access_rules": {"title": "Правила доступа к командам", "group": "chat"},
+        "chat_custom_social_actions": {"title": "Пользовательские соцдействия", "group": "chat"},
+        "chat_global_boosts": {"title": "Глобальные бусты чата", "group": "chat"},
+        "chat_metrics": {"title": "Метрики чата", "group": "chat"},
+        "chat_role_definitions": {"title": "Определения ролей чата", "group": "chat"},
+        "chat_settings": {"title": "Настройки чата", "group": "chat"},
+        "chat_text_alias_settings": {"title": "Настройки текстовых алиасов", "group": "chat"},
+        "chat_text_aliases": {"title": "Текстовые алиасы", "group": "chat"},
+        "chat_triggers": {"title": "Триггеры чата", "group": "chat"},
+        "chats": {"title": "Чаты", "group": "core"},
+        "economy_accounts": {"title": "Экономические счета", "group": "economy"},
+        "economy_farms": {"title": "Фермы", "group": "economy"},
+        "economy_inventory": {"title": "Инвентарь", "group": "economy"},
+        "economy_ledger": {"title": "Журнал экономики", "group": "economy"},
+        "economy_market_listings": {"title": "Рыночные лоты", "group": "economy"},
+        "economy_market_trades": {"title": "Рыночные сделки", "group": "economy"},
+        "economy_plots": {"title": "Грядки", "group": "economy"},
+        "economy_private_contexts": {"title": "Приватные контексты экономики", "group": "economy"},
+        "economy_transfer_daily": {"title": "Дневные лимиты переводов", "group": "economy"},
+        "global_achievement_stats": {"title": "Глобальная статистика достижений", "group": "achievement"},
+        "global_metrics": {"title": "Глобальные метрики", "group": "core"},
+        "inline_private_messages": {"title": "Встроенные личные сообщения", "group": "web"},
+        "marriages": {"title": "Браки", "group": "relationship"},
+        "pairs": {"title": "Пары", "group": "relationship"},
+        "relationship_action_usage": {"title": "Использование действий отношений", "group": "relationship"},
+        "relationship_proposals": {"title": "Предложения отношений", "group": "relationship"},
+        "relationships_graph": {"title": "Граф отношений", "group": "relationship"},
+        "user_chat_achievement": {"title": "Достижения пользователей в чате", "group": "achievement"},
+        "user_chat_activity": {"title": "Активность пользователей в чате", "group": "activity"},
+        "user_chat_activity_daily": {"title": "Дневная активность пользователей", "group": "activity"},
+        "user_chat_activity_minute": {"title": "Минутная активность пользователей", "group": "activity"},
+        "user_chat_announce_subscriptions": {"title": "Подписки на анонсы", "group": "activity"},
+        "user_chat_awards": {"title": "Награды пользователей", "group": "achievement"},
+        "user_chat_bot_roles": {"title": "Роли бота у пользователей", "group": "activity"},
+        "user_chat_iris_import_history": {"title": "История импорта Iris", "group": "activity"},
+        "user_chat_iris_import_state": {"title": "Состояние импорта Iris", "group": "activity"},
+        "user_chat_message_events": {"title": "События сообщений пользователей", "group": "activity"},
+        "user_chat_moderation_states": {"title": "Состояния модерации пользователей", "group": "activity"},
+        "user_chat_profiles": {"title": "Профили пользователей в чате", "group": "activity"},
+        "user_global_achievement": {"title": "Глобальные достижения пользователей", "group": "achievement"},
+        "user_karma_votes": {"title": "Голоса кармы", "group": "activity"},
+        "users": {"title": "Пользователи", "group": "core"},
+        "web_login_codes": {"title": "Коды входа веб-панели", "group": "web"},
+        "web_sessions": {"title": "Веб-сессии", "group": "web"},
+    }
+
+    def _admin_table_title(table_name: str) -> str:
+        meta = ADMIN_TABLE_META.get(table_name)
+        if meta is not None:
+            return str(meta["title"])
+        return table_name.replace("_", " ")
+
+    def _admin_table_group(table_name: str) -> str:
+        meta = ADMIN_TABLE_META.get(table_name)
+        if meta is not None:
+            return str(meta["group"])
+        return "other"
+
+    def _admin_table_catalog() -> list[tuple[str, str, str]]:
+        from selara.infrastructure.db.models import Base
+
+        table_names = sorted({mapper.class_.__tablename__ for mapper in Base.registry.mappers})
+        return [(table_name, _admin_table_title(table_name), _admin_table_group(table_name)) for table_name in table_names]
+
+    def _admin_table_sections() -> list[dict[str, object]]:
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for table_name, title, group in ADMIN_TABLES:
+            grouped.setdefault(group, []).append((table_name, title))
+
+        sections: list[dict[str, object]] = []
+        for group in ADMIN_TABLE_GROUP_ORDER:
+            tables = grouped.get(group)
+            if not tables:
+                continue
+            sections.append(
+                {
+                    "key": group,
+                    "title": ADMIN_TABLE_GROUP_LABELS.get(group, group),
+                    "tables": tables,
+                }
+            )
+        return sections
+
+    ADMIN_TABLES = _admin_table_catalog()
 
     async def _load_admin_from_request(session: AsyncSession, request: Request, touch: bool) -> int | None:
         """Загружает admin_user_id из сессии админа."""
@@ -6470,6 +6566,43 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     def _admin_primary_key_column(model_class):
         return next(iter(model_class.__table__.primary_key.columns))
+
+    def _admin_primary_key_columns(model_class) -> list:
+        return list(model_class.__table__.primary_key.columns)
+
+    def _admin_primary_key_values_from_row(model_class, row) -> dict[str, object]:
+        return {column.name: getattr(row, column.name, None) for column in _admin_primary_key_columns(model_class)}
+
+    def _admin_primary_key_display(pk_values: dict[str, object]) -> str:
+        return ", ".join(f"{key}={value}" for key, value in pk_values.items())
+
+    def _admin_primary_key_query(pk_values: dict[str, object]) -> str:
+        encoded: dict[str, str] = {}
+        for key, value in pk_values.items():
+            if isinstance(value, datetime):
+                encoded[key] = value.isoformat()
+            elif isinstance(value, date):
+                encoded[key] = value.isoformat()
+            else:
+                encoded[key] = str(value)
+        return urlencode(encoded)
+
+    def _admin_primary_key_values_from_input(model_class, raw_values) -> tuple[dict[str, object] | None, str | None]:
+        pk_values: dict[str, object] = {}
+        for column in _admin_primary_key_columns(model_class):
+            raw_value = raw_values.get(column.name)
+            if raw_value is None or raw_value == "":
+                return None, f"Не указан ключ записи: {column.name}."
+            value = _coerce_admin_form_value(column, raw_value)
+            if value is _admin_invalid_form_value:
+                return None, f"Некорректный ключ записи: {column.name}."
+            pk_values[column.name] = value
+        return pk_values, None
+
+    async def _admin_get_record(session: AsyncSession, model_class, pk_values: dict[str, object]):
+        identity_values = [pk_values[column.name] for column in _admin_primary_key_columns(model_class)]
+        identity = identity_values[0] if len(identity_values) == 1 else tuple(identity_values)
+        return await session.get(model_class, identity)
 
     def _admin_is_user_reference_column(column_name: str) -> bool:
         return column_name in {"telegram_user_id", "user_low_id", "user_high_id", "user_id"} or column_name.endswith(
@@ -6604,7 +6737,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
             ),
-            tables=ADMIN_TABLES,
+            table_sections=_admin_table_sections(),
             admin_user_id=admin_user_id,
         )
 
@@ -6774,6 +6907,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     for col in model_class.__table__.columns
                 ],
             )
+            row_entries = [
+                {
+                    "row": row,
+                    "pk_query": _admin_primary_key_query(_admin_primary_key_values_from_row(model_class, row)),
+                }
+                for row in rows
+            ]
 
             await session.commit()
 
@@ -6786,9 +6926,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=request.query_params.get("error"),
             ),
             table_name=table_name,
-            table_title=dict(ADMIN_TABLES).get(table_name, table_name),
+            table_title=_admin_table_title(table_name),
             columns=columns,
-            rows=rows,
+            row_entries=row_entries,
             page=page,
             total=total,
             limit=limit,
@@ -6799,24 +6939,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/app/admin/table/{table_name}/edit")
     async def admin_table_edit_page(request: Request, table_name: str):
         """Страница редактирования записи."""
-        record_id = request.query_params.get("id", "")
-        if not record_id:
-            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
-
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
                 return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
 
-            pk_column = _admin_primary_key_column(model_class)
-            try:
-                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
-                    record_id = int(record_id)
-            except ValueError:
-                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+            pk_values, error = _admin_primary_key_values_from_input(model_class, request.query_params)
+            if pk_values is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text=error or "Некорректный ключ записи."))
 
             # Получаем запись
-            row = await session.get(model_class, record_id)
+            row = await _admin_get_record(session, model_class, pk_values)
             if row is None:
                 return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
 
@@ -6825,6 +6958,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             # Получаем колонки и значения
             columns = [(col.name, getattr(row, col.name, None)) for col in model_class.__table__.columns]
             reference_labels = await _admin_reference_labels(session, column_values=columns)
+            primary_key_columns = [column.name for column in _admin_primary_key_columns(model_class)]
+            record_id = _admin_primary_key_display(pk_values)
+            pk_fields = list(pk_values.items())
 
         return _render_template(
             "admin_edit.html",
@@ -6835,8 +6971,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=request.query_params.get("error"),
             ),
             table_name=table_name,
-            table_title=dict(ADMIN_TABLES).get(table_name, table_name),
+            table_title=_admin_table_title(table_name),
             record_id=record_id,
+            pk_fields=pk_fields,
+            primary_key_columns=primary_key_columns,
             columns=columns,
             reference_labels=reference_labels,
         )
@@ -6856,24 +6994,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
 
         form = await _parse_form(request)
-        record_id = form.get("id", "")
-
-        if not record_id:
-            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
 
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
                 return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
 
-            pk_column = _admin_primary_key_column(model_class)
-            try:
-                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
-                    record_id = int(record_id)
-            except ValueError:
-                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+            pk_values, error = _admin_primary_key_values_from_input(model_class, form)
+            if pk_values is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text=error or "Некорректный ключ записи."))
 
-            row = await session.get(model_class, record_id)
+            row = await _admin_get_record(session, model_class, pk_values)
             if row is None:
                 return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
 
@@ -6898,7 +7029,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_type="private",
                 chat_title="Admin Panel",
                 action_code="admin_record_updated",
-                description=f"Admin {admin_user_id} updated record {record_id} in {table_name}: {', '.join(updated_fields)}",
+                description=(
+                    f"Admin {admin_user_id} updated record {_admin_primary_key_display(pk_values)} "
+                    f"in {table_name}: {', '.join(updated_fields)}"
+                ),
                 actor_user_id=admin_user_id,
             )
 
@@ -6919,24 +7053,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
 
         form = await _parse_form(request)
-        record_id = form.get("id", "")
-
-        if not record_id:
-            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
 
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
                 return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
 
-            pk_column = _admin_primary_key_column(model_class)
-            try:
-                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
-                    record_id = int(record_id)
-            except ValueError:
-                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+            pk_values, error = _admin_primary_key_values_from_input(model_class, form)
+            if pk_values is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text=error or "Некорректный ключ записи."))
 
-            row = await session.get(model_class, record_id)
+            row = await _admin_get_record(session, model_class, pk_values)
             if row is None:
                 return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
 
@@ -6950,7 +7077,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_type="private",
                 chat_title="Admin Panel",
                 action_code="admin_record_deleted",
-                description=f"Admin {admin_user_id} deleted record {record_id} from {table_name}",
+                description=f"Admin {admin_user_id} deleted record {_admin_primary_key_display(pk_values)} from {table_name}",
                 actor_user_id=admin_user_id,
             )
 
