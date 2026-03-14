@@ -66,6 +66,12 @@ def test_alias_mode_both_rewrites_prefix_and_tail() -> None:
     assert rewritten == "нейминг Ivan"
 
 
+def test_alias_mode_both_rewrites_profile_alias_with_target_tail() -> None:
+    aliases = [_alias(alias_text="ты кто", command_key="me", source_trigger="кто ты")]
+    rewritten = _apply_alias_mode_to_text(text="ты кто @alice", mode="both", aliases=aliases)
+    assert rewritten == "кто ты @alice"
+
+
 def test_alias_mode_prefers_longest_alias_match() -> None:
     aliases = [
         _alias(alias_text="мой", command_key="me", source_trigger="кто я"),

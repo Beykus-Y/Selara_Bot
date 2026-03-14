@@ -2803,6 +2803,19 @@ async def text_commands_handler(
             return
         text = rewritten
 
+    if _is_reply_profile_lookup(message, text):
+        if not await _enforce_command_access(message, activity_repo, command_key="me"):
+            return
+        await send_user_stats(
+            message,
+            activity_repo,
+            bot,
+            settings,
+            chat_settings,
+            user_id=message.reply_to_message.from_user.id,
+        )
+        return
+
     naming_matched, naming_value, naming_error = _extract_naming_value(text)
     if naming_matched:
         if naming_error is not None:

@@ -204,6 +204,7 @@ COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "naming",
     "announce",
     "game",
+    "me",
     "active",
     "top",
     "role",
