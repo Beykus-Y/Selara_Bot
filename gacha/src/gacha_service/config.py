@@ -25,6 +25,7 @@ def _default_app_dir() -> str:
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha"
     default_banner: str = "genshin"
+    admin_token: str = ""
     app_dir: str = _default_app_dir()
 
     model_config = SettingsConfigDict(env_prefix="GACHA_", env_file=".env", extra="ignore")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from selara.core.config import Settings
 from selara.infrastructure.http.gacha_client import (
     GachaClientError,
+    GachaCooldownResetResponse,
     GachaProfileResponse,
     GachaPullResponse,
     HttpGachaClient,
@@ -42,5 +43,21 @@ async def get_profile(settings: Settings, *, user_id: int, banner: str) -> Gacha
     client = _build_client(settings, banner=banner)
     try:
         return await client.get_profile(user_id=user_id, banner=banner)
+    except GachaClientError as exc:
+        raise GachaUseCaseError(exc.message) from exc
+
+
+async def reset_cooldown(settings: Settings, *, user_id: int, banner: str) -> GachaCooldownResetResponse:
+    client = _build_client(settings, banner=banner)
+    admin_token = settings.gacha_admin_token.strip()
+    if not admin_token:
+        raise GachaUseCaseError("Не настроен GACHA_ADMIN_TOKEN для admin-команд.")
+
+    try:
+        return await client.reset_cooldown(
+            user_id=user_id,
+            banner=banner,
+            admin_token=admin_token,
+        )
     except GachaClientError as exc:
         raise GachaUseCaseError(exc.message) from exc

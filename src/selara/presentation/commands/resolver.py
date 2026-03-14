@@ -75,6 +75,20 @@ def _parse_top_command(tokens: list[str], *, top_default: int, top_max: int) -> 
 
 def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
     usage = "Формат: гача генш|геншин|хср или моя гача генш|геншин|хср"
+    skip_usage = "Формат: гача скип генш|геншин|хср [@username]"
+
+    if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] == "скип":
+        if len(tokens) not in {3, 4}:
+            raise TextCommandResolutionError(skip_usage)
+        banner = _GACHA_BANNER_ALIASES.get(tokens[2])
+        if banner is None:
+            raise TextCommandResolutionError(skip_usage)
+        target_username = None
+        if len(tokens) == 4:
+            target_username = tokens[3]
+            if not target_username.startswith("@") or len(target_username) < 2:
+                raise TextCommandResolutionError(skip_usage)
+        return CommandIntent(name="gacha_skip", args={"banner": banner, "target_username": target_username})
 
     if len(tokens) == 1 and tokens[0] == "гача":
         raise TextCommandResolutionError(usage)

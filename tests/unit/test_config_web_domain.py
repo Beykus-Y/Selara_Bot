@@ -38,6 +38,9 @@ def test_resolve_gacha_base_url_returns_none_without_config() -> None:
     settings = Settings(
         BOT_TOKEN="token",
         DATABASE_URL="sqlite+aiosqlite:///tmp/test.db",
+        GACHA_BASE_URL="",
+        GACHA_GENSHIN_BASE_URL="",
+        GACHA_HSR_BASE_URL="",
     )
 
     assert settings.resolve_gacha_base_url("genshin") is None

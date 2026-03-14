@@ -67,6 +67,8 @@ http://your-vps:8001/images/genshin/amber.jpg
 
 `POST /v1/gacha/pull`
 
+`POST /v1/gacha/admin/cooldowns/reset`
+
 `GET /v1/gacha/users/{user_id}/profile?banner=genshin`
 
 `GET /v1/gacha/users/{user_id}/history?banner=genshin&limit=10`
@@ -79,6 +81,21 @@ http://your-vps:8001/images/genshin/amber.jpg
   "username": "beykus",
   "banner": "genshin"
 }
+```
+
+Для admin-сброса кулдауна:
+
+```json
+{
+  "user_id": 12345,
+  "banner": "genshin"
+}
+```
+
+Нужен header:
+
+```text
+X-Gacha-Admin-Token: <GACHA_ADMIN_TOKEN>
 ```
 
 Пример ответа:

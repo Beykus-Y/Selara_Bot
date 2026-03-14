@@ -50,6 +50,21 @@ class GachaRepository:
             return None
         return _coerce_utc_datetime(cooldown.next_pull_at)
 
+    async def reset_banner_cooldown(self, *, user_id: int, banner: str) -> bool:
+        cooldown = await self._session.get(
+            PlayerBannerCooldownModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if cooldown is None:
+            return False
+
+        await self._session.delete(cooldown)
+        await self._session.commit()
+        return True
+
     async def get_or_create_player(self, *, user_id: int, username: str | None) -> PlayerState:
         player = await self._session.get(PlayerModel, user_id)
         if player is None:

@@ -13,7 +13,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "gacha_player_cards",
-        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.BigInteger(), nullable=False),
         sa.Column("banner", sa.String(length=32), nullable=False),
         sa.Column("character_code", sa.String(length=64), nullable=False),
         sa.Column("copies_owned", sa.Integer(), nullable=False, server_default="0"),
@@ -21,7 +21,7 @@ def upgrade() -> None:
     )
     op.create_table(
         "gacha_players",
-        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.BigInteger(), nullable=False),
         sa.Column("username", sa.String(length=64), nullable=True),
         sa.Column("adventure_rank", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("adventure_xp", sa.Integer(), nullable=False, server_default="0"),
@@ -33,7 +33,7 @@ def upgrade() -> None:
     op.create_table(
         "gacha_pull_history",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.BigInteger(), nullable=False),
         sa.Column("banner", sa.String(length=32), nullable=False),
         sa.Column("character_code", sa.String(length=64), nullable=False),
         sa.Column("character_name", sa.String(length=128), nullable=False),

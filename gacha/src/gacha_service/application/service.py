@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from gacha_service.application.catalog import get_banner_config, get_cards_for_banner
 from gacha_service.domain.models import GachaCard, PlayerState, PullResult, RARITY_LABELS, resolve_rank
@@ -32,6 +34,19 @@ def _pick_card(cards: tuple[GachaCard, ...], rng: random.Random) -> GachaCard:
     return rng.choices(cards, weights=weights, k=1)[0]
 
 
+def _resolve_reward_variant(card: GachaCard, *, existing_copies: int) -> tuple[GachaCard, Literal["new", "constellation", "duplicate"]]:
+    if existing_copies <= 0:
+        return card, "new"
+
+    if card.banner == "genshin":
+        constellation_level = min(existing_copies, 6)
+        if existing_copies <= 6:
+            return replace(card, name=f"{card.name} (С{constellation_level})"), "constellation"
+        return replace(card, name=f"{card.name} (С6) дубликат", primogems=card.primogems * 2), "duplicate"
+
+    return card, "duplicate"
+
+
 def _resolve_adventure_xp_gain(base_xp: int, existing_copies: int) -> int:
     if existing_copies <= 0:
         multiplier = 1.0
@@ -49,13 +64,18 @@ def _render_success_message(
     player: PlayerState,
     *,
     seconds_remaining: int,
-    is_new: bool,
+    outcome: Literal["new", "constellation", "duplicate"],
     copies_owned: int,
     adventure_xp_gained: int,
 ) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
     rarity_label = RARITY_LABELS[card.rarity]
-    card_line = "🍀 Вы получили новую карту" if is_new else "♻️ Вам выпал дубликат"
+    if outcome == "new":
+        card_line = "🍀 Вы получили новую карту"
+    elif outcome == "constellation":
+        card_line = "✨ Вы получили созвездие"
+    else:
+        card_line = "♻️ Вам выпал дубликат"
     return (
         f"{card_line}: {card.name}\n\n"
         f"⬜ Редкость: {rarity_label}\n\n"
@@ -103,8 +123,9 @@ class GachaService:
                 seconds_remaining=seconds_remaining,
             )
 
-        card = _pick_card(get_cards_for_banner(banner), self._rng)
-        existing_copies = await self._repo.get_card_copies(user_id=user_id, banner=banner, card_code=card.code)
+        base_card = _pick_card(get_cards_for_banner(banner), self._rng)
+        existing_copies = await self._repo.get_card_copies(user_id=user_id, banner=banner, card_code=base_card.code)
+        card, outcome = _resolve_reward_variant(base_card, existing_copies=existing_copies)
         adventure_xp_gained = _resolve_adventure_xp_gain(card.adventure_xp, existing_copies)
         next_pull_at = current_time + timedelta(seconds=cooldown_seconds)
         updated_player, copies_owned = await self._repo.apply_pull(
@@ -122,7 +143,7 @@ class GachaService:
                 card,
                 updated_player,
                 seconds_remaining=cooldown_seconds,
-                is_new=is_new,
+                outcome=outcome,
                 copies_owned=copies_owned,
                 adventure_xp_gained=adventure_xp_gained,
             ),

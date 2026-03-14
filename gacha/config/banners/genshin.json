@@ -4,14 +4,24 @@
   "cooldown_seconds": 10800,
   "cards": [
     {
-      "code": "ororon",
-      "name": "Оророн",
-      "rarity": "epic",
-      "points": 5000,
-      "primogems": 10,
-      "adventure_xp": 120,
-      "image_url": "/images/genshin/ororon.jpg",
-      "weight": 12
+      "code": "albedo",
+      "name": "Альбедо",
+      "rarity": "legendary",
+      "points": 8600,
+      "primogems": 15,
+      "adventure_xp": 150,
+      "image_url": "/images/genshin/albedo.jpg",
+      "weight": 2
+    },
+    {
+      "code": "alhaitham",
+      "name": "Аль-Хайтам",
+      "rarity": "legendary",
+      "points": 9700,
+      "primogems": 18,
+      "adventure_xp": 175,
+      "image_url": "/images/genshin/alihaytam.jpg",
+      "weight": 2
     },
     {
       "code": "amber",
@@ -24,14 +34,94 @@
       "weight": 30
     },
     {
-      "code": "noelle",
-      "name": "Ноэлль",
+      "code": "ayaka",
+      "name": "Аяка",
+      "rarity": "legendary",
+      "points": 9800,
+      "primogems": 18,
+      "adventure_xp": 175,
+      "image_url": "/images/genshin/ayaka.jpg",
+      "weight": 2
+    },
+    {
+      "code": "baizhu",
+      "name": "Бай Чжу",
+      "rarity": "legendary",
+      "points": 9000,
+      "primogems": 16,
+      "adventure_xp": 155,
+      "image_url": "/images/genshin/bay_cju.jpg",
+      "weight": 2
+    },
+    {
+      "code": "beidou",
+      "name": "Бэй Доу",
       "rarity": "rare",
-      "points": 1800,
-      "primogems": 4,
-      "adventure_xp": 60,
-      "image_url": "/images/genshin/noelle.jpg",
-      "weight": 24
+      "points": 2000,
+      "primogems": 5,
+      "adventure_xp": 70,
+      "image_url": "/images/genshin/beidou.jpg",
+      "weight": 20
+    },
+    {
+      "code": "capitano",
+      "name": "Капитано",
+      "rarity": "legendary",
+      "points": 12500,
+      "primogems": 25,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/capitano.jpg",
+      "weight": 1
+    },
+    {
+      "code": "chasca",
+      "name": "Часка",
+      "rarity": "legendary",
+      "points": 10400,
+      "primogems": 19,
+      "adventure_xp": 185,
+      "image_url": "/images/genshin/chaska.jpg",
+      "weight": 2
+    },
+    {
+      "code": "columbina",
+      "name": "Коломбина",
+      "rarity": "legendary",
+      "points": 12000,
+      "primogems": 23,
+      "adventure_xp": 210,
+      "image_url": "/images/genshin/columbina.jpg",
+      "weight": 1
+    },
+    {
+      "code": "diluc",
+      "name": "Дилюк",
+      "rarity": "legendary",
+      "points": 9400,
+      "primogems": 17,
+      "adventure_xp": 170,
+      "image_url": "/images/genshin/diluk.jpg",
+      "weight": 2
+    },
+    {
+      "code": "durin",
+      "name": "Дурин",
+      "rarity": "legendary",
+      "points": 10200,
+      "primogems": 19,
+      "adventure_xp": 185,
+      "image_url": "/images/genshin/durin.jpg",
+      "weight": 2
+    },
+    {
+      "code": "escoffier",
+      "name": "Эскофье",
+      "rarity": "legendary",
+      "points": 10300,
+      "primogems": 19,
+      "adventure_xp": 180,
+      "image_url": "/images/genshin/escoffie.jpg",
+      "weight": 2
     },
     {
       "code": "fischl",
@@ -41,17 +131,257 @@
       "primogems": 8,
       "adventure_xp": 100,
       "image_url": "/images/genshin/fischl.jpg",
-      "weight": 14
+      "weight": 12
+    },
+    {
+      "code": "flins",
+      "name": "Флинс",
+      "rarity": "legendary",
+      "points": 10200,
+      "primogems": 19,
+      "adventure_xp": 185,
+      "image_url": "/images/genshin/flins.jpg",
+      "weight": 2
+    },
+    {
+      "code": "heizou",
+      "name": "Хэйдзо",
+      "rarity": "rare",
+      "points": 1800,
+      "primogems": 4,
+      "adventure_xp": 65,
+      "image_url": "/images/genshin/heidzo.jpg",
+      "weight": 18
+    },
+    {
+      "code": "aether",
+      "name": "Итэр",
+      "rarity": "legendary",
+      "points": 9600,
+      "primogems": 17,
+      "adventure_xp": 170,
+      "image_url": "/images/genshin/iter.jpg",
+      "weight": 2
+    },
+    {
+      "code": "itto",
+      "name": "Итто",
+      "rarity": "legendary",
+      "points": 9300,
+      "primogems": 17,
+      "adventure_xp": 165,
+      "image_url": "/images/genshin/itto.jpg",
+      "weight": 2
+    },
+    {
+      "code": "kaveh",
+      "name": "Кавех",
+      "rarity": "rare",
+      "points": 1600,
+      "primogems": 4,
+      "adventure_xp": 60,
+      "image_url": "/images/genshin/kaveh.jpg",
+      "weight": 16
+    },
+    {
+      "code": "kaeya",
+      "name": "Кэйа",
+      "rarity": "common",
+      "points": 900,
+      "primogems": 2,
+      "adventure_xp": 45,
+      "image_url": "/images/genshin/keya.jpg",
+      "weight": 28
+    },
+    {
+      "code": "lyney",
+      "name": "Лини",
+      "rarity": "legendary",
+      "points": 9200,
+      "primogems": 17,
+      "adventure_xp": 165,
+      "image_url": "/images/genshin/lini.jpg",
+      "weight": 2
+    },
+    {
+      "code": "lumine",
+      "name": "Люмин",
+      "rarity": "legendary",
+      "points": 9600,
+      "primogems": 17,
+      "adventure_xp": 170,
+      "image_url": "/images/genshin/lumen.jpg",
+      "weight": 2
+    },
+    {
+      "code": "mavuika",
+      "name": "Мавуика",
+      "rarity": "legendary",
+      "points": 11800,
+      "primogems": 22,
+      "adventure_xp": 205,
+      "image_url": "/images/genshin/mavuika.jpg",
+      "weight": 1
+    },
+    {
+      "code": "yumemizuki_mizuki",
+      "name": "Мидзуки",
+      "rarity": "legendary",
+      "points": 10100,
+      "primogems": 19,
+      "adventure_xp": 180,
+      "image_url": "/images/genshin/midzuki.jpg",
+      "weight": 2
     },
     {
       "code": "nahida",
       "name": "Нахида",
       "rarity": "legendary",
-      "points": 10000,
-      "primogems": 20,
-      "adventure_xp": 180,
+      "points": 11700,
+      "primogems": 22,
+      "adventure_xp": 200,
       "image_url": "/images/genshin/nahida.jpg",
-      "weight": 4
+      "weight": 1
+    },
+    {
+      "code": "nefer",
+      "name": "Нефер",
+      "rarity": "legendary",
+      "points": 10600,
+      "primogems": 20,
+      "adventure_xp": 185,
+      "image_url": "/images/genshin/nefer.jpg",
+      "weight": 2
+    },
+    {
+      "code": "neuvillette",
+      "name": "Нёвиллет",
+      "rarity": "legendary",
+      "points": 11900,
+      "primogems": 23,
+      "adventure_xp": 210,
+      "image_url": "/images/genshin/nevelett.jpg",
+      "weight": 1
+    },
+    {
+      "code": "nilou",
+      "name": "Нилу",
+      "rarity": "legendary",
+      "points": 9100,
+      "primogems": 16,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/nilou.jpg",
+      "weight": 2
+    },
+    {
+      "code": "noelle",
+      "name": "Ноэлль",
+      "rarity": "rare",
+      "points": 2100,
+      "primogems": 5,
+      "adventure_xp": 75,
+      "image_url": "/images/genshin/noelle.jpg",
+      "weight": 22
+    },
+    {
+      "code": "ororon",
+      "name": "Оророн",
+      "rarity": "epic",
+      "points": 5000,
+      "primogems": 10,
+      "adventure_xp": 120,
+      "image_url": "/images/genshin/ororon.jpg",
+      "weight": 10
+    },
+    {
+      "code": "wriothesley",
+      "name": "Ризли",
+      "rarity": "legendary",
+      "points": 10700,
+      "primogems": 20,
+      "adventure_xp": 190,
+      "image_url": "/images/genshin/rizli.jpg",
+      "weight": 2
+    },
+    {
+      "code": "cyno",
+      "name": "Сайно",
+      "rarity": "legendary",
+      "points": 10500,
+      "primogems": 19,
+      "adventure_xp": 185,
+      "image_url": "/images/genshin/saino.jpg",
+      "weight": 2
+    },
+    {
+      "code": "sayu",
+      "name": "Саю",
+      "rarity": "common",
+      "points": 1000,
+      "primogems": 3,
+      "adventure_xp": 50,
+      "image_url": "/images/genshin/sayu.jpg",
+      "weight": 24
+    },
+    {
+      "code": "charlotte",
+      "name": "Шарлотта",
+      "rarity": "rare",
+      "points": 1700,
+      "primogems": 4,
+      "adventure_xp": 60,
+      "image_url": "/images/genshin/sharlotta.jpg",
+      "weight": 18
+    },
+    {
+      "code": "tartaglia",
+      "name": "Тарталья",
+      "rarity": "legendary",
+      "points": 9500,
+      "primogems": 18,
+      "adventure_xp": 170,
+      "image_url": "/images/genshin/tartalia.jpg",
+      "weight": 2
+    },
+    {
+      "code": "varesa",
+      "name": "Вареса",
+      "rarity": "legendary",
+      "points": 10200,
+      "primogems": 19,
+      "adventure_xp": 180,
+      "image_url": "/images/genshin/varesa.jpg",
+      "weight": 2
+    },
+    {
+      "code": "venti",
+      "name": "Венти",
+      "rarity": "legendary",
+      "points": 11600,
+      "primogems": 21,
+      "adventure_xp": 200,
+      "image_url": "/images/genshin/venti.jpg",
+      "weight": 1
+    },
+    {
+      "code": "yae_miko",
+      "name": "Яэ Мико",
+      "rarity": "legendary",
+      "points": 9900,
+      "primogems": 18,
+      "adventure_xp": 175,
+      "image_url": "/images/genshin/yae_miko.jpg",
+      "weight": 2
+    },
+    {
+      "code": "jahoda",
+      "name": "Ягода",
+      "rarity": "rare",
+      "points": 1400,
+      "primogems": 3,
+      "adventure_xp": 55,
+      "image_url": "/images/genshin/yagoda.jpg",
+      "weight": 14
     }
   ]
 }

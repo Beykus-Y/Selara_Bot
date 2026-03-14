@@ -58,6 +58,13 @@ class GachaProfileResponse(BaseModel):
     recent_pulls: list[GachaHistoryEntryPayload]
 
 
+class GachaCooldownResetResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    message: str
+
+
 class GachaClientError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -88,6 +95,24 @@ class HttpGachaClient:
             params={"banner": banner},
         )
         return GachaProfileResponse.model_validate(payload)
+
+    async def reset_cooldown(
+        self,
+        *,
+        user_id: int,
+        banner: str,
+        admin_token: str,
+    ) -> GachaCooldownResetResponse:
+        payload = await self._request(
+            "POST",
+            "/v1/gacha/admin/cooldowns/reset",
+            headers={"X-Gacha-Admin-Token": admin_token},
+            json={
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        return GachaCooldownResetResponse.model_validate(payload)
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         try:

@@ -209,7 +209,54 @@ async def test_duplicate_card_grants_less_adventure_xp() -> None:
     assert second.is_new is False
     assert second.copies_owned == 2
     assert second.adventure_xp_gained == 60
-    assert "дубликат" in second.message.lower()
+    assert second.card is not None
+    assert second.card.name == "Тест (С1)"
+    assert "созвездие" in second.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_genshin_post_c6_duplicate_doubles_primogems() -> None:
+    repo = FakeGachaRepository()
+    now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+    card = GachaCard(
+        code="fixed",
+        banner="genshin",
+        name="Фишль",
+        rarity=CardRarity.epic,
+        points=1000,
+        primogems=5,
+        adventure_xp=120,
+        image_url="https://example.com/test.png",
+        weight=1,
+    )
+
+    class FixedRandom:
+        def choices(self, population, weights=None, k=1):
+            return [card]
+
+    service = GachaService(repo, rng=FixedRandom())
+
+    results = []
+    for offset in range(8):
+        results.append(
+            await service.pull(
+                user_id=919,
+                username="const",
+                banner="genshin",
+                now=now + timedelta(hours=4 * offset),
+            )
+        )
+
+    assert results[0].card is not None
+    assert results[0].card.name == "Фишль"
+    assert results[1].card is not None
+    assert results[1].card.name == "Фишль (С1)"
+    assert results[6].card is not None
+    assert results[6].card.name == "Фишль (С6)"
+    assert results[7].card is not None
+    assert results[7].card.name == "Фишль (С6) дубликат"
+    assert results[7].card.primogems == 10
+    assert "дубликат" in results[7].message.lower()
 
 
 def test_history_payload_uses_rarity_labels() -> None:

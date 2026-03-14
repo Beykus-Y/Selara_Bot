@@ -34,6 +34,7 @@ from selara.application.use_cases.gacha import (
     GachaUseCaseError,
     get_profile as get_gacha_profile,
     pull_card as pull_gacha_card,
+    reset_cooldown as reset_gacha_cooldown,
 )
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
@@ -925,6 +926,75 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
         return
 
     await _answer_quiet(message, response.message, disable_web_page_preview=True)
+
+
+async def _resolve_gacha_skip_target(
+    message: Message,
+    activity_repo,
+    *,
+    target_username: str | None,
+) -> tuple[int | None, str | None]:
+    if message.from_user is None:
+        return None, "Не удалось определить отправителя команды."
+
+    if not target_username:
+        return message.from_user.id, None
+
+    if message.chat.type not in {"group", "supergroup"}:
+        return None, "Сброс кулдауна по @username работает только в группе."
+
+    snapshot = await activity_repo.find_shared_group_user_by_username(
+        sender_user_id=message.from_user.id,
+        username=target_username,
+    )
+    if snapshot is None:
+        return None, f"Не удалось найти пользователя {target_username}."
+
+    return snapshot.telegram_user_id, None
+
+
+async def _send_gacha_skip(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    *,
+    banner: str,
+    target_username: str | None,
+) -> None:
+    if message.from_user is None:
+        return
+
+    admin_user_id = settings.gacha_admin_user_id
+    if admin_user_id is None:
+        await _answer_quiet(message, "Команда недоступна: не настроен GACHA_ADMIN_USER_ID.")
+        return
+    if message.from_user.id != admin_user_id:
+        await _answer_quiet(message, "Недостаточно прав для сброса кулдауна гачи.")
+        return
+
+    target_user_id, error = await _resolve_gacha_skip_target(
+        message,
+        activity_repo,
+        target_username=target_username,
+    )
+    if error is not None:
+        await _answer_quiet(message, error)
+        return
+    if target_user_id is None:
+        await _answer_quiet(message, "Не удалось определить пользователя для сброса кулдауна.")
+        return
+
+    try:
+        response = await reset_gacha_cooldown(
+            settings,
+            user_id=target_user_id,
+            banner=banner,
+        )
+    except GachaUseCaseError as exc:
+        await _answer_quiet(message, exc.message)
+        return
+
+    await _answer_quiet(message, response.message)
 
 
 def _command_object_from_args(raw_args: str | None):
@@ -2909,6 +2979,16 @@ async def text_commands_handler(
 
     if intent.name == "gacha_profile":
         await _send_gacha_profile(message, settings, banner=str(intent.args.get("banner", "")))
+        return
+
+    if intent.name == "gacha_skip":
+        await _send_gacha_skip(
+            message,
+            activity_repo,
+            settings,
+            banner=str(intent.args.get("banner", "")),
+            target_username=intent.args.get("target_username"),
+        )
         return
 
     if intent.name == "start":

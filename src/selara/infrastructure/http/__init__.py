@@ -1,5 +1,6 @@
 from selara.infrastructure.http.gacha_client import (
     GachaClientError,
+    GachaCooldownResetResponse,
     GachaProfileResponse,
     GachaPullResponse,
     HttpGachaClient,
@@ -7,6 +8,7 @@ from selara.infrastructure.http.gacha_client import (
 
 __all__ = [
     "GachaClientError",
+    "GachaCooldownResetResponse",
     "GachaProfileResponse",
     "GachaPullResponse",
     "HttpGachaClient",

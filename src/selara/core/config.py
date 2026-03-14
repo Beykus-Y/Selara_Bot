@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     gacha_genshin_base_url: str = Field(default="", validation_alias="GACHA_GENSHIN_BASE_URL")
     gacha_hsr_base_url: str = Field(default="", validation_alias="GACHA_HSR_BASE_URL")
     gacha_timeout_seconds: float = Field(default=10.0, validation_alias="GACHA_TIMEOUT_SECONDS")
+    gacha_admin_user_id: int | None = Field(default=None, validation_alias="GACHA_ADMIN_USER_ID")
+    gacha_admin_token: str = Field(default="", validation_alias="GACHA_ADMIN_TOKEN")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")

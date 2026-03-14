@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import BigInteger, DateTime, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -13,7 +13,7 @@ class Base(DeclarativeBase):
 class PlayerModel(Base):
     __tablename__ = "gacha_players"
 
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     adventure_rank: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     adventure_xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -25,7 +25,7 @@ class PlayerModel(Base):
 class PlayerBannerCooldownModel(Base):
     __tablename__ = "gacha_player_banner_cooldowns"
 
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     banner: Mapped[str] = mapped_column(String(32), primary_key=True)
     next_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -34,7 +34,7 @@ class PullHistoryModel(Base):
     __tablename__ = "gacha_pull_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     banner: Mapped[str] = mapped_column(String(32), nullable=False)
     character_code: Mapped[str] = mapped_column(String(64), nullable=False)
     character_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -49,7 +49,7 @@ class PullHistoryModel(Base):
 class PlayerCardCollectionModel(Base):
     __tablename__ = "gacha_player_cards"
 
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     banner: Mapped[str] = mapped_column(String(32), primary_key=True)
     character_code: Mapped[str] = mapped_column(String(64), primary_key=True)
     copies_owned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

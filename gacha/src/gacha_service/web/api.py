@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +77,18 @@ class HistoryResponse(BaseModel):
     banner: str
     user_id: int
     entries: list[HistoryEntryPayload]
+
+
+class CooldownResetRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+    banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
+
+
+class CooldownResetResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    message: str
 
 
 def _to_player_payload(*, player, user_id: int) -> PlayerPayload:
@@ -258,6 +270,37 @@ def build_router(session_factory):
                 )
                 for entry in recent_pulls
             ],
+        )
+
+    @router.post("/admin/cooldowns/reset", response_model=CooldownResetResponse)
+    async def reset_cooldown(
+        payload: CooldownResetRequest,
+        x_gacha_admin_token: str | None = Header(default=None, alias="X-Gacha-Admin-Token"),
+        session: AsyncSession = Depends(get_session),
+    ) -> CooldownResetResponse:
+        expected_token = settings.admin_token.strip()
+        if not expected_token:
+            raise HTTPException(status_code=503, detail="Admin reset token is not configured on gacha server.")
+        if x_gacha_admin_token != expected_token:
+            raise HTTPException(status_code=403, detail="Invalid admin token.")
+
+        repo = GachaRepository(session)
+        try:
+            banner_config = get_banner_config(payload.banner)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        reset = await repo.reset_banner_cooldown(user_id=payload.user_id, banner=payload.banner)
+        if reset:
+            message = f"Кулдаун баннера {banner_config.title} сброшен для пользователя {payload.user_id}."
+        else:
+            message = f"Для пользователя {payload.user_id} нет активного кулдауна на баннере {banner_config.title}."
+
+        return CooldownResetResponse(
+            status="ok",
+            banner=payload.banner,
+            user_id=payload.user_id,
+            message=message,
         )
 
     return router
