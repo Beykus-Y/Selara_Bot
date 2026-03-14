@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <nav class="breadcrumb">
+          <a href="/app/admin">Админка</a>
+          <span class="breadcrumb-sep">/</span>
+          <span>{{ table_title }}</span>
+        </nav>
+        <h2>{{ table_title }}</h2>
+        <p class="panel-subtitle">Таблица: <code>{{ table_name }}</code> • Записей: {{ total }}</p>
+      </div>
+    </div>
+
+    <div class="admin-table-controls">
+      <form class="admin-search-form" method="get" action="/app/admin/table/{{ table_name }}" style="flex-wrap: wrap; gap: 8px;">
+        {% for col in columns %}
+          <input
+            type="text"
+            name="{{ col }}"
+            placeholder="{{ col }}"
+            value="{{ filters_input.get(col, '') }}"
+            class="admin-search-input"
+            style="min-width: 120px; flex: 1;"
+          >
+        {% endfor %}
+        <button type="submit" class="button primary">Найти</button>
+        {% if filters_input %}
+          <a href="/app/admin/table/{{ table_name }}" class="button ghost">Сбросить</a>
+        {% endif %}
+      </form>
+    </div>
+
+    <div class="table-wrapper">
+      <table class="admin-data-table">
+        <thead>
+          <tr>
+            {% for col in columns %}
+              <th>{{ col }}</th>
+            {% endfor %}
+            <th class="admin-actions-col">Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              {% for col in columns %}
+                <td>
+                  {% set value = row|attr(col) %}
+                  {% if value is none %}
+                    <span class="text-muted">NULL</span>
+                  {% elif value is sameas true %}
+                    <span class="badge badge-ok">true</span>
+                  {% elif value is sameas false %}
+                    <span class="badge badge-error">false</span>
+                  {% elif col.endswith('_at') and value %}
+                    {{ value.strftime('%Y-%m-%d %H:%M:%S') }} UTC
+                  {% elif value is string and value|length > 50 %}
+                    <span title="{{ value }}">{{ value[:50] }}…</span>
+                  {% else %}
+                    {{ value }}
+                  {% endif %}
+                  {% set ref_label = reference_labels.get(col, {}).get(value) %}
+                  {% if ref_label %}
+                    <div class="text-muted">{{ ref_label }}</div>
+                  {% endif %}
+                </td>
+              {% endfor %}
+              <td class="admin-actions-col">
+                <span class="admin-row-actions">
+                  <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?id={{ row.id|default('') }}">✏️</a>
+                  <button class="button button-small button-danger" data-delete-url="/app/admin/table/{{ table_name }}/delete?id={{ row.id|default('') }}">🗑️</button>
+                </span>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="{{ columns|length + 1 }}" class="text-center text-muted">
+                Нет записей
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if total > limit %}
+      <div class="admin-pagination">
+        {% set filter_params = namespace(str='') %}
+        {% for key, value in filters_input.items() %}
+          {% set filter_params.str = filter_params.str + '&' + key + '=' + value %}
+        {% endfor %}
+        
+        {% if page > 1 %}
+          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page - 1 }}{{ filter_params.str }}">← Назад</a>
+        {% endif %}
+
+        <span class="pagination-info">
+          Страница {{ page }} из {{ ((total + limit - 1) / limit)|int }}
+        </span>
+
+        {% if page * limit < total %}
+          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page + 1 }}{{ filter_params.str }}">Вперёд →</a>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <div class="admin-back-link">
+      <a href="/app/admin" class="button ghost">← К списку таблиц</a>
+    </div>
+  </div>
+
+  <dialog class="confirm-dialog" id="delete-dialog">
+    <form method="post" class="confirm-dialog-form" id="delete-form">
+      <input type="hidden" name="id" value="">
+      <h3>Подтверждение удаления</h3>
+      <p>Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
+      <div class="confirm-dialog-actions">
+        <button type="button" class="button ghost" onclick="document.getElementById('delete-dialog').close()">Отмена</button>
+        <button type="submit" class="button danger">Удалить</button>
+      </div>
+    </form>
+  </dialog>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    document.querySelectorAll('[data-delete-url]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const url = btn.getAttribute('data-delete-url');
+        const dialog = document.getElementById('delete-dialog');
+        const form = document.getElementById('delete-form');
+        const urlParams = new URLSearchParams(url.split('?')[1]);
+        const id = urlParams.get('id');
+        form.action = url.split('?')[0];
+        form.querySelector('input[name="id"]').value = id;
+        dialog.showModal();
+      });
+    });
+  </script>
+{% endblock %}

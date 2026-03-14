@@ -1400,6 +1400,21 @@ Index("idx_web_sessions_user_created", WebSessionModel.user_id, WebSessionModel.
 Index("idx_web_sessions_expires", WebSessionModel.expires_at, WebSessionModel.revoked_at)
 
 
+class AdminSessionModel(Base):
+    __tablename__ = "admin_sessions"
+
+    session_token: Mapped[str] = mapped_column(String(128), primary_key=True)
+    admin_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_admin_sessions_user_created", AdminSessionModel.admin_user_id, AdminSessionModel.created_at)
+Index("idx_admin_sessions_expires", AdminSessionModel.expires_at, AdminSessionModel.revoked_at)
+
+
 class UserChatAchievementModel(Base):
     __tablename__ = "user_chat_achievement"
 

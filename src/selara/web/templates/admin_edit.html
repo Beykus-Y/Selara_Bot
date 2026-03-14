@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <nav class="breadcrumb">
+          <a href="/app/admin">Админка</a>
+          <span class="breadcrumb-sep">/</span>
+          <a href="/app/admin/table/{{ table_name }}">{{ table_title }}</a>
+          <span class="breadcrumb-sep">/</span>
+          <span>Редактирование</span>
+        </nav>
+        <h2>Редактирование записи</h2>
+        <p class="panel-subtitle">Таблица: <code>{{ table_name }}</code> • ID: <code>{{ record_id }}</code></p>
+      </div>
+    </div>
+
+    <form class="admin-edit-form" method="post" action="/app/admin/table/{{ table_name }}/update">
+      <input type="hidden" name="id" value="{{ record_id }}">
+      
+      <div class="admin-edit-fields">
+        {% for col_name, value in columns %}
+          <div class="admin-edit-field">
+            <label>
+              <span class="field-label">{{ col_name }}</span>
+              {% if col_name.endswith('_at') and value %}
+                <span class="text-muted">UTC</span>
+                <input
+                  type="datetime-local"
+                  name="{{ col_name }}"
+                  value="{{ value.strftime('%Y-%m-%dT%H:%M:%S') }}"
+                  step="1"
+                  class="admin-field-input"
+                >
+              {% elif value is sameas true or value is sameas false %}
+                <select name="{{ col_name }}" class="admin-field-input">
+                  <option value="true" {% if value is sameas true %}selected{% endif %}>true</option>
+                  <option value="false" {% if value is sameas false %}selected{% endif %}>false</option>
+                </select>
+              {% elif value is string and value|length > 100 %}
+                <textarea
+                  name="{{ col_name }}"
+                  class="admin-field-input admin-textarea"
+                  rows="5"
+                >{{ value }}</textarea>
+              {% else %}
+                <input
+                  type="text"
+                  name="{{ col_name }}"
+                  value="{{ value if value is not none else '' }}"
+                  class="admin-field-input"
+                  {% if col_name == 'id' %}readonly{% endif %}
+                >
+              {% endif %}
+              {% set ref_label = reference_labels.get(col_name, {}).get(value) %}
+              {% if ref_label %}
+                <span class="text-muted">{{ ref_label }}</span>
+              {% endif %}
+            </label>
+          </div>
+        {% endfor %}
+      </div>
+
+      <div class="admin-edit-actions">
+        <a href="/app/admin/table/{{ table_name }}" class="button ghost">Отмена</a>
+        <button type="submit" class="button primary">Сохранить</button>
+      </div>
+    </form>
+
+    <div class="admin-back-link">
+      <a href="/app/admin/table/{{ table_name }}" class="button ghost">← Назад к таблице</a>
+    </div>
+  </div>
+{% endblock %}

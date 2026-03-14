@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero login-hero">
+    <div class="hero-copy login-copy">
+      <span class="eyebrow">Админ-панель Selara</span>
+      <h1 class="login-title">Вход для администратора</h1>
+      <p class="lead login-lead">
+        Доступ к панели управления ботом и базой данных.
+        Только для авторизованных администраторов.
+      </p>
+    </div>
+
+    <div class="login-side">
+      <article class="login-side-card">
+        <span class="landing-card-kicker">безопасность</span>
+        <strong>Отдельная авторизация</strong>
+        <p>Админ-панель использует отдельную сессию, не связанную с обычной веб-авторизацией.</p>
+      </article>
+
+      <article class="login-side-card">
+        <span class="landing-card-kicker">доступ</span>
+        <strong>Только по прямой ссылке</strong>
+        <p>Ссылка на админку не публикуется в интерфейсе. Доступ только по прямому URL.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="grid two-col login-detail-grid">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Вход в админку</h2>
+          <p class="panel-subtitle">Введите пароль администратора для доступа к панели управления.</p>
+        </div>
+      </div>
+      <form class="stack-form" method="post" action="/app/admin/login">
+        <label class="field">
+          <span>Пароль администратора</span>
+          <input
+            class="code-input"
+            type="password"
+            name="password"
+            autocomplete="current-password"
+            autofocus
+            required
+          >
+        </label>
+        <button type="submit" class="button primary">Войти</button>
+      </form>
+      <p class="helper-text">
+        Пароль хранится в переменной окружения <code>ADMIN_PASSWORD</code>.
+      </p>
+    </article>
+
+    <article class="panel panel-accent login-form-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Возможности админки</h2>
+          <p class="panel-subtitle">Просмотр и редактирование данных бота.</p>
+        </div>
+      </div>
+      <ul class="feature-list">
+        <li>📊 <strong>Просмотр таблиц БД</strong> — все основные таблицы бота</li>
+        <li>🔍 <strong>Поиск и фильтрация</strong> — быстрый поиск по записям</li>
+        <li>✏️ <strong>Редактирование</strong> — ручное исправление данных</li>
+        <li>🗑️ <strong>Удаление</strong> — удаление проблемных записей</li>
+        <li>📝 <strong>Аудит действий</strong> — лог всех изменений</li>
+      </ul>
+    </article>
+  </section>
+{% endblock %}

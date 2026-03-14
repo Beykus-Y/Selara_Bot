@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, String, Text, Integer, BigInteger, SmallInteger, Boolean, DateTime, Date
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -43,9 +43,10 @@ from selara.core.web_auth import (
 from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.domain.economy_entities import FarmState
 from selara.domain.value_objects import display_name_from_parts
-from selara.infrastructure.db.models import EconomyAccountModel, UserChatActivityModel, UserModel
+from selara.infrastructure.db.models import ChatModel, EconomyAccountModel, UserChatActivityModel, UserModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
+from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.presentation.auth import has_permission
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
@@ -6417,6 +6418,543 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     text=message,
                 )
             )
+
+    # ========== ADMIN PANEL ROUTES ==========
+
+    ADMIN_TABLES = [
+        ("users", "Пользователи"),
+        ("chats", "Чаты"),
+        ("user_chat_activity", "Активность пользователей"),
+        ("user_chat_awards", "Награды"),
+        ("user_chat_bot_role", "Роли бота"),
+        ("chat_settings", "Настройки чатов"),
+        ("economy_accounts", "Счета экономики"),
+        ("economy_inventory", "Инвентарь"),
+        ("economy_market_listings", "Рыночные лоты"),
+        ("pairs", "Пары"),
+        ("marriages", "Браки"),
+        ("chat_audit_logs", "Аудит лог"),
+        ("web_sessions", "Веб-сессии"),
+        ("admin_sessions", "Админ-сессии"),
+    ]
+
+    async def _load_admin_from_request(session: AsyncSession, request: Request, touch: bool) -> int | None:
+        """Загружает admin_user_id из сессии админа."""
+        token = request.cookies.get(settings.admin_session_cookie_name)
+        if not token:
+            return None
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        return await auth_repo.get_admin_by_session(
+            session_token=token,
+            now=_now_utc(),
+            touch=touch,
+        )
+
+    def _admin_auth_required(user_id: int | None) -> bool:
+        """Проверяет, что пользователь — админ."""
+        if user_id is None:
+            return False
+        if settings.admin_user_id is None:
+            return False
+        return user_id == settings.admin_user_id
+
+    _admin_invalid_form_value = object()
+
+    def _load_admin_model_class(table_name: str):
+        from selara.infrastructure.db.models import Base
+
+        for mapper in Base.registry.mappers:
+            if mapper.class_.__tablename__ == table_name:
+                return mapper.class_
+        return None
+
+    def _admin_primary_key_column(model_class):
+        return next(iter(model_class.__table__.primary_key.columns))
+
+    def _admin_is_user_reference_column(column_name: str) -> bool:
+        return column_name in {"telegram_user_id", "user_low_id", "user_high_id", "user_id"} or column_name.endswith(
+            "_user_id"
+        )
+
+    def _admin_is_chat_reference_column(column_name: str) -> bool:
+        return column_name in {"telegram_chat_id", "chat_id"} or column_name.endswith("_chat_id")
+
+    def _admin_reference_id(raw_value: object) -> int | None:
+        if raw_value is None or isinstance(raw_value, bool):
+            return None
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, str):
+            try:
+                return int(raw_value.strip())
+            except ValueError:
+                return None
+        return None
+
+    def _admin_user_reference_label(row: UserModel) -> str:
+        return display_name_from_parts(
+            user_id=int(row.telegram_user_id),
+            username=row.username,
+            first_name=row.first_name,
+            last_name=row.last_name,
+        )
+
+    def _admin_chat_reference_label(row: ChatModel) -> str:
+        title = (row.title or "").strip()
+        if title:
+            return title
+        return f"{row.type}:{int(row.telegram_chat_id)}"
+
+    async def _admin_reference_labels(
+        session: AsyncSession,
+        *,
+        column_values: list[tuple[str, object]],
+    ) -> dict[str, dict[object, str]]:
+        user_ids: set[int] = set()
+        chat_ids: set[int] = set()
+        for column_name, raw_value in column_values:
+            ref_id = _admin_reference_id(raw_value)
+            if ref_id is None:
+                continue
+            if _admin_is_user_reference_column(column_name):
+                user_ids.add(ref_id)
+            elif _admin_is_chat_reference_column(column_name):
+                chat_ids.add(ref_id)
+
+        user_labels: dict[int, str] = {}
+        if user_ids:
+            user_rows = (
+                await session.execute(select(UserModel).where(UserModel.telegram_user_id.in_(sorted(user_ids))))
+            ).scalars().all()
+            user_labels = {int(row.telegram_user_id): _admin_user_reference_label(row) for row in user_rows}
+
+        chat_labels: dict[int, str] = {}
+        if chat_ids:
+            chat_rows = (
+                await session.execute(select(ChatModel).where(ChatModel.telegram_chat_id.in_(sorted(chat_ids))))
+            ).scalars().all()
+            chat_labels = {int(row.telegram_chat_id): _admin_chat_reference_label(row) for row in chat_rows}
+
+        labels: dict[str, dict[object, str]] = {}
+        for column_name, raw_value in column_values:
+            ref_id = _admin_reference_id(raw_value)
+            if ref_id is None:
+                continue
+            label: str | None = None
+            if _admin_is_user_reference_column(column_name):
+                label = user_labels.get(ref_id, "не найден в users")
+            elif _admin_is_chat_reference_column(column_name):
+                label = chat_labels.get(ref_id, "не найден в chats")
+            if label is None:
+                continue
+            labels.setdefault(column_name, {})[raw_value] = label
+        return labels
+
+    def _coerce_admin_form_value(column, raw_value: str):
+        if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
+            try:
+                return int(raw_value) if raw_value else None
+            except ValueError:
+                return None
+        if isinstance(column.type, Boolean):
+            return raw_value.lower() in ("true", "1", "yes") if raw_value else False
+        if isinstance(column.type, DateTime):
+            if not raw_value:
+                return None
+            try:
+                value = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            except ValueError:
+                return _admin_invalid_form_value
+            if value.tzinfo is None:
+                return value.replace(tzinfo=_UTC)
+            return value.astimezone(_UTC)
+        if isinstance(column.type, Date):
+            if not raw_value:
+                return None
+            try:
+                return datetime.strptime(raw_value, "%Y-%m-%d").date()
+            except ValueError:
+                return _admin_invalid_form_value
+        return raw_value
+
+    def _admin_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
+        return {
+            "top_links": _top_links(
+                ("/app/admin", "Админка", "subtle"),
+            ),
+            "show_logout": True,
+            "flash": flash,
+            "error": error,
+        }
+
+    @app.get("/app/admin", response_class=HTMLResponse)
+    async def admin_page(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+
+        return _render_template(
+            "admin.html",
+            page_title="Selara • Админ-панель",
+            page_name="admin",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"),
+                error=request.query_params.get("error"),
+            ),
+            tables=ADMIN_TABLES,
+            admin_user_id=admin_user_id,
+        )
+
+    @app.get("/app/admin/login", response_class=HTMLResponse)
+    async def admin_login_page(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=False)
+            await session.commit()
+
+        if _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin")
+
+        return _render_template(
+            "admin_login.html",
+            page_title="Selara • Вход админа",
+            page_name="admin_login",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"),
+                error=request.query_params.get("error"),
+            ),
+        )
+
+    @app.post("/app/admin/login")
+    async def admin_login_submit(request: Request):
+        now = _now_utc()
+        prefers_json = _prefers_json(request)
+        form = await _parse_form(request)
+        password = form.get("password", "")
+
+        # Проверка пароля
+        if not settings.admin_password or password != settings.admin_password:
+            redirect_path = _with_message("/app/admin/login", key="error", text="Неверный пароль.")
+            if prefers_json:
+                return _json_result(ok=False, message="Неверный пароль.", status_code=401, redirect=redirect_path)
+            return _redirect(redirect_path)
+
+        # Проверка admin_user_id
+        if settings.admin_user_id is None:
+            redirect_path = _with_message("/app/admin/login", key="error", text="ADMIN_USER_ID не настроен.")
+            if prefers_json:
+                return _json_result(ok=False, message="ADMIN_USER_ID не настроен.", status_code=500, redirect=redirect_path)
+            return _redirect(redirect_path)
+
+        async with session_factory() as session:
+            auth_repo = SqlAlchemyAdminAuthRepository(session)
+            await auth_repo.purge_expired_state(now=now)
+
+            token = generate_session_token()
+            await auth_repo.create_session(
+                admin_user_id=settings.admin_user_id,
+                session_token=token,
+                expires_at=now + timedelta(hours=settings.admin_session_ttl_hours),
+                now=now,
+            )
+            await session.commit()
+
+        redirect_path = _with_message("/app/admin", key="flash", text="Вход выполнен.")
+        response = (
+            _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect=redirect_path)
+            if prefers_json
+            else _redirect(redirect_path)
+        )
+        response.set_cookie(
+            settings.admin_session_cookie_name,
+            token,
+            httponly=True,
+            secure=settings.admin_session_cookie_secure,
+            samesite="lax",
+            max_age=settings.admin_session_ttl_hours * 3600,
+        )
+        return response
+
+    @app.post("/app/admin/logout")
+    async def admin_logout(request: Request):
+        prefers_json = _prefers_json(request)
+        token = request.cookies.get(settings.admin_session_cookie_name)
+        if token:
+            async with session_factory() as session:
+                auth_repo = SqlAlchemyAdminAuthRepository(session)
+                await auth_repo.revoke_session(session_token=token, now=_now_utc())
+                await session.commit()
+
+        redirect_path = _with_message("/app/admin/login", key="flash", text="Сессия завершена.")
+        response = (
+            _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect=redirect_path)
+            if prefers_json
+            else _redirect(redirect_path)
+        )
+        response.delete_cookie(settings.admin_session_cookie_name)
+        return response
+
+    @app.get("/app/admin/table/{table_name}", response_class=HTMLResponse)
+    async def admin_table_page(request: Request, table_name: str):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+
+        # Проверка имени таблицы
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
+
+        page = int(request.query_params.get("page", 1))
+        limit = 50
+        
+        # Собираем все фильтры из query params
+        filters_input = {}
+        for key, value in request.query_params.items():
+            if key not in ("page", "limit") and value:
+                filters_input[key] = value
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
+
+            columns = [col.name for col in model_class.__table__.columns]
+            filters = []
+            for col_name, col_value in filters_input.items():
+                if col_name not in columns:
+                    continue
+                col = model_class.__table__.columns[col_name]
+                if isinstance(col.type, (String, Text)):
+                    filters.append(col.ilike(f"%{col_value}%"))
+                elif isinstance(col.type, (Integer, BigInteger, SmallInteger)):
+                    try:
+                        filters.append(col == int(col_value))
+                    except ValueError:
+                        pass
+                elif isinstance(col.type, DateTime):
+                    try:
+                        search_dt = datetime.fromisoformat(col_value.replace("Z", "+00:00"))
+                        filters.append(col == search_dt)
+                    except ValueError:
+                        pass
+                elif isinstance(col.type, Date):
+                    try:
+                        filters.append(col == datetime.strptime(col_value, "%Y-%m-%d").date())
+                    except ValueError:
+                        pass
+                elif isinstance(col.type, Boolean):
+                    if col_value.lower() in ("true", "1", "yes"):
+                        filters.append(col == True)
+                    elif col_value.lower() in ("false", "0", "no"):
+                        filters.append(col == False)
+            
+            if filters:
+                stmt = select(model_class).where(and_(*filters)).limit(limit).offset((page - 1) * limit)
+            else:
+                stmt = select(model_class).limit(limit).offset((page - 1) * limit)
+
+            rows = (await session.execute(stmt)).scalars().all()
+
+            # Получаем общее количество
+            count_stmt = select(func.count()).select_from(model_class)
+            if filters:
+                count_stmt = select(func.count()).select_from(model_class).where(and_(*filters))
+            total = (await session.execute(count_stmt)).scalar() or 0
+            reference_labels = await _admin_reference_labels(
+                session,
+                column_values=[
+                    (col.name, getattr(row, col.name, None))
+                    for row in rows
+                    for col in model_class.__table__.columns
+                ],
+            )
+
+            await session.commit()
+
+        return _render_template(
+            "admin_table.html",
+            page_title=f"Selara • {table_name}",
+            page_name="admin_table",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"),
+                error=request.query_params.get("error"),
+            ),
+            table_name=table_name,
+            table_title=dict(ADMIN_TABLES).get(table_name, table_name),
+            columns=columns,
+            rows=rows,
+            page=page,
+            total=total,
+            limit=limit,
+            filters_input=filters_input,
+            reference_labels=reference_labels,
+        )
+
+    @app.get("/app/admin/table/{table_name}/edit")
+    async def admin_table_edit_page(request: Request, table_name: str):
+        """Страница редактирования записи."""
+        record_id = request.query_params.get("id", "")
+        if not record_id:
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
+
+            pk_column = _admin_primary_key_column(model_class)
+            try:
+                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
+                    record_id = int(record_id)
+            except ValueError:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+
+            # Получаем запись
+            row = await session.get(model_class, record_id)
+            if row is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
+
+            await session.commit()
+
+            # Получаем колонки и значения
+            columns = [(col.name, getattr(row, col.name, None)) for col in model_class.__table__.columns]
+            reference_labels = await _admin_reference_labels(session, column_values=columns)
+
+        return _render_template(
+            "admin_edit.html",
+            page_title=f"Selara • Редактирование {table_name}",
+            page_name="admin_edit",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"),
+                error=request.query_params.get("error"),
+            ),
+            table_name=table_name,
+            table_title=dict(ADMIN_TABLES).get(table_name, table_name),
+            record_id=record_id,
+            columns=columns,
+            reference_labels=reference_labels,
+        )
+
+    @app.post("/app/admin/table/{table_name}/update")
+    async def admin_table_update(request: Request, table_name: str):
+        """Обновление записи."""
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
+
+        form = await _parse_form(request)
+        record_id = form.get("id", "")
+
+        if not record_id:
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
+
+            pk_column = _admin_primary_key_column(model_class)
+            try:
+                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
+                    record_id = int(record_id)
+            except ValueError:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+
+            row = await session.get(model_class, record_id)
+            if row is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
+
+            # Обновляем поля (кроме id и первичных ключей)
+            updated_fields = []
+            for col in model_class.__table__.columns:
+                if col.primary_key:
+                    continue
+                if col.name in form:
+                    value = _coerce_admin_form_value(col, form[col.name])
+                    if value is _admin_invalid_form_value:
+                        continue
+                    setattr(row, col.name, value)
+                    updated_fields.append(col.name)
+
+            await session.commit()
+            
+            # Логирование действия
+            await log_chat_action(
+                SqlAlchemyActivityRepository(session),
+                chat_id=0,
+                chat_type="private",
+                chat_title="Admin Panel",
+                action_code="admin_record_updated",
+                description=f"Admin {admin_user_id} updated record {record_id} in {table_name}: {', '.join(updated_fields)}",
+                actor_user_id=admin_user_id,
+            )
+
+        return _redirect(_with_message(f"/app/admin/table/{table_name}", key="flash", text=f"Запись обновлена. Изменены поля: {', '.join(updated_fields)}"))
+
+    @app.post("/app/admin/table/{table_name}/delete")
+    async def admin_table_delete(request: Request, table_name: str):
+        """Удаление записи."""
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
+
+        form = await _parse_form(request)
+        record_id = form.get("id", "")
+
+        if not record_id:
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Не указан ID записи."))
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _redirect(_with_message("/app/admin", key="error", text="Таблица не найдена."))
+
+            pk_column = _admin_primary_key_column(model_class)
+            try:
+                if isinstance(pk_column.type, (Integer, BigInteger, SmallInteger)):
+                    record_id = int(record_id)
+            except ValueError:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Некорректный ID записи."))
+
+            row = await session.get(model_class, record_id)
+            if row is None:
+                return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
+
+            await session.delete(row)
+            await session.commit()
+            
+            # Логирование действия
+            await log_chat_action(
+                SqlAlchemyActivityRepository(session),
+                chat_id=0,
+                chat_type="private",
+                chat_title="Admin Panel",
+                action_code="admin_record_deleted",
+                description=f"Admin {admin_user_id} deleted record {record_id} from {table_name}",
+                actor_user_id=admin_user_id,
+            )
+
+        return _redirect(_with_message(f"/app/admin/table/{table_name}", key="flash", text="Запись удалена."))
 
     return app
 

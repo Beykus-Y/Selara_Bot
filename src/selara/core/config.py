@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
+    admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
+    admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
+    admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
+    admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
+    admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
     @property
     def supported_chat_types(self) -> set[str]:
         return {"private", "group", "supergroup"}

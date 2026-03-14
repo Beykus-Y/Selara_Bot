@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Админ-панель</h2>
+        <p class="panel-subtitle">Управление базой данных и просмотр состояния бота.</p>
+      </div>
+    </div>
+
+    <div class="admin-user-info">
+      <span class="badge badge-ok">Админ</span>
+      <span>User ID: <code>{{ admin_user_id }}</code></span>
+    </div>
+
+    <div class="admin-tables-grid">
+      {% for table_key, table_title in tables %}
+        <a class="admin-table-card" href="/app/admin/table/{{ table_key }}">
+          <span class="admin-table-icon">📊</span>
+          <div class="admin-table-info">
+            <strong>{{ table_title }}</strong>
+            <small>{{ table_key }}</small>
+          </div>
+          <span class="admin-table-arrow">→</span>
+        </a>
+      {% endfor %}
+    </div>
+
+    <div class="admin-actions">
+      <form method="post" action="/app/admin/logout" style="display: inline;">
+        <button type="submit" class="button danger">Выйти из админки</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}
