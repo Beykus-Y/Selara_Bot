@@ -126,6 +126,14 @@ def _build_proposal_keyboard(proposal_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _build_relationship_end_keyboard(*, action: str, owner_user_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подтвердить", callback_data=f"relend:confirm:{action}:{owner_user_id}")
+    builder.button(text="❌ Отмена", callback_data=f"relend:cancel:{action}:{owner_user_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 async def _safe_callback_answer(query: CallbackQuery, text: str | None = None, *, show_alert: bool = False) -> None:
     try:
         await query.answer(text=text, show_alert=show_alert)
@@ -229,6 +237,33 @@ def _proposal_kind_title(kind: str) -> str:
 
 def _relation_status_title(kind: str) -> str:
     return "Пара" if kind == "pair" else "Брак"
+
+
+async def _build_actor_mention(
+    activity_repo,
+    *,
+    chat_id: int,
+    telegram_user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    is_bot: bool,
+) -> str:
+    actor = await _build_actor_snapshot(
+        activity_repo,
+        chat_id=chat_id,
+        telegram_user_id=telegram_user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+        is_bot=is_bot,
+    )
+    return await _mention(activity_repo, chat_id=chat_id, user=actor, user_id=actor.telegram_user_id)
+
+
+async def _build_partner_mention(activity_repo, *, chat_id: int, partner_user_id: int) -> str:
+    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
+    return await _mention(activity_repo, chat_id=chat_id, user=partner, user_id=partner_user_id)
 
 
 def _build_relationship_action_keyboard(
@@ -652,6 +687,115 @@ async def marriages_command(message: Message, activity_repo) -> None:
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
+async def _request_breakup_confirmation(message: Message, activity_repo) -> None:
+    pair = await activity_repo.get_active_relationship(user_id=message.from_user.id, chat_id=message.chat.id)
+    if pair is None or pair.kind != "pair":
+        await message.answer("У вас нет активных отношений (пары).")
+        return
+
+    partner_user_id = _partner_id(pair, user_id=message.from_user.id)
+    actor_mention = await _build_actor_mention(
+        activity_repo,
+        chat_id=message.chat.id,
+        telegram_user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+    partner_mention = await _build_partner_mention(activity_repo, chat_id=message.chat.id, partner_user_id=partner_user_id)
+    await message.answer(
+        (
+            f"{actor_mention}, вы точно хотите завершить отношения с {partner_mention}?\n"
+            "Нужно отдельное подтверждение, чтобы не разорвать связь случайно."
+        ),
+        parse_mode="HTML",
+        reply_markup=_build_relationship_end_keyboard(action="breakup", owner_user_id=message.from_user.id),
+    )
+
+
+async def _request_divorce_confirmation(message: Message, activity_repo) -> None:
+    marriage = await activity_repo.get_active_marriage(user_id=message.from_user.id, chat_id=message.chat.id)
+    if marriage is None:
+        await message.answer("У вас нет активного брака.")
+        return
+
+    partner_user_id = marriage.user_high_id if marriage.user_low_id == message.from_user.id else marriage.user_low_id
+    actor_mention = await _build_actor_mention(
+        activity_repo,
+        chat_id=message.chat.id,
+        telegram_user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+    partner_mention = await _build_partner_mention(activity_repo, chat_id=message.chat.id, partner_user_id=partner_user_id)
+    await message.answer(
+        (
+            f"{actor_mention}, вы точно хотите развестись с {partner_mention}?\n"
+            "Нужно отдельное подтверждение, чтобы не расторгнуть брак случайно."
+        ),
+        parse_mode="HTML",
+        reply_markup=_build_relationship_end_keyboard(action="divorce", owner_user_id=message.from_user.id),
+    )
+
+
+async def _confirm_breakup(query: CallbackQuery, activity_repo) -> tuple[str, int | None]:
+    pair = await activity_repo.dissolve_pair(user_id=query.from_user.id, chat_id=query.message.chat.id)
+    if pair is None:
+        return "У вас уже нет активных отношений (пары).", None
+
+    partner_user_id = _partner_id(pair, user_id=query.from_user.id)
+    actor_mention = await _build_actor_mention(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        telegram_user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
+    partner_mention = await _build_partner_mention(activity_repo, chat_id=query.message.chat.id, partner_user_id=partner_user_id)
+    return f"{actor_mention} и {partner_mention} больше не в отношениях.", partner_user_id
+
+
+async def _confirm_divorce(query: CallbackQuery, activity_repo) -> tuple[str, int | None]:
+    marriage = await activity_repo.dissolve_marriage(user_id=query.from_user.id, chat_id=query.message.chat.id)
+    if marriage is None:
+        return "У вас уже нет активного брака.", None
+
+    partner_user_id = marriage.user_high_id if marriage.user_low_id == query.from_user.id else marriage.user_low_id
+    actor_mention = await _build_actor_mention(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        telegram_user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
+    partner_mention = await _build_partner_mention(activity_repo, chat_id=query.message.chat.id, partner_user_id=partner_user_id)
+
+    await activity_repo.remove_graph_relationship(
+        chat_id=query.message.chat.id,
+        user_a=query.from_user.id,
+        user_b=partner_user_id,
+        relation_type="spouse",
+    )
+    await log_chat_action(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+        action_code="marriage_divorce",
+        description=f"Брак расторгнут: {query.from_user.id} и {partner_user_id}.",
+        actor_user_id=query.from_user.id,
+        target_user_id=partner_user_id,
+    )
+    return f"{actor_mention} и {partner_mention} теперь не состоят в браке.", partner_user_id
+
+
 @router.message(Command("pair"))
 async def pair_command(message: Message, command: CommandObject, activity_repo) -> None:
     await _send_relationship_proposal(message, activity_repo=activity_repo, kind="pair", args=command.args)
@@ -669,25 +813,7 @@ async def breakup_command(message: Message, activity_repo) -> None:
     if message.chat.type not in {"group", "supergroup"}:
         await message.answer("Команда доступна в группе.")
         return
-
-    pair = await activity_repo.dissolve_pair(user_id=message.from_user.id, chat_id=message.chat.id)
-    if pair is None:
-        await message.answer("У вас нет активных отношений (пары).")
-        return
-
-    partner_user_id = pair.user_high_id if pair.user_low_id == message.from_user.id else pair.user_low_id
-    actor = UserSnapshot(
-        telegram_user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_bot=bool(message.from_user.is_bot),
-        chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
-    )
-    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
-    actor_mention = await _mention(activity_repo, chat_id=message.chat.id, user=actor, user_id=actor.telegram_user_id)
-    partner_mention = await _mention(activity_repo, chat_id=message.chat.id, user=partner, user_id=partner_user_id)
-    await message.answer(f"{actor_mention} и {partner_mention} больше не в отношениях.", parse_mode="HTML")
+    await _request_breakup_confirmation(message, activity_repo)
 
 
 @router.message(Command("love"))
@@ -737,45 +863,7 @@ async def divorce_command(message: Message, activity_repo) -> None:
     if message.chat.type not in {"group", "supergroup"}:
         await message.answer("Команда доступна в группе.")
         return
-
-    marriage = await activity_repo.dissolve_marriage(user_id=message.from_user.id, chat_id=message.chat.id)
-    if marriage is None:
-        await message.answer("У вас нет активного брака.")
-        return
-
-    partner_user_id = marriage.user_high_id if marriage.user_low_id == message.from_user.id else marriage.user_low_id
-    actor = UserSnapshot(
-        telegram_user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_bot=bool(message.from_user.is_bot),
-        chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=message.from_user.id),
-    )
-    partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
-    actor_mention = await _mention(activity_repo, chat_id=message.chat.id, user=actor, user_id=actor.telegram_user_id)
-    partner_mention = await _mention(activity_repo, chat_id=message.chat.id, user=partner, user_id=partner_user_id)
-
-    await message.answer(
-        f"{actor_mention} и {partner_mention} теперь не состоят в браке.",
-        parse_mode="HTML",
-    )
-    await activity_repo.remove_graph_relationship(
-        chat_id=message.chat.id,
-        user_a=message.from_user.id,
-        user_b=partner_user_id,
-        relation_type="spouse",
-    )
-    await log_chat_action(
-        activity_repo,
-        chat_id=message.chat.id,
-        chat_type=message.chat.type,
-        chat_title=message.chat.title,
-        action_code="marriage_divorce",
-        description=f"Брак расторгнут: {message.from_user.id} и {partner_user_id}.",
-        actor_user_id=message.from_user.id,
-        target_user_id=partner_user_id,
-    )
+    await _request_divorce_confirmation(message, activity_repo)
 
 
 async def _enforce_relationship_panel_owner(query: CallbackQuery, *, owner_user_id: int) -> bool:
@@ -785,6 +873,48 @@ async def _enforce_relationship_panel_owner(query: CallbackQuery, *, owner_user_
         return True
     await _safe_callback_answer(query, "Это панель другого пользователя.", show_alert=True)
     return False
+
+
+@router.callback_query(F.data.startswith("relend:"))
+async def relationship_end_callback(query: CallbackQuery, activity_repo) -> None:
+    if query.from_user is None or query.data is None or query.message is None:
+        await _safe_callback_answer(query)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await _safe_callback_answer(query, "Некорректная кнопка", show_alert=True)
+        return
+
+    _, decision, action, owner_raw = parts
+    if decision not in {"confirm", "cancel"}:
+        await _safe_callback_answer(query, "Неизвестное действие", show_alert=True)
+        return
+    if action not in {"breakup", "divorce"}:
+        await _safe_callback_answer(query, "Неизвестный сценарий", show_alert=True)
+        return
+    if not owner_raw.isdigit():
+        await _safe_callback_answer(query, "Некорректный владелец", show_alert=True)
+        return
+
+    owner_user_id = int(owner_raw)
+    if query.from_user.id != owner_user_id:
+        await _safe_callback_answer(query, "Подтвердить или отменить может только инициатор.", show_alert=True)
+        return
+
+    if decision == "cancel":
+        cancelled_text = "Разрыв отношений отменён." if action == "breakup" else "Развод отменён."
+        await query.message.edit_text(cancelled_text, reply_markup=None)
+        await _safe_callback_answer(query, "Отменено")
+        return
+
+    result_text, _ = (
+        await _confirm_breakup(query, activity_repo)
+        if action == "breakup"
+        else await _confirm_divorce(query, activity_repo)
+    )
+    await query.message.edit_text(result_text, parse_mode="HTML", reply_markup=None)
+    await _safe_callback_answer(query, "Подтверждено")
 
 
 @router.callback_query(F.data.startswith("relact:"))
