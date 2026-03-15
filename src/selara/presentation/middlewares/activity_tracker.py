@@ -30,6 +30,10 @@ def _is_profile_lookup_message(message: Message) -> bool:
     return False
 
 
+def _is_membership_service_message(message: Message) -> bool:
+    return bool(getattr(message, "new_chat_members", None) or getattr(message, "left_chat_member", None))
+
+
 class ActivityTrackerMiddleware(BaseMiddleware):
     def __init__(self, activity_batcher: ActivityBatcher) -> None:
         self._activity_batcher = activity_batcher
@@ -47,6 +51,8 @@ class ActivityTrackerMiddleware(BaseMiddleware):
 
         settings = data.get("settings")
         if settings is None or not is_trackable_message(event, settings.supported_chat_types):
+            return result
+        if _is_membership_service_message(event):
             return result
         if _is_profile_lookup_message(event):
             return result

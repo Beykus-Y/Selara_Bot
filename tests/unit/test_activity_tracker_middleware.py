@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.types import Message
 
-from selara.presentation.middlewares.activity_tracker import ActivityTrackerMiddleware, _is_profile_lookup_message
+from selara.presentation.middlewares.activity_tracker import (
+    ActivityTrackerMiddleware,
+    _is_membership_service_message,
+    _is_profile_lookup_message,
+)
 
 
 def _msg(text: str):
@@ -33,6 +37,16 @@ def test_profile_lookup_ignores_regular_messages() -> None:
     assert not _is_profile_lookup_message(_msg("кто ты такой"))
 
 
+def test_membership_service_message_detects_join_and_leave() -> None:
+    join_event = SimpleNamespace(new_chat_members=[SimpleNamespace(id=1)], left_chat_member=None)
+    leave_event = SimpleNamespace(new_chat_members=[], left_chat_member=SimpleNamespace(id=1))
+    regular_event = SimpleNamespace(new_chat_members=[], left_chat_member=None)
+
+    assert _is_membership_service_message(join_event) is True
+    assert _is_membership_service_message(leave_event) is True
+    assert _is_membership_service_message(regular_event) is False
+
+
 def _event(*, text: str = "hello", chat_type: str = "group") -> Message:
     message = AsyncMock(spec=Message)
     message.text = text
@@ -46,6 +60,8 @@ def _event(*, text: str = "hello", chat_type: str = "group") -> Message:
     )
     message.date = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
     message.message_id = 777
+    message.new_chat_members = []
+    message.left_chat_member = None
     return message
 
 
@@ -86,6 +102,23 @@ async def test_activity_tracker_skips_profile_lookup_messages() -> None:
     await middleware(
         handler,
         _event(text="/me"),
+        {"settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"})},
+    )
+
+    batcher.enqueue_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_skips_membership_service_messages() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value=None)
+    event = _event(text=None)
+    event.left_chat_member = SimpleNamespace(id=501)
+
+    await middleware(
+        handler,
+        event,
         {"settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"})},
     )
 
