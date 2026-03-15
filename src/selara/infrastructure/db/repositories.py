@@ -2939,6 +2939,44 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         return True
 
+    async def list_chat_users_missing_iris_import(self, *, chat_id: int, limit: int = 500) -> list[UserSnapshot]:
+        stmt = (
+            select(
+                UserModel,
+                UserChatActivityModel.display_name_override,
+                UserChatActivityModel.title_prefix,
+            )
+            .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
+            .outerjoin(
+                UserChatIrisImportStateModel,
+                and_(
+                    UserChatIrisImportStateModel.chat_id == UserChatActivityModel.chat_id,
+                    UserChatIrisImportStateModel.user_id == UserChatActivityModel.user_id,
+                ),
+            )
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
+                UserModel.is_bot.is_(False),
+                UserChatIrisImportStateModel.user_id.is_(None),
+            )
+            .order_by(
+                UserChatActivityModel.message_count.desc(),
+                UserChatActivityModel.last_seen_at.desc(),
+                UserChatActivityModel.user_id.asc(),
+            )
+            .limit(max(1, int(limit)))
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            self._to_user_snapshot(
+                user,
+                chat_display_name=display_name_override,
+                title_prefix=title_prefix,
+            )
+            for user, display_name_override, title_prefix in rows
+        ]
+
     async def get_user_chat_iris_import_state(self, *, chat_id: int, user_id: int) -> IrisImportState | None:
         row = await self._session.get(
             UserChatIrisImportStateModel,

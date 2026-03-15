@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from selara.presentation.handlers.text_commands import (
+    _extract_award_remove_index,
+    _extract_award_request,
     _extract_profile_about_text,
     _extract_reply_award_title,
     _is_reply_profile_lookup,
@@ -41,6 +43,32 @@ def test_extract_reply_award_title_rejects_unclosed_quotes() -> None:
     assert matched is True
     assert value is None
     assert error is not None
+
+
+def test_extract_award_request_supports_username_target() -> None:
+    matched, target_token, value, error = _extract_award_request("наградить @weiinnya Месть подаётся выпечкой")
+
+    assert matched is True
+    assert target_token == "@weiinnya"
+    assert value == "Месть подаётся выпечкой"
+    assert error is None
+
+
+def test_extract_award_request_supports_username_target_on_new_line() -> None:
+    matched, target_token, value, error = _extract_award_request("наградить @Hislorr\nМесть подаётся выпечкой")
+
+    assert matched is True
+    assert target_token == "@Hislorr"
+    assert value == "Месть подаётся выпечкой"
+    assert error is None
+
+
+def test_extract_award_remove_index_reads_positive_number() -> None:
+    matched, award_index, error = _extract_award_remove_index("снять награду 6")
+
+    assert matched is True
+    assert award_index == 6
+    assert error is None
 
 
 def test_is_reply_profile_lookup_matches_reply_who_are_you() -> None:

@@ -47,6 +47,7 @@ from selara.presentation.commands.catalog import (
     SOCIAL_COMMAND_KEY_TO_ACTION,
     SOCIAL_TRIGGER_TO_COMMAND_KEY,
     match_builtin_command,
+    resolve_builtin_command_key,
 )
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.commands.resolver import TextCommandResolutionError, resolve_text_command
@@ -103,7 +104,8 @@ from selara.presentation.handlers.stats import (
     _resolve_stats_target_user,
     achievements_command,
     send_inactive_members,
-    award_reply_text_command,
+    award_text_command,
+    remove_award_reply_text_command,
     send_last_seen,
     send_me_stats,
     send_rep_stats,
@@ -122,6 +124,7 @@ _ANNOUNCE_PATTERN = re.compile(r"^\s*объява\b(?P<body>[\s\S]*)$", re.IGNOR
 _NAMING_PATTERN = re.compile(r"^\s*(?:нейминг|/naming(?:@[A-Za-z0-9_]+)?)\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _PROFILE_ABOUT_PATTERN = re.compile(r"^\s*добавить\s+о\s+себе\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _PROFILE_AWARD_PATTERN = re.compile(r"^\s*наградить\b(?P<body>[\s\S]*)$", re.IGNORECASE)
+_PROFILE_AWARD_REMOVE_PATTERN = re.compile(r"^\s*снять\s+награду\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _SMART_TRIGGER_LEARN_PATTERN = re.compile(r"^\s*!?научить\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _CUSTOM_RP_ADD_PATTERN = re.compile(r"^\s*!?добавить_действие\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _ZHMYH_PATTERN = re.compile(r"^жмых(?:\s+(?P<level>\d+))?$")
@@ -810,7 +813,8 @@ def _match_custom_alias(text: str, aliases: list[ChatTextAlias]) -> _CustomAlias
 
 def _rewrite_text_with_alias(match: _CustomAliasMatch) -> str:
     source = match.alias.source_trigger_norm
-    if match.tail_raw and match.alias.command_key in COMMAND_KEYS_WITH_TAIL:
+    effective_command_key = resolve_builtin_command_key(source) or match.alias.command_key
+    if match.tail_raw and effective_command_key in COMMAND_KEYS_WITH_TAIL:
         return f"{source} {match.tail_raw}"
     return source
 
@@ -1701,17 +1705,49 @@ def _extract_profile_about_text(text: str) -> tuple[bool, str | None, str | None
     return True, value, error
 
 
-def _extract_reply_award_title(text: str) -> tuple[bool, str | None, str | None]:
+def _extract_award_request(text: str) -> tuple[bool, str | None, str | None, str | None]:
     match = _PROFILE_AWARD_PATTERN.match(text)
+    if match is None:
+        return False, None, None, None
+
+    body = (match.group("body") or "").strip()
+    target_token = None
+    title_body = body
+    if body:
+        parts = body.split(maxsplit=1)
+        first_token = parts[0]
+        if first_token.startswith("@") or first_token.lstrip("-").isdigit():
+            target_token = first_token
+            title_body = parts[1] if len(parts) > 1 else ""
+
+    value, error = _extract_optional_quoted_text(
+        title_body.strip(),
+        empty_error=(
+            'Формат: reply на сообщение или <code>наградить @username текст награды</code>'
+        ),
+        unclosed_error='Закройте кавычки в команде <code>наградить</code>.',
+    )
+    return True, target_token, value, error
+
+
+def _extract_reply_award_title(text: str) -> tuple[bool, str | None, str | None]:
+    matched, _target_token, value, error = _extract_award_request(text)
+    return matched, value, error
+
+
+def _extract_award_remove_index(text: str) -> tuple[bool, int | None, str | None]:
+    match = _PROFILE_AWARD_REMOVE_PATTERN.match(text)
     if match is None:
         return False, None, None
 
-    value, error = _extract_optional_quoted_text(
-        (match.group("body") or "").strip(),
-        empty_error='Формат: reply на сообщение и <code>наградить текст награды</code>',
-        unclosed_error='Закройте кавычки в команде <code>наградить</code>.',
-    )
-    return True, value, error
+    body = " ".join(((match.group("body") or "").split())).strip()
+    if not body or not body.isdigit():
+        return True, None, 'Формат: reply на сообщение бота и <code>снять награду 2</code>.'
+
+    award_index = int(body)
+    if award_index <= 0:
+        return True, None, "Номер награды должен быть положительным."
+    return True, award_index, None
 
 
 def _is_reply_profile_lookup(message: Message, text: str) -> bool:
@@ -2834,12 +2870,32 @@ async def text_commands_handler(
         await set_about_text_command(message, activity_repo, about_text=about_text or "")
         return
 
-    award_matched, award_title, award_error = _extract_reply_award_title(text)
+    award_matched, award_target_token, award_title, award_error = _extract_award_request(text)
     if award_matched:
         if award_error is not None:
             await _answer_quiet(message, award_error, parse_mode="HTML")
             return
-        await award_reply_text_command(message, activity_repo, bot, title=award_title or "")
+        await award_text_command(
+            message,
+            activity_repo,
+            bot,
+            title=award_title or "",
+            target_token=award_target_token,
+        )
+        return
+
+    award_remove_matched, award_remove_index, award_remove_error = _extract_award_remove_index(text)
+    if award_remove_matched:
+        if award_remove_error is not None:
+            await _answer_quiet(message, award_remove_error, parse_mode="HTML")
+            return
+        await remove_award_reply_text_command(
+            message,
+            activity_repo,
+            bot,
+            award_index=award_remove_index or 0,
+            timezone_name=settings.bot_timezone,
+        )
         return
 
     if await _handle_command_rank_phrase(message, activity_repo, text):

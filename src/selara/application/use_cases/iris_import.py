@@ -13,8 +13,9 @@ _KARMA_RE = re.compile(r"➕\s*([+-]?\d+)")
 _FIRST_SEEN_RE = re.compile(r"Первое появление:\s*(\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
 _LAST_ACTIVE_RE = re.compile(r"Последний актив:\s*(.+)", re.IGNORECASE)
 _ACTIVITY_RE = re.compile(r"Актив\s*\(д\|н\|м\|весь\):\s*([^\n]+)", re.IGNORECASE)
-_AWARD_LINE_RE = re.compile(r"^\s*\d+\.\s*(.+?)\s*\|\s*(\d{2}\.\d{2}\.\d{4})\s*$")
+_AWARD_LINE_RE = re.compile(r"^\s*(?:\d+\.\s*)?(?P<title>.+?)\s*\|\s*(?P<created_at>.+?)\s*$")
 _IRIS_AWARD_PREFIX_RE = re.compile(r"^\s*🎗(?:\ufe0f)?[₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹]*\s*")
+_NO_AWARDS_RE = re.compile(r"^\s*💬\s*пока\s+нет\s*$", re.IGNORECASE)
 _RELATIVE_PART_RE = re.compile(
     r"(?P<value>\d+)\s*(?P<unit>мин(?:ут[аы]?)?|ч(?:ас(?:а|ов)?)?|д(?:н(?:я|ей)?)?|мес(?:яц(?:а|ев)?)?)",
     re.IGNORECASE,
@@ -125,6 +126,7 @@ def parse_forwarded_awards_message(
     text: str,
     entities: list[Any] | tuple[Any, ...] | None,
     timezone_name: str,
+    now: datetime | None = None,
 ) -> IrisAwardsImportData:
     body = (text or "").strip()
     if not body:
@@ -135,16 +137,28 @@ def parse_forwarded_awards_message(
         raise ValueError("Не удалось определить пользователя по ссылке Iris.")
 
     awards: list[tuple[str, datetime]] = []
+    empty_awards_list_detected = False
     for raw_line in body.splitlines():
+        normalized_line = " ".join((raw_line or "").split())
+        if _NO_AWARDS_RE.match(normalized_line):
+            empty_awards_list_detected = True
+            continue
         match = _AWARD_LINE_RE.match(raw_line)
         if match is None:
             continue
-        title = strip_iris_award_prefix(match.group(1) or "")
+        title = strip_iris_award_prefix(match.group("title") or "")
         if not title:
             continue
-        awards.append((title, _date_to_utc_noon(match.group(2), timezone_name)))
+        created_at = _parse_relative_or_datetime(
+            match.group("created_at") or "",
+            timezone_name=timezone_name,
+            now=now,
+        )
+        if created_at is None:
+            raise ValueError("Не удалось распознать дату награды Iris.")
+        awards.append((title, created_at))
 
-    if not awards:
+    if not awards and not empty_awards_list_detected:
         raise ValueError("Не удалось распарсить награды Iris.")
 
     return IrisAwardsImportData(target_username=target_username, awards=tuple(awards))

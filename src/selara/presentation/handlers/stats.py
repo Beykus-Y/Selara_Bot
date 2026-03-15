@@ -1,6 +1,7 @@
 from html import escape
 
 import asyncio
+import re
 from dataclasses import dataclass
 from functools import partial
 from datetime import datetime, timedelta, timezone
@@ -68,6 +69,9 @@ _IRIS_IMPORT_TTL = timedelta(minutes=15)
 _IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
 _AWARD_MIN_ACTOR_RANK = SYSTEM_ROLE_BY_CODE["junior_admin"].rank
 _IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
+_IRIS_MISSING_EMPTY_TEXT = "✅ <b>Все активные участники уже перенесены из Iris.</b>"
+_IRIS_MISSING_HEADER = "🧩 <b>Кто ещё не перенесён из Iris:</b>"
+_IRIS_MISSING_CONTINUATION_TITLE = "🧩 <b>Продолжение списка неперенесённых из Iris:</b>"
 _INACTIVE_THRESHOLD = timedelta(days=1)
 _INACTIVE_HEADER_VARIANTS: tuple[str, ...] = (
     "✖️ <b>Кто в чате не писал больше суток:</b>",
@@ -92,6 +96,9 @@ _ACTIVITY_TOP_PERIOD_ALIASES: dict[str, LeaderboardPeriod] = {
     "месяц": "month",
     "month": "month",
 }
+_AWARD_REPLY_LINE_RE = re.compile(
+    r"^\s*(?P<index>\d+)\.\s*(?P<title>.+?)\s+—\s+(?P<award_date>\d{2}\.\d{2}\.\d{4})\s+•\s+.+$"
+)
 
 
 @dataclass
@@ -313,7 +320,7 @@ def _message_text_and_entities(message: Message) -> tuple[str, tuple]:
     return "", ()
 
 
-def _extract_linked_user_label_from_message(message: Message | None, *, user_id: int) -> str | None:
+def _extract_linked_user_from_message(message: Message | None, *, user_id: int | None = None) -> tuple[int, str | None] | None:
     if message is None:
         return None
 
@@ -323,30 +330,57 @@ def _extract_linked_user_label_from_message(message: Message | None, *, user_id:
 
     for entity in entities:
         entity_type = str(getattr(entity, "type", "") or "").lower()
+        linked_user_id: int | None = None
         if entity_type == "text_mention":
             entity_user = getattr(entity, "user", None)
-            if entity_user is None or int(getattr(entity_user, "id", 0) or 0) != int(user_id):
+            if entity_user is None:
                 continue
+            linked_user_id = int(getattr(entity_user, "id", 0) or 0)
         elif entity_type == "text_link":
             parsed = urlparse(str(getattr(entity, "url", "") or ""))
             if parsed.scheme != "tg" or parsed.netloc != "user":
                 continue
-            linked_user_id = (parse_qs(parsed.query).get("id") or [None])[0]
-            if linked_user_id is None or not str(linked_user_id).lstrip("-").isdigit():
+            raw_linked_user_id = (parse_qs(parsed.query).get("id") or [None])[0]
+            if raw_linked_user_id is None or not str(raw_linked_user_id).lstrip("-").isdigit():
                 continue
-            if int(linked_user_id) != int(user_id):
-                continue
+            linked_user_id = int(raw_linked_user_id)
         else:
+            continue
+
+        if user_id is not None and linked_user_id != int(user_id):
             continue
 
         offset = int(getattr(entity, "offset", 0) or 0)
         length = int(getattr(entity, "length", 0) or 0)
-        if length <= 0:
-            continue
-        label = text[offset : offset + length].strip()
-        if label:
-            return label
+        label = None
+        if length > 0:
+            label = text[offset : offset + length].strip() or None
+        return linked_user_id, label
 
+    return None
+
+
+def _extract_linked_user_label_from_message(message: Message | None, *, user_id: int) -> str | None:
+    linked = _extract_linked_user_from_message(message, user_id=user_id)
+    return None if linked is None else linked[1]
+
+
+def _extract_award_entry_from_message(message: Message | None, *, award_index: int) -> tuple[str, str] | None:
+    if message is None:
+        return None
+
+    text, _entities = _message_text_and_entities(message)
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        match = _AWARD_REPLY_LINE_RE.match(raw_line.strip())
+        if match is None or int(match.group("index")) != int(award_index):
+            continue
+        title = strip_iris_award_prefix(match.group("title") or "")
+        award_date = (match.group("award_date") or "").strip()
+        if title and award_date:
+            return title, award_date
     return None
 
 
@@ -508,6 +542,41 @@ def _build_inactive_members_messages(
             chunks.append("\n".join(current_lines))
             current_lines = [_INACTIVE_CONTINUATION_TITLE]
             current_len = len(_INACTIVE_CONTINUATION_TITLE)
+        current_lines.append(line)
+        current_len += extra_len
+
+    current_lines.append("")
+    current_lines.append(footer)
+    chunks.append("\n".join(current_lines))
+    return chunks
+
+
+def _build_missing_iris_import_messages(*, users: list[UserSnapshot]) -> list[str]:
+    if not users:
+        return [_IRIS_MISSING_EMPTY_TEXT]
+
+    footer = f"👥 <b>Всего без переноса:</b> {len(users)}"
+    chunks: list[str] = []
+    current_lines = [_IRIS_MISSING_HEADER]
+    current_len = len(_IRIS_MISSING_HEADER)
+
+    for index, user in enumerate(users, start=1):
+        label = preferred_mention_label_from_parts(
+            user_id=user.telegram_user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            chat_display_name=user.chat_display_name,
+        )
+        mention = format_user_link(user_id=user.telegram_user_id, label=label)
+        username_note = f"@{user.username}" if (user.username or "").strip() else "без @username"
+        line = f"{index}. {mention} • <code>{escape(username_note)}</code>"
+        extra_len = len(line) + 1
+        footer_len = len(footer) + 2 if index == len(users) else 0
+        if current_lines and current_len + extra_len + footer_len > 3900:
+            chunks.append("\n".join(current_lines))
+            current_lines = [_IRIS_MISSING_CONTINUATION_TITLE]
+            current_len = len(_IRIS_MISSING_CONTINUATION_TITLE)
         current_lines.append(line)
         current_len += extra_len
 
@@ -891,17 +960,9 @@ async def set_about_text_command(message: Message, activity_repo, *, about_text:
     await message.answer("Раздел «О себе» обновлён.")
 
 
-async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *, title: str) -> None:
-    if message.from_user is None:
-        return
-    if message.chat.type not in {"group", "supergroup"}:
-        await message.answer("Команда доступна только в группе.")
-        return
-    if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer('Нужно сделать reply на сообщение участника и написать <code>наградить текст</code>.', parse_mode="HTML")
-        return
+async def _ensure_award_actor_allowed(message: Message, activity_repo, bot: Bot) -> bool:
     if not await _ensure_chat_admin(message, bot):
-        return
+        return False
     actor_role_definition, _bootstrapped = await get_actor_role_definition(
         activity_repo,
         chat_id=message.chat.id,
@@ -917,19 +978,109 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
     )
     if actor_role_definition is None or int(actor_role_definition.rank) < _AWARD_MIN_ACTOR_RANK:
         await message.answer("Выдавать награды могут только админы бота с ролью «Мл. админ» и выше.")
-        return
+        return False
+    return True
+
+
+async def _resolve_award_target(
+    message: Message,
+    activity_repo,
+    *,
+    target_token: str | None,
+) -> tuple[UserSnapshot | None, str | None]:
+    normalized_token = (target_token or "").strip()
+    if normalized_token:
+        if normalized_token.startswith("@"):
+            user = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=normalized_token)
+            if user is None:
+                return None, f"Пользователь {normalized_token} не найден в этом чате."
+            return user, None
+
+        if normalized_token.lstrip("-").isdigit():
+            user_id = int(normalized_token)
+            existing = await activity_repo.get_user_snapshot(user_id=user_id)
+            chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
+            if existing is not None:
+                return (
+                    UserSnapshot(
+                        telegram_user_id=existing.telegram_user_id,
+                        username=existing.username,
+                        first_name=existing.first_name,
+                        last_name=existing.last_name,
+                        is_bot=existing.is_bot,
+                        chat_display_name=chat_display_name or existing.chat_display_name,
+                    ),
+                    None,
+                )
+            return (
+                UserSnapshot(
+                    telegram_user_id=user_id,
+                    username=None,
+                    first_name=None,
+                    last_name=None,
+                    is_bot=False,
+                    chat_display_name=chat_display_name,
+                ),
+                None,
+            )
+
+        return None, 'Формат: reply на сообщение или <code>наградить @username текст награды</code>.'
+
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        return None, (
+            'Нужно сделать reply на сообщение участника или написать '
+            '<code>наградить @username текст награды</code>.'
+        )
 
     target_user = message.reply_to_message.from_user
-    if target_user.id == message.from_user.id:
+    return (
+        UserSnapshot(
+            telegram_user_id=target_user.id,
+            username=target_user.username,
+            first_name=target_user.first_name,
+            last_name=target_user.last_name,
+            is_bot=bool(target_user.is_bot),
+            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=target_user.id),
+        ),
+        None,
+    )
+
+
+async def award_text_command(
+    message: Message,
+    activity_repo,
+    bot: Bot,
+    *,
+    title: str,
+    target_token: str | None = None,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    target, target_error = await _resolve_award_target(message, activity_repo, target_token=target_token)
+    if target is None:
+        await message.answer(target_error or "Не удалось определить пользователя.", parse_mode="HTML")
+        return
+
+    if not await _ensure_award_actor_allowed(message, activity_repo, bot):
+        return
+
+    if target.telegram_user_id == message.from_user.id:
         await message.answer("Себя награждать нельзя.")
         return
-    if bool(target_user.is_bot):
+    if bool(target.is_bot):
         await message.answer("Ботам награды не выдаются.")
         return
 
     normalized = " ".join((title or "").split()).strip()
     if not normalized:
-        await message.answer('Формат: reply на сообщение и <code>наградить текст награды</code>.', parse_mode="HTML")
+        await message.answer(
+            'Формат: reply на сообщение или <code>наградить @username текст награды</code>.',
+            parse_mode="HTML",
+        )
         return
     if len(normalized) > _AWARD_TITLE_MAX_LEN:
         await message.answer(
@@ -938,14 +1089,6 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
         )
         return
 
-    target = UserSnapshot(
-        telegram_user_id=target_user.id,
-        username=target_user.username,
-        first_name=target_user.first_name,
-        last_name=target_user.last_name,
-        is_bot=bool(target_user.is_bot),
-        chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=target_user.id),
-    )
     award = await activity_repo.add_user_chat_award(
         chat=ChatSnapshot(message.chat.id, message.chat.type, message.chat.title),
         target=target,
@@ -967,6 +1110,107 @@ async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *,
     )
     await message.answer(
         f"Награда выдана <b>{target_mention}</b>: {escape(normalized)}",
+        parse_mode="HTML",
+    )
+
+
+async def award_reply_text_command(message: Message, activity_repo, bot: Bot, *, title: str) -> None:
+    await award_text_command(message, activity_repo, bot, title=title, target_token=None)
+
+
+async def remove_award_reply_text_command(
+    message: Message,
+    activity_repo,
+    bot: Bot,
+    *,
+    award_index: int,
+    timezone_name: str,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.reply_to_message is None:
+        await message.answer(
+            'Нужно сделать reply на сообщение бота со списком наград и написать <code>снять награду 2</code>.',
+            parse_mode="HTML",
+        )
+        return
+    if not await _ensure_award_actor_allowed(message, activity_repo, bot):
+        return
+
+    reply_author = getattr(message.reply_to_message, "from_user", None)
+    if reply_author is not None and not bool(reply_author.is_bot):
+        await message.answer("Снимать награду нужно reply на сообщение бота со списком наград.")
+        return
+
+    target_link = _extract_linked_user_from_message(message.reply_to_message)
+    if target_link is None:
+        await message.answer("Не удалось определить пользователя по сообщению со списком наград.")
+        return
+    target_user_id, target_label = target_link
+
+    awards = await activity_repo.list_user_chat_awards(
+        chat_id=message.chat.id,
+        user_id=target_user_id,
+        limit=_PROFILE_AWARDS_LIMIT,
+    )
+    if not awards:
+        await message.answer("У пользователя уже нет наград.")
+        return
+
+    reply_entry = _extract_award_entry_from_message(message.reply_to_message, award_index=award_index)
+    selected_award = None
+    if reply_entry is not None:
+        reply_title, reply_date = reply_entry
+        for award in awards:
+            if strip_iris_award_prefix(award.title) != reply_title:
+                continue
+            if _format_iris_import_date(award.created_at, timezone_name, include_time=False) != reply_date:
+                continue
+            selected_award = award
+            break
+    if selected_award is None and 1 <= int(award_index) <= len(awards):
+        selected_award = awards[award_index - 1]
+    if selected_award is None:
+        await message.answer("Не удалось найти награду под этим номером. Обновите список наград и попробуйте снова.")
+        return
+
+    removed = await activity_repo.remove_user_chat_award(chat_id=message.chat.id, award_id=selected_award.id)
+    if not removed:
+        await message.answer("Не удалось снять награду. Обновите список наград и попробуйте снова.")
+        return
+
+    fallback_user = UserSnapshot(
+        telegram_user_id=target_user_id,
+        username=None,
+        first_name=None,
+        last_name=None,
+        is_bot=False,
+        chat_display_name=target_label,
+    )
+    target_mention = await _resolve_profile_mention(
+        activity_repo,
+        chat_id=message.chat.id,
+        user_id=target_user_id,
+        cache={},
+        fallback_user=fallback_user,
+    )
+    normalized_title = strip_iris_award_prefix(selected_award.title)
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="profile_award_remove",
+        description=f"Пользователь {message.from_user.id} снял награду {target_user_id}: {normalized_title}.",
+        actor_user_id=message.from_user.id,
+        target_user_id=target_user_id,
+        meta_json={"award_id": selected_award.id, "title": normalized_title},
+    )
+    await message.answer(
+        f"Награда снята у <b>{target_mention}</b>: {escape(normalized_title)}",
         parse_mode="HTML",
     )
 
@@ -1512,7 +1756,7 @@ async def desc_command(message: Message) -> None:
 @router.message(Command("award"))
 async def award_command(message: Message) -> None:
     await message.answer(
-        'Награды выдаются только так: reply на сообщение участника и <code>наградить текст награды</code>.',
+        'Награды выдаются так: reply на сообщение участника или <code>наградить @username текст награды</code>.',
         parse_mode="HTML",
     )
 
@@ -1639,6 +1883,37 @@ async def iris_import_command(
     await message.answer("Инструкцию отправила в ЛС. Перешлите туда два ответа Iris по шагам.")
 
 
+@router.message(Command("iriskto_perenos"))
+async def iris_missing_imports_command(message: Message, activity_repo, bot: Bot) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    actor_role_definition, _bootstrapped = await get_actor_role_definition(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        bootstrap_if_missing_owner=True,
+        bot=bot,
+    )
+    actor_role_code = actor_role_definition.role_code if actor_role_definition is not None else None
+    if not _is_iris_import_manager_role(actor_role_code):
+        await message.answer("Команда доступна только owner, co_owner или senior_admin.")
+        return
+
+    users = await activity_repo.list_chat_users_missing_iris_import(chat_id=message.chat.id, limit=500)
+    for chunk in _build_missing_iris_import_messages(users=users):
+        await message.answer(chunk, parse_mode="HTML")
+
+
 @router.message(PendingIrisImportFilter())
 async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot, settings: Settings) -> None:
     if message.from_user is None:
@@ -1713,6 +1988,7 @@ async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot,
             text=raw_text,
             entities=list(entities),
             timezone_name=settings.bot_timezone,
+            now=_now_utc(),
         )
     except ValueError as exc:
         await message.answer(

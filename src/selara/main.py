@@ -22,6 +22,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="login", description="Код для входа в веб-панель"),
         BotCommand(command="me", description="Моя статистика в чате"),
         BotCommand(command="iris_perenos", description="Перенос профиля из Iris в текущем чате"),
+        BotCommand(command="iriskto_perenos", description="Кто в чате ещё не перенесён из Iris"),
         BotCommand(command="achievements", description="Мои достижения в текущем чате"),
         BotCommand(command="rep", description="Мой профиль репутации"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),

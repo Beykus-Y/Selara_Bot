@@ -127,6 +127,7 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "role": "роль",
     "me": "кто я",
     "iris_perenos": "ирис перенос",
+    "iriskto_perenos": "ирис кто перенос",
     "help": "помощь",
     "active": "актив",
     "announce_reg": "рег",

@@ -23,6 +23,7 @@ SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "start": "start",
     "me": "me",
     "iris_perenos": "iris_perenos",
+    "iriskto_perenos": "iriskto_perenos",
     "rep": "rep",
     "top": "top",
     "active": "active",

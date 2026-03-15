@@ -72,6 +72,12 @@ def test_alias_mode_both_rewrites_profile_alias_with_target_tail() -> None:
     assert rewritten == "кто ты @alice"
 
 
+def test_alias_mode_both_keeps_profile_tail_when_alias_command_key_is_wrong() -> None:
+    aliases = [_alias(alias_text="ты кто", command_key="alive", source_trigger="кто ты")]
+    rewritten = _apply_alias_mode_to_text(text="ты кто @alice", mode="both", aliases=aliases)
+    assert rewritten == "кто ты @alice"
+
+
 def test_alias_mode_prefers_longest_alias_match() -> None:
     aliases = [
         _alias(alias_text="мой", command_key="me", source_trigger="кто я"),

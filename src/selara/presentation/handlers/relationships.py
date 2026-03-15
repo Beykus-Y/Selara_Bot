@@ -87,6 +87,9 @@ def _format_relationship_duration(*, started_at: datetime, now: datetime) -> str
     days, rem = divmod(total_seconds, 86400)
     hours, rem = divmod(rem, 3600)
     minutes = rem // 60
+    months, days = divmod(days, 30)
+    if months:
+        return f"{months} мес." if days == 0 else f"{months} мес. {days} дн."
     if days:
         return f"{days} дн." if hours == 0 else f"{days} дн. {hours} ч."
     if hours:

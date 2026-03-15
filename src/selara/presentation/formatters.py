@@ -89,7 +89,10 @@ def format_elapsed_compact(value: datetime, timezone_name: str) -> str:
     days, rem = divmod(total_seconds, 86400)
     hours, rem = divmod(rem, 3600)
     minutes = rem // 60
+    months, days = divmod(days, 30)
 
+    if months:
+        return f"{months} мес {days} дн назад" if days else f"{months} мес назад"
     if days:
         return f"{days} дн {hours} ч назад" if hours else f"{days} дн назад"
     if hours:
