@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -27,6 +28,34 @@ def _format_duration(seconds: int) -> str:
     hours, remainder = divmod(normalized, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def _format_percentage(value: float) -> str:
+    rounded = round(value, 1)
+    if rounded.is_integer():
+        return str(int(rounded))
+    return f"{rounded:.1f}"
+
+
+@dataclass(frozen=True, slots=True)
+class _BannerTerms:
+    xp_label: str
+    rank_label: str
+    currency_label: str
+
+
+def _get_banner_terms(banner: str) -> _BannerTerms:
+    if banner == "hsr":
+        return _BannerTerms(
+            xp_label="Опыт освоения",
+            rank_label="Уровень освоения",
+            currency_label="Звездный нефрит",
+        )
+    return _BannerTerms(
+        xp_label="Опыт приключений",
+        rank_label="Ранг приключений",
+        currency_label="Примогемы",
+    )
 
 
 def _pick_card(cards: tuple[GachaCard, ...], rng: random.Random) -> GachaCard:
@@ -67,9 +96,11 @@ def _render_success_message(
     outcome: Literal["new", "constellation", "duplicate"],
     copies_owned: int,
     adventure_xp_gained: int,
+    ownership_percent: float,
 ) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
     rarity_label = RARITY_LABELS[card.rarity]
+    terms = _get_banner_terms(card.banner)
     if outcome == "new":
         card_line = "🍀 Вы получили новую карту"
     elif outcome == "constellation":
@@ -80,21 +111,23 @@ def _render_success_message(
         f"{card_line}: {card.name}\n\n"
         f"⬜ Редкость: {rarity_label}\n\n"
         f"🗂 Копий у вас: {copies_owned}\n"
-        f"🧭 Опыт приключений: +{adventure_xp_gained}\n"
+        f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков\n"
+        f"🧭 {terms.xp_label}: +{adventure_xp_gained}\n"
         f"🌟 Очки: +{card.points} [{player.total_points}]\n"
-        f"💠 Примогемы: +{card.primogems} [{player.total_primogems}]\n"
-        f"🧭 Ранг приключений: {rank} ({xp_into_rank}/{xp_for_next_rank})\n\n"
+        f"💠 {terms.currency_label}: +{card.primogems} [{player.total_primogems}]\n"
+        f"🧭 {terms.rank_label}: {rank} ({xp_into_rank}/{xp_for_next_rank})\n\n"
         f"⌛️ Вы сможете получить карту через: {_format_duration(seconds_remaining)}"
     )
 
 
-def _render_cooldown_message(player: PlayerState, *, seconds_remaining: int) -> str:
+def _render_cooldown_message(player: PlayerState, *, banner: str, seconds_remaining: int) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
+    terms = _get_banner_terms(banner)
     return (
         "⏳ Новая карта пока недоступна.\n\n"
-        f"🧭 Ранг приключений: {rank} ({xp_into_rank}/{xp_for_next_rank})\n"
+        f"🧭 {terms.rank_label}: {rank} ({xp_into_rank}/{xp_for_next_rank})\n"
         f"🌟 Очки: [{player.total_points}]\n"
-        f"💠 Примогемы: [{player.total_primogems}]\n\n"
+        f"💠 {terms.currency_label}: [{player.total_primogems}]\n\n"
         f"⌛️ До следующей крутки: {_format_duration(seconds_remaining)}"
     )
 
@@ -116,7 +149,7 @@ class GachaService:
             seconds_remaining = int((next_pull_at - current_time).total_seconds())
             return PullResult(
                 status="cooldown",
-                message=_render_cooldown_message(player, seconds_remaining=seconds_remaining),
+                message=_render_cooldown_message(player, banner=banner, seconds_remaining=seconds_remaining),
                 card=None,
                 player=player,
                 cooldown_until=next_pull_at,
@@ -136,6 +169,13 @@ class GachaService:
             pulled_at=current_time,
             next_pull_at=next_pull_at,
         )
+        owners_with_card, total_banner_players = await self._repo.get_card_ownership_stats(
+            banner=card.banner,
+            card_code=base_card.code,
+        )
+        ownership_percent = 0.0
+        if total_banner_players > 0:
+            ownership_percent = owners_with_card / total_banner_players * 100
         is_new = existing_copies == 0
         return PullResult(
             status="ok",
@@ -146,6 +186,7 @@ class GachaService:
                 outcome=outcome,
                 copies_owned=copies_owned,
                 adventure_xp_gained=adventure_xp_gained,
+                ownership_percent=ownership_percent,
             ),
             card=card,
             player=updated_player,

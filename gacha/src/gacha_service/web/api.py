@@ -131,18 +131,27 @@ def _resolve_public_image_url(request: Request, image_url: str) -> str:
 
 def _render_profile_message(
     *,
+    banner: str,
     banner_title: str,
     player_payload: PlayerPayload,
     unique_cards: int,
     total_copies: int,
     recent_pulls: list[HistoryEntryPayload],
 ) -> str:
+    if banner == "hsr":
+        rank_label = "Уровень освоения"
+        currency_label = "Звездный нефрит"
+        xp_suffix = "опыта освоения"
+    else:
+        rank_label = "Ранг приключений"
+        currency_label = "Примогемы"
+        xp_suffix = "XP"
     lines = [
         f"📒 Статистика гачи: {banner_title}",
         "",
-        f"🧭 Ранг приключений: {player_payload.adventure_rank} ({player_payload.xp_into_rank}/{player_payload.xp_for_next_rank})",
+        f"🧭 {rank_label}: {player_payload.adventure_rank} ({player_payload.xp_into_rank}/{player_payload.xp_for_next_rank})",
         f"🌟 Очки: {player_payload.total_points}",
-        f"💠 Примогемы: {player_payload.total_primogems}",
+        f"💠 {currency_label}: {player_payload.total_primogems}",
         f"🗂 Уникальных карт: {unique_cards}",
         f"📦 Всего копий: {total_copies}",
         "",
@@ -153,7 +162,7 @@ def _render_profile_message(
     else:
         for entry in recent_pulls:
             lines.append(
-                f"{entry.rarity_label} {entry.card_name} | +{entry.adventure_xp_gained} XP | {entry.pulled_at:%Y-%m-%d %H:%M}"
+                f"{entry.rarity_label} {entry.card_name} | +{entry.adventure_xp_gained} {xp_suffix} | {entry.pulled_at:%Y-%m-%d %H:%M}"
             )
     return "\n".join(lines)
 
@@ -245,6 +254,7 @@ def build_router(session_factory):
             status="ok",
             banner=banner,
             message=_render_profile_message(
+                banner=banner,
                 banner_title=banner_config.title,
                 player_payload=player_payload,
                 unique_cards=unique_cards,

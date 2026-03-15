@@ -211,3 +211,22 @@ class GachaRepository:
         result = await self._session.execute(stmt)
         unique_cards, total_copies = result.one()
         return int(unique_cards or 0), int(total_copies or 0)
+
+    async def get_card_ownership_stats(self, *, banner: str, card_code: str) -> tuple[int, int]:
+        owners_stmt = select(
+            func.count(func.distinct(PlayerCardCollectionModel.user_id)),
+        ).where(
+            PlayerCardCollectionModel.banner == banner,
+            PlayerCardCollectionModel.character_code == card_code,
+            PlayerCardCollectionModel.copies_owned > 0,
+        )
+        total_players_stmt = select(
+            func.count(func.distinct(PlayerCardCollectionModel.user_id)),
+        ).where(
+            PlayerCardCollectionModel.banner == banner,
+        )
+        owners_result = await self._session.execute(owners_stmt)
+        total_players_result = await self._session.execute(total_players_stmt)
+        owners = owners_result.scalar_one()
+        total_players = total_players_result.scalar_one()
+        return int(owners or 0), int(total_players or 0)

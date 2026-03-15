@@ -7,111 +7,331 @@
       "code": "asta",
       "name": "Аста",
       "rarity": "common",
-      "points": 200,
+      "points": 250,
       "primogems": 5,
-      "adventure_xp": 15,
+      "adventure_xp": 20,
       "image_url": "/images/hsr/asta.jpg",
-      "weight": 60
+      "weight": 48
+    },
+    {
+      "code": "dan_heng",
+      "name": "Дань Хэн",
+      "rarity": "common",
+      "points": 250,
+      "primogems": 5,
+      "adventure_xp": 20,
+      "image_url": "/images/hsr/dan_heng.jpg",
+      "weight": 48
+    },
+    {
+      "code": "march_7th",
+      "name": "Март 7",
+      "rarity": "common",
+      "points": 250,
+      "primogems": 5,
+      "adventure_xp": 20,
+      "image_url": "/images/hsr/mart7.jpg",
+      "weight": 48
+    },
+    {
+      "code": "serval",
+      "name": "Сервал",
+      "rarity": "common",
+      "points": 250,
+      "primogems": 5,
+      "adventure_xp": 20,
+      "image_url": "/images/hsr/serval.jpg",
+      "weight": 47
     },
     {
       "code": "tingyun",
       "name": "Тинъюнь",
       "rarity": "common",
       "points": 250,
-      "primogems": 6,
-      "adventure_xp": 18,
-      "image_url": "/images/hsr/tingyun.jpg",
-      "weight": 50
+      "primogems": 5,
+      "adventure_xp": 20,
+      "image_url": "/images/hsr/tin_yun.jpg",
+      "weight": 47
     },
     {
-      "code": "dan_heng",
-      "name": "Дань Хэн",
-      "rarity": "rare",
-      "points": 800,
-      "primogems": 10,
-      "adventure_xp": 40,
-      "image_url": "/images/hsr/dan_heng.jpg",
-      "weight": 30
+      "code": "aventurine",
+      "name": "Авантюрин",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/avanturin.jpg",
+      "weight": 1
     },
     {
       "code": "bailu",
       "name": "Байлу",
-      "rarity": "rare",
-      "points": 850,
-      "primogems": 12,
-      "adventure_xp": 45,
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
       "image_url": "/images/hsr/bailu.jpg",
-      "weight": 20
+      "weight": 1
     },
     {
-      "code": "seele",
-      "name": "Зеле",
-      "rarity": "epic",
-      "points": 2000,
-      "primogems": 18,
-      "adventure_xp": 100,
-      "image_url": "/images/hsr/seele.jpg",
-      "weight": 8
+      "code": "black_swan",
+      "name": "Чёрный лебедь",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/black_lebed.jpg",
+      "weight": 1
+    },
+    {
+      "code": "blade",
+      "name": "Блэйд",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/blayde.jpg",
+      "weight": 1
     },
     {
       "code": "bronya",
       "name": "Броня",
       "rarity": "legendary",
-      "points": 5000,
-      "primogems": 25,
-      "adventure_xp": 150,
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
       "image_url": "/images/hsr/bronya.jpg",
-      "weight": 2
+      "weight": 1
     },
     {
-      "code": "march7th",
-      "name": "Март 7",
-      "rarity": "common",
-      "points": 900,
-      "primogems": 3,
-      "adventure_xp": 45,
-      "image_url": "/images/hsr/march7th.jpg",
-      "weight": 30
+      "code": "castorice",
+      "name": "Кастория",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/castoria.jpg",
+      "weight": 1
     },
     {
-      "code": "dan_heng",
-      "name": "Дань Хэн",
-      "rarity": "rare",
-      "points": 2100,
-      "primogems": 5,
-      "adventure_xp": 70,
-      "image_url": "/images/hsr/dan_heng.jpg",
-      "weight": 22
+      "code": "jingliu",
+      "name": "Цзинлю",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/czinlyu.jpg",
+      "weight": 1
     },
     {
-      "code": "asta",
-      "name": "Аста",
-      "rarity": "rare",
-      "points": 2300,
-      "primogems": 5,
-      "adventure_xp": 75,
-      "image_url": "/images/hsr/asta.jpg",
-      "weight": 22
+      "code": "jing_yuan",
+      "name": "Цзин Юань",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/czin_yuan.jpg",
+      "weight": 1
+    },
+    {
+      "code": "dan_heng_imbibitor_lunae",
+      "name": "Дань Хэн • Пожиратель Луны",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/dan_heng_pojuratel_luni.jpg",
+      "weight": 1
+    },
+    {
+      "code": "dr_ratio",
+      "name": "Доктор Рацио",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/doctor_racio.jpg",
+      "weight": 1
+    },
+    {
+      "code": "fugue",
+      "name": "Фуга",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/fuga.jpg",
+      "weight": 1
+    },
+    {
+      "code": "fu_xuan",
+      "name": "Фу Сюань",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/fu_suan.jpg",
+      "weight": 1
+    },
+    {
+      "code": "hyacine",
+      "name": "Гиацина",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/giacina.jpg",
+      "weight": 1
+    },
+    {
+      "code": "sparkle",
+      "name": "Искорка",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/iscorca.jpg",
+      "weight": 1
+    },
+    {
+      "code": "sparxie",
+      "name": "Искра",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/iscra.jpg",
+      "weight": 1
+    },
+    {
+      "code": "ruan_mei",
+      "name": "Жуань Мэй",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/juan_mey.jpg",
+      "weight": 1
     },
     {
       "code": "kafka",
       "name": "Кафка",
-      "rarity": "epic",
-      "points": 5200,
-      "primogems": 10,
-      "adventure_xp": 130,
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
       "image_url": "/images/hsr/kafka.jpg",
-      "weight": 12
+      "weight": 1
     },
     {
-      "code": "acheron",
-      "name": "Ахерон",
+      "code": "caelus",
+      "name": "Кэлус",
       "rarity": "legendary",
-      "points": 11500,
+      "points": 11000,
       "primogems": 22,
-      "adventure_xp": 190,
-      "image_url": "/images/hsr/acheron.jpg",
-      "weight": 4
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/kelus.jpg",
+      "weight": 1
+    },
+    {
+      "code": "clara",
+      "name": "Клара",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/klara.jpg",
+      "weight": 1
+    },
+    {
+      "code": "lingsha",
+      "name": "Линша",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/linsha.jpg",
+      "weight": 1
+    },
+    {
+      "code": "seele",
+      "name": "Зеле",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/seele.jpg",
+      "weight": 1
+    },
+    {
+      "code": "stelle",
+      "name": "Стелла",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/stella.jpg",
+      "weight": 1
+    },
+    {
+      "code": "evernight",
+      "name": "Темень",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/temen.jpg",
+      "weight": 1
+    },
+    {
+      "code": "the_herta",
+      "name": "Великая Герта",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/velikaya_gerta.jpg",
+      "weight": 1
+    },
+    {
+      "code": "welt",
+      "name": "Вельт",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/velt_yang.jpg",
+      "weight": 1
+    },
+    {
+      "code": "sunday",
+      "name": "Воскресенье",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/voskresenie.jpg",
+      "weight": 1
+    },
+    {
+      "code": "yanqing",
+      "name": "Яньцин",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/yancin.jpg",
+      "weight": 1
+    },
+    {
+      "code": "yao_guang",
+      "name": "Яо Гуан",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/yao_guan.jpg",
+      "weight": 1
     }
   ]
 }

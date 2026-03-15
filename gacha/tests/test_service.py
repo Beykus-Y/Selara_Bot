@@ -70,6 +70,19 @@ class FakeGachaRepository:
     async def get_card_copies(self, *, user_id: int, banner: str, card_code: str) -> int:
         return self.collection.get((user_id, banner, card_code), 0)
 
+    async def get_card_ownership_stats(self, *, banner: str, card_code: str) -> tuple[int, int]:
+        owners = {
+            user_id
+            for (user_id, current_banner, current_card_code), copies_owned in self.collection.items()
+            if current_banner == banner and current_card_code == card_code and copies_owned > 0
+        }
+        banner_players = {
+            user_id
+            for (user_id, current_banner, _), copies_owned in self.collection.items()
+            if current_banner == banner and copies_owned > 0
+        }
+        return len(owners), len(banner_players)
+
 
 @pytest.mark.asyncio
 async def test_pull_grants_card_and_updates_totals() -> None:
@@ -87,6 +100,7 @@ async def test_pull_grants_card_and_updates_totals() -> None:
     assert result.is_new
     assert result.copies_owned == 1
     assert "Вы получили новую карту" in result.message
+    assert "Такая карта есть у 100% игроков" in result.message
 
 
 @pytest.mark.asyncio
@@ -161,6 +175,53 @@ async def test_hsr_uses_banner_specific_cooldown() -> None:
     assert result.card.banner == "hsr"
     assert result.cooldown_until == now + timedelta(hours=2)
     assert result.seconds_remaining == 2 * 60 * 60
+    assert "Опыт освоения" in result.message
+    assert "Уровень освоения" in result.message
+    assert "Звездный нефрит" in result.message
+
+
+@pytest.mark.asyncio
+async def test_pull_shows_card_ownership_percentage_across_banner_players() -> None:
+    repo = FakeGachaRepository()
+    now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+    card = GachaCard(
+        code="shared",
+        banner="genshin",
+        name="Тест",
+        rarity=CardRarity.common,
+        points=100,
+        primogems=2,
+        adventure_xp=20,
+        image_url="https://example.com/test.png",
+        weight=1,
+    )
+    other_card = GachaCard(
+        code="other",
+        banner="genshin",
+        name="Другой",
+        rarity=CardRarity.common,
+        points=100,
+        primogems=2,
+        adventure_xp=20,
+        image_url="https://example.com/other.png",
+        weight=1,
+    )
+
+    class FixedRandom:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def choices(self, population, weights=None, k=1):
+            self.calls += 1
+            return [card if self.calls != 2 else other_card]
+
+    service = GachaService(repo, rng=FixedRandom())
+
+    await service.pull(user_id=1, username="one", banner="genshin", now=now)
+    await service.pull(user_id=2, username="two", banner="genshin", now=now + timedelta(hours=4))
+    result = await service.pull(user_id=3, username="three", banner="genshin", now=now + timedelta(hours=8))
+
+    assert "Такая карта есть у 66.7% игроков" in result.message
 
 
 @pytest.mark.asyncio
@@ -301,6 +362,7 @@ def test_profile_message_includes_recent_pulls_block() -> None:
     ]
 
     message = _render_profile_message(
+        banner="genshin",
         banner_title="Genshin Impact",
         player_payload=player,
         unique_cards=1,
@@ -311,6 +373,30 @@ def test_profile_message_includes_recent_pulls_block() -> None:
     assert "Статистика гачи: Genshin Impact" in message
     assert "Последние крутки" in message
     assert "Эмбер" in message
+
+
+def test_hsr_profile_message_uses_hsr_terms() -> None:
+    player = PlayerPayload(
+        user_id=2,
+        adventure_rank=3,
+        adventure_xp=600,
+        xp_into_rank=150,
+        xp_for_next_rank=600,
+        total_points=3200,
+        total_primogems=40,
+    )
+
+    message = _render_profile_message(
+        banner="hsr",
+        banner_title="Honkai: Star Rail",
+        player_payload=player,
+        unique_cards=4,
+        total_copies=6,
+        recent_pulls=[],
+    )
+
+    assert "Уровень освоения" in message
+    assert "Звездный нефрит" in message
 
 
 def test_resolve_public_image_url_builds_vps_link() -> None:
