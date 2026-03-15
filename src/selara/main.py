@@ -7,6 +7,7 @@ from aiogram.types import BotCommand
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
+from selara.infrastructure.backup import run_daily_backup_scheduler
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
@@ -113,10 +114,18 @@ async def _run_bot(settings, session_factory) -> None:
 
     await bot.set_my_commands(build_bot_commands())
     await activity_batcher.start()
+    backup_task = None
+    if settings.admin_user_id is not None:
+        backup_task = asyncio.create_task(run_daily_backup_scheduler(bot=bot, settings=settings), name="daily-backup")
+    else:
+        logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
 
     try:
         await dispatcher.start_polling(bot, settings=settings)
     finally:
+        if backup_task is not None:
+            backup_task.cancel()
+            await asyncio.gather(backup_task, return_exceptions=True)
         await activity_batcher.close()
         await bot.session.close()
 

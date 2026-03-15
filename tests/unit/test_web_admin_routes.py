@@ -119,6 +119,7 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert "Дневная активность пользователей" in response.text
     assert "Использование действий отношений" in response.text
     assert "Коды входа веб-панели" in response.text
+    assert 'action="/app/admin/request-backup"' in response.text
 
 
 @pytest.mark.asyncio
@@ -452,3 +453,34 @@ async def test_admin_table_update_converts_blank_datetime_fields_to_none(monkeyp
     assert marriage.last_affection_at is None
     assert marriage.updated_at == datetime(2026, 3, 8, 9, 6, tzinfo=timezone.utc)
     log_chat_action_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_request_backup_calls_runtime_backup(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    backup_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    monkeypatch.setattr(web_app_module, "send_daily_backup", backup_mock)
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.post("/app/admin/request-backup")
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/app/admin?flash=")
+    backup_mock.assert_awaited_once()

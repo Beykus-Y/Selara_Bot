@@ -47,6 +47,7 @@ from selara.infrastructure.db.models import ChatModel, EconomyAccountModel, User
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
+from selara.infrastructure.backup import send_daily_backup
 from selara.presentation.auth import has_permission
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
@@ -6828,6 +6829,32 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
         response.delete_cookie(settings.admin_session_cookie_name)
         return response
+
+    @app.post("/app/admin/request-backup")
+    async def admin_request_backup(request: Request):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            if prefers_json:
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+            return _redirect("/app/admin/login")
+
+        try:
+            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+        except Exception:
+            logger.exception("Admin backup request failed")
+            redirect_path = _with_message("/app/admin", key="error", text="Не удалось отправить backup. Проверьте логи и конфиг.")
+            if prefers_json:
+                return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500, redirect=redirect_path)
+            return _redirect(redirect_path)
+
+        redirect_path = _with_message("/app/admin", key="flash", text="Backup отправлен в Telegram.")
+        if prefers_json:
+            return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
+        return _redirect(redirect_path)
 
     @app.get("/app/admin/table/{table_name}", response_class=HTMLResponse)
     async def admin_table_page(request: Request, table_name: str):

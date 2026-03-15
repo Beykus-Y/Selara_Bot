@@ -38,6 +38,9 @@
     {% endfor %}
 
     <div class="admin-actions">
+      <form method="post" action="/app/admin/request-backup" style="display: inline;">
+        <button type="submit" class="button">Запросить бекап</button>
+      </form>
       <form method="post" action="/app/admin/logout" style="display: inline;">
         <button type="submit" class="button danger">Выйти из админки</button>
       </form>

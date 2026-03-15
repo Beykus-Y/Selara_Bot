@@ -6,6 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY gacha/pyproject.toml gacha/README.md /app/
 COPY gacha/alembic.ini /app/
 COPY gacha/alembic /app/alembic

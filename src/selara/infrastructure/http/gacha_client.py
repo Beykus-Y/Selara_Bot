@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -65,6 +66,12 @@ class GachaCooldownResetResponse(BaseModel):
     message: str
 
 
+@dataclass(slots=True)
+class GachaBackupFile:
+    filename: str
+    content: bytes
+
+
 class GachaClientError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -114,6 +121,26 @@ class HttpGachaClient:
         )
         return GachaCooldownResetResponse.model_validate(payload)
 
+    async def download_backup(self, *, admin_token: str) -> GachaBackupFile:
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds) as client:
+                response = await client.post(
+                    "/v1/gacha/admin/backup",
+                    headers={"X-Gacha-Admin-Token": admin_token},
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise GachaClientError("Гача-сервер не отдал backup вовремя.") from exc
+        except httpx.HTTPStatusError as exc:
+            raise GachaClientError(_extract_error_message(exc.response)) from exc
+        except httpx.HTTPError as exc:
+            raise GachaClientError("Не удалось скачать backup с гача-сервера.") from exc
+
+        return GachaBackupFile(
+            filename=_extract_filename(response),
+            content=response.content,
+        )
+
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds) as client:
@@ -152,3 +179,15 @@ def _extract_error_message(response: httpx.Response) -> str:
     if response.status_code >= 500:
         return "Гача-сервер вернул ошибку."
     return f"Гача-сервер отклонил запрос: HTTP {response.status_code}."
+
+
+def _extract_filename(response: httpx.Response) -> str:
+    disposition = response.headers.get("content-disposition", "")
+    for part in disposition.split(";"):
+        candidate = part.strip()
+        if not candidate.startswith("filename="):
+            continue
+        value = candidate.split("=", 1)[1].strip().strip('"')
+        if value:
+            return value
+    return "gacha_pg_dump.dump"

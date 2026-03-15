@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from secrets import compare_digest
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +13,7 @@ from gacha_service.application.catalog import get_banner_config
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
 from gacha_service.domain.models import CardRarity, RARITY_LABELS, resolve_rank
+from gacha_service.infrastructure.backup import BackupError, cleanup_backup_artifact, create_database_backup
 from gacha_service.infrastructure.db import session_dependency
 from gacha_service.infrastructure.repository import GachaRepository
 
@@ -157,6 +161,14 @@ def _render_profile_message(
 router = APIRouter(prefix="/v1/gacha", tags=["gacha"])
 
 
+def _require_admin_token(x_gacha_admin_token: str | None) -> None:
+    expected_token = settings.admin_token.strip()
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Admin token is not configured on gacha server.")
+    if not compare_digest(x_gacha_admin_token or "", expected_token):
+        raise HTTPException(status_code=403, detail="Invalid admin token.")
+
+
 def build_router(session_factory):
     async def get_session() -> AsyncSession:
         async for session in session_dependency(session_factory):
@@ -278,11 +290,7 @@ def build_router(session_factory):
         x_gacha_admin_token: str | None = Header(default=None, alias="X-Gacha-Admin-Token"),
         session: AsyncSession = Depends(get_session),
     ) -> CooldownResetResponse:
-        expected_token = settings.admin_token.strip()
-        if not expected_token:
-            raise HTTPException(status_code=503, detail="Admin reset token is not configured on gacha server.")
-        if x_gacha_admin_token != expected_token:
-            raise HTTPException(status_code=403, detail="Invalid admin token.")
+        _require_admin_token(x_gacha_admin_token)
 
         repo = GachaRepository(session)
         try:
@@ -301,6 +309,28 @@ def build_router(session_factory):
             banner=payload.banner,
             user_id=payload.user_id,
             message=message,
+        )
+
+    @router.post("/admin/backup")
+    async def backup_database(
+        x_gacha_admin_token: str | None = Header(default=None, alias="X-Gacha-Admin-Token"),
+    ) -> FileResponse:
+        _require_admin_token(x_gacha_admin_token)
+
+        try:
+            artifact = await create_database_backup(settings=settings)
+        except BackupError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+        return FileResponse(
+            artifact.path,
+            filename=artifact.filename,
+            media_type=artifact.media_type,
+            background=BackgroundTask(cleanup_backup_artifact, artifact),
+            headers={
+                "Cache-Control": "no-store",
+                "X-Gacha-Backup-Format": artifact.path.suffix.lstrip("."),
+            },
         )
 
     return router
