@@ -1126,7 +1126,7 @@ def _extract_zhmyh_level(text: str) -> tuple[bool, int | None, str | None]:
 
 
 def _extract_social_action(text: str) -> str | None:
-    action_key, _replica = _extract_social_action_request(text)
+    action_key, _mass_target, _replica = _extract_social_action_target_request(text)
     return action_key
 
 
@@ -1150,9 +1150,64 @@ def _extract_social_action_request(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _extract_social_action_target_request(text: str) -> tuple[str | None, bool, str | None]:
+    action_key, tail = _extract_social_action_request(text)
+    if action_key is None:
+        return None, False, None
+    if not tail:
+        return action_key, False, None
+
+    match = re.match(r"^(?P<marker>\S+)(?:[?!.,:;…]+)?(?:\s+(?P<rest>[\s\S]*))?\s*$", tail)
+    if match is None:
+        return action_key, False, tail
+
+    marker = normalize_text_command(match.group("marker") or "")
+    if marker not in {"всех", "всем"}:
+        return action_key, False, tail
+
+    replica = " ".join(((match.group("rest") or "")).split()).strip() or None
+    return action_key, True, replica
+
+
 def _build_social_action_replica_line(replica: str) -> str:
     template = random.choice(_SOCIAL_ACTION_REPLICA_TEMPLATES)
     return template.format(replica=escape(replica))
+
+
+def _build_social_action_mass_messages(
+    *,
+    template: str,
+    actor_mention: str,
+    target_mentions: list[str],
+    replica: str | None,
+) -> list[str]:
+    if not target_mentions:
+        return []
+
+    replica_line = _build_social_action_replica_line(replica) if replica else None
+    messages: list[str] = []
+    current_mentions: list[str] = []
+
+    for mention in target_mentions:
+        candidate_mentions = current_mentions + [mention]
+        candidate = template.format(actor=actor_mention, target=", ".join(candidate_mentions))
+        if replica_line:
+            candidate = f"{candidate}\n{replica_line}"
+        if current_mentions and len(candidate) > _MAX_MESSAGE_LEN_SAFE:
+            current = template.format(actor=actor_mention, target=", ".join(current_mentions))
+            if replica_line:
+                current = f"{current}\n{replica_line}"
+            messages.append(current)
+            current_mentions = [mention]
+            continue
+        current_mentions = candidate_mentions
+
+    if current_mentions:
+        current = template.format(actor=actor_mention, target=", ".join(current_mentions))
+        if replica_line:
+            current = f"{current}\n{replica_line}"
+        messages.append(current)
+    return messages
 
 
 def _extract_today_randomizer_predicate(text: str) -> tuple[bool, str | None, str | None]:
@@ -1882,7 +1937,7 @@ async def _social_action_user_snapshot(message: Message, activity_repo, *, user)
 
 async def _send_social_action(message: Message, activity_repo, chat_settings: ChatSettings, *, action_key: str) -> None:
     canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, "действие")
-    _, replica = _extract_social_action_request(message.text or message.caption or "")
+    _, mass_target, replica = _extract_social_action_target_request(message.text or message.caption or "")
     if message.chat.type not in {"group", "supergroup"}:
         await _answer_quiet(message, "Эта команда работает только в группе.")
         return
@@ -1896,6 +1951,39 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
             "18+ действия отключены в этом чате. Включить: <code>/setcfg actions_18_enabled true</code>.",
             parse_mode="HTML",
         )
+        return
+
+    actor = await _social_action_user_snapshot(message, activity_repo, user=message.from_user)
+    actor_mention = _social_action_mention(actor)
+    template = random.choice(_SOCIAL_ACTION_TEMPLATES[action_key])
+
+    if mass_target:
+        try:
+            recipients = await activity_repo.get_announcement_recipients(chat_id=message.chat.id)
+        except Exception:
+            recipients = []
+
+        target_mentions = [
+            _social_action_mention(target)
+            for target in recipients
+            if not target.is_bot and target.telegram_user_id != message.from_user.id
+        ]
+        if not target_mentions:
+            await _answer_quiet(message, "Пока некого обрабатывать командой для всех.")
+            return
+
+        for response_text in _build_social_action_mass_messages(
+            template=template,
+            actor_mention=actor_mention,
+            target_mentions=target_mentions,
+            replica=replica,
+        ):
+            await _answer_quiet(
+                message,
+                response_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         return
 
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
@@ -1914,10 +2002,8 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
         await _answer_quiet(message, "Нужно выбрать живого участника, а не бота.")
         return
 
-    actor = await _social_action_user_snapshot(message, activity_repo, user=message.from_user)
     target = await _social_action_user_snapshot(message, activity_repo, user=target_user)
-    template = random.choice(_SOCIAL_ACTION_TEMPLATES[action_key])
-    response_text = template.format(actor=_social_action_mention(actor), target=_social_action_mention(target))
+    response_text = template.format(actor=actor_mention, target=_social_action_mention(target))
     if replica:
         response_text = f"{response_text}\n{_build_social_action_replica_line(replica)}"
     await _answer_quiet(

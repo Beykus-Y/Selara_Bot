@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from selara.core.chat_settings import ChatSettings
+from selara.domain.entities import UserSnapshot
 from selara.presentation.handlers.text_commands import _send_social_action
 
 
@@ -66,6 +67,26 @@ def _chat_settings(*, actions_18_enabled: bool) -> ChatSettings:
 class _FakeActivityRepo:
     async def get_chat_display_name(self, *, chat_id: int, user_id: int) -> None:
         return None
+
+    async def get_announcement_recipients(self, *, chat_id: int) -> list[UserSnapshot]:
+        return [
+            UserSnapshot(
+                telegram_user_id=2,
+                username="target",
+                first_name="Target",
+                last_name=None,
+                is_bot=False,
+                chat_display_name=None,
+            ),
+            UserSnapshot(
+                telegram_user_id=3,
+                username="friend",
+                first_name="Friend",
+                last_name=None,
+                is_bot=False,
+                chat_display_name=None,
+            ),
+        ]
 
 
 class _DummyMessage:
@@ -146,4 +167,25 @@ async def test_send_social_action_includes_replica_tail(
     assert len(message.answers) == 1
     assert action_fragment in message.answers[0][0]
     assert f"С репликой: «{replica}»" in message.answers[0][0]
+    assert message.answers[0][1]["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_send_social_action_supports_all_targets_without_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage(text="обнять всех\nвы лучшие")
+    message.reply_to_message = None
+    monkeypatch.setattr("selara.presentation.handlers.text_commands.random.choice", lambda seq: seq[0])
+
+    await _send_social_action(
+        message,
+        _FakeActivityRepo(),
+        _chat_settings(actions_18_enabled=True),
+        action_key="hug",
+    )
+
+    assert len(message.answers) == 1
+    assert "обнял" in message.answers[0][0]
+    assert "tg://user?id=2" in message.answers[0][0]
+    assert "tg://user?id=3" in message.answers[0][0]
+    assert "С репликой: «вы лучшие»" in message.answers[0][0]
     assert message.answers[0][1]["parse_mode"] == "HTML"

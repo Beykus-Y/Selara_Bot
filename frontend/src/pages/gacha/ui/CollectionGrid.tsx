@@ -13,7 +13,7 @@ const RARITY_COLORS: Record<string, string> = {
   legendary: 'bg-yellow-200',
 }
 
-export function CollectionGrid({ cards, banner }: CollectionGridProps) {
+export function CollectionGrid({ cards }: CollectionGridProps) {
   if (cards.length === 0) {
     return (
       <div className="collection-empty">

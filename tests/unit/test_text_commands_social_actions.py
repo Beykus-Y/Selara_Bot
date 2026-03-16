@@ -4,6 +4,7 @@ from selara.presentation.handlers.text_commands import (
     _build_social_action_replica_line,
     _extract_social_action,
     _extract_social_action_request,
+    _extract_social_action_target_request,
 )
 
 
@@ -57,6 +58,22 @@ def test_extract_social_action_request_supports_inline_replica_with_punctuation(
 
     assert action_key == "hug"
     assert replica == "бедолага ты наша"
+
+
+def test_extract_social_action_target_request_supports_all_targets() -> None:
+    action_key, mass_target, replica = _extract_social_action_target_request("Обнять всех")
+
+    assert action_key == "hug"
+    assert mass_target is True
+    assert replica is None
+
+
+def test_extract_social_action_target_request_supports_all_targets_with_replica() -> None:
+    action_key, mass_target, replica = _extract_social_action_target_request("поцеловать всем\nвы лучшие")
+
+    assert action_key == "kiss"
+    assert mass_target is True
+    assert replica == "вы лучшие"
 
 
 def test_build_social_action_replica_line_uses_alternative_template(monkeypatch: pytest.MonkeyPatch) -> None:
