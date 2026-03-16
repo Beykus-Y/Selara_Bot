@@ -86,6 +86,50 @@ function getGachaApiUrl(): string {
 
 const GACHA_API_URL = getGachaApiUrl()
 
+function normalizeGachaImageUrl(imageUrl: string): string {
+  const value = imageUrl.trim()
+  if (!value) {
+    return value
+  }
+
+  const proxyBase = `${window.location.origin}${resolveAppPath('/gacha')}`
+
+  if (value.startsWith('/images/')) {
+    return `${proxyBase}${value}`
+  }
+
+  try {
+    const parsed = new URL(value)
+    if (parsed.pathname.startsWith('/images/')) {
+      return `${proxyBase}${parsed.pathname}${parsed.search}${parsed.hash}`
+    }
+  } catch {
+    return value
+  }
+
+  return value
+}
+
+function normalizeCollectionResponse(payload: CollectionResponse): CollectionResponse {
+  return {
+    ...payload,
+    cards: payload.cards.map((card) => ({
+      ...card,
+      image_url: normalizeGachaImageUrl(card.image_url),
+    })),
+  }
+}
+
+function normalizeProfileResponse(payload: ProfileResponse): ProfileResponse {
+  return {
+    ...payload,
+    recent_pulls: payload.recent_pulls.map((entry) => ({
+      ...entry,
+      image_url: normalizeGachaImageUrl(entry.image_url),
+    })),
+  }
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -139,9 +183,10 @@ export async function getUserCollection(
   userId: number,
   banner: string = 'genshin',
 ): Promise<CollectionResponse> {
-  return request<CollectionResponse>('GET', `/v1/gacha/users/${userId}/collection`, {
+  const payload = await request<CollectionResponse>('GET', `/v1/gacha/users/${userId}/collection`, {
     params: { banner },
   })
+  return normalizeCollectionResponse(payload)
 }
 
 /**
@@ -152,7 +197,8 @@ export async function getUserProfile(
   banner: string = 'genshin',
   limit: number = 5,
 ): Promise<ProfileResponse> {
-  return request<ProfileResponse>('GET', `/v1/gacha/users/${userId}/profile`, {
+  const payload = await request<ProfileResponse>('GET', `/v1/gacha/users/${userId}/profile`, {
     params: { banner, limit },
   })
+  return normalizeProfileResponse(payload)
 }
