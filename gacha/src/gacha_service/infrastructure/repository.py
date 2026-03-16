@@ -230,3 +230,17 @@ class GachaRepository:
         owners = owners_result.scalar_one()
         total_players = total_players_result.scalar_one()
         return int(owners or 0), int(total_players or 0)
+
+    async def get_user_collection(self, *, user_id: int, banner: str) -> list[PlayerCardCollectionModel]:
+        """Получить всю коллекцию карточек пользователя по баннеру"""
+        stmt = (
+            select(PlayerCardCollectionModel)
+            .where(
+                PlayerCardCollectionModel.user_id == user_id,
+                PlayerCardCollectionModel.banner == banner,
+                PlayerCardCollectionModel.copies_owned > 0,
+            )
+            .order_by(PlayerCardCollectionModel.character_code)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars())

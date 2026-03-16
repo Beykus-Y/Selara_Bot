@@ -95,6 +95,24 @@ class CooldownResetResponse(BaseModel):
     message: str
 
 
+class CollectionCardPayload(BaseModel):
+    code: str
+    name: str
+    rarity: str
+    rarity_label: str
+    copies_owned: int
+    image_url: str
+
+
+class CollectionResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    cards: list[CollectionCardPayload]
+    total_unique: int
+    total_copies: int
+
+
 def _to_player_payload(*, player, user_id: int) -> PlayerPayload:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
     return PlayerPayload(
@@ -292,6 +310,48 @@ def build_router(session_factory):
                 )
                 for entry in recent_pulls
             ],
+        )
+
+    @router.get("/users/{user_id}/collection", response_model=CollectionResponse)
+    async def collection(
+        user_id: int,
+        banner: str = settings.default_banner,
+        request: Request = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> CollectionResponse:
+        repo = GachaRepository(session)
+        try:
+            banner_config = get_banner_config(banner)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        cards_collection = await repo.get_user_collection(user_id=user_id, banner=banner)
+        card_info_by_code = {card.code: card for card in banner_config.cards}
+
+        payload_cards = []
+        total_copies = 0
+        for card in cards_collection:
+            if card.character_code in card_info_by_code:
+                card_info = card_info_by_code[card.character_code]
+                payload_cards.append(
+                    CollectionCardPayload(
+                        code=card.character_code,
+                        name=card_info.name,
+                        rarity=card_info.rarity.value,
+                        rarity_label=RARITY_LABELS[card_info.rarity],
+                        copies_owned=card.copies_owned,
+                        image_url=_resolve_public_image_url(request, card_info.image_url),
+                    )
+                )
+                total_copies += card.copies_owned
+
+        return CollectionResponse(
+            status="ok",
+            banner=banner,
+            user_id=user_id,
+            cards=payload_cards,
+            total_unique=len(payload_cards),
+            total_copies=total_copies,
         )
 
     @router.post("/admin/cooldowns/reset", response_model=CooldownResetResponse)

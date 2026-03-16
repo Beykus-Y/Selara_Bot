@@ -7,6 +7,7 @@ import { ChatPage } from '@/pages/chat/page'
 import { DocsPage } from '@/pages/docs/page'
 import { EconomyPage } from '@/pages/economy/page'
 import { FamilyPage } from '@/pages/family/page'
+import { GachaCollectionPage } from '@/pages/gacha/page'
 import { GamesPage } from '@/pages/games/page'
 import { HomePage } from '@/pages/home/page'
 import { LandingPage } from '@/pages/landing/page'
@@ -49,6 +50,7 @@ const router = createBrowserRouter(
         { path: 'games', element: <GamesPage /> },
         { path: 'games/live', element: <GamesPage /> },
         { path: 'achievements', element: <AchievementsPage /> },
+        { path: 'gacha/collection/:userId', element: <GachaCollectionPage /> },
         { path: 'docs/user', element: <DocsPage variant="user" /> },
         { path: 'docs/admin', element: <DocsPage variant="admin" /> },
         { path: 'chat/:chatId', element: <ChatPage /> },

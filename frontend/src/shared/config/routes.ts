@@ -20,6 +20,7 @@ export const routes = {
   settings: '/app/settings',
   games: '/app/games',
   achievements: '/app/achievements',
+  gachaCollection: (userId: string | number) => `/app/gacha/collection/${userId}`,
   appUserDocs: '/app/docs/user',
   appAdminDocs: '/app/docs/admin',
   publicDocs: (variant: DocsVariant, chatId?: string | number | null) =>
