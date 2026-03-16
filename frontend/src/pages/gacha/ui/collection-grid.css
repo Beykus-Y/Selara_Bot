@@ -20,9 +20,11 @@
 }
 
 .collection-card {
-  border-radius: 0.5rem;
+  border-radius: 0.9rem;
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, rgba(24, 30, 47, 0.98), rgba(14, 18, 29, 0.98));
+  box-shadow: 0 12px 28px rgba(7, 10, 20, 0.24);
   transition: all 0.2s ease;
   display: flex;
   flex-direction: column;
@@ -31,13 +33,13 @@
 
 .collection-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 18px 36px rgba(7, 10, 20, 0.35);
 }
 
 .collection-card-image-wrapper {
   position: relative;
   width: 100%;
-  padding-bottom: 100%; /* 1:1 aspect ratio */
+  padding-bottom: 112%;
   overflow: hidden;
 }
 
@@ -52,16 +54,18 @@
 
 .collection-card-content {
   padding: 0.75rem;
-  background: white;
   flex: 1;
   display: flex;
   flex-direction: column;
+  background:
+    linear-gradient(180deg, rgba(20, 25, 38, 0.84), rgba(12, 15, 23, 0.96));
 }
 
 .collection-card-name {
   font-size: 0.875rem;
   font-weight: 600;
   margin: 0;
+  color: #f6f8ff;
   line-height: 1.2;
   min-height: 2.4rem;
   overflow: hidden;
@@ -73,18 +77,49 @@
 
 .collection-card-rarity {
   font-size: 0.75rem;
-  color: #666;
-  margin-top: 0.25rem;
+  color: #9ca9d3;
+  margin-top: 0.5rem;
   line-height: 1;
 }
 
-.collection-card-copies {
-  font-size: 1rem;
-  font-weight: 700;
-  margin-top: auto;
-  padding-top: 0.5rem;
-  text-align: center;
-  color: #333;
+.collection-card--common {
+  box-shadow:
+    inset 0 0 0 1px rgba(178, 187, 210, 0.16),
+    0 12px 28px rgba(7, 10, 20, 0.24);
+}
+
+.collection-card--rare {
+  box-shadow:
+    inset 0 0 0 1px rgba(86, 150, 255, 0.22),
+    0 12px 28px rgba(7, 10, 20, 0.24);
+}
+
+.collection-card--epic {
+  box-shadow:
+    inset 0 0 0 1px rgba(156, 99, 255, 0.22),
+    0 12px 28px rgba(7, 10, 20, 0.24);
+}
+
+.collection-card--legendary {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 185, 74, 0.28),
+    0 12px 28px rgba(7, 10, 20, 0.24);
+}
+
+.collection-card--common .collection-card-content {
+  border-top: 1px solid rgba(178, 187, 210, 0.16);
+}
+
+.collection-card--rare .collection-card-content {
+  border-top: 1px solid rgba(86, 150, 255, 0.24);
+}
+
+.collection-card--epic .collection-card-content {
+  border-top: 1px solid rgba(156, 99, 255, 0.24);
+}
+
+.collection-card--legendary .collection-card-content {
+  border-top: 1px solid rgba(255, 185, 74, 0.3);
 }
 
 .collection-empty {
@@ -93,4 +128,20 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.collection-empty-state {
+  text-align: center;
+  color: #aeb8db;
+}
+
+.collection-empty-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #eef3ff;
+}
+
+.collection-empty-note {
+  margin: 0.35rem 0 0;
 }

@@ -6,19 +6,28 @@ interface CollectionGridProps {
   banner: string
 }
 
-const RARITY_COLORS: Record<string, string> = {
-  common: 'bg-gray-200',
-  rare: 'bg-blue-200',
-  epic: 'bg-purple-200',
-  legendary: 'bg-yellow-200',
+function resolveCollectionCardName(card: CollectionCard, banner: string): string {
+  if (card.copies_owned <= 1) {
+    return card.name
+  }
+
+  const upgradeLevel = Math.min(card.copies_owned - 1, 6)
+  if (banner === 'genshin') {
+    return `${card.name} (С${upgradeLevel})`
+  }
+  if (banner === 'hsr') {
+    return `${card.name} (E${upgradeLevel})`
+  }
+  return `${card.name} ×${card.copies_owned}`
 }
 
-export function CollectionGrid({ cards }: CollectionGridProps) {
+export function CollectionGrid({ cards, banner }: CollectionGridProps) {
   if (cards.length === 0) {
     return (
       <div className="collection-empty">
-        <div className="text-center py-8">
-          <p className="text-gray-500">Нет карточек в коллекции</p>
+        <div className="collection-empty-state">
+          <p className="collection-empty-title">Нет карточек в коллекции</p>
+          <p className="collection-empty-note">Этот баннер пока пуст.</p>
         </div>
       </div>
     )
@@ -26,18 +35,20 @@ export function CollectionGrid({ cards }: CollectionGridProps) {
 
   return (
     <div className="collection-grid">
-      {cards.map((card) => (
-        <div key={card.code} className={`collection-card ${RARITY_COLORS[card.rarity] || 'bg-white'}`}>
-          <div className="collection-card-image-wrapper">
-            <img src={card.image_url} alt={card.name} className="collection-card-image" />
+      {cards.map((card) => {
+        const displayName = resolveCollectionCardName(card, banner)
+        return (
+          <div key={card.code} className={`collection-card collection-card--${card.rarity}`}>
+            <div className="collection-card-image-wrapper">
+              <img src={card.image_url} alt={displayName} className="collection-card-image" />
+            </div>
+            <div className="collection-card-content">
+              <h3 className="collection-card-name">{displayName}</h3>
+              <div className="collection-card-rarity">{card.rarity_label}</div>
+            </div>
           </div>
-          <div className="collection-card-content">
-            <h3 className="collection-card-name">{card.name}</h3>
-            <div className="collection-card-rarity">{card.rarity_label}</div>
-            <div className="collection-card-copies">×{card.copies_owned}</div>
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

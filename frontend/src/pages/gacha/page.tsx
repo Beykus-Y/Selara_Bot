@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router-dom'
+import { useSearchParams, useParams } from 'react-router-dom'
 
 import { getGachaCollection } from '@/pages/gacha/api/get-gacha-collection'
 import { GachaPageView } from '@/pages/gacha/ui/GachaPageView'
@@ -8,13 +8,16 @@ import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function GachaCollectionPage() {
   const { userId } = useParams<{ userId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
   const parsedUserId = userId ? parseInt(userId, 10) : null
+  const rawBanner = searchParams.get('banner')
+  const banner = rawBanner === 'hsr' ? 'hsr' : 'genshin'
 
   usePageTitle('Коллекция гачи')
 
   const collectionQuery = useQuery({
-    queryKey: ['gacha-collection', parsedUserId],
-    queryFn: () => getGachaCollection(parsedUserId!, 'genshin'),
+    queryKey: ['gacha-collection', parsedUserId, banner],
+    queryFn: () => getGachaCollection(parsedUserId!, banner),
     enabled: !!parsedUserId,
   })
 
@@ -39,5 +42,19 @@ export function GachaCollectionPage() {
     return <LoadingShell eyebrow="Коллекция" title="Инициализирую коллекцию" />
   }
 
-  return <GachaPageView data={collectionQuery.data} />
+  return (
+    <GachaPageView
+      data={collectionQuery.data}
+      activeBanner={banner}
+      onBannerChange={(nextBanner) => {
+        const nextParams = new URLSearchParams(searchParams)
+        if (nextBanner === 'genshin') {
+          nextParams.delete('banner')
+        } else {
+          nextParams.set('banner', nextBanner)
+        }
+        setSearchParams(nextParams, { replace: true })
+      }}
+    />
+  )
 }
