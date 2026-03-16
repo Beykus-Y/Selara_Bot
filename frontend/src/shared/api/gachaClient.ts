@@ -3,6 +3,8 @@
  * Communicates with independent gacha microservice
  */
 
+import { resolveAppPath } from '@/shared/config/app-base-path'
+
 export interface CollectionCard {
   code: string
   name: string
@@ -79,8 +81,7 @@ function getGachaApiUrl(): string {
     return 'http://localhost:8001'
   }
 
-  // For production, assume gacha API is on same domain but different port/path
-  return `${window.location.origin}/gacha`
+  return `${window.location.origin}${resolveAppPath('/gacha')}`
 }
 
 const GACHA_API_URL = getGachaApiUrl()

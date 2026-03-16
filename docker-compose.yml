@@ -67,6 +67,7 @@ services:
     environment:
       LISTEN_PORT: "8081"
       APP_UPSTREAM: "app:${WEB_PORT:-8080}"
+      GACHA_BASE_URL: "${GACHA_BASE_URL:-http://selara-gacha:8001}"
     expose:
       - "8081"
     networks:

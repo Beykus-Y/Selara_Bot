@@ -172,6 +172,18 @@ export function AppShell() {
     setIsDrawerOpen(false)
   }
 
+  const primaryNavigation = viewerQuery.data
+    ? [
+        ...appNavigation,
+        {
+          label: 'Коллекция',
+          description: 'Карточки гачи текущего аккаунта',
+          shortLabel: 'Коллекция',
+          to: routes.gachaCollection(viewerQuery.data.telegram_user_id),
+        },
+      ]
+    : appNavigation
+
   const navigation = (
     <>
       <div className="app-brand">
@@ -185,7 +197,7 @@ export function AppShell() {
       <div className="app-sidebar__section">
         <span className="app-sidebar__label">Основная навигация</span>
         <nav className="app-nav" aria-label="Основная навигация">
-          {appNavigation.map((item) => (
+          {primaryNavigation.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

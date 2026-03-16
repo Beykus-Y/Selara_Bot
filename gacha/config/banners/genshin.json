@@ -1,7 +1,7 @@
 {
   "code": "genshin",
   "title": "Genshin Impact",
-  "cooldown_seconds": 10800,
+  "cooldown_seconds": 3600,
   "cards": [
     {
       "code": "amber",
