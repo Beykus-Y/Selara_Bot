@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Авторизованная зона</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+    </div>
+    <div class="hero-side">
+      <div class="hero-chip">идеи для бота</div>
+      <div class="hero-chip">только после входа</div>
+      <div class="hero-chip">статус виден в кабинете</div>
+    </div>
+  </section>
+
+  <section class="metrics-grid">
+    {% for metric in feedback_metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel panel-accent">
+      <div class="panel-head">
+        <div>
+          <h2>Новая заявка</h2>
+          <p class="panel-subtitle">Коротко назовите функцию и ниже опишите, как она должна работать.</p>
+        </div>
+      </div>
+      <form class="stack-form" method="post" action="/app/feedback">
+        <label class="field">
+          <span>Что добавить</span>
+          <input type="text" name="title" maxlength="160" placeholder="Например: напоминания по расписанию" required>
+        </label>
+        <label class="field">
+          <span>Описание</span>
+          <textarea name="details" rows="7" placeholder="Что именно должен уметь бот, где это должно появиться и как ты это видишь." required></textarea>
+        </label>
+        <button type="submit" class="button primary">Отправить идею</button>
+      </form>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Как это работает</h2>
+          <p class="panel-subtitle">Эта страница доступна только после обычной авторизации через Telegram.</p>
+        </div>
+      </div>
+      <div class="list-stack compact">
+        <div class="security-card">
+          <strong>Заявка попадает в админку</strong>
+          <p>Там можно просмотреть список, открыть запись через таблицу и быстро менять статус прямо на панели.</p>
+        </div>
+        <div class="security-card">
+          <strong>Статус виден здесь же</strong>
+          <p>Когда админ отметит заявку как сделанную, она останется в истории этого аккаунта со статусом.</p>
+        </div>
+        <div class="security-card">
+          <strong>Можно отправлять несколько идей</strong>
+          <p>Для каждой функции создаётся отдельная запись, так проще отслеживать прогресс по разным запросам.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Мои заявки</h2>
+        <p class="panel-subtitle">История отправленных предложений и текущий статус каждой идеи.</p>
+      </div>
+      <span class="panel-tag">{{ feedback_items|length }}</span>
+    </div>
+    {% if feedback_items %}
+      <div class="feedback-list">
+        {% for item in feedback_items %}
+          <article class="feedback-card feedback-card-{{ item.status_code }}">
+            <div class="feedback-card-head">
+              <div>
+                <strong>{{ item.title }}</strong>
+                <p class="feedback-meta">Создано {{ item.created_at }}</p>
+              </div>
+              <span class="feedback-status feedback-status-{{ item.status_code }}">{{ item.status_label }}</span>
+            </div>
+            <p class="feedback-body">{{ item.details }}</p>
+            <p class="feedback-note">{{ item.status_note }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-text">Здесь пока пусто. Первая идея появится после отправки формы выше.</p>
+    {% endif %}
+  </section>
+{% endblock %}

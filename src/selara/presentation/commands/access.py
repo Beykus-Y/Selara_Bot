@@ -96,6 +96,7 @@ SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "ranks": "ranks",
     "lastseen": "lastseen",
     "help": "help",
+    "gachagive": "gacha_skip",
 }
 
 KNOWN_COMMAND_KEYS: set[str] = set(SLASH_COMMAND_TO_KEY.values()) | set(BUILTIN_TRIGGER_TO_COMMAND_KEY.values()) | set(

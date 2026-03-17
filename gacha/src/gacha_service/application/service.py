@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from gacha_service.application.catalog import get_banner_config, get_cards_for_banner
+from gacha_service.application.catalog import get_banner_config, get_card_for_banner, get_cards_for_banner
 from gacha_service.domain.models import GachaCard, PlayerState, PullResult, RARITY_LABELS, resolve_rank
 from gacha_service.infrastructure.repository import GachaRepository
 
@@ -132,6 +132,36 @@ def _render_cooldown_message(player: PlayerState, *, banner: str, seconds_remain
     )
 
 
+def _render_admin_grant_message(
+    card: GachaCard,
+    player: PlayerState,
+    *,
+    outcome: Literal["new", "constellation", "duplicate"],
+    copies_owned: int,
+    adventure_xp_gained: int,
+    ownership_percent: float,
+) -> str:
+    rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
+    rarity_label = RARITY_LABELS[card.rarity]
+    terms = _get_banner_terms(card.banner)
+    if outcome == "new":
+        card_line = "🎁 Админ выдал новую карту"
+    elif outcome == "constellation":
+        card_line = "🎁 Админ выдал созвездие"
+    else:
+        card_line = "🎁 Админ выдал дубликат"
+    return (
+        f"{card_line}: {card.name}\n\n"
+        f"⬜ Редкость: {rarity_label}\n\n"
+        f"🗂 Копий у пользователя: {copies_owned}\n"
+        f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков\n"
+        f"🧭 {terms.xp_label}: +{adventure_xp_gained}\n"
+        f"🌟 Очки: +{card.points} [{player.total_points}]\n"
+        f"💠 {terms.currency_label}: +{card.primogems} [{player.total_primogems}]\n"
+        f"🧭 {terms.rank_label}: {rank} ({xp_into_rank}/{xp_for_next_rank})"
+    )
+
+
 class GachaService:
     def __init__(self, repo: GachaRepository, *, default_cooldown_seconds: int | None = None, rng: random.Random | None = None) -> None:
         self._repo = repo
@@ -192,6 +222,62 @@ class GachaService:
             player=updated_player,
             cooldown_until=next_pull_at,
             seconds_remaining=cooldown_seconds,
+            is_new=is_new,
+            copies_owned=copies_owned,
+            adventure_xp_gained=adventure_xp_gained,
+        )
+
+    async def grant_card(
+        self,
+        *,
+        user_id: int,
+        username: str | None,
+        banner: str,
+        card_code: str,
+        now: datetime | None = None,
+    ) -> PullResult:
+        current_time = now or _utc_now()
+        player = await self._repo.get_or_create_player(user_id=user_id, username=username)
+        base_card = get_card_for_banner(banner, card_code)
+        existing_copies = await self._repo.get_card_copies(user_id=user_id, banner=banner, card_code=base_card.code)
+        card, outcome = _resolve_reward_variant(base_card, existing_copies=existing_copies)
+        adventure_xp_gained = _resolve_adventure_xp_gain(card.adventure_xp, existing_copies)
+        current_cooldown = _coerce_utc_datetime(await self._repo.get_banner_cooldown(user_id=user_id, banner=banner))
+
+        updated_player, copies_owned = await self._repo.apply_pull(
+            user_id=user_id,
+            username=username,
+            card=card,
+            adventure_xp_gained=adventure_xp_gained,
+            pulled_at=current_time,
+            next_pull_at=current_cooldown,
+            update_cooldown=False,
+        )
+        owners_with_card, total_banner_players = await self._repo.get_card_ownership_stats(
+            banner=card.banner,
+            card_code=base_card.code,
+        )
+        ownership_percent = 0.0
+        if total_banner_players > 0:
+            ownership_percent = owners_with_card / total_banner_players * 100
+        is_new = existing_copies == 0
+        return PullResult(
+            status="ok",
+            message=_render_admin_grant_message(
+                card,
+                updated_player,
+                outcome=outcome,
+                copies_owned=copies_owned,
+                adventure_xp_gained=adventure_xp_gained,
+                ownership_percent=ownership_percent,
+            ),
+            card=card,
+            player=updated_player,
+            cooldown_until=current_cooldown or current_time,
+            seconds_remaining=max(
+                0,
+                int(((current_cooldown or current_time) - current_time).total_seconds()),
+            ),
             is_new=is_new,
             copies_owned=copies_owned,
             adventure_xp_gained=adventure_xp_gained,

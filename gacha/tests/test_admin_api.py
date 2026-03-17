@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
+from gacha_service.domain.models import CardRarity
 from gacha_service.infrastructure.backup import BackupArtifact
 from gacha_service.web import api
 
@@ -99,3 +101,67 @@ async def test_admin_backup_requires_token_and_returns_file(
     assert allowed.headers["x-gacha-backup-format"] == "dump"
     assert allowed.headers["cache-control"] == "no-store"
     assert cleanup_calls == [backup_file]
+
+
+@pytest.mark.asyncio
+async def test_admin_give_card_requires_token_and_returns_pull_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+    class FakeService:
+        def __init__(self, repo) -> None:
+            self.repo = repo
+
+        async def grant_card(self, *, user_id: int, username: str | None, banner: str, card_code: str):
+            _ = self.repo
+            return SimpleNamespace(
+                status="ok",
+                message="card granted",
+                card=SimpleNamespace(
+                    code=card_code,
+                    name="Тарталья",
+                    rarity=CardRarity.legendary,
+                    points=5,
+                    primogems=10,
+                    image_url="/images/genshin/tartalia.jpg",
+                ),
+                player=SimpleNamespace(
+                    user_id=user_id,
+                    adventure_xp=0,
+                    total_points=5,
+                    total_primogems=10,
+                ),
+                cooldown_until=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
+                is_new=True,
+                copies_owned=1,
+                adventure_xp_gained=100,
+            )
+
+    async def fake_session_dependency(_session_factory):
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(api, "GachaRepository", FakeRepo)
+    monkeypatch.setattr(api, "GachaService", FakeService)
+    monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    monkeypatch.setattr(api.settings, "admin_token", "secret")
+
+    app = FastAPI()
+    app.include_router(api.build_router(object()))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        denied = await client.post(
+            "/v1/gacha/admin/give",
+            json={"user_id": 123, "code": "tartalia"},
+        )
+        allowed = await client.post(
+            "/v1/gacha/admin/give",
+            headers={"X-Gacha-Admin-Token": "secret"},
+            json={"user_id": 123, "code": "tartalia"},
+        )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "ok"
+    assert allowed.json()["card"]["code"] == "tartalia"

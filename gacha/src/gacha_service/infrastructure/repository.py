@@ -96,7 +96,8 @@ class GachaRepository:
         card: GachaCard,
         adventure_xp_gained: int,
         pulled_at: datetime,
-        next_pull_at: datetime,
+        next_pull_at: datetime | None,
+        update_cooldown: bool = True,
     ) -> tuple[PlayerState, int]:
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
@@ -110,25 +111,27 @@ class GachaRepository:
         player.total_primogems += card.primogems
         player.adventure_xp += adventure_xp_gained
         player.adventure_rank = resolve_rank(player.adventure_xp)[0]
-        player.next_pull_at = next_pull_at
+        if update_cooldown:
+            player.next_pull_at = next_pull_at
 
-        cooldown_entry = await self._session.get(
-            PlayerBannerCooldownModel,
-            {
-                "user_id": user_id,
-                "banner": card.banner,
-            },
-        )
-        if cooldown_entry is None:
-            cooldown_entry = PlayerBannerCooldownModel(
-                user_id=user_id,
-                banner=card.banner,
-                next_pull_at=next_pull_at,
+        if update_cooldown and next_pull_at is not None:
+            cooldown_entry = await self._session.get(
+                PlayerBannerCooldownModel,
+                {
+                    "user_id": user_id,
+                    "banner": card.banner,
+                },
             )
-            self._session.add(cooldown_entry)
-            await self._session.flush()
-        else:
-            cooldown_entry.next_pull_at = next_pull_at
+            if cooldown_entry is None:
+                cooldown_entry = PlayerBannerCooldownModel(
+                    user_id=user_id,
+                    banner=card.banner,
+                    next_pull_at=next_pull_at,
+                )
+                self._session.add(cooldown_entry)
+                await self._session.flush()
+            else:
+                cooldown_entry.next_pull_at = next_pull_at
 
         collection_entry = await self._session.get(
             PlayerCardCollectionModel,

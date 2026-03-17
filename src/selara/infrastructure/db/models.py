@@ -1415,6 +1415,36 @@ Index("idx_admin_sessions_user_created", AdminSessionModel.admin_user_id, AdminS
 Index("idx_admin_sessions_expires", AdminSessionModel.expires_at, AdminSessionModel.revoked_at)
 
 
+class UserFeatureRequestModel(Base):
+    __tablename__ = "user_feature_requests"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    details: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'done')", name="ck_user_feature_requests_status"),
+    )
+
+
+Index("idx_user_feature_requests_user_created", UserFeatureRequestModel.user_id, UserFeatureRequestModel.created_at)
+Index("idx_user_feature_requests_status_created", UserFeatureRequestModel.status, UserFeatureRequestModel.created_at)
+
+
 class UserChatAchievementModel(Base):
     __tablename__ = "user_chat_achievement"
 

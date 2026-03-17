@@ -61,3 +61,15 @@ async def reset_cooldown(settings: Settings, *, user_id: int, banner: str) -> Ga
         )
     except GachaClientError as exc:
         raise GachaUseCaseError(exc.message) from exc
+
+
+async def give_card(settings: Settings, *, user_id: int, banner: str | None, code: str) -> GachaPullResponse:
+    client = _build_client(settings, banner=banner or "")
+    admin_token = settings.gacha_admin_token.strip()
+    if not admin_token:
+        raise GachaUseCaseError("Не настроен GACHA_ADMIN_TOKEN для admin-команд.")
+
+    try:
+        return await client.give_card(user_id=user_id, banner=banner, code=code, admin_token=admin_token)
+    except GachaClientError as exc:
+        raise GachaUseCaseError(exc.message) from exc

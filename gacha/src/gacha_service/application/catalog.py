@@ -69,3 +69,14 @@ def get_cards_for_banner(banner: str) -> tuple[GachaCard, ...]:
         )
         for card in config.cards
     )
+
+
+def get_card_for_banner(banner: str, code: str) -> GachaCard:
+    normalized_code = (code or "").strip().lower()
+    if not normalized_code:
+        raise ValueError("Код карты не указан.")
+
+    for card in get_cards_for_banner(banner):
+        if card.code.lower() == normalized_code:
+            return card
+    raise ValueError(f"Карта '{code}' не найдена в баннере '{banner}'.")

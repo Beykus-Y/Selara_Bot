@@ -43,7 +43,13 @@ from selara.core.web_auth import (
 from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.domain.economy_entities import FarmState
 from selara.domain.value_objects import display_name_from_parts
-from selara.infrastructure.db.models import ChatModel, EconomyAccountModel, UserChatActivityModel, UserModel
+from selara.infrastructure.db.models import (
+    ChatModel,
+    EconomyAccountModel,
+    UserChatActivityModel,
+    UserFeatureRequestModel,
+    UserModel,
+)
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
@@ -463,6 +469,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     def _home_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
         return {
             "top_links": _top_links(
+                ("/app/feedback", "Обратная связь", "ghost"),
                 ("/app/docs/user", "Справка пользователя", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
                 ("/app/achievements", "Достижения", "ghost"),
@@ -477,6 +484,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return {
             "top_links": _top_links(
                 ("/app", "К кабинетам", "ghost"),
+                ("/app/feedback", "Обратная связь", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
                 ("/app/achievements", "Достижения", "ghost"),
                 (f"/app/chat/{chat_id}/economy", "Экономика", "ghost"),
@@ -494,6 +502,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return {
             "top_links": _top_links(
                 ("#create-game", "Создать игру", "primary"),
+                ("/app/feedback", "Обратная связь", "ghost"),
                 ("/app/achievements", "Достижения", "ghost"),
                 ("/app/docs/user", "Справка пользователя", "ghost"),
                 ("/app", "К кабинетам", "ghost"),
@@ -507,6 +516,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     def _achievements_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
         return {
             "top_links": _top_links(
+                ("/app/feedback", "Обратная связь", "ghost"),
                 ("/app/games", "Активные игры", "ghost"),
                 ("/app", "К кабинетам", "ghost"),
                 ("/app/achievements", "Обновить", "subtle"),
@@ -515,6 +525,84 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "flash": flash,
             "error": error,
         }
+
+    def _feedback_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
+        return {
+            "top_links": _top_links(
+                ("/app", "К кабинетам", "ghost"),
+                ("/app/games", "Активные игры", "ghost"),
+                ("/app/achievements", "Достижения", "ghost"),
+                ("/app/feedback", "Обновить", "subtle"),
+            ),
+            "show_logout": True,
+            "flash": flash,
+            "error": error,
+        }
+
+    def _feature_request_status_meta(*, status: str, done_at: datetime | None) -> dict[str, object]:
+        if status == "done":
+            return {
+                "code": "done",
+                "label": "Сделано",
+                "note": (
+                    f"Отмечено {format_datetime(done_at)}"
+                    if done_at is not None
+                    else "Отмечено админом"
+                ),
+                "is_done": True,
+            }
+        return {
+            "code": "open",
+            "label": "Не сделано",
+            "note": "Ожидает решения",
+            "is_done": False,
+        }
+
+    def _build_feature_request_item(
+        *,
+        row: UserFeatureRequestModel,
+        author_label: str | None = None,
+    ) -> dict[str, object]:
+        status_meta = _feature_request_status_meta(status=row.status, done_at=row.done_at)
+        return {
+            "id": int(row.id),
+            "title": row.title,
+            "details": row.details,
+            "status_code": status_meta["code"],
+            "status_label": status_meta["label"],
+            "status_note": status_meta["note"],
+            "is_done": status_meta["is_done"],
+            "created_at": format_datetime(row.created_at),
+            "done_at": format_datetime(row.done_at) if row.done_at is not None else None,
+            "author_label": author_label,
+        }
+
+    async def _load_admin_feature_request_items(
+        session: AsyncSession,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        stmt = (
+            select(UserFeatureRequestModel, UserModel)
+            .join(UserModel, UserModel.telegram_user_id == UserFeatureRequestModel.user_id)
+            .order_by((UserFeatureRequestModel.status == "done").asc(), UserFeatureRequestModel.created_at.desc())
+            .limit(limit)
+        )
+        rows = (await session.execute(stmt)).all()
+        items: list[dict[str, object]] = []
+        for feature_request, author in rows:
+            items.append(
+                _build_feature_request_item(
+                    row=feature_request,
+                    author_label=display_name_from_parts(
+                        user_id=int(author.telegram_user_id),
+                        username=author.username,
+                        first_name=author.first_name,
+                        last_name=author.last_name,
+                    ),
+                )
+            )
+        return items
 
     def _audit_layout_context(chat_id: int, *, flash: str | None, error: str | None) -> dict[str, object]:
         return {
@@ -4251,6 +4339,108 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         assert page_context is not None
         return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
 
+    @app.get("/app/feedback", response_class=HTMLResponse)
+    async def feedback_page(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
+
+            rows = (
+                await session.execute(
+                    select(UserFeatureRequestModel)
+                    .where(UserFeatureRequestModel.user_id == user.telegram_user_id)
+                    .order_by(UserFeatureRequestModel.created_at.desc(), UserFeatureRequestModel.id.desc())
+                )
+            ).scalars().all()
+            await session.commit()
+
+        feedback_items = [_build_feature_request_item(row=row) for row in rows]
+        open_count = sum(1 for item in feedback_items if not bool(item["is_done"]))
+        done_count = len(feedback_items) - open_count
+        page_context: dict[str, object] = {
+            "page_title": "Selara • Обратная связь",
+            "page_name": "feedback",
+            "hero_title": "Обратная связь по боту",
+            "hero_subtitle": (
+                "Оставьте идеи, чего не хватает в боте. После отправки заявка попадёт в админку, "
+                "где её можно будет отметить как сделанную."
+            ),
+            "feedback_metrics": [
+                {"label": "Всего заявок", "value": str(len(feedback_items)), "note": "из этого аккаунта", "tone": "indigo"},
+                {"label": "Не сделано", "value": str(open_count), "note": "ещё в работе", "tone": "magenta"},
+                {"label": "Сделано", "value": str(done_count), "note": "отмечено в админке", "tone": "cyan"},
+            ],
+            "feedback_items": feedback_items,
+            "flash": request.query_params.get("flash"),
+            "error": request.query_params.get("error"),
+        }
+        page_context.update(
+            _feedback_layout_context(
+                flash=page_context["flash"],  # type: ignore[index]
+                error=page_context["error"],  # type: ignore[index]
+            )
+        )
+        return _render_template("feedback.html", **page_context)
+
+    @app.post("/app/feedback")
+    async def feedback_submit(request: Request):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                redirect_path = _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect=redirect_path)
+                return _redirect(redirect_path)
+
+            form = await _parse_form(request)
+            title = " ".join(str(form.get("title", "")).split()).strip()
+            details = str(form.get("details", "")).strip()
+
+            if not title:
+                await session.commit()
+                redirect_path = _with_message("/app/feedback", key="error", text="Нужно коротко назвать идею.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Нужно коротко назвать идею.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
+            if len(title) > 160:
+                await session.commit()
+                redirect_path = _with_message("/app/feedback", key="error", text="Заголовок должен быть до 160 символов.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Заголовок должен быть до 160 символов.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
+            if not details:
+                await session.commit()
+                redirect_path = _with_message("/app/feedback", key="error", text="Опишите, что именно нужно добавить.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Опишите, что именно нужно добавить.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
+
+            feature_request = UserFeatureRequestModel(
+                user_id=user.telegram_user_id,
+                title=title,
+                details=details,
+                status="open",
+            )
+            session.add(feature_request)
+            await session.flush()
+            request_id = int(feature_request.id)
+            await session.commit()
+
+        redirect_path = _with_message("/app/feedback", key="flash", text="Предложение отправлено.")
+        if prefers_json:
+            return _json_result(
+                ok=True,
+                message="Предложение отправлено.",
+                status_code=200,
+                redirect=redirect_path,
+                request_id=request_id,
+            )
+        return _redirect(redirect_path)
+
     @app.get("/app/games", response_class=HTMLResponse)
     async def games_page(request: Request):
         async with session_factory() as session:
@@ -6489,6 +6679,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "user_chat_message_events": {"title": "События сообщений пользователей", "group": "activity"},
         "user_chat_moderation_states": {"title": "Состояния модерации пользователей", "group": "activity"},
         "user_chat_profiles": {"title": "Профили пользователей в чате", "group": "activity"},
+        "user_feature_requests": {"title": "Заявки на функции", "group": "web"},
         "user_global_achievement": {"title": "Глобальные достижения пользователей", "group": "achievement"},
         "user_karma_votes": {"title": "Голоса кармы", "group": "activity"},
         "users": {"title": "Пользователи", "group": "core"},
@@ -6725,10 +6916,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     async def admin_page(request: Request):
         async with session_factory() as session:
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
-            await session.commit()
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _redirect("/app/admin/login")
 
-        if not _admin_auth_required(admin_user_id):
-            return _redirect("/app/admin/login")
+            feedback_requests = await _load_admin_feature_request_items(session)
+            open_feedback_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(UserFeatureRequestModel)
+                    .where(UserFeatureRequestModel.status == "open")
+                )
+            ).scalar_one()
+            await session.commit()
 
         return _render_template(
             "admin.html",
@@ -6740,6 +6940,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ),
             table_sections=_admin_table_sections(),
             admin_user_id=admin_user_id,
+            feedback_requests=feedback_requests,
+            open_feedback_count=int(open_feedback_count or 0),
         )
 
     @app.get("/app/admin/login", response_class=HTMLResponse)
@@ -6854,6 +7056,44 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         redirect_path = _with_message("/app/admin", key="flash", text="Backup отправлен в Telegram.")
         if prefers_json:
             return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
+        return _redirect(redirect_path)
+
+    @app.post("/app/admin/feedback/{request_id}/status")
+    async def admin_feedback_status_update(request: Request, request_id: int):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                if prefers_json:
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+                return _redirect("/app/admin/login")
+
+            form = await _parse_form(request)
+            new_status = str(form.get("status", "")).strip().lower()
+            if new_status not in {"open", "done"}:
+                await session.commit()
+                redirect_path = _with_message("/app/admin", key="error", text="Неизвестный статус заявки.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Неизвестный статус заявки.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
+
+            row = await session.get(UserFeatureRequestModel, request_id)
+            if row is None:
+                await session.commit()
+                redirect_path = _with_message("/app/admin", key="error", text="Заявка не найдена.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Заявка не найдена.", status_code=404, redirect=redirect_path)
+                return _redirect(redirect_path)
+
+            row.status = new_status
+            row.done_at = _now_utc() if new_status == "done" else None
+            await session.commit()
+
+        message = "Заявка отмечена как сделанная." if new_status == "done" else "Заявка возвращена в открытые."
+        redirect_path = _with_message("/app/admin", key="flash", text=message)
+        if prefers_json:
+            return _json_result(ok=True, message=message, status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
 
     @app.get("/app/admin/table/{table_name}", response_class=HTMLResponse)

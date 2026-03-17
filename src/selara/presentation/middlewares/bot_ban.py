@@ -59,14 +59,11 @@ class BotBanMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         if isinstance(event, Message):
-            await event.answer(
-                "Не могу выполнить: вы забанены ботом в этом чате.\n"
-                "Причина и статус: /modstat (если доступно) или обратитесь к админам."
-            )
             return None
 
         if isinstance(event, CallbackQuery):
-            await event.answer("Вы забанены ботом в этом чате.", show_alert=True)
+            # Acknowledge callback silently so client doesn't hang, but don't show any message.
+            await event.answer()
             return None
 
         return await handler(event, data)

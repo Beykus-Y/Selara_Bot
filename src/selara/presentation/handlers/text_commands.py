@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import httpx
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -32,6 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.use_cases.gacha import (
     GachaUseCaseError,
+    give_card as give_gacha_card,
     get_profile as get_gacha_profile,
     pull_card as pull_gacha_card,
     reset_cooldown as reset_gacha_cooldown,
@@ -942,20 +943,42 @@ async def _resolve_gacha_skip_target(
     if message.from_user is None:
         return None, "Не удалось определить отправителя команды."
 
-    if not target_username:
-        return message.from_user.id, None
+    # If target specified via @username, resolve via activity repository
+    if target_username:
+        if message.chat.type not in {"group", "supergroup"}:
+            return None, "Сброс кулдауна по @username работает только в группе."
 
-    if message.chat.type not in {"group", "supergroup"}:
-        return None, "Сброс кулдауна по @username работает только в группе."
+        snapshot = await activity_repo.find_shared_group_user_by_username(
+            sender_user_id=message.from_user.id,
+            username=target_username,
+        )
+        if snapshot is None:
+            return None, f"Не удалось найти пользователя {target_username}."
 
-    snapshot = await activity_repo.find_shared_group_user_by_username(
-        sender_user_id=message.from_user.id,
-        username=target_username,
-    )
-    if snapshot is None:
-        return None, f"Не удалось найти пользователя {target_username}."
+        return snapshot.telegram_user_id, None
 
-    return snapshot.telegram_user_id, None
+    # If command was issued as a reply, use the replied-to user as the target
+    if message.reply_to_message is not None and message.reply_to_message.from_user is not None:
+        return message.reply_to_message.from_user.id, None
+
+    # Default to sender
+    return message.from_user.id, None
+
+
+async def _ensure_gacha_admin_user(
+    message: Message,
+    settings: Settings,
+    *,
+    denied_message: str,
+) -> bool:
+    admin_user_id = settings.gacha_admin_user_id
+    if admin_user_id is None:
+        await _answer_quiet(message, "Команда недоступна: не настроен GACHA_ADMIN_USER_ID.")
+        return False
+    if message.from_user is None or message.from_user.id != admin_user_id:
+        await _answer_quiet(message, denied_message)
+        return False
+    return True
 
 
 async def _send_gacha_skip(
@@ -969,12 +992,11 @@ async def _send_gacha_skip(
     if message.from_user is None:
         return
 
-    admin_user_id = settings.gacha_admin_user_id
-    if admin_user_id is None:
-        await _answer_quiet(message, "Команда недоступна: не настроен GACHA_ADMIN_USER_ID.")
-        return
-    if message.from_user.id != admin_user_id:
-        await _answer_quiet(message, "Недостаточно прав для сброса кулдауна гачи.")
+    if not await _ensure_gacha_admin_user(
+        message,
+        settings,
+        denied_message="Недостаточно прав для сброса кулдауна гачи.",
+    ):
         return
 
     target_user_id, error = await _resolve_gacha_skip_target(
@@ -995,6 +1017,57 @@ async def _send_gacha_skip(
             user_id=target_user_id,
             banner=banner,
         )
+    except GachaUseCaseError as exc:
+        await _answer_quiet(message, exc.message)
+        return
+
+    await _answer_quiet(message, response.message)
+
+
+@router.message(Command("gachagive"))
+async def gachagive_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    settings: Settings,
+) -> None:
+    if message.from_user is None:
+        return
+
+    raw = (command.args or "").strip()
+    if not raw and message.reply_to_message is None:
+        await _answer_quiet(message, 'Формат: /gachagive <code> @username (или reply)')
+        return
+
+    parts = raw.split()
+    code = parts[0] if parts else None
+    target_username = parts[1] if len(parts) > 1 else None
+
+    if not code:
+        await _answer_quiet(message, 'Укажите код карты: /gachagive <code> @username (или reply)')
+        return
+
+    if not await _ensure_gacha_admin_user(
+        message,
+        settings,
+        denied_message="Недостаточно прав для выдачи карты в гаче.",
+    ):
+        return
+
+    target_user_id, error = await _resolve_gacha_skip_target(
+        message,
+        activity_repo,
+        target_username=target_username,
+    )
+    if error is not None:
+        await _answer_quiet(message, error)
+        return
+    if target_user_id is None:
+        await _answer_quiet(message, "Не удалось определить пользователя для выдачи карты.")
+        return
+
+    try:
+        response = await give_gacha_card(settings, user_id=target_user_id, banner=None, code=code)
     except GachaUseCaseError as exc:
         await _answer_quiet(message, exc.message)
         return

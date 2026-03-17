@@ -88,6 +88,12 @@ class CooldownResetRequest(BaseModel):
     banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
 
 
+class AdminGiveCardRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+    code: str = Field(..., min_length=1, max_length=64)
+    banner: str | None = Field(default=None, min_length=1, max_length=32)
+
+
 class CooldownResetResponse(BaseModel):
     status: str
     banner: str
@@ -379,6 +385,50 @@ def build_router(session_factory):
             banner=payload.banner,
             user_id=payload.user_id,
             message=message,
+        )
+
+    @router.post("/admin/give", response_model=PullResponse)
+    async def admin_give_card(
+        payload: AdminGiveCardRequest,
+        request: Request,
+        x_gacha_admin_token: str | None = Header(default=None, alias="X-Gacha-Admin-Token"),
+        session: AsyncSession = Depends(get_session),
+    ) -> PullResponse:
+        _require_admin_token(x_gacha_admin_token)
+
+        banner = payload.banner or settings.default_banner
+        repo = GachaRepository(session)
+        service = GachaService(repo)
+        try:
+            result = await service.grant_card(
+                user_id=payload.user_id,
+                username=None,
+                banner=banner,
+                card_code=payload.code,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        card_payload = None
+        if result.card is not None:
+            card_payload = CardPayload(
+                code=result.card.code,
+                name=result.card.name,
+                rarity=result.card.rarity.value,
+                rarity_label=RARITY_LABELS[result.card.rarity],
+                points=result.card.points,
+                primogems=result.card.primogems,
+                image_url=_resolve_public_image_url(request, result.card.image_url),
+            )
+        return PullResponse(
+            status=result.status,
+            message=result.message,
+            card=card_payload,
+            player=_to_player_payload(player=result.player, user_id=result.player.user_id),
+            cooldown_until=result.cooldown_until,
+            is_new=result.is_new,
+            copies_owned=result.copies_owned,
+            adventure_xp_gained=result.adventure_xp_gained,
         )
 
     @router.post("/admin/backup")

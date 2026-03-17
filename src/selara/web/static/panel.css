@@ -5576,6 +5576,84 @@ textarea:focus-visible,
   border-top: 1px solid var(--line);
 }
 
+.feedback-list {
+  display: grid;
+  gap: 14px;
+}
+
+.feedback-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  background: var(--surface);
+}
+
+.feedback-card-open {
+  box-shadow: inset 0 0 0 1px rgba(255, 196, 87, 0.16);
+}
+
+.feedback-card-done {
+  box-shadow: inset 0 0 0 1px rgba(102, 255, 194, 0.14);
+}
+
+.feedback-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.feedback-meta,
+.feedback-note,
+.feedback-body {
+  margin: 8px 0 0;
+}
+
+.feedback-meta,
+.feedback-note {
+  color: var(--muted);
+}
+
+.feedback-body {
+  white-space: pre-wrap;
+}
+
+.feedback-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.feedback-status-open {
+  background: rgba(255, 196, 87, 0.16);
+  color: #ffd978;
+}
+
+.feedback-status-done {
+  background: rgba(102, 255, 194, 0.16);
+  color: #7affcd;
+}
+
+.admin-feedback-list {
+  margin-bottom: 8px;
+}
+
+.admin-feedback-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .admin-table-controls {
   display: flex;
   justify-content: space-between;
@@ -5782,6 +5860,12 @@ textarea:focus-visible,
   .admin-actions-col {
     width: 70px;
   }
+
+  .feedback-card-head,
+  .admin-feedback-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .admin-edit-form {
@@ -5852,4 +5936,3 @@ textarea:focus-visible,
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }
-

@@ -121,6 +121,19 @@ class HttpGachaClient:
         )
         return GachaCooldownResetResponse.model_validate(payload)
 
+    async def give_card(self, *, user_id: int, banner: str | None, code: str, admin_token: str) -> GachaPullResponse:
+        payload = await self._request(
+            "POST",
+            "/v1/gacha/admin/give",
+            headers={"X-Gacha-Admin-Token": admin_token},
+            json={
+                "user_id": user_id,
+                "banner": banner,
+                "code": code,
+            },
+        )
+        return GachaPullResponse.model_validate(payload)
+
     async def download_backup(self, *, admin_token: str) -> GachaBackupFile:
         try:
             async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds) as client:

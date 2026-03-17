@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gacha_service.application.catalog import get_banner_config
 from gacha_service.application.service import GachaService
 from gacha_service.domain.models import CardRarity, GachaCard, PlayerState
 from gacha_service.web.api import _render_profile_message, _resolve_public_image_url, _to_history_payload, PlayerPayload
@@ -48,7 +49,8 @@ class FakeGachaRepository:
         card: GachaCard,
         adventure_xp_gained: int,
         pulled_at: datetime,
-        next_pull_at: datetime,
+        next_pull_at: datetime | None,
+        update_cooldown: bool = True,
     ) -> tuple[PlayerState, int]:
         current = await self.get_or_create_player(user_id=user_id, username=username)
         key = (user_id, card.banner, card.code)
@@ -60,9 +62,10 @@ class FakeGachaRepository:
             adventure_xp=current.adventure_xp + adventure_xp_gained,
             total_points=current.total_points + card.points,
             total_primogems=current.total_primogems + card.primogems,
-            next_pull_at=next_pull_at,
+            next_pull_at=next_pull_at if update_cooldown else current.next_pull_at,
         )
-        self.banner_cooldowns[(user_id, card.banner)] = next_pull_at
+        if update_cooldown and next_pull_at is not None:
+            self.banner_cooldowns[(user_id, card.banner)] = next_pull_at
         self.players[user_id] = updated
         self.history.append({"user_id": user_id, "card_code": card.code, "pulled_at": pulled_at})
         return updated, copies_owned
@@ -89,6 +92,7 @@ async def test_pull_grants_card_and_updates_totals() -> None:
     repo = FakeGachaRepository()
     service = GachaService(repo)
     now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+    cooldown_seconds = get_banner_config("genshin").cooldown_seconds
 
     result = await service.pull(user_id=100, username="tester", banner="genshin", now=now)
 
@@ -96,7 +100,7 @@ async def test_pull_grants_card_and_updates_totals() -> None:
     assert result.card is not None
     assert result.player.total_points > 0
     assert result.player.total_primogems > 0
-    assert result.cooldown_until == now + timedelta(hours=3)
+    assert result.cooldown_until == now + timedelta(seconds=cooldown_seconds)
     assert result.is_new
     assert result.copies_owned == 1
     assert "Вы получили новую карту" in result.message
@@ -178,6 +182,29 @@ async def test_hsr_uses_banner_specific_cooldown() -> None:
     assert "Опыт освоения" in result.message
     assert "Уровень освоения" in result.message
     assert "Звездный нефрит" in result.message
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_card_adds_card_without_setting_cooldown() -> None:
+    repo = FakeGachaRepository()
+    service = GachaService(repo)
+    now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+
+    result = await service.grant_card(
+        user_id=555,
+        username="tester",
+        banner="genshin",
+        card_code="tartalia",
+        now=now,
+    )
+
+    assert result.status == "ok"
+    assert result.card is not None
+    assert result.card.code == "tartalia"
+    assert result.player.total_points > 0
+    assert result.player.total_primogems > 0
+    assert repo.banner_cooldowns == {}
+    assert "Админ выдал" in result.message
 
 
 @pytest.mark.asyncio
