@@ -7,7 +7,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from gacha_service.application.catalog import get_banner_config, get_card_for_banner, get_cards_for_banner
-from gacha_service.domain.models import GachaCard, PlayerState, PullResult, RARITY_LABELS, resolve_rank
+from gacha_service.domain.models import (
+    GachaCard,
+    PlayerState,
+    PullResult,
+    RARITY_LABELS,
+    format_element_icon,
+    format_element_label,
+    format_region_label,
+    resolve_rank,
+)
 from gacha_service.infrastructure.repository import GachaRepository
 
 
@@ -88,6 +97,15 @@ def _resolve_adventure_xp_gain(base_xp: int, existing_copies: int) -> int:
     return max(1, int(round(base_xp * multiplier)))
 
 
+def _render_card_origin_block(card: GachaCard) -> str:
+    if card.banner != "genshin":
+        return ""
+    region_label = format_region_label(card.region_code)
+    element_label = format_element_label(card.element_code)
+    element_icon = format_element_icon(card.element_code)
+    return f"🌍 Регион: {region_label}\n{element_icon} Стихия: {element_label}\n"
+
+
 def _render_success_message(
     card: GachaCard,
     player: PlayerState,
@@ -101,6 +119,7 @@ def _render_success_message(
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
     rarity_label = RARITY_LABELS[card.rarity]
     terms = _get_banner_terms(card.banner)
+    origin_block = _render_card_origin_block(card)
     if outcome == "new":
         card_line = "🍀 Вы получили новую карту"
     elif outcome == "constellation":
@@ -109,7 +128,9 @@ def _render_success_message(
         card_line = "♻️ Вам выпал дубликат"
     return (
         f"{card_line}: {card.name}\n\n"
-        f"⬜ Редкость: {rarity_label}\n\n"
+        f"⬜ Редкость: {rarity_label}\n"
+        f"{origin_block}"
+        "\n"
         f"🗂 Копий у вас: {copies_owned}\n"
         f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков\n"
         f"🧭 {terms.xp_label}: +{adventure_xp_gained}\n"
@@ -144,6 +165,7 @@ def _render_admin_grant_message(
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
     rarity_label = RARITY_LABELS[card.rarity]
     terms = _get_banner_terms(card.banner)
+    origin_block = _render_card_origin_block(card)
     if outcome == "new":
         card_line = "🎁 Админ выдал новую карту"
     elif outcome == "constellation":
@@ -152,7 +174,9 @@ def _render_admin_grant_message(
         card_line = "🎁 Админ выдал дубликат"
     return (
         f"{card_line}: {card.name}\n\n"
-        f"⬜ Редкость: {rarity_label}\n\n"
+        f"⬜ Редкость: {rarity_label}\n"
+        f"{origin_block}"
+        "\n"
         f"🗂 Копий у пользователя: {copies_owned}\n"
         f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков\n"
         f"🧭 {terms.xp_label}: +{adventure_xp_gained}\n"

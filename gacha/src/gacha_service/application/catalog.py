@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from gacha_service.config import settings
 from gacha_service.domain.models import CardRarity, GachaCard
@@ -17,7 +18,9 @@ class CardConfig(BaseModel):
     primogems: int = Field(ge=0)
     adventure_xp: int = Field(ge=0)
     image_url: str
-    weight: int = Field(default=1, ge=1)
+    region_code: str | None = Field(default=None, min_length=1)
+    element_code: str | None = Field(default=None, min_length=1)
+    weight: float = Field(default=1, gt=0)
 
 
 class BannerConfig(BaseModel):
@@ -25,6 +28,25 @@ class BannerConfig(BaseModel):
     title: str
     cooldown_seconds: int = Field(gt=0)
     cards: list[CardConfig]
+
+    @model_validator(mode="after")
+    def validate_banner_specific_card_fields(self) -> "BannerConfig":
+        if self.code != "genshin":
+            return self
+
+        missing_fields: list[str] = []
+        for card in self.cards:
+            missing: list[str] = []
+            if not card.region_code:
+                missing.append("region_code")
+            if not card.element_code:
+                missing.append("element_code")
+            if missing:
+                missing_fields.append(f"{card.code}: {', '.join(missing)}")
+        if missing_fields:
+            details = "; ".join(missing_fields)
+            raise ValueError(f"Для баннера '{self.code}' у карт обязательны region_code и element_code: {details}")
+        return self
 
 
 def _load_banner_file(path: Path) -> BannerConfig:
@@ -65,6 +87,8 @@ def get_cards_for_banner(banner: str) -> tuple[GachaCard, ...]:
             primogems=card.primogems,
             adventure_xp=card.adventure_xp,
             image_url=card.image_url,
+            region_code=card.region_code,
+            element_code=card.element_code,
             weight=card.weight,
         )
         for card in config.cards

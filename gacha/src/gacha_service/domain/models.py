@@ -10,6 +10,7 @@ class CardRarity(StrEnum):
     rare = "rare"
     epic = "epic"
     legendary = "legendary"
+    mythic = "mythic"
 
 
 RARITY_LABELS: dict[CardRarity, str] = {
@@ -17,7 +18,62 @@ RARITY_LABELS: dict[CardRarity, str] = {
     CardRarity.rare: "🟦 Редкая",
     CardRarity.epic: "🟪 Эпическая",
     CardRarity.legendary: "🟨 Легендарная",
+    CardRarity.mythic: "🟥 Мифическая",
 }
+
+REGION_LABELS: dict[str, str] = {
+    "mondstadt": "Мондштадт",
+    "liyue": "Ли Юэ",
+    "inazuma": "Инадзума",
+    "sumeru": "Сумеру",
+    "fontaine": "Фонтейн",
+    "natlan": "Натлан",
+    "nod_krai": "Нод-Край",
+    "snezhnaya": "Снежная",
+    "khaenriah": "Каэнри'ах",
+    "unknown": "Неизвестно",
+}
+
+ELEMENT_LABELS: dict[str, str] = {
+    "hydro": "Гидро",
+    "electro": "Электро",
+    "pyro": "Пиро",
+    "cryo": "Крио",
+    "anemo": "Анемо",
+    "dendro": "Дендро",
+    "geo": "Гео",
+    "unknown": "Неизвестно",
+}
+
+ELEMENT_ICONS: dict[str, str] = {
+    "hydro": "💧",
+    "electro": "⚡",
+    "pyro": "🔥",
+    "cryo": "❄️",
+    "anemo": "🌪️",
+    "dendro": "🌿",
+    "geo": "🪨",
+    "unknown": "✨",
+}
+
+
+def format_region_label(region_code: str | None) -> str:
+    normalized = (region_code or "").strip().lower()
+    if not normalized:
+        return "Неизвестно"
+    return REGION_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def format_element_label(element_code: str | None) -> str:
+    normalized = (element_code or "").strip().lower()
+    if not normalized:
+        return "Неизвестно"
+    return ELEMENT_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def format_element_icon(element_code: str | None) -> str:
+    normalized = (element_code or "").strip().lower() or "unknown"
+    return ELEMENT_ICONS.get(normalized, "✨")
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,7 +86,9 @@ class GachaCard:
     primogems: int
     adventure_xp: int
     image_url: str
-    weight: int = 1
+    region_code: str | None = None
+    element_code: str | None = None
+    weight: float = 1
 
 
 @dataclass(slots=True, frozen=True)

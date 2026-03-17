@@ -182,6 +182,8 @@ async def test_hsr_uses_banner_specific_cooldown() -> None:
     assert "Опыт освоения" in result.message
     assert "Уровень освоения" in result.message
     assert "Звездный нефрит" in result.message
+    assert "Регион:" not in result.message
+    assert "Стихия:" not in result.message
 
 
 @pytest.mark.asyncio
@@ -349,6 +351,8 @@ async def test_genshin_post_c6_duplicate_doubles_primogems() -> None:
 
 def test_history_payload_uses_rarity_labels() -> None:
     entry = SimpleNamespace(
+        banner="genshin",
+        character_code="amber",
         pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
         character_name="Эмбер",
         rarity="common",
@@ -362,6 +366,10 @@ def test_history_payload_uses_rarity_labels() -> None:
 
     assert payload.rarity == "common"
     assert payload.rarity_label == "⬜ Обычная"
+    assert payload.region_code is not None
+    assert payload.element_code is not None
+    assert payload.region_label == "Мондштадт"
+    assert payload.element_label == "Пиро"
 
 
 def test_profile_message_includes_recent_pulls_block() -> None:
@@ -377,6 +385,8 @@ def test_profile_message_includes_recent_pulls_block() -> None:
     recent = [
         _to_history_payload(
             SimpleNamespace(
+                banner="genshin",
+                character_code="amber",
                 pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
                 character_name="Эмбер",
                 rarity="common",
@@ -400,6 +410,8 @@ def test_profile_message_includes_recent_pulls_block() -> None:
     assert "Статистика гачи: Genshin Impact" in message
     assert "Последние крутки" in message
     assert "Эмбер" in message
+    assert "Мондштадт" in message
+    assert "Пиро" in message
 
 
 def test_hsr_profile_message_uses_hsr_terms() -> None:
@@ -424,6 +436,83 @@ def test_hsr_profile_message_uses_hsr_terms() -> None:
 
     assert "Уровень освоения" in message
     assert "Звездный нефрит" in message
+
+
+def test_hsr_profile_message_does_not_render_origin_block() -> None:
+    player = PlayerPayload(
+        user_id=4,
+        adventure_rank=3,
+        adventure_xp=600,
+        xp_into_rank=150,
+        xp_for_next_rank=600,
+        total_points=3200,
+        total_primogems=40,
+    )
+    recent = [
+        _to_history_payload(
+            SimpleNamespace(
+                banner="hsr",
+                character_code="kafka",
+                pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
+                character_name="Кафка",
+                rarity="legendary",
+                points=11000,
+                primogems=22,
+                adventure_xp=200,
+                image_url="https://example.com/kafka.png",
+            )
+        )
+    ]
+
+    message = _render_profile_message(
+        banner="hsr",
+        banner_title="Honkai: Star Rail",
+        player_payload=player,
+        unique_cards=1,
+        total_copies=1,
+        recent_pulls=recent,
+    )
+
+    assert "Кафка" in message
+    assert "Неизвестно" not in message
+
+
+def test_profile_message_uses_neizvestno_for_unknown_origin() -> None:
+    player = PlayerPayload(
+        user_id=3,
+        adventure_rank=1,
+        adventure_xp=0,
+        xp_into_rank=0,
+        xp_for_next_rank=300,
+        total_points=0,
+        total_primogems=0,
+    )
+    recent = [
+        _to_history_payload(
+            SimpleNamespace(
+                banner="genshin",
+                character_code="missing_card",
+                pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
+                character_name="Неизвестный",
+                rarity="common",
+                points=1,
+                primogems=1,
+                adventure_xp=1,
+                image_url="https://example.com/missing.png",
+            )
+        )
+    ]
+
+    message = _render_profile_message(
+        banner="genshin",
+        banner_title="Genshin Impact",
+        player_payload=player,
+        unique_cards=1,
+        total_copies=1,
+        recent_pulls=recent,
+    )
+
+    assert "Неизвестно" in message
 
 
 def test_resolve_public_image_url_builds_vps_link() -> None:

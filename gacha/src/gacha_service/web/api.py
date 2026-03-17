@@ -9,10 +9,16 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gacha_service.application.catalog import get_banner_config
+from gacha_service.application.catalog import get_banner_config, get_card_for_banner
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
-from gacha_service.domain.models import CardRarity, RARITY_LABELS, resolve_rank
+from gacha_service.domain.models import (
+    CardRarity,
+    RARITY_LABELS,
+    format_element_label,
+    format_region_label,
+    resolve_rank,
+)
 from gacha_service.infrastructure.backup import BackupError, cleanup_backup_artifact, create_database_backup
 from gacha_service.infrastructure.db import session_dependency
 from gacha_service.infrastructure.repository import GachaRepository
@@ -32,6 +38,10 @@ class CardPayload(BaseModel):
     points: int
     primogems: int
     image_url: str
+    region_code: str | None = None
+    element_code: str | None = None
+    region_label: str | None = None
+    element_label: str | None = None
 
 
 class PlayerPayload(BaseModel):
@@ -64,6 +74,10 @@ class HistoryEntryPayload(BaseModel):
     primogems: int
     adventure_xp_gained: int
     image_url: str
+    region_code: str | None = None
+    element_code: str | None = None
+    region_label: str | None = None
+    element_label: str | None = None
 
 
 class ProfileResponse(BaseModel):
@@ -108,6 +122,10 @@ class CollectionCardPayload(BaseModel):
     rarity_label: str
     copies_owned: int
     image_url: str
+    region_code: str | None = None
+    element_code: str | None = None
+    region_label: str | None = None
+    element_label: str | None = None
 
 
 class CollectionResponse(BaseModel):
@@ -132,8 +150,28 @@ def _to_player_payload(*, player, user_id: int) -> PlayerPayload:
     )
 
 
+def _resolve_card_codes(*, banner: str, code: str) -> tuple[str | None, str | None]:
+    try:
+        card = get_card_for_banner(banner, code)
+    except ValueError:
+        return None, None
+    return card.region_code, card.element_code
+
+
+def _resolve_card_labels(*, banner: str, region_code: str | None, element_code: str | None) -> tuple[str | None, str | None]:
+    if banner != "genshin":
+        return None, None
+    return format_region_label(region_code), format_element_label(element_code)
+
+
 def _to_history_payload(entry) -> HistoryEntryPayload:
     rarity = CardRarity(entry.rarity)
+    region_code, element_code = _resolve_card_codes(banner=entry.banner, code=entry.character_code)
+    region_label, element_label = _resolve_card_labels(
+        banner=entry.banner,
+        region_code=region_code,
+        element_code=element_code,
+    )
     return HistoryEntryPayload(
         pulled_at=entry.pulled_at,
         card_name=entry.character_name,
@@ -143,6 +181,10 @@ def _to_history_payload(entry) -> HistoryEntryPayload:
         primogems=entry.primogems,
         adventure_xp_gained=entry.adventure_xp,
         image_url=entry.image_url,
+        region_code=region_code,
+        element_code=element_code,
+        region_label=region_label,
+        element_label=element_label,
     )
 
 
@@ -185,8 +227,13 @@ def _render_profile_message(
         lines.append("Пока пусто.")
     else:
         for entry in recent_pulls:
+            details = ""
+            if entry.region_label or entry.element_label:
+                details = f" • {entry.region_label or 'Неизвестно'} • {entry.element_label or 'Неизвестно'}"
             lines.append(
-                f"{entry.rarity_label} {entry.card_name} | +{entry.adventure_xp_gained} {xp_suffix} | {entry.pulled_at:%Y-%m-%d %H:%M}"
+                f"{entry.rarity_label} {entry.card_name} "
+                f"{details} "
+                f"| +{entry.adventure_xp_gained} {xp_suffix} | {entry.pulled_at:%Y-%m-%d %H:%M}"
             )
     return "\n".join(lines)
 
@@ -230,6 +277,12 @@ def build_router(session_factory):
 
         card_payload = None
         if result.card is not None:
+            card_banner = getattr(result.card, "banner", payload.banner)
+            region_label, element_label = _resolve_card_labels(
+                banner=card_banner,
+                region_code=getattr(result.card, "region_code", None),
+                element_code=getattr(result.card, "element_code", None),
+            )
             card_payload = CardPayload(
                 code=result.card.code,
                 name=result.card.name,
@@ -238,6 +291,10 @@ def build_router(session_factory):
                 points=result.card.points,
                 primogems=result.card.primogems,
                 image_url=_resolve_public_image_url(request, result.card.image_url),
+                region_code=getattr(result.card, "region_code", None),
+                element_code=getattr(result.card, "element_code", None),
+                region_label=region_label,
+                element_label=element_label,
             )
         return PullResponse(
             status=result.status,
@@ -339,6 +396,11 @@ def build_router(session_factory):
         for card in cards_collection:
             if card.character_code in card_info_by_code:
                 card_info = card_info_by_code[card.character_code]
+                region_label, element_label = _resolve_card_labels(
+                    banner=banner,
+                    region_code=card_info.region_code,
+                    element_code=card_info.element_code,
+                )
                 payload_cards.append(
                     CollectionCardPayload(
                         code=card.character_code,
@@ -347,6 +409,10 @@ def build_router(session_factory):
                         rarity_label=RARITY_LABELS[card_info.rarity],
                         copies_owned=card.copies_owned,
                         image_url=_resolve_public_image_url(request, card_info.image_url),
+                        region_code=card_info.region_code,
+                        element_code=card_info.element_code,
+                        region_label=region_label,
+                        element_label=element_label,
                     )
                 )
                 total_copies += card.copies_owned
@@ -411,6 +477,12 @@ def build_router(session_factory):
 
         card_payload = None
         if result.card is not None:
+            card_banner = getattr(result.card, "banner", banner)
+            region_label, element_label = _resolve_card_labels(
+                banner=card_banner,
+                region_code=getattr(result.card, "region_code", None),
+                element_code=getattr(result.card, "element_code", None),
+            )
             card_payload = CardPayload(
                 code=result.card.code,
                 name=result.card.name,
@@ -419,6 +491,10 @@ def build_router(session_factory):
                 points=result.card.points,
                 primogems=result.card.primogems,
                 image_url=_resolve_public_image_url(request, result.card.image_url),
+                region_code=getattr(result.card, "region_code", None),
+                element_code=getattr(result.card, "element_code", None),
+                region_label=region_label,
+                element_label=element_label,
             )
         return PullResponse(
             status=result.status,

@@ -14,6 +14,31 @@ RARITY_LABELS = {
     "rare": "rare / 4★",
     "epic": "epic / 4★",
     "legendary": "legendary / 5★",
+    "mythic": "mythic / 6★",
+}
+
+REGION_LABELS = {
+    "mondstadt": "Мондштадт",
+    "liyue": "Ли Юэ",
+    "inazuma": "Инадзума",
+    "sumeru": "Сумеру",
+    "fontaine": "Фонтейн",
+    "natlan": "Натлан",
+    "nod_krai": "Нод-Край",
+    "snezhnaya": "Снежная",
+    "khaenriah": "Каэнри'ах",
+    "unknown": "Неизвестно",
+}
+
+ELEMENT_LABELS = {
+    "hydro": "Гидро",
+    "electro": "Электро",
+    "pyro": "Пиро",
+    "cryo": "Крио",
+    "anemo": "Анемо",
+    "dendro": "Дендро",
+    "geo": "Гео",
+    "unknown": "Неизвестно",
 }
 
 
@@ -32,13 +57,30 @@ def _format_percent(value: float) -> str:
     return f"{value:.4f}%"
 
 
+def _format_number(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _format_card_meta(card: dict) -> str:
+    parts: list[str] = []
+    region_code = str(card.get("region_code", "") or "").strip()
+    element_code = str(card.get("element_code", "") or "").strip()
+    if region_code:
+        parts.append(f"регион={REGION_LABELS.get(region_code, region_code)}")
+    if element_code:
+        parts.append(f"стихия={ELEMENT_LABELS.get(element_code, element_code)}")
+    return f" | {' | '.join(parts)}" if parts else ""
+
+
 def _build_report(path: Path) -> str:
     payload = _load_banner(path)
     title = payload.get("title", path.stem)
     code = payload.get("code", path.stem)
     cooldown_seconds = payload.get("cooldown_seconds", 0)
     cards = payload.get("cards", [])
-    total_weight = sum(int(card.get("weight", 0)) for card in cards)
+    total_weight = sum(float(card.get("weight", 0) or 0) for card in cards)
 
     lines: list[str] = []
     lines.append(f"{'=' * 72}")
@@ -46,10 +88,10 @@ def _build_report(path: Path) -> str:
     lines.append(f"{'=' * 72}")
     lines.append(f"Кулдаун: {cooldown_seconds} сек")
     lines.append(f"Карточек: {len(cards)}")
-    lines.append(f"Сумма весов: {total_weight}")
+    lines.append(f"Сумма весов: {_format_number(total_weight)}")
     lines.append("")
 
-    rarity_weights: dict[str, int] = defaultdict(int)
+    rarity_weights: dict[str, float] = defaultdict(float)
     rarity_counts: dict[str, int] = defaultdict(int)
     for card in cards:
         rarity = card["rarity"]
@@ -57,14 +99,14 @@ def _build_report(path: Path) -> str:
         rarity_counts[rarity] += 1
 
     lines.append("Шансы по редкостям:")
-    for rarity in ("common", "rare", "epic", "legendary"):
+    for rarity in ("common", "rare", "epic", "legendary", "mythic"):
         weight = rarity_weights.get(rarity, 0)
         if weight <= 0:
             continue
         chance = weight / total_weight * 100
         lines.append(
             f"  {RARITY_LABELS.get(rarity, rarity)}: {_format_percent(chance)} "
-            f"(вес {weight}, карточек {rarity_counts[rarity]})"
+            f"(вес {_format_number(weight)}, карточек {rarity_counts[rarity]})"
         )
 
     lines.append("")
@@ -73,7 +115,8 @@ def _build_report(path: Path) -> str:
         chance = card["weight"] / total_weight * 100
         lines.append(
             f"  {card['name']:<28} | {card['rarity']:<10} | "
-            f"weight={card['weight']:<3} | chance={_format_percent(chance)}"
+            f"weight={_format_number(float(card['weight'])):<3} | chance={_format_percent(chance)}"
+            f"{_format_card_meta(card)}"
         )
 
     return "\n".join(lines)

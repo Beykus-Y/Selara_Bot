@@ -61,32 +61,49 @@ class TestBannerConfigs:
 
     def test_genshin_card_structure(self, genshin_config):
         """Test that all Genshin cards have required fields."""
-        required_fields = {"code", "name", "rarity", "points", "primogems", "adventure_xp", "image_url", "weight"}
+        required_fields = {
+            "code",
+            "name",
+            "rarity",
+            "points",
+            "primogems",
+            "adventure_xp",
+            "image_url",
+            "region_code",
+            "element_code",
+            "weight",
+        }
         for card in genshin_config["cards"]:
             assert isinstance(card, dict)
             assert required_fields.issubset(card.keys()), f"Card {card.get('code')} missing fields"
             assert isinstance(card["code"], str) and card["code"]
             assert isinstance(card["name"], str) and card["name"]
-            assert card["rarity"] in {"common", "rare", "epic", "legendary"}
+            assert card["rarity"] in {"common", "rare", "epic", "legendary", "mythic"}
             assert card["points"] >= 0
             assert card["primogems"] >= 0
             assert card["adventure_xp"] >= 0
             assert card["weight"] > 0
+            assert isinstance(card["region_code"], str) and card["region_code"]
+            assert isinstance(card["element_code"], str) and card["element_code"]
             assert card["image_url"].startswith("/images/genshin/")
 
     def test_hsr_card_structure(self, hsr_config):
-        """Test that all HSR cards have required fields."""
+        """Test that all HSR cards have required base fields and optional metadata."""
         required_fields = {"code", "name", "rarity", "points", "primogems", "adventure_xp", "image_url", "weight"}
         for card in hsr_config["cards"]:
             assert isinstance(card, dict)
             assert required_fields.issubset(card.keys()), f"Card {card.get('code')} missing fields"
             assert isinstance(card["code"], str) and card["code"]
             assert isinstance(card["name"], str) and card["name"]
-            assert card["rarity"] in {"common", "rare", "epic", "legendary"}
+            assert card["rarity"] in {"common", "rare", "epic", "legendary", "mythic"}
             assert card["points"] >= 0
             assert card["primogems"] >= 0
             assert card["adventure_xp"] >= 0
             assert card["weight"] > 0
+            if "region_code" in card:
+                assert isinstance(card["region_code"], str) and card["region_code"]
+            if "element_code" in card:
+                assert isinstance(card["element_code"], str) and card["element_code"]
             assert card["image_url"].startswith("/images/hsr/")
 
     def test_genshin_unique_codes(self, genshin_config):
@@ -167,15 +184,16 @@ class TestRarityDistribution:
             return json.load(f)
 
     def test_genshin_rarity_distribution(self, genshin_config):
-        """Test Genshin tracks the actual 4★/5★ split via epic/legendary."""
+        """Test Genshin tracks higher-tier rarities via epic/legendary/mythic."""
         rarities = [card["rarity"] for card in genshin_config["cards"]]
         epic_count = rarities.count("epic")
         legendary_count = rarities.count("legendary")
+        mythic_count = rarities.count("mythic")
 
-        # Genshin's playable cast is mostly 4★/5★, so epic/legendary should be present.
+        # Genshin should keep higher-tier rarities in the banner pool.
         assert epic_count > 0, "No epic cards"
         assert legendary_count > 0, "No legendary cards"
-        assert epic_count + legendary_count == len(rarities), "Unexpected lower-tier rarities remain in Genshin"
+        assert epic_count + legendary_count + mythic_count == len(rarities), "Unexpected lower-tier rarities remain in Genshin"
 
     def test_genshin_rewards_by_rarity(self, genshin_config):
         """Test that card rewards increase with rarity."""
@@ -190,6 +208,10 @@ class TestRarityDistribution:
             avg_epic_points = sum(c["points"] for c in cards_by_rarity["epic"]) / len(cards_by_rarity["epic"])
             avg_legendary_points = sum(c["points"] for c in cards_by_rarity["legendary"]) / len(cards_by_rarity["legendary"])
             assert avg_epic_points < avg_legendary_points, "Epic cards should have lower rewards than legendary"
+        if "legendary" in cards_by_rarity and "mythic" in cards_by_rarity:
+            avg_legendary_points = sum(c["points"] for c in cards_by_rarity["legendary"]) / len(cards_by_rarity["legendary"])
+            avg_mythic_points = sum(c["points"] for c in cards_by_rarity["mythic"]) / len(cards_by_rarity["mythic"])
+            assert avg_legendary_points < avg_mythic_points, "Legendary cards should have lower rewards than mythic"
 
 
 class TestWeights:
@@ -230,6 +252,10 @@ class TestWeights:
             avg_common = sum(weights_by_rarity["epic"]) / len(weights_by_rarity["epic"])
             avg_legendary = sum(weights_by_rarity["legendary"]) / len(weights_by_rarity["legendary"])
             assert avg_common > avg_legendary, "Epic cards should have higher weight than legendary"
+        if "legendary" in weights_by_rarity and "mythic" in weights_by_rarity:
+            total_legendary = sum(weights_by_rarity["legendary"])
+            total_mythic = sum(weights_by_rarity["mythic"])
+            assert total_legendary > total_mythic, "Legendary total weight should stay higher than mythic"
 
 
 class TestStatistics:
@@ -259,7 +285,7 @@ class TestStatistics:
                 rarities[rarity] = 0
             rarities[rarity] += 1
 
-        for rarity in ["common", "rare", "epic", "legendary"]:
+        for rarity in ["common", "rare", "epic", "legendary", "mythic"]:
             count = rarities.get(rarity, 0)
             print(f"  {rarity}: {count}")
 
@@ -278,7 +304,7 @@ class TestStatistics:
                 rarities[rarity] = 0
             rarities[rarity] += 1
 
-        for rarity in ["common", "rare", "epic", "legendary"]:
+        for rarity in ["common", "rare", "epic", "legendary", "mythic"]:
             count = rarities.get(rarity, 0)
             print(f"  {rarity}: {count}")
 

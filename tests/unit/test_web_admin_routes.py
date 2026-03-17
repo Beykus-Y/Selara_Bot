@@ -48,6 +48,9 @@ class FakeExecuteResult:
     def scalar(self):
         return self._scalar_value
 
+    def scalar_one(self):
+        return self._scalar_value
+
 
 class FakeSession:
     def __init__(self, *, execute_results=None, records=None) -> None:
@@ -93,7 +96,12 @@ class QueueSessionFactory:
 @pytest.mark.asyncio
 async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     settings = _settings()
-    auth_session = FakeSession()
+    auth_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+        ]
+    )
     monkeypatch.setattr(
         web_app_module,
         "SqlAlchemyAdminAuthRepository",
