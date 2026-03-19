@@ -113,6 +113,33 @@ class PullResult:
     is_new: bool = False
     copies_owned: int = 0
     adventure_xp_gained: int = 0
+    pull_id: int | None = None
+    sell_offer: "SellOffer" | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SellOffer:
+    sale_price: int
+
+
+@dataclass(slots=True, frozen=True)
+class SellResult:
+    status: str
+    message: str
+    player: PlayerState
+    pull_id: int
+    banner: str
+    sale_price: int
+    sold_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class CurrencyGrantResult:
+    status: str
+    message: str
+    player: PlayerState
+    banner: str
+    amount: int
 
 
 def xp_for_rank(rank: int) -> int:

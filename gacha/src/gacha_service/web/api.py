@@ -54,6 +54,10 @@ class PlayerPayload(BaseModel):
     total_primogems: int
 
 
+class SellOfferPayload(BaseModel):
+    sale_price: int
+
+
 class PullResponse(BaseModel):
     status: str
     message: str
@@ -63,6 +67,8 @@ class PullResponse(BaseModel):
     is_new: bool
     copies_owned: int
     adventure_xp_gained: int
+    pull_id: int | None = None
+    sell_offer: SellOfferPayload | None = None
 
 
 class HistoryEntryPayload(BaseModel):
@@ -108,6 +114,17 @@ class AdminGiveCardRequest(BaseModel):
     banner: str | None = Field(default=None, min_length=1, max_length=32)
 
 
+class AdminGrantCurrencyRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+    username: str | None = Field(default=None, max_length=64)
+    banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
+    amount: int
+
+
+class SellPullRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+
+
 class CooldownResetResponse(BaseModel):
     status: str
     banner: str
@@ -135,6 +152,25 @@ class CollectionResponse(BaseModel):
     cards: list[CollectionCardPayload]
     total_unique: int
     total_copies: int
+
+
+class SellPullResponse(BaseModel):
+    status: str
+    message: str
+    pull_id: int
+    banner: str
+    sale_price: int
+    sold_at: datetime
+    player: PlayerPayload
+
+
+class AdminGrantCurrencyResponse(BaseModel):
+    status: str
+    message: str
+    banner: str
+    user_id: int
+    amount: int
+    player: PlayerPayload
 
 
 def _to_player_payload(*, player, user_id: int) -> PlayerPayload:
@@ -193,6 +229,54 @@ def _resolve_public_image_url(request: Request, image_url: str) -> str:
         return image_url
     base_url = str(request.base_url).rstrip("/")
     return f"{base_url}/{image_url.lstrip('/')}"
+
+
+def _pull_response_from_result(*, result, request: Request, fallback_banner: str) -> PullResponse:
+    card_payload = None
+    if result.card is not None:
+        card_banner = getattr(result.card, "banner", fallback_banner)
+        region_label, element_label = _resolve_card_labels(
+            banner=card_banner,
+            region_code=getattr(result.card, "region_code", None),
+            element_code=getattr(result.card, "element_code", None),
+        )
+        card_payload = CardPayload(
+            code=result.card.code,
+            name=result.card.name,
+            rarity=result.card.rarity.value,
+            rarity_label=RARITY_LABELS[result.card.rarity],
+            points=result.card.points,
+            primogems=result.card.primogems,
+            image_url=_resolve_public_image_url(request, result.card.image_url),
+            region_code=getattr(result.card, "region_code", None),
+            element_code=getattr(result.card, "element_code", None),
+            region_label=region_label,
+            element_label=element_label,
+        )
+    sell_offer = None
+    if result.sell_offer is not None:
+        sell_offer = SellOfferPayload(sale_price=result.sell_offer.sale_price)
+    return PullResponse(
+        status=result.status,
+        message=result.message,
+        card=card_payload,
+        player=_to_player_payload(player=result.player, user_id=result.player.user_id),
+        cooldown_until=result.cooldown_until,
+        is_new=result.is_new,
+        copies_owned=result.copies_owned,
+        adventure_xp_gained=result.adventure_xp_gained,
+        pull_id=result.pull_id,
+        sell_offer=sell_offer,
+    )
+
+
+def _http_exception_for_value_error(exc: ValueError) -> HTTPException:
+    message = str(exc)
+    if message.startswith("Баннер ") or message.startswith("Карта ") or message == "Крутка не найдена.":
+        status_code = 404
+    else:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail=message)
 
 
 def _render_profile_message(
@@ -273,39 +357,28 @@ def build_router(session_factory):
                 banner=payload.banner,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise _http_exception_for_value_error(exc) from exc
 
-        card_payload = None
-        if result.card is not None:
-            card_banner = getattr(result.card, "banner", payload.banner)
-            region_label, element_label = _resolve_card_labels(
-                banner=card_banner,
-                region_code=getattr(result.card, "region_code", None),
-                element_code=getattr(result.card, "element_code", None),
+        return _pull_response_from_result(result=result, request=request, fallback_banner=payload.banner)
+
+    @router.post("/pull/purchase", response_model=PullResponse)
+    async def purchase_pull(
+        payload: PullRequest,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> PullResponse:
+        repo = GachaRepository(session)
+        service = GachaService(repo)
+        try:
+            result = await service.pull_purchase(
+                user_id=payload.user_id,
+                username=payload.username,
+                banner=payload.banner,
             )
-            card_payload = CardPayload(
-                code=result.card.code,
-                name=result.card.name,
-                rarity=result.card.rarity.value,
-                rarity_label=RARITY_LABELS[result.card.rarity],
-                points=result.card.points,
-                primogems=result.card.primogems,
-                image_url=_resolve_public_image_url(request, result.card.image_url),
-                region_code=getattr(result.card, "region_code", None),
-                element_code=getattr(result.card, "element_code", None),
-                region_label=region_label,
-                element_label=element_label,
-            )
-        return PullResponse(
-            status=result.status,
-            message=result.message,
-            card=card_payload,
-            player=_to_player_payload(player=result.player, user_id=result.player.user_id),
-            cooldown_until=result.cooldown_until,
-            is_new=result.is_new,
-            copies_owned=result.copies_owned,
-            adventure_xp_gained=result.adventure_xp_gained,
-        )
+        except ValueError as exc:
+            raise _http_exception_for_value_error(exc) from exc
+
+        return _pull_response_from_result(result=result, request=request, fallback_banner=payload.banner)
 
     @router.get("/users/{user_id}/profile", response_model=ProfileResponse)
     async def profile(
@@ -321,7 +394,7 @@ def build_router(session_factory):
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        player = await repo.get_or_create_player(user_id=user_id, username=None)
+        player = await repo.get_or_create_player(user_id=user_id, username=None, banner=banner)
         unique_cards, total_copies = await repo.get_collection_stats(user_id=user_id, banner=banner)
         recent_pulls = await repo.get_recent_pulls_by_banner(user_id=user_id, banner=banner, limit=max(1, min(limit, 10)))
         player_payload = _to_player_payload(player=player, user_id=user_id)
@@ -473,38 +546,60 @@ def build_router(session_factory):
                 card_code=payload.code,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise _http_exception_for_value_error(exc) from exc
 
-        card_payload = None
-        if result.card is not None:
-            card_banner = getattr(result.card, "banner", banner)
-            region_label, element_label = _resolve_card_labels(
-                banner=card_banner,
-                region_code=getattr(result.card, "region_code", None),
-                element_code=getattr(result.card, "element_code", None),
+        return _pull_response_from_result(result=result, request=request, fallback_banner=banner)
+
+    @router.post("/admin/currency/grant", response_model=AdminGrantCurrencyResponse)
+    async def admin_grant_currency(
+        payload: AdminGrantCurrencyRequest,
+        x_gacha_admin_token: str | None = Header(default=None, alias="X-Gacha-Admin-Token"),
+        session: AsyncSession = Depends(get_session),
+    ) -> AdminGrantCurrencyResponse:
+        _require_admin_token(x_gacha_admin_token)
+
+        repo = GachaRepository(session)
+        service = GachaService(repo)
+        try:
+            result = await service.grant_currency(
+                user_id=payload.user_id,
+                username=payload.username,
+                banner=payload.banner,
+                amount=payload.amount,
             )
-            card_payload = CardPayload(
-                code=result.card.code,
-                name=result.card.name,
-                rarity=result.card.rarity.value,
-                rarity_label=RARITY_LABELS[result.card.rarity],
-                points=result.card.points,
-                primogems=result.card.primogems,
-                image_url=_resolve_public_image_url(request, result.card.image_url),
-                region_code=getattr(result.card, "region_code", None),
-                element_code=getattr(result.card, "element_code", None),
-                region_label=region_label,
-                element_label=element_label,
-            )
-        return PullResponse(
+        except ValueError as exc:
+            raise _http_exception_for_value_error(exc) from exc
+
+        return AdminGrantCurrencyResponse(
             status=result.status,
             message=result.message,
-            card=card_payload,
+            banner=result.banner,
+            user_id=result.player.user_id,
+            amount=result.amount,
             player=_to_player_payload(player=result.player, user_id=result.player.user_id),
-            cooldown_until=result.cooldown_until,
-            is_new=result.is_new,
-            copies_owned=result.copies_owned,
-            adventure_xp_gained=result.adventure_xp_gained,
+        )
+
+    @router.post("/pulls/{pull_id}/sell", response_model=SellPullResponse)
+    async def sell_pull(
+        pull_id: int,
+        payload: SellPullRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> SellPullResponse:
+        repo = GachaRepository(session)
+        service = GachaService(repo)
+        try:
+            result = await service.sell_pull(user_id=payload.user_id, pull_id=pull_id)
+        except ValueError as exc:
+            raise _http_exception_for_value_error(exc) from exc
+
+        return SellPullResponse(
+            status=result.status,
+            message=result.message,
+            pull_id=result.pull_id,
+            banner=result.banner,
+            sale_price=result.sale_price,
+            sold_at=result.sold_at,
+            player=_to_player_payload(player=result.player, user_id=result.player.user_id),
         )
 
     @router.post("/admin/backup")

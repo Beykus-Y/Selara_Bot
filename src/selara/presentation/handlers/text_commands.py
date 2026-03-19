@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import random
@@ -31,12 +32,18 @@ from aiogram.types import (
 from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.use_cases.gacha import (
+    GACHA_CURRENCY_PER_COIN_RATE,
+    GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT,
     GachaUseCaseError,
+    buy_currency_with_coins as buy_gacha_currency_with_coins,
     give_card as give_gacha_card,
     get_profile as get_gacha_profile,
+    purchase_pull as purchase_gacha_pull,
     pull_card as pull_gacha_card,
     reset_cooldown as reset_gacha_cooldown,
+    sell_pull as sell_gacha_pull,
 )
+from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
@@ -379,6 +386,10 @@ class _InlinePrivatePendingMessage:
 _INLINE_PM_PENDING: dict[str, _InlinePrivatePendingMessage] = {}
 _INLINE_RP_PENDING: dict[str, tuple[int, UserSnapshot, datetime]] = {}
 _INLINE_RP_RECENT_TARGETS: dict[int, list[UserSnapshot]] = {}
+_GACHA_CALLBACK_PREFIX = "gacha:"
+_GACHA_PAID_PULL_PRICE = 180
+_GACHA_CURRENCY_PURCHASE_AMOUNT = GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT
+_GACHA_COIN_EXCHANGE_RATE = GACHA_CURRENCY_PER_COIN_RATE
 _GACHA_BANNER_LABELS: dict[str, str] = {
     "genshin": "Геншин",
     "hsr": "HSR",
@@ -860,6 +871,55 @@ def _gacha_banner_label(banner: str) -> str:
     return _GACHA_BANNER_LABELS.get((banner or "").strip().lower(), banner)
 
 
+def _gacha_currency_label(banner: str) -> str:
+    if (banner or "").strip().lower() == "hsr":
+        return "Звездный нефрит"
+    return "Примогемы"
+
+
+def _gacha_currency_button_label(banner: str) -> str:
+    if (banner or "").strip().lower() == "hsr":
+        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита"
+    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов"
+
+
+def _gacha_rank_label(banner: str) -> str:
+    if (banner or "").strip().lower() == "hsr":
+        return "Уровень освоения"
+    return "Ранг приключений"
+
+
+def _gacha_economy_mode(*, chat_type: str, chat_settings: ChatSettings) -> str:
+    if chat_type in {"group", "supergroup"}:
+        return chat_settings.economy_mode
+    return "global"
+
+
+def _gacha_economy_chat_id(*, chat_type: str, chat_id: int) -> int | None:
+    if chat_type in {"group", "supergroup"}:
+        return chat_id
+    return None
+
+
+async def _load_gacha_coin_balance(
+    economy_repo,
+    *,
+    economy_mode: str,
+    chat_id: int | None,
+    user_id: int,
+) -> int | None:
+    scope, error = await resolve_scope_or_error(
+        economy_repo,
+        economy_mode=economy_mode,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    if scope is None:
+        return None
+    account, _ = await get_account_or_error(economy_repo, scope=scope, user_id=user_id)
+    return account.balance
+
+
 def _gacha_image_filename(image_url: str) -> str:
     candidate = basename(urlsplit(image_url).path.strip())
     if candidate:
@@ -872,6 +932,222 @@ async def _fetch_gacha_image_file(image_url: str, *, timeout_seconds: float) -> 
         response = await client.get(image_url)
         response.raise_for_status()
     return BufferedInputFile(response.content, filename=_gacha_image_filename(image_url))
+
+
+def _gacha_escape_message_html(text: str) -> str:
+    return "\n".join(escape(line) for line in text.splitlines())
+
+
+def _render_gacha_pull_html(*, banner: str, response, owner_user_id: int) -> str:
+    header = f"<b>🎴 {_gacha_banner_label(banner)}</b>"
+    if not response.message:
+        return header
+
+    if response.card is None:
+        return f"{header}\n\n{_gacha_escape_message_html(response.message)}"
+
+    lines = response.message.splitlines()
+    if lines:
+        first_line = lines[0]
+        if ": " in first_line:
+            prefix, _ = first_line.rsplit(": ", 1)
+            lines[0] = f"{escape(prefix)}: {format_user_link(user_id=owner_user_id, label=response.card.name)}"
+        else:
+            lines[0] = escape(first_line)
+    if len(lines) > 1:
+        lines[1:] = [escape(line) for line in lines[1:]]
+    return f"{header}\n\n" + "\n".join(lines)
+
+
+def _gacha_buy_callback_data(*, banner: str, owner_user_id: int) -> str:
+    return f"{_GACHA_CALLBACK_PREFIX}buy:{banner}:u{owner_user_id}"
+
+
+def _gacha_currency_buy_callback_data(*, banner: str, amount: int, owner_user_id: int) -> str:
+    return f"{_GACHA_CALLBACK_PREFIX}currency:{banner}:{amount}:u{owner_user_id}"
+
+
+def _gacha_sell_callback_data(*, banner: str, pull_id: int, owner_user_id: int) -> str:
+    return f"{_GACHA_CALLBACK_PREFIX}sell:{banner}:{pull_id}:u{owner_user_id}"
+
+
+def _parse_gacha_callback_data(data: str | None) -> tuple[str | None, str | None, int | None, int | None, int | None]:
+    if data is None or not data.startswith(_GACHA_CALLBACK_PREFIX):
+        return None, None, None, None, None
+    parts = data.split(":")
+    if len(parts) == 4 and parts[1] == "buy" and parts[3].startswith("u") and parts[3][1:].isdigit():
+        return "buy", parts[2], None, int(parts[3][1:]), None
+    if (
+        len(parts) == 5
+        and parts[1] == "currency"
+        and parts[3].isdigit()
+        and parts[4].startswith("u")
+        and parts[4][1:].isdigit()
+    ):
+        return "currency", parts[2], None, int(parts[4][1:]), int(parts[3])
+    if len(parts) == 5 and parts[1] == "sell" and parts[3].isdigit() and parts[4].startswith("u") and parts[4][1:].isdigit():
+        return "sell", parts[2], int(parts[3]), int(parts[4][1:]), None
+    return None, None, None, None, None
+
+
+def _build_gacha_sell_markup(*, banner: str, pull_id: int, owner_user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Продать",
+                    callback_data=_gacha_sell_callback_data(banner=banner, pull_id=pull_id, owner_user_id=owner_user_id),
+                )
+            ]
+        ]
+    )
+
+
+def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str]) -> InlineKeyboardMarkup | None:
+    rows: list[list[InlineKeyboardButton]] = []
+    for banner in banners:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Крутка • {_gacha_banner_label(banner)}",
+                    callback_data=_gacha_buy_callback_data(banner=banner, owner_user_id=owner_user_id),
+                ),
+                InlineKeyboardButton(
+                    text=_gacha_currency_button_label(banner),
+                    callback_data=_gacha_currency_buy_callback_data(
+                        banner=banner,
+                        amount=_GACHA_CURRENCY_PURCHASE_AMOUNT,
+                        owner_user_id=owner_user_id,
+                    ),
+                ),
+            ]
+        )
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_gacha_pull_markup(*, response, banner: str, owner_user_id: int) -> InlineKeyboardMarkup | None:
+    if response.sell_offer is None or response.pull_id is None:
+        return None
+    return _build_gacha_sell_markup(banner=banner, pull_id=response.pull_id, owner_user_id=owner_user_id)
+
+
+def _format_gacha_recent_pull(entry) -> str:
+    if entry is None:
+        return "нет"
+    pulled_at = getattr(entry, "pulled_at", "")
+    if isinstance(pulled_at, str):
+        timestamp = pulled_at.replace("T", " ")[:16]
+    else:
+        timestamp = str(pulled_at)
+    return f"{escape(entry.card_name)} • <code>{escape(timestamp)}</code>"
+
+
+def _render_gacha_info_section(*, banner: str, response) -> str:
+    recent = response.recent_pulls[0] if response.recent_pulls else None
+    return "\n".join(
+        [
+            f"<b>{_gacha_banner_label(banner)}</b>",
+            f"🧭 {_gacha_rank_label(banner)}: <code>{response.player.adventure_rank}</code> ({response.player.xp_into_rank}/{response.player.xp_for_next_rank})",
+            f"🌟 Очки: <code>{response.player.total_points}</code>",
+            f"💠 {_gacha_currency_label(banner)}: <code>{response.player.total_primogems}</code>",
+            f"🗂 Карты: <code>{response.unique_cards}</code> • копии <code>{response.total_copies}</code>",
+            f"🕘 Последняя: {_format_gacha_recent_pull(recent)}",
+        ]
+    )
+
+
+async def _build_gacha_info_view(
+    settings: Settings,
+    economy_repo,
+    *,
+    user_id: int,
+    economy_mode: str,
+    chat_id: int | None,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    banners = ("genshin", "hsr")
+    results = await asyncio.gather(
+        *(get_gacha_profile(settings, user_id=user_id, banner=banner) for banner in banners),
+        return_exceptions=True,
+    )
+    coin_balance = await _load_gacha_coin_balance(
+        economy_repo,
+        economy_mode=economy_mode,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+
+    sections: list[str] = [
+        "<b>Гача инфо</b>",
+        f"💸 Платная крутка: <code>{_GACHA_PAID_PULL_PRICE}</code> валюты баннера",
+        f"💱 Обмен: <code>1</code> валюты = <code>{_GACHA_COIN_EXCHANGE_RATE}</code> монет",
+    ]
+    if coin_balance is not None:
+        sections.append(f"🪙 Монеты бота: <code>{coin_balance}</code>")
+    available_banners: list[str] = []
+    errors: list[str] = []
+    for banner, result in zip(banners, results, strict=True):
+        if isinstance(result, Exception):
+            error_text = result.message if isinstance(result, GachaUseCaseError) else str(result)
+            errors.append(f"❌ {escape(_gacha_banner_label(banner))}: {escape(error_text)}")
+            continue
+        available_banners.append(banner)
+        sections.extend(["", _render_gacha_info_section(banner=banner, response=result)])
+
+    if not available_banners:
+        if errors:
+            return "\n".join(errors), None
+        return "Не удалось загрузить гача-статистику.", None
+
+    if errors:
+        sections.extend(["", *errors])
+    return "\n".join(sections), _build_gacha_info_markup(owner_user_id=user_id, banners=available_banners)
+
+
+async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, banner: str, response, owner_user_id: int) -> None:
+    rendered_message = _render_gacha_pull_html(banner=banner, response=response, owner_user_id=owner_user_id)
+    reply_markup = _build_gacha_pull_markup(response=response, banner=banner, owner_user_id=owner_user_id)
+    if response.card is None or not response.card.image_url:
+        await _answer_quiet(
+            message,
+            rendered_message,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+        return
+
+    try:
+        photo = await _fetch_gacha_image_file(
+            response.card.image_url,
+            timeout_seconds=settings.gacha_timeout_seconds,
+        )
+        await message.answer_photo(
+            photo=photo,
+            caption=rendered_message,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_notification=message.chat.type in {"group", "supergroup"},
+        )
+    except (httpx.HTTPError, TelegramBadRequest) as exc:
+        logger.warning(
+            "Gacha image delivery failed, falling back to text",
+            extra={
+                "chat_id": getattr(message.chat, "id", None),
+                "user_id": owner_user_id,
+                "banner": banner,
+                "image_url": response.card.image_url,
+                "error": str(exc),
+            },
+        )
+        await _answer_quiet(
+            message,
+            rendered_message,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
 
 
 async def _send_gacha_pull(message: Message, settings: Settings, *, banner: str) -> None:
@@ -889,33 +1165,13 @@ async def _send_gacha_pull(message: Message, settings: Settings, *, banner: str)
         await _answer_quiet(message, exc.message)
         return
 
-    rendered_message = f"🎴 {_gacha_banner_label(banner)}\n\n{response.message}"
-    if response.card is None or not response.card.image_url:
-        await _answer_quiet(message, rendered_message, disable_web_page_preview=True)
-        return
-
-    try:
-        photo = await _fetch_gacha_image_file(
-            response.card.image_url,
-            timeout_seconds=settings.gacha_timeout_seconds,
-        )
-        await message.answer_photo(
-            photo=photo,
-            caption=rendered_message,
-            disable_notification=message.chat.type in {"group", "supergroup"},
-        )
-    except (httpx.HTTPError, TelegramBadRequest) as exc:
-        logger.warning(
-            "Gacha image delivery failed, falling back to text",
-            extra={
-                "chat_id": getattr(message.chat, "id", None),
-                "user_id": message.from_user.id,
-                "banner": banner,
-                "image_url": response.card.image_url,
-                "error": str(exc),
-            },
-        )
-        await _answer_quiet(message, rendered_message, disable_web_page_preview=True)
+    await _deliver_gacha_pull_response(
+        message,
+        settings,
+        banner=banner,
+        response=response,
+        owner_user_id=message.from_user.id,
+    )
 
 
 async def _send_gacha_profile(message: Message, settings: Settings, *, banner: str) -> None:
@@ -933,6 +1189,20 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
         return
 
     await _answer_quiet(message, response.message, disable_web_page_preview=True)
+
+
+async def _send_gacha_info(message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
+    if message.from_user is None:
+        return
+
+    text, reply_markup = await _build_gacha_info_view(
+        settings,
+        economy_repo,
+        user_id=message.from_user.id,
+        economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
+        chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
+    )
+    await _answer_quiet(message, text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
 
 
 async def _resolve_gacha_skip_target(
@@ -2829,6 +3099,110 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
     await _safe_callback_answer(query, chunks[page_index], show_alert=True)
 
 
+@router.callback_query(F.data.startswith(_GACHA_CALLBACK_PREFIX))
+async def gacha_callback(query: CallbackQuery, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
+    action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
+    if action is None or banner is None or owner_user_id is None:
+        await _safe_callback_answer(query)
+        return
+    if query.from_user is None or query.message is None:
+        await _safe_callback_answer(query)
+        return
+    if int(query.from_user.id) != int(owner_user_id):
+        await _safe_callback_answer(query, "Эта кнопка не для вас.", show_alert=True)
+        return
+
+    economy_mode = _gacha_economy_mode(chat_type=query.message.chat.type, chat_settings=chat_settings)
+    economy_chat_id = _gacha_economy_chat_id(chat_type=query.message.chat.type, chat_id=query.message.chat.id)
+
+    if action == "buy":
+        try:
+            response = await purchase_gacha_pull(
+                settings,
+                user_id=query.from_user.id,
+                username=query.from_user.username,
+                banner=banner,
+            )
+        except GachaUseCaseError as exc:
+            await _safe_callback_answer(query, exc.message, show_alert=True)
+            return
+
+        await _deliver_gacha_pull_response(
+            query.message,
+            settings,
+            banner=banner,
+            response=response,
+            owner_user_id=query.from_user.id,
+        )
+        text, reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+        )
+        try:
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
+        except TelegramBadRequest:
+            pass
+        await _safe_callback_answer(query)
+        return
+
+    if action == "currency":
+        if currency_amount is None:
+            await _safe_callback_answer(query)
+            return
+        try:
+            result = await buy_gacha_currency_with_coins(
+                settings,
+                economy_repo,
+                economy_mode=economy_mode,
+                chat_id=economy_chat_id,
+                user_id=query.from_user.id,
+                username=query.from_user.username,
+                banner=banner,
+                currency_amount=currency_amount,
+            )
+        except GachaUseCaseError as exc:
+            await _safe_callback_answer(query, exc.message, show_alert=True)
+            return
+
+        text, reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+        )
+        try:
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
+        except TelegramBadRequest:
+            pass
+        await _safe_callback_answer(query, result.message)
+        return
+
+    if pull_id is None:
+        await _safe_callback_answer(query)
+        return
+
+    try:
+        response = await sell_gacha_pull(
+            settings,
+            user_id=query.from_user.id,
+            pull_id=pull_id,
+            banner=banner,
+        )
+    except GachaUseCaseError as exc:
+        await _safe_callback_answer(query, exc.message, show_alert=True)
+        return
+
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await _safe_callback_answer(query, response.message)
+
+
 @router.message(Command("menu"))
 async def menu_command(message: Message, settings: Settings, chat_settings: ChatSettings) -> None:
     if message.from_user is None:
@@ -3209,6 +3583,10 @@ async def text_commands_handler(
 
     if intent.name == "gacha_profile":
         await _send_gacha_profile(message, settings, banner=str(intent.args.get("banner", "")))
+        return
+
+    if intent.name == "gacha_info":
+        await _send_gacha_info(message, settings, economy_repo, chat_settings)
         return
 
     if intent.name == "gacha_skip":

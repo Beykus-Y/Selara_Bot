@@ -38,6 +38,7 @@ _CHAT_SETTINGS = SimpleNamespace(
         ("моя гача генш", "_send_gacha_profile", "genshin"),
         ("моя гача геншин", "_send_gacha_profile", "genshin"),
         ("моя гача хср", "_send_gacha_profile", "hsr"),
+        ("гача инфо", "_send_gacha_info", None),
         ("гача скип генш", "_send_gacha_skip", "genshin"),
         ("гача скип хср @alice", "_send_gacha_skip", "hsr"),
     ],
@@ -79,6 +80,11 @@ async def test_text_commands_handler_routes_gacha_commands(
             assert target_handler.await_args.kwargs["target_username"] == "@alice"
         else:
             assert target_handler.await_args.kwargs["target_username"] is None
+    elif handler_attr == "_send_gacha_info":
+        assert target_handler.await_args.args[1] is settings
+        assert target_handler.await_args.args[2] is not None
+        assert target_handler.await_args.args[3] is _CHAT_SETTINGS
     else:
         assert target_handler.await_args.args[1] is settings
-    assert target_handler.await_args.kwargs["banner"] == banner
+    if banner is not None:
+        assert target_handler.await_args.kwargs["banner"] == banner

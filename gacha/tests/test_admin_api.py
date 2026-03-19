@@ -136,6 +136,8 @@ async def test_admin_give_card_requires_token_and_returns_pull_payload(monkeypat
                 is_new=True,
                 copies_owned=1,
                 adventure_xp_gained=100,
+                pull_id=77,
+                sell_offer=None,
             )
 
     async def fake_session_dependency(_session_factory):
@@ -165,3 +167,169 @@ async def test_admin_give_card_requires_token_and_returns_pull_payload(monkeypat
     assert allowed.status_code == 200
     assert allowed.json()["status"] == "ok"
     assert allowed.json()["card"]["code"] == "tartalia"
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_currency_requires_token_and_returns_player_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+    class FakeService:
+        def __init__(self, repo) -> None:
+            self.repo = repo
+
+        async def grant_currency(self, *, user_id: int, username: str | None, banner: str, amount: int):
+            _ = (self.repo, username)
+            return SimpleNamespace(
+                status="ok",
+                message="currency granted",
+                banner=banner,
+                amount=amount,
+                player=SimpleNamespace(
+                    user_id=user_id,
+                    adventure_xp=0,
+                    total_points=5,
+                    total_primogems=180,
+                ),
+            )
+
+    async def fake_session_dependency(_session_factory):
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(api, "GachaRepository", FakeRepo)
+    monkeypatch.setattr(api, "GachaService", FakeService)
+    monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    monkeypatch.setattr(api.settings, "admin_token", "secret")
+
+    app = FastAPI()
+    app.include_router(api.build_router(object()))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        denied = await client.post(
+            "/v1/gacha/admin/currency/grant",
+            json={"user_id": 123, "username": "buyer", "banner": "genshin", "amount": 180},
+        )
+        allowed = await client.post(
+            "/v1/gacha/admin/currency/grant",
+            headers={"X-Gacha-Admin-Token": "secret"},
+            json={"user_id": 123, "username": "buyer", "banner": "genshin", "amount": 180},
+        )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    payload = allowed.json()
+    assert payload["status"] == "ok"
+    assert payload["banner"] == "genshin"
+    assert payload["amount"] == 180
+    assert payload["player"]["total_primogems"] == 180
+
+
+@pytest.mark.asyncio
+async def test_purchase_pull_returns_sell_offer_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+    class FakeService:
+        def __init__(self, repo) -> None:
+            self.repo = repo
+
+        async def pull_purchase(self, *, user_id: int, username: str | None, banner: str):
+            _ = (self.repo, username)
+            return SimpleNamespace(
+                status="ok",
+                message="paid pull",
+                card=SimpleNamespace(
+                    code="kafka",
+                    name="Кафка (E6) дубликат",
+                    rarity=CardRarity.legendary,
+                    points=11,
+                    primogems=22,
+                    image_url="/images/hsr/kafka.jpg",
+                    banner=banner,
+                ),
+                player=SimpleNamespace(
+                    user_id=user_id,
+                    adventure_xp=0,
+                    total_points=11,
+                    total_primogems=44,
+                ),
+                cooldown_until=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
+                is_new=False,
+                copies_owned=8,
+                adventure_xp_gained=20,
+                pull_id=55,
+                sell_offer=SimpleNamespace(sale_price=66),
+            )
+
+    async def fake_session_dependency(_session_factory):
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(api, "GachaRepository", FakeRepo)
+    monkeypatch.setattr(api, "GachaService", FakeService)
+    monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+
+    app = FastAPI()
+    app.include_router(api.build_router(object()))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/v1/gacha/pull/purchase",
+            json={"user_id": 123, "username": "buyer", "banner": "hsr"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pull_id"] == 55
+    assert payload["sell_offer"]["sale_price"] == 66
+
+
+@pytest.mark.asyncio
+async def test_sell_pull_returns_updated_player_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+    class FakeService:
+        def __init__(self, repo) -> None:
+            self.repo = repo
+
+        async def sell_pull(self, *, user_id: int, pull_id: int):
+            _ = self.repo
+            return SimpleNamespace(
+                status="ok",
+                message="sold",
+                player=SimpleNamespace(
+                    user_id=user_id,
+                    adventure_xp=0,
+                    total_points=99,
+                    total_primogems=120,
+                ),
+                pull_id=pull_id,
+                banner="genshin",
+                sale_price=54,
+                sold_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
+            )
+
+    async def fake_session_dependency(_session_factory):
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(api, "GachaRepository", FakeRepo)
+    monkeypatch.setattr(api, "GachaService", FakeService)
+    monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+
+    app = FastAPI()
+    app.include_router(api.build_router(object()))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/v1/gacha/pulls/12/sell", json={"user_id": 123})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pull_id"] == 12
+    assert payload["sale_price"] == 54
+    assert payload["player"]["total_primogems"] == 120

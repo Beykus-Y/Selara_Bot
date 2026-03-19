@@ -197,6 +197,13 @@ def test_resolver_maps_gacha_profile_commands() -> None:
     assert intent.args["banner"] == "genshin"
 
 
+def test_resolver_maps_gacha_info_command() -> None:
+    intent = resolve_text_command("гача инфо", top_default=10, top_max=50)
+
+    assert intent is not None
+    assert intent.name == "gacha_info"
+
+
 def test_resolver_maps_gacha_skip_commands() -> None:
     self_intent = resolve_text_command("гача скип генш", top_default=10, top_max=50)
     other_intent = resolve_text_command("гача скип хср @alice", top_default=10, top_max=50)
@@ -212,7 +219,7 @@ def test_resolver_maps_gacha_skip_commands() -> None:
     assert other_intent.args["target_username"] == "@alice"
 
 
-@pytest.mark.parametrize("text", ["гача", "моя гача", "гача завтра", "моя гача завтра"])
+@pytest.mark.parametrize("text", ["гача", "моя гача", "гача завтра", "моя гача завтра", "гача инфо генш"])
 def test_resolver_raises_for_incomplete_or_unknown_gacha_commands(text: str) -> None:
     with pytest.raises(TextCommandResolutionError, match="Формат: гача"):
         resolve_text_command(text, top_default=10, top_max=50)

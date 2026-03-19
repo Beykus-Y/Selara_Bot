@@ -32,8 +32,10 @@ async def test_send_gacha_pull_downloads_remote_image_before_telegram_send(monke
         "pull_gacha_card",
         AsyncMock(
             return_value=SimpleNamespace(
-                message="pull result",
-                card=SimpleNamespace(image_url="http://example.com/images/genshin/amber.jpg"),
+                message="🍀 Вы получили новую карту: Эмбер",
+                card=SimpleNamespace(name="Эмбер", image_url="http://example.com/images/genshin/amber.jpg"),
+                sell_offer=None,
+                pull_id=10,
             )
         ),
     )
@@ -48,7 +50,9 @@ async def test_send_gacha_pull_downloads_remote_image_before_telegram_send(monke
     assert len(message.photo_calls) == 1
     photo, kwargs = message.photo_calls[0]
     assert isinstance(photo, BufferedInputFile)
-    assert kwargs["caption"].startswith("🎴 Геншин")
+    assert kwargs["caption"].startswith("<b>🎴 Геншин</b>")
+    assert 'tg://user?id=1' in kwargs["caption"]
+    assert kwargs["parse_mode"] == "HTML"
     assert message.text_calls == []
 
 
@@ -62,8 +66,10 @@ async def test_send_gacha_pull_falls_back_to_text_when_image_fetch_fails(monkeyp
         "pull_gacha_card",
         AsyncMock(
             return_value=SimpleNamespace(
-                message="pull result",
-                card=SimpleNamespace(image_url="http://example.com/images/genshin/amber.jpg"),
+                message="🍀 Вы получили новую карту: Эмбер",
+                card=SimpleNamespace(name="Эмбер", image_url="http://example.com/images/genshin/amber.jpg"),
+                sell_offer=None,
+                pull_id=10,
             )
         ),
     )
@@ -77,4 +83,5 @@ async def test_send_gacha_pull_falls_back_to_text_when_image_fetch_fails(monkeyp
 
     assert message.photo_calls == []
     assert len(message.text_calls) == 1
-    assert message.text_calls[0][0].startswith("🎴 Геншин")
+    assert message.text_calls[0][0].startswith("<b>🎴 Геншин</b>")
+    assert message.text_calls[0][1]["parse_mode"] == "HTML"

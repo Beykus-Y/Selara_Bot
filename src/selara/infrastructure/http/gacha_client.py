@@ -17,6 +17,10 @@ class GachaCardPayload(BaseModel):
     image_url: str
 
 
+class GachaSellOfferPayload(BaseModel):
+    sale_price: int
+
+
 class GachaPlayerPayload(BaseModel):
     user_id: int
     adventure_rank: int
@@ -35,11 +39,14 @@ class GachaPullResponse(BaseModel):
     is_new: bool = False
     copies_owned: int = 0
     adventure_xp_gained: int = 0
+    pull_id: int | None = None
+    sell_offer: GachaSellOfferPayload | None = None
 
 
 class GachaHistoryEntryPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    pulled_at: str
     card_name: str
     rarity: str
     rarity_label: str
@@ -64,6 +71,25 @@ class GachaCooldownResetResponse(BaseModel):
     banner: str
     user_id: int
     message: str
+
+
+class GachaSellPullResponse(BaseModel):
+    status: str
+    message: str
+    pull_id: int
+    banner: str
+    sale_price: int
+    sold_at: str
+    player: GachaPlayerPayload
+
+
+class GachaCurrencyGrantResponse(BaseModel):
+    status: str
+    message: str
+    banner: str
+    user_id: int
+    amount: int
+    player: GachaPlayerPayload
 
 
 @dataclass(slots=True)
@@ -103,6 +129,26 @@ class HttpGachaClient:
         )
         return GachaProfileResponse.model_validate(payload)
 
+    async def purchase_pull(self, *, user_id: int, username: str | None, banner: str) -> GachaPullResponse:
+        payload = await self._request(
+            "POST",
+            "/v1/gacha/pull/purchase",
+            json={
+                "user_id": user_id,
+                "username": username,
+                "banner": banner,
+            },
+        )
+        return GachaPullResponse.model_validate(payload)
+
+    async def sell_pull(self, *, user_id: int, pull_id: int) -> GachaSellPullResponse:
+        payload = await self._request(
+            "POST",
+            f"/v1/gacha/pulls/{pull_id}/sell",
+            json={"user_id": user_id},
+        )
+        return GachaSellPullResponse.model_validate(payload)
+
     async def reset_cooldown(
         self,
         *,
@@ -133,6 +179,28 @@ class HttpGachaClient:
             },
         )
         return GachaPullResponse.model_validate(payload)
+
+    async def grant_currency(
+        self,
+        *,
+        user_id: int,
+        username: str | None,
+        banner: str,
+        amount: int,
+        admin_token: str,
+    ) -> GachaCurrencyGrantResponse:
+        payload = await self._request(
+            "POST",
+            "/v1/gacha/admin/currency/grant",
+            headers={"X-Gacha-Admin-Token": admin_token},
+            json={
+                "user_id": user_id,
+                "username": username,
+                "banner": banner,
+                "amount": amount,
+            },
+        )
+        return GachaCurrencyGrantResponse.model_validate(payload)
 
     async def download_backup(self, *, admin_token: str) -> GachaBackupFile:
         try:

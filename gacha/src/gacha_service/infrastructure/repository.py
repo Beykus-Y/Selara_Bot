@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gacha_service.domain.models import GachaCard, PlayerState, resolve_rank
 from gacha_service.infrastructure.models import (
     PlayerBannerCooldownModel,
+    PlayerBannerWalletModel,
     PlayerCardCollectionModel,
     PlayerModel,
     PullHistoryModel,
@@ -22,14 +23,14 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _to_player_state(model: PlayerModel) -> PlayerState:
+def _to_player_state(model: PlayerModel, *, total_primogems_override: int | None = None) -> PlayerState:
     return PlayerState(
         user_id=model.user_id,
         username=model.username,
         adventure_rank=model.adventure_rank,
         adventure_xp=model.adventure_xp,
         total_points=model.total_points,
-        total_primogems=model.total_primogems,
+        total_primogems=model.total_primogems if total_primogems_override is None else total_primogems_override,
         next_pull_at=_coerce_utc_datetime(model.next_pull_at),
     )
 
@@ -37,6 +38,64 @@ def _to_player_state(model: PlayerModel) -> PlayerState:
 class GachaRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def adjust_banner_currency(
+        self,
+        *,
+        user_id: int,
+        username: str | None,
+        banner: str,
+        amount: int,
+    ) -> PlayerState:
+        if amount == 0:
+            raise ValueError("Количество валюты должно быть ненулевым.")
+
+        player = await self._session.get(PlayerModel, user_id)
+        if player is None:
+            player = PlayerModel(
+                user_id=user_id,
+                username=username,
+                adventure_rank=1,
+                adventure_xp=0,
+                total_points=0,
+                total_primogems=0,
+                next_pull_at=None,
+            )
+            self._session.add(player)
+            await self._session.flush()
+        elif username is not None:
+            player.username = username
+
+        wallet = await self._session.get(
+            PlayerBannerWalletModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if wallet is None:
+            wallet = PlayerBannerWalletModel(
+                user_id=user_id,
+                banner=banner,
+                currency_balance=0,
+            )
+            self._session.add(wallet)
+            await self._session.flush()
+
+        new_balance = int(wallet.currency_balance) + int(amount)
+        if new_balance < 0:
+            raise ValueError("Недостаточно валюты для списания.")
+
+        new_total_primogems = int(player.total_primogems) + int(amount)
+        if new_total_primogems < 0:
+            raise ValueError("Недостаточно валюты для списания.")
+
+        wallet.currency_balance = new_balance
+        player.total_primogems = new_total_primogems
+
+        await self._session.commit()
+        await self._session.refresh(player)
+        return _to_player_state(player, total_primogems_override=int(wallet.currency_balance))
 
     async def get_banner_cooldown(self, *, user_id: int, banner: str) -> datetime | None:
         cooldown = await self._session.get(
@@ -65,7 +124,19 @@ class GachaRepository:
         await self._session.commit()
         return True
 
-    async def get_or_create_player(self, *, user_id: int, username: str | None) -> PlayerState:
+    async def get_banner_currency_balance(self, *, user_id: int, banner: str) -> int:
+        wallet = await self._session.get(
+            PlayerBannerWalletModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if wallet is None:
+            return 0
+        return int(wallet.currency_balance)
+
+    async def get_or_create_player(self, *, user_id: int, username: str | None, banner: str | None = None) -> PlayerState:
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
             player = PlayerModel(
@@ -80,13 +151,23 @@ class GachaRepository:
             self._session.add(player)
             await self._session.commit()
             await self._session.refresh(player)
-            return _to_player_state(player)
+            if banner is None:
+                return _to_player_state(player)
+            return _to_player_state(
+                player,
+                total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
+            )
 
         if username is not None and username != player.username:
             player.username = username
             await self._session.commit()
             await self._session.refresh(player)
-        return _to_player_state(player)
+        if banner is None:
+            return _to_player_state(player)
+        return _to_player_state(
+            player,
+            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
+        )
 
     async def apply_pull(
         self,
@@ -98,7 +179,11 @@ class GachaRepository:
         pulled_at: datetime,
         next_pull_at: datetime | None,
         update_cooldown: bool = True,
-    ) -> tuple[PlayerState, int]:
+        pull_source: str = "free",
+        purchase_price: int = 0,
+        base_currency_price: int = 0,
+        sellable: bool = False,
+    ) -> tuple[PlayerState, int, int]:
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
             player = PlayerModel(user_id=user_id, username=username, adventure_rank=1, adventure_xp=0, total_points=0, total_primogems=0)
@@ -108,7 +193,6 @@ class GachaRepository:
         if username is not None:
             player.username = username
         player.total_points += card.points
-        player.total_primogems += card.primogems
         player.adventure_xp += adventure_xp_gained
         player.adventure_rank = resolve_rank(player.adventure_xp)[0]
         if update_cooldown:
@@ -133,6 +217,29 @@ class GachaRepository:
             else:
                 cooldown_entry.next_pull_at = next_pull_at
 
+        wallet = await self._session.get(
+            PlayerBannerWalletModel,
+            {
+                "user_id": user_id,
+                "banner": card.banner,
+            },
+        )
+        wallet_balance = 0 if wallet is None else int(wallet.currency_balance)
+        if purchase_price > wallet_balance:
+            raise ValueError("Недостаточно валюты для платной крутки.")
+        if wallet is None:
+            wallet = PlayerBannerWalletModel(
+                user_id=user_id,
+                banner=card.banner,
+                currency_balance=0,
+            )
+            self._session.add(wallet)
+            await self._session.flush()
+
+        currency_delta = card.primogems - purchase_price
+        wallet.currency_balance = wallet_balance + currency_delta
+        player.total_primogems += currency_delta
+
         collection_entry = await self._session.get(
             PlayerCardCollectionModel,
             {
@@ -152,23 +259,88 @@ class GachaRepository:
             await self._session.flush()
         collection_entry.copies_owned += 1
 
-        self._session.add(
-            PullHistoryModel(
-                user_id=user_id,
-                banner=card.banner,
-                character_code=card.code,
-                character_name=card.name,
-                rarity=card.rarity.value,
-                points=card.points,
-                primogems=card.primogems,
-                adventure_xp=adventure_xp_gained,
-                image_url=card.image_url,
-                pulled_at=pulled_at,
-            )
+        history_entry = PullHistoryModel(
+            user_id=user_id,
+            banner=card.banner,
+            character_code=card.code,
+            character_name=card.name,
+            rarity=card.rarity.value,
+            points=card.points,
+            primogems=card.primogems,
+            adventure_xp=adventure_xp_gained,
+            image_url=card.image_url,
+            source=pull_source,
+            base_currency_price=base_currency_price,
+            purchase_price=purchase_price,
+            sale_price=0 if sellable else None,
+            sold_at=None,
+            pulled_at=pulled_at,
         )
+        self._session.add(history_entry)
+        await self._session.flush()
         await self._session.commit()
         await self._session.refresh(player)
-        return _to_player_state(player), int(collection_entry.copies_owned)
+        return (
+            _to_player_state(player, total_primogems_override=int(wallet.currency_balance)),
+            int(collection_entry.copies_owned),
+            int(history_entry.id),
+        )
+
+    async def sell_pull(
+        self,
+        *,
+        user_id: int,
+        pull_id: int,
+        sold_at: datetime,
+    ) -> tuple[PlayerState, int, str, datetime]:
+        stmt = (
+            select(PullHistoryModel)
+            .where(PullHistoryModel.id == pull_id, PullHistoryModel.user_id == user_id)
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        entry = result.scalar_one_or_none()
+        if entry is None:
+            raise ValueError("Крутка не найдена.")
+        if entry.sale_price is None:
+            raise ValueError("Эту копию нельзя продать.")
+        if entry.sold_at is not None:
+            raise ValueError("Эта копия уже продана.")
+
+        player = await self._session.get(PlayerModel, user_id)
+        if player is None:
+            raise ValueError("Игрок не найден.")
+
+        wallet = await self._session.get(
+            PlayerBannerWalletModel,
+            {
+                "user_id": user_id,
+                "banner": entry.banner,
+            },
+        )
+        if wallet is None:
+            wallet = PlayerBannerWalletModel(
+                user_id=user_id,
+                banner=entry.banner,
+                currency_balance=0,
+            )
+            self._session.add(wallet)
+            await self._session.flush()
+
+        sale_price = int(entry.base_currency_price) * 3
+        wallet.currency_balance = int(wallet.currency_balance) + sale_price
+        player.total_primogems += sale_price
+        entry.sale_price = sale_price
+        entry.sold_at = sold_at
+
+        await self._session.commit()
+        await self._session.refresh(player)
+        return (
+            _to_player_state(player, total_primogems_override=int(wallet.currency_balance)),
+            sale_price,
+            entry.banner,
+            sold_at,
+        )
 
     async def get_card_copies(self, *, user_id: int, banner: str, card_code: str) -> int:
         entry = await self._session.get(

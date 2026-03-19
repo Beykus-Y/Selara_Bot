@@ -110,6 +110,7 @@ KNOWN_COMMAND_KEYS.update(
         "announce_unreg",
         "gacha_pull",
         "gacha_profile",
+        "gacha_info",
         "gacha_skip",
         "shipperim",
         "zhmyh",

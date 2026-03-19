@@ -30,6 +30,14 @@ class PlayerBannerCooldownModel(Base):
     next_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PlayerBannerWalletModel(Base):
+    __tablename__ = "gacha_player_banner_wallets"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    banner: Mapped[str] = mapped_column(String(32), primary_key=True)
+    currency_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class PullHistoryModel(Base):
     __tablename__ = "gacha_pull_history"
 
@@ -43,6 +51,11 @@ class PullHistoryModel(Base):
     primogems: Mapped[int] = mapped_column(Integer, nullable=False)
     adventure_xp: Mapped[int] = mapped_column(Integer, nullable=False)
     image_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="free", nullable=False)
+    base_currency_price: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    purchase_price: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sale_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sold_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
