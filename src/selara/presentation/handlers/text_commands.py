@@ -75,6 +75,7 @@ from selara.presentation.handlers.help import send_help
 from selara.presentation.handlers.chat_assistant import (
     adopt_command as family_adopt_command,
     family_command as family_tree_command,
+    manage_chat_gate_command,
     match_chat_trigger,
     match_custom_social_action,
     pet_command as family_pet_command,
@@ -3528,6 +3529,17 @@ async def text_commands_handler(
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
             activity_repo=activity_repo,
             chat_settings=chat_settings,
+        )
+        return
+
+    if intent.name in {"antiraid_on", "antiraid_off", "chat_lock", "chat_unlock"}:
+        await manage_chat_gate_command(
+            message,
+            activity_repo=activity_repo,
+            bot=bot,
+            chat_settings=chat_settings,
+            command_key=intent.name,
+            raw_args=intent.args.get("raw_args") if intent.args else None,
         )
         return
 

@@ -109,3 +109,32 @@ def test_apply_setting_update_rejects_week_start_hour_out_of_range() -> None:
     )
     assert updated is None
     assert error == "Значение должно быть в диапазоне 0..23"
+
+
+def test_apply_setting_update_accepts_antiraid_window_from_allowed_values() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+    updated, error = apply_setting_update(
+        key="antiraid_recent_window_minutes",
+        raw_value="5",
+        current=current,
+        defaults=defaults,
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["antiraid_recent_window_minutes"] == 5
+
+
+def test_apply_setting_update_rejects_antiraid_window_outside_allowed_values() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+    updated, error = apply_setting_update(
+        key="antiraid_recent_window_minutes",
+        raw_value="7",
+        current=current,
+        defaults=defaults,
+    )
+
+    assert updated is None
+    assert error == "antiraid_recent_window_minutes должен быть равен 5 или 10"

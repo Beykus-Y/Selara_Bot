@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Protocol
 
@@ -6,6 +7,7 @@ from selara.domain.entities import (
     BotRole,
     ChatAuditLogEntry,
     ChatActivitySummary,
+    ChatInterestingFactState,
     ChatTrigger,
     CustomSocialAction,
     ChatTextAlias,
@@ -52,12 +54,23 @@ class ActivityRepository(Protocol):
     async def get_chat_activity_summary(self, *, chat_id: int) -> ChatActivitySummary: ...
 
     async def get_top(self, *, chat_id: int, limit: int) -> list[ActivityStats]: ...
+    async def count_human_messages_since(self, *, chat_id: int, since: datetime) -> int: ...
 
     async def get_last_seen(self, *, chat_id: int, user_id: int) -> datetime | None: ...
 
     async def get_chat_settings(self, *, chat_id: int): ...
 
     async def upsert_chat_settings(self, *, chat: ChatSnapshot, values: dict[str, object]): ...
+    async def list_chats_with_interesting_facts_enabled(self) -> list[ChatSnapshot]: ...
+    async def get_chat_interesting_fact_state(self, *, chat_id: int) -> ChatInterestingFactState | None: ...
+    async def upsert_chat_interesting_fact_state(
+        self,
+        *,
+        chat: ChatSnapshot,
+        last_sent_at: datetime,
+        last_fact_id: str,
+        used_fact_ids: Sequence[str],
+    ) -> ChatInterestingFactState: ...
     async def get_chat_alias_mode(self, *, chat_id: int) -> TextAliasMode: ...
     async def set_chat_alias_mode(self, *, chat: ChatSnapshot, mode: TextAliasMode) -> TextAliasMode: ...
     async def list_chat_aliases(self, *, chat_id: int) -> list[ChatTextAlias]: ...
@@ -363,8 +376,17 @@ class ActivityRepository(Protocol):
         actor_user_id: int | None = None,
         target_user_id: int | None = None,
         meta_json: dict | None = None,
+        created_at: datetime | None = None,
     ) -> ChatAuditLogEntry: ...
     async def list_audit_logs(self, *, chat_id: int, limit: int = 100) -> list[ChatAuditLogEntry]: ...
+    async def list_audit_logs_by_action(
+        self,
+        *,
+        chat_id: int,
+        action_code: str,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[ChatAuditLogEntry]: ...
 
     async def apply_moderation_action(
         self,

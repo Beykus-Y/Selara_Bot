@@ -528,7 +528,7 @@
       "adventure_xp": 160,
       "image_url": "/images/genshin/kamin.jpg",
       "weight": 18.0,
-      "region_code": "inazuma",
+      "region_code": "liyue",
       "element_code": "pyro"
     },
     {
@@ -564,7 +564,7 @@
       "adventure_xp": 160,
       "image_url": "/images/genshin/kachina.jpg",
       "weight": 18.0,
-      "region_code": "nod_krai",
+      "region_code": "natlan",
       "element_code": "geo"
     },
     {
@@ -985,7 +985,7 @@
       "image_url": "/images/genshin/saharoza.jpg",
       "weight": 18.0,
       "region_code": "mondstadt",
-      "element_code": "electro"
+      "element_code": "anemo"
     },
     {
       "code": "sayu",

@@ -111,6 +111,35 @@ def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
     return None
 
 
+def _parse_chat_gate_command(tokens: list[str]) -> CommandIntent | None:
+    if not tokens:
+        return None
+
+    if tokens[0] == "+антирейд":
+        if len(tokens) == 1:
+            return CommandIntent(name="antiraid_on")
+        if len(tokens) == 2 and tokens[1] in {"5", "10"}:
+            return CommandIntent(name="antiraid_on", args={"raw_args": tokens[1]})
+        raise TextCommandResolutionError("Формат команды: +антирейд [5|10]")
+
+    if tokens[0] == "-антирейд":
+        if len(tokens) == 1:
+            return CommandIntent(name="antiraid_off")
+        raise TextCommandResolutionError("Формат команды: -антирейд")
+
+    if tokens[0] == "-чат":
+        if len(tokens) == 1:
+            return CommandIntent(name="chat_lock")
+        raise TextCommandResolutionError("Формат команды: -чат")
+
+    if tokens[0] == "+чат":
+        if len(tokens) == 1:
+            return CommandIntent(name="chat_unlock")
+        raise TextCommandResolutionError("Формат команды: +чат")
+
+    return None
+
+
 def resolve_text_command(
     text: str,
     *,
@@ -131,6 +160,10 @@ def resolve_text_command(
     gacha_command = _parse_gacha_command(tokens)
     if gacha_command is not None:
         return gacha_command
+
+    chat_gate_command = _parse_chat_gate_command(tokens)
+    if chat_gate_command is not None:
+        return chat_gate_command
 
     if tokens[0] == "актив":
         if len(tokens) > 1 and not prefix_tail_is_valid(command_key="active", tail_text=" ".join(tokens[1:])):

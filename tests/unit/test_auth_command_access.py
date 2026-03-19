@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from selara.domain.entities import ChatRoleDefinition
 from selara.presentation.auth import get_actor_role_definition, has_command_access
 
@@ -22,6 +24,7 @@ class _FakeActivityRepo:
         self._roles = {
             "participant": _role(role_code="participant", title_ru="Участник", rank=0),
             "junior_admin": _role(role_code="junior_admin", title_ru="Мл. админ", rank=10),
+            "senior_admin": _role(role_code="senior_admin", title_ru="Ст. админ", rank=20),
         }
         self._actor_role_code = actor_role_code
 
@@ -91,6 +94,50 @@ async def test_inactive_command_allows_junior_admin() -> None:
     assert allowed is True
     assert actor_role_code == "junior_admin"
     assert required_role_code == "junior_admin"
+    assert bootstrapped is False
+
+
+@pytest.mark.parametrize("command_key", ["antiraid_on", "antiraid_off", "chat_lock", "chat_unlock"])
+async def test_chat_gate_commands_require_senior_admin_by_default(command_key: str) -> None:
+    allowed, actor_role_code, required_role_code, bootstrapped = await has_command_access(
+        _FakeActivityRepo("junior_admin"),
+        chat_id=-100,
+        chat_type="group",
+        chat_title="Test",
+        user_id=1,
+        username="user",
+        first_name="User",
+        last_name=None,
+        is_bot=False,
+        command_key=command_key,
+        bootstrap_if_missing_owner=False,
+    )
+
+    assert allowed is False
+    assert actor_role_code == "junior_admin"
+    assert required_role_code == "senior_admin"
+    assert bootstrapped is False
+
+
+@pytest.mark.parametrize("command_key", ["antiraid_on", "antiraid_off", "chat_lock", "chat_unlock"])
+async def test_chat_gate_commands_allow_senior_admin_by_default(command_key: str) -> None:
+    allowed, actor_role_code, required_role_code, bootstrapped = await has_command_access(
+        _FakeActivityRepo("senior_admin"),
+        chat_id=-100,
+        chat_type="group",
+        chat_title="Test",
+        user_id=1,
+        username="user",
+        first_name="User",
+        last_name=None,
+        is_bot=False,
+        command_key=command_key,
+        bootstrap_if_missing_owner=False,
+    )
+
+    assert allowed is True
+    assert actor_role_code == "senior_admin"
+    assert required_role_code == "senior_admin"
     assert bootstrapped is False
 
 

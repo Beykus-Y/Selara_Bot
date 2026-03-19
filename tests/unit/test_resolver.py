@@ -245,3 +245,31 @@ def test_resolver_maps_market_structured_args() -> None:
     assert intent is not None
     assert intent.name == "market"
     assert intent.args["raw_args"] == "buy 15 2"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_name", "expected_args"),
+    [
+        ("+антирейд", "antiraid_on", {}),
+        ("+антирейд 5", "antiraid_on", {"raw_args": "5"}),
+        ("+антирейд 10", "antiraid_on", {"raw_args": "10"}),
+        ("-антирейд", "antiraid_off", {}),
+        ("-чат", "chat_lock", {}),
+        ("+чат", "chat_unlock", {}),
+    ],
+)
+def test_resolver_maps_chat_gate_commands(
+    text: str,
+    expected_name: str,
+    expected_args: dict[str, str],
+) -> None:
+    intent = resolve_text_command(text, top_default=10, top_max=50)
+
+    assert intent is not None
+    assert intent.name == expected_name
+    assert intent.args == expected_args
+
+
+def test_resolver_rejects_invalid_antiraid_window() -> None:
+    with pytest.raises(TextCommandResolutionError, match=r"Формат команды: \+антирейд \[5\|10\]"):
+        resolve_text_command("+антирейд 7", top_default=10, top_max=50)

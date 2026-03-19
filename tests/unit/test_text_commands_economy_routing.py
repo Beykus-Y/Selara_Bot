@@ -167,3 +167,40 @@ async def test_text_commands_handler_silently_skips_disabled_standard_trigger_fo
 
     quiet_answer.assert_not_awaited()
     assert message.answers == []
+
+
+@pytest.mark.asyncio
+async def test_text_commands_handler_routes_chat_gate_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _DummyMessage(text="+антирейд 5")
+    activity_repo = SimpleNamespace(
+        get_chat_alias_mode=AsyncMock(return_value="both"),
+        list_chat_aliases=AsyncMock(return_value=[]),
+    )
+    gate_handler = AsyncMock()
+    bot = object()
+
+    monkeypatch.setattr(
+        text_commands,
+        "resolve_text_command",
+        lambda *_args, **_kwargs: CommandIntent(name="antiraid_on", args={"raw_args": "5"}),
+    )
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+    monkeypatch.setattr(text_commands, "manage_chat_gate_command", gate_handler)
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=activity_repo,
+        economy_repo=object(),
+        bot=bot,
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=replace(_BASE_CHAT_SETTINGS, custom_rp_enabled=False, smart_triggers_enabled=False),
+        session_factory=object(),
+    )
+
+    gate_handler.assert_awaited_once()
+    assert gate_handler.await_args.kwargs["bot"] is bot
+    assert gate_handler.await_args.kwargs["command_key"] == "antiraid_on"
+    assert gate_handler.await_args.kwargs["raw_args"] == "5"

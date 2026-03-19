@@ -28,6 +28,7 @@ from selara.domain.entities import (
     ChatAuditLogEntry,
     ChatActivitySummary,
     ChatCommandAccessRule,
+    ChatInterestingFactState,
     ChatRoleDefinition,
     UserChatAward,
     UserChatProfile,
@@ -75,6 +76,7 @@ from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
     ChatAuditLogModel,
     ChatAchievementStatsModel,
+    ChatInterestingFactStateModel,
     ChatAuctionModel,
     ChatGlobalBoostModel,
     ChatCommandAccessRuleModel,
@@ -188,6 +190,21 @@ def _normalize_optional_datetime(value: datetime | None) -> datetime | None:
 
 def _preserve_optional_text(current: str | None, incoming: str | None) -> str | None:
     return incoming if incoming is not None else current
+
+
+def _normalize_string_items(values: object) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        return ()
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return tuple(result)
 
 
 def _distribute_activity(total: int, days: Sequence[date]) -> dict[date, int]:
@@ -1486,6 +1503,31 @@ class SqlAlchemyActivityRepository:
             return await self._get_chat_activity_summary_from_events(chat_id=chat_id)
         return await self._get_chat_activity_summary_legacy(chat_id=chat_id)
 
+    async def count_human_messages_since(self, *, chat_id: int, since: datetime) -> int:
+        normalized_since = _coerce_utc_datetime(since)
+        if await self._is_chat_event_synced(chat_id=chat_id):
+            stmt = (
+                select(func.count(UserChatMessageEventModel.id))
+                .join(UserModel, UserModel.telegram_user_id == UserChatMessageEventModel.user_id)
+                .where(
+                    UserChatMessageEventModel.chat_id == chat_id,
+                    UserChatMessageEventModel.sent_at >= normalized_since,
+                    UserModel.is_bot.is_(False),
+                )
+            )
+            return int((await self._session.execute(stmt)).scalar_one() or 0)
+
+        stmt = (
+            select(func.coalesce(func.sum(UserChatActivityMinuteModel.message_count), 0))
+            .join(UserModel, UserModel.telegram_user_id == UserChatActivityMinuteModel.user_id)
+            .where(
+                UserChatActivityMinuteModel.chat_id == chat_id,
+                UserChatActivityMinuteModel.activity_minute >= normalized_since,
+                UserModel.is_bot.is_(False),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def _get_chat_activity_summary_legacy(self, *, chat_id: int) -> ChatActivitySummary:
         stmt = select(
             func.count(UserChatActivityModel.user_id),
@@ -1740,56 +1782,7 @@ class SqlAlchemyActivityRepository:
         if row is None:
             return None
 
-        return ChatSettings(
-            top_limit_default=int(row.top_limit_default),
-            top_limit_max=int(row.top_limit_max),
-            vote_daily_limit=int(row.vote_daily_limit),
-            leaderboard_hybrid_buttons_enabled=bool(row.leaderboard_hybrid_buttons_enabled),
-            leaderboard_hybrid_karma_weight=float(row.leaderboard_hybrid_karma_weight),
-            leaderboard_hybrid_activity_weight=float(row.leaderboard_hybrid_activity_weight),
-            leaderboard_7d_days=int(row.leaderboard_7d_days),
-            leaderboard_week_start_weekday=int(row.leaderboard_week_start_weekday),
-            leaderboard_week_start_hour=int(row.leaderboard_week_start_hour),
-            mafia_night_seconds=int(row.mafia_night_seconds),
-            mafia_day_seconds=int(row.mafia_day_seconds),
-            mafia_vote_seconds=int(row.mafia_vote_seconds),
-            mafia_reveal_eliminated_role=bool(row.mafia_reveal_eliminated_role),
-            text_commands_enabled=bool(row.text_commands_enabled),
-            text_commands_locale=row.text_commands_locale,
-            actions_18_enabled=bool(row.actions_18_enabled),
-            smart_triggers_enabled=bool(row.smart_triggers_enabled),
-            welcome_enabled=bool(row.welcome_enabled),
-            welcome_text=row.welcome_text,
-            welcome_button_text=row.welcome_button_text,
-            welcome_button_url=row.welcome_button_url,
-            goodbye_enabled=bool(row.goodbye_enabled),
-            goodbye_text=row.goodbye_text,
-            welcome_cleanup_service_messages=bool(row.welcome_cleanup_service_messages),
-            entry_captcha_enabled=bool(row.entry_captcha_enabled),
-            entry_captcha_timeout_seconds=int(row.entry_captcha_timeout_seconds),
-            entry_captcha_kick_on_fail=bool(row.entry_captcha_kick_on_fail),
-            custom_rp_enabled=bool(row.custom_rp_enabled),
-            family_tree_enabled=bool(row.family_tree_enabled),
-            titles_enabled=bool(row.titles_enabled),
-            title_price=int(row.title_price),
-            craft_enabled=bool(row.craft_enabled),
-            auctions_enabled=bool(row.auctions_enabled),
-            auction_duration_minutes=int(row.auction_duration_minutes),
-            auction_min_increment=int(row.auction_min_increment),
-            economy_enabled=bool(row.economy_enabled),
-            economy_mode=row.economy_mode,
-            economy_tap_cooldown_seconds=int(row.economy_tap_cooldown_seconds),
-            economy_daily_base_reward=int(row.economy_daily_base_reward),
-            economy_daily_streak_cap=int(row.economy_daily_streak_cap),
-            economy_lottery_ticket_price=int(row.economy_lottery_ticket_price),
-            economy_lottery_paid_daily_limit=int(row.economy_lottery_paid_daily_limit),
-            economy_transfer_daily_limit=int(row.economy_transfer_daily_limit),
-            economy_transfer_tax_percent=int(row.economy_transfer_tax_percent),
-            economy_market_fee_percent=int(row.economy_market_fee_percent),
-            economy_negative_event_chance_percent=int(row.economy_negative_event_chance_percent),
-            economy_negative_event_loss_percent=int(row.economy_negative_event_loss_percent),
-            cleanup_economy_commands=bool(row.cleanup_economy_commands),
-        )
+        return self._to_chat_settings(row)
 
     async def upsert_chat_settings(
         self,
@@ -1822,6 +1815,87 @@ class SqlAlchemyActivityRepository:
         if settings is None:
             raise RuntimeError("Failed to load chat settings after upsert")
         return settings
+
+    async def list_chats_with_interesting_facts_enabled(self) -> list[ChatSnapshot]:
+        stmt = (
+            select(ChatModel.telegram_chat_id, ChatModel.type, ChatModel.title)
+            .join(ChatSettingsModel, ChatSettingsModel.chat_id == ChatModel.telegram_chat_id)
+            .where(
+                ChatSettingsModel.interesting_facts_enabled.is_(True),
+                ChatModel.type.in_(("group", "supergroup")),
+            )
+            .order_by(ChatModel.telegram_chat_id.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ChatSnapshot(
+                telegram_chat_id=int(chat_id),
+                chat_type=str(chat_type),
+                title=chat_title,
+            )
+            for chat_id, chat_type, chat_title in rows
+        ]
+
+    async def get_chat_interesting_fact_state(self, *, chat_id: int) -> ChatInterestingFactState | None:
+        row = await self._session.get(ChatInterestingFactStateModel, chat_id)
+        if row is None:
+            return None
+        return self._to_chat_interesting_fact_state(row)
+
+    async def upsert_chat_interesting_fact_state(
+        self,
+        *,
+        chat: ChatSnapshot,
+        last_sent_at: datetime,
+        last_fact_id: str,
+        used_fact_ids: Sequence[str],
+    ) -> ChatInterestingFactState:
+        await self._upsert_chat(chat)
+        normalized_last_fact_id = str(last_fact_id or "").strip()
+        if not normalized_last_fact_id:
+            raise ValueError("last_fact_id must not be empty")
+
+        normalized_used_ids = list(_normalize_string_items(list(used_fact_ids)))
+        normalized_last_sent_at = _coerce_utc_datetime(last_sent_at)
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if dialect == "postgresql":
+            stmt = pg_insert(ChatInterestingFactStateModel).values(
+                chat_id=chat.telegram_chat_id,
+                last_sent_at=normalized_last_sent_at,
+                last_fact_id=normalized_last_fact_id,
+                used_fact_ids_json=normalized_used_ids,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[ChatInterestingFactStateModel.chat_id],
+                set_={
+                    "last_sent_at": normalized_last_sent_at,
+                    "last_fact_id": normalized_last_fact_id,
+                    "used_fact_ids_json": normalized_used_ids,
+                    "updated_at": func.now(),
+                },
+            )
+            await self._session.execute(stmt)
+        else:
+            row = await self._session.get(ChatInterestingFactStateModel, chat.telegram_chat_id)
+            if row is None:
+                row = ChatInterestingFactStateModel(
+                    chat_id=chat.telegram_chat_id,
+                    last_sent_at=normalized_last_sent_at,
+                    last_fact_id=normalized_last_fact_id,
+                    used_fact_ids_json=normalized_used_ids,
+                )
+                self._session.add(row)
+            else:
+                row.last_sent_at = normalized_last_sent_at
+                row.last_fact_id = normalized_last_fact_id
+                row.used_fact_ids_json = normalized_used_ids
+                row.updated_at = datetime.now(timezone.utc)
+
+        await self._session.flush()
+        state = await self.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
+        if state is None:
+            raise RuntimeError("Failed to load interesting fact state after upsert")
+        return state
 
     async def get_chat_alias_mode(self, *, chat_id: int) -> TextAliasMode:
         row = await self._session.get(ChatTextAliasSettingsModel, chat_id)
@@ -2438,6 +2512,7 @@ class SqlAlchemyActivityRepository:
         actor_user_id: int | None = None,
         target_user_id: int | None = None,
         meta_json: dict | None = None,
+        created_at: datetime | None = None,
     ) -> ChatAuditLogEntry:
         await self._upsert_chat(chat)
         if actor_user_id is not None:
@@ -2461,14 +2536,17 @@ class SqlAlchemyActivityRepository:
                 )
             )
 
-        row = ChatAuditLogModel(
-            chat_id=chat.telegram_chat_id,
-            actor_user_id=actor_user_id,
-            target_user_id=target_user_id,
-            action_code=_normalize_free_text(action_code).replace(" ", "_")[:64] or "event",
-            description=(description or "").strip()[:2000],
-            meta_json=meta_json or None,
-        )
+        row_kwargs = {
+            "chat_id": chat.telegram_chat_id,
+            "actor_user_id": actor_user_id,
+            "target_user_id": target_user_id,
+            "action_code": _normalize_free_text(action_code).replace(" ", "_")[:64] or "event",
+            "description": (description or "").strip()[:2000],
+            "meta_json": meta_json or None,
+        }
+        if created_at is not None:
+            row_kwargs["created_at"] = _coerce_utc_datetime(created_at)
+        row = ChatAuditLogModel(**row_kwargs)
         self._session.add(row)
         await self._session.flush()
         return self._to_chat_audit_log(row)
@@ -2481,6 +2559,30 @@ class SqlAlchemyActivityRepository:
             .order_by(ChatAuditLogModel.created_at.desc(), ChatAuditLogModel.id.desc())
             .limit(normalized_limit)
         )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [self._to_chat_audit_log(row) for row in rows]
+
+    async def list_audit_logs_by_action(
+        self,
+        *,
+        chat_id: int,
+        action_code: str,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[ChatAuditLogEntry]:
+        normalized_limit = max(1, min(int(limit), 500))
+        normalized_action = _normalize_free_text(action_code).replace(" ", "_")[:64] or "event"
+        stmt = (
+            select(ChatAuditLogModel)
+            .where(
+                ChatAuditLogModel.chat_id == chat_id,
+                ChatAuditLogModel.action_code == normalized_action,
+            )
+            .order_by(ChatAuditLogModel.created_at.desc(), ChatAuditLogModel.id.desc())
+            .limit(normalized_limit)
+        )
+        if since is not None:
+            stmt = stmt.where(ChatAuditLogModel.created_at >= _coerce_utc_datetime(since))
         rows = (await self._session.execute(stmt)).scalars().all()
         return [self._to_chat_audit_log(row) for row in rows]
 
@@ -5447,7 +5549,7 @@ class SqlAlchemyActivityRepository:
             action_code=row.action_code,
             description=row.description,
             meta_json=row.meta_json if isinstance(row.meta_json, dict) else None,
-            created_at=row.created_at,
+            created_at=_coerce_utc_datetime(row.created_at),
         )
 
     @staticmethod
@@ -5548,6 +5650,76 @@ class SqlAlchemyActivityRepository:
             source_bot_username=row.source_bot_username,
             source_target_username=row.source_target_username,
             karma_base_all_time=int(row.karma_base_all_time),
+        )
+
+    @staticmethod
+    def _to_chat_interesting_fact_state(row: ChatInterestingFactStateModel) -> ChatInterestingFactState:
+        return ChatInterestingFactState(
+            chat_id=int(row.chat_id),
+            last_sent_at=_normalize_optional_datetime(row.last_sent_at),
+            last_fact_id=str(row.last_fact_id).strip() or None,
+            used_fact_ids=_normalize_string_items(row.used_fact_ids_json),
+            updated_at=_normalize_optional_datetime(row.updated_at),
+        )
+
+    @staticmethod
+    def _to_chat_settings(row: ChatSettingsModel) -> ChatSettings:
+        return ChatSettings(
+            top_limit_default=int(row.top_limit_default),
+            top_limit_max=int(row.top_limit_max),
+            vote_daily_limit=int(row.vote_daily_limit),
+            leaderboard_hybrid_karma_weight=float(row.leaderboard_hybrid_karma_weight),
+            leaderboard_hybrid_activity_weight=float(row.leaderboard_hybrid_activity_weight),
+            leaderboard_7d_days=int(row.leaderboard_7d_days),
+            leaderboard_week_start_weekday=int(row.leaderboard_week_start_weekday),
+            leaderboard_week_start_hour=int(row.leaderboard_week_start_hour),
+            mafia_night_seconds=int(row.mafia_night_seconds),
+            mafia_day_seconds=int(row.mafia_day_seconds),
+            mafia_vote_seconds=int(row.mafia_vote_seconds),
+            mafia_reveal_eliminated_role=bool(row.mafia_reveal_eliminated_role),
+            text_commands_enabled=bool(row.text_commands_enabled),
+            text_commands_locale=row.text_commands_locale,
+            actions_18_enabled=bool(row.actions_18_enabled),
+            smart_triggers_enabled=bool(row.smart_triggers_enabled),
+            welcome_enabled=bool(row.welcome_enabled),
+            welcome_text=row.welcome_text,
+            welcome_button_text=row.welcome_button_text,
+            welcome_button_url=row.welcome_button_url,
+            goodbye_enabled=bool(row.goodbye_enabled),
+            goodbye_text=row.goodbye_text,
+            welcome_cleanup_service_messages=bool(row.welcome_cleanup_service_messages),
+            entry_captcha_enabled=bool(row.entry_captcha_enabled),
+            entry_captcha_timeout_seconds=int(row.entry_captcha_timeout_seconds),
+            entry_captcha_kick_on_fail=bool(row.entry_captcha_kick_on_fail),
+            custom_rp_enabled=bool(row.custom_rp_enabled),
+            family_tree_enabled=bool(row.family_tree_enabled),
+            titles_enabled=bool(row.titles_enabled),
+            title_price=int(row.title_price),
+            craft_enabled=bool(row.craft_enabled),
+            auctions_enabled=bool(row.auctions_enabled),
+            auction_duration_minutes=int(row.auction_duration_minutes),
+            auction_min_increment=int(row.auction_min_increment),
+            economy_enabled=bool(row.economy_enabled),
+            economy_mode=row.economy_mode,
+            economy_tap_cooldown_seconds=int(row.economy_tap_cooldown_seconds),
+            economy_daily_base_reward=int(row.economy_daily_base_reward),
+            economy_daily_streak_cap=int(row.economy_daily_streak_cap),
+            economy_lottery_ticket_price=int(row.economy_lottery_ticket_price),
+            economy_lottery_paid_daily_limit=int(row.economy_lottery_paid_daily_limit),
+            economy_transfer_daily_limit=int(row.economy_transfer_daily_limit),
+            economy_transfer_tax_percent=int(row.economy_transfer_tax_percent),
+            economy_market_fee_percent=int(row.economy_market_fee_percent),
+            economy_negative_event_chance_percent=int(row.economy_negative_event_chance_percent),
+            economy_negative_event_loss_percent=int(row.economy_negative_event_loss_percent),
+            antiraid_enabled=bool(row.antiraid_enabled),
+            antiraid_recent_window_minutes=int(row.antiraid_recent_window_minutes),
+            chat_write_locked=bool(row.chat_write_locked),
+            cleanup_economy_commands=bool(row.cleanup_economy_commands),
+            leaderboard_hybrid_buttons_enabled=bool(row.leaderboard_hybrid_buttons_enabled),
+            interesting_facts_enabled=bool(row.interesting_facts_enabled),
+            interesting_facts_interval_minutes=int(row.interesting_facts_interval_minutes),
+            interesting_facts_target_messages=int(row.interesting_facts_target_messages),
+            interesting_facts_sleep_cap_minutes=int(row.interesting_facts_sleep_cap_minutes),
         )
 
     @staticmethod

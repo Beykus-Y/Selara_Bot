@@ -82,6 +82,10 @@ SOCIAL_COMMAND_KEY_TO_ACTION: dict[TextCommandKey, str] = {
 }
 
 PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
+    "+антирейд": "antiraid_on",
+    "-антирейд": "antiraid_off",
+    "-чат": "chat_lock",
+    "+чат": "chat_unlock",
     "нейминг": "naming",
     "объява": "announce",
     "игра": "game",
@@ -174,6 +178,10 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "adopt": "усыновить",
     "pet": "стать питомцем",
     "family": "семья",
+    "antiraid_on": "+антирейд",
+    "antiraid_off": "-антирейд",
+    "chat_lock": "-чат",
+    "chat_unlock": "+чат",
     "shipperim": "шипперим",
     "naming": "нейминг",
     "announce": "объява",
@@ -226,6 +234,7 @@ COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "adopt",
     "pet",
     "family",
+    "antiraid_on",
     "social_slap",
     "social_kill",
     "social_fuck",
@@ -401,6 +410,12 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
         if action in _TITLE_SET_TOKENS:
             return len(tokens) >= 2
         return False
+
+    if command_key == "antiraid_on":
+        return len(tokens) <= 1 and (not tokens or tokens[0] in {"5", "10"})
+
+    if command_key in {"antiraid_off", "chat_lock", "chat_unlock"}:
+        return not tokens
 
     if command_key == "role":
         return False

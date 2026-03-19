@@ -16,8 +16,11 @@ CFG_BOOL_KEYS: set[str] = {
     "welcome_cleanup_service_messages",
     "entry_captcha_enabled",
     "entry_captcha_kick_on_fail",
+    "antiraid_enabled",
+    "chat_write_locked",
     "custom_rp_enabled",
     "family_tree_enabled",
+    "interesting_facts_enabled",
     "titles_enabled",
     "craft_enabled",
     "auctions_enabled",
@@ -207,6 +210,24 @@ SETTING_META: dict[str, SettingMeta] = {
         description_ru="Если false, бот просто оставит пользователя в ограничении до ручного вмешательства.",
         value_hint_ru="true/false.",
     ),
+    "antiraid_enabled": SettingMeta(
+        title_ru="Антирейд включён",
+        short_ru="Антирейд",
+        description_ru="При входе новых участников бот автоматически закрывает чат и банит новых не-админов.",
+        value_hint_ru="true/false.",
+    ),
+    "antiraid_recent_window_minutes": SettingMeta(
+        title_ru="Окно добана антирейда",
+        short_ru="Окно антирейда",
+        description_ru="Сколько минут назад проверять уже вошедших участников при включении антирейда.",
+        value_hint_ru="Только 5 или 10.",
+    ),
+    "chat_write_locked": SettingMeta(
+        title_ru="Чат закрыт для записи",
+        short_ru="Lock чата",
+        description_ru="Если включено, писать могут только админы Telegram; участники получают дефолтный read-only режим.",
+        value_hint_ru="true/false.",
+    ),
     "custom_rp_enabled": SettingMeta(
         title_ru="Кастомные RP-действия",
         short_ru="Кастомные RP",
@@ -218,6 +239,30 @@ SETTING_META: dict[str, SettingMeta] = {
         short_ru="Семья",
         description_ru="Включает команды усыновления, питомцев и генерацию древа.",
         value_hint_ru="true/false.",
+    ),
+    "interesting_facts_enabled": SettingMeta(
+        title_ru="Автофакты включены",
+        short_ru="Автофакты",
+        description_ru="Бот периодически вкидывает случайный интересный факт в чат по гибридному антиспам-правилу.",
+        value_hint_ru="true/false.",
+    ),
+    "interesting_facts_interval_minutes": SettingMeta(
+        title_ru="Минимальный интервал автофактов",
+        short_ru="Интервал автофактов",
+        description_ru="Минимальная пауза между двумя автофактами в этом чате.",
+        value_hint_ru="Целое число > 0 (мин).",
+    ),
+    "interesting_facts_target_messages": SettingMeta(
+        title_ru="Цель сообщений между автофактами",
+        short_ru="Сообщения до факта",
+        description_ru="Сколько сообщений пользователей должно накопиться после прошлого автофакта, чтобы бот мог прислать следующий раньше фазы тишины.",
+        value_hint_ru="Целое число > 0.",
+    ),
+    "interesting_facts_sleep_cap_minutes": SettingMeta(
+        title_ru="Предел сна для автофактов",
+        short_ru="Предел сна автофактов",
+        description_ru="Если в чате не было человеческой активности дольше этого окна, бот перестаёт пытаться оживлять его фактами.",
+        value_hint_ru="Целое число > 0 (мин).",
     ),
     "titles_enabled": SettingMeta(
         title_ru="Титулы включены",
@@ -377,8 +422,15 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "entry_captcha_enabled",
             "entry_captcha_timeout_seconds",
             "entry_captcha_kick_on_fail",
+            "antiraid_enabled",
+            "antiraid_recent_window_minutes",
+            "chat_write_locked",
             "custom_rp_enabled",
             "family_tree_enabled",
+            "interesting_facts_enabled",
+            "interesting_facts_interval_minutes",
+            "interesting_facts_target_messages",
+            "interesting_facts_sleep_cap_minutes",
         ),
     ),
     (
@@ -474,8 +526,15 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "entry_captcha_enabled": value.entry_captcha_enabled,
         "entry_captcha_timeout_seconds": value.entry_captcha_timeout_seconds,
         "entry_captcha_kick_on_fail": value.entry_captcha_kick_on_fail,
+        "antiraid_enabled": value.antiraid_enabled,
+        "antiraid_recent_window_minutes": value.antiraid_recent_window_minutes,
+        "chat_write_locked": value.chat_write_locked,
         "custom_rp_enabled": value.custom_rp_enabled,
         "family_tree_enabled": value.family_tree_enabled,
+        "interesting_facts_enabled": value.interesting_facts_enabled,
+        "interesting_facts_interval_minutes": value.interesting_facts_interval_minutes,
+        "interesting_facts_target_messages": value.interesting_facts_target_messages,
+        "interesting_facts_sleep_cap_minutes": value.interesting_facts_sleep_cap_minutes,
         "titles_enabled": value.titles_enabled,
         "title_price": value.title_price,
         "craft_enabled": value.craft_enabled,
@@ -633,6 +692,9 @@ def validate_settings_payload(current: dict[str, object]) -> str | None:
 
     if int(current["entry_captcha_timeout_seconds"]) < 30:
         return "entry_captcha_timeout_seconds должен быть >= 30"
+
+    if int(current["antiraid_recent_window_minutes"]) not in {5, 10}:
+        return "antiraid_recent_window_minutes должен быть равен 5 или 10"
 
     if int(current["title_price"]) < 1:
         return "title_price должен быть >= 1"

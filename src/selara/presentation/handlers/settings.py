@@ -11,6 +11,11 @@ from selara.domain.entities import ChatSnapshot
 from selara.presentation.auth import has_permission
 from selara.presentation.commands.access import resolve_command_key_input
 from selara.presentation.commands.normalizer import normalize_text_command
+from selara.presentation.interesting_facts import (
+    INTERESTING_FACT_CATALOG,
+    format_interesting_fact_message,
+    select_next_interesting_fact,
+)
 from selara.presentation.handlers.settings_common import (
     apply_setting_update,
     render_settings,
@@ -94,6 +99,49 @@ async def setcfg_command(
         f"Ключ: <code>{key}</code>\n"
         f"Новое значение: <code>{getattr(updated, key)}</code>",
         parse_mode="HTML",
+    )
+
+
+@router.message(Command("facttest"))
+async def facttest_command(message: Message, activity_repo) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе")
+        return
+
+    if message.from_user is None:
+        return
+
+    allowed, _, _ = await has_permission(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        permission="manage_settings",
+        bootstrap_if_missing_owner=False,
+    )
+    if not allowed:
+        await message.answer("Недостаточно прав для превью автофактов в этой группе.")
+        return
+
+    facts = INTERESTING_FACT_CATALOG.get_facts()
+    if not facts:
+        await message.answer("Каталог автофактов пуст или не удалось его загрузить.")
+        return
+
+    state = await activity_repo.get_chat_interesting_fact_state(chat_id=message.chat.id)
+    fact, _ = select_next_interesting_fact(facts=facts, state=state)
+    if fact is None:
+        await message.answer("Не удалось подобрать факт для превью.")
+        return
+
+    await message.answer(
+        format_interesting_fact_message(fact.text),
+        disable_web_page_preview=True,
     )
 
 

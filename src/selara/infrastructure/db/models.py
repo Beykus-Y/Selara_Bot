@@ -295,6 +295,25 @@ class ChatActivityEventSyncStateModel(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ChatInterestingFactStateModel(Base):
+    __tablename__ = "chat_interesting_fact_state"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fact_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    used_fact_ids_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class UserKarmaVoteModel(Base):
     __tablename__ = "user_karma_votes"
 
@@ -730,6 +749,13 @@ class ChatSettingsModel(Base):
     entry_captcha_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     entry_captcha_timeout_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False, default=180, server_default="180")
     entry_captcha_kick_on_fail: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    antiraid_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    antiraid_recent_window_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=10, server_default="10")
+    chat_write_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    interesting_facts_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    interesting_facts_interval_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=180, server_default="180")
+    interesting_facts_target_messages: Mapped[int] = mapped_column(BigInteger, nullable=False, default=150, server_default="150")
+    interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     titles_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
@@ -883,7 +909,7 @@ Index(
 class ChatAuditLogModel(Base):
     __tablename__ = "chat_audit_logs"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),

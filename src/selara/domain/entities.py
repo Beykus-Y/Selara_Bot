@@ -41,6 +41,15 @@ class ChatActivitySummary:
     last_activity_at: datetime | None
 
 
+@dataclass(frozen=True)
+class ChatInterestingFactState:
+    chat_id: int
+    last_sent_at: datetime | None
+    last_fact_id: str | None
+    used_fact_ids: tuple[str, ...]
+    updated_at: datetime | None = None
+
+
 LeaderboardMode = Literal["mix", "activity", "karma"]
 LeaderboardPeriod = Literal["all", "7d", "hour", "day", "week", "month"]
 TextAliasMode = Literal["aliases_if_exists", "both", "standard_only"]

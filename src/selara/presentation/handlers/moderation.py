@@ -267,6 +267,18 @@ async def _try_unrestrict_user(bot: Bot, *, chat_id: int, user_id: int) -> bool:
         return False
 
 
+def _is_chat_member_admin(member) -> bool:
+    return getattr(member, "status", None) in {"administrator", "creator"}
+
+
+async def _target_is_telegram_admin(bot: Bot, *, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+    except (AttributeError, TelegramBadRequest, TelegramForbiddenError):
+        return False
+    return _is_chat_member_admin(member)
+
+
 def _parse_text_action(text: str) -> tuple[str, str] | None:
     raw = text.strip()
     if not raw or raw.startswith("/"):
@@ -364,7 +376,6 @@ async def _apply_moderation_action(
         bootstrap_if_missing_owner=False,
     )
     if not allowed or actor_role is None:
-        await message.answer("Недостаточно прав для модерации.")
         return
 
     actor_role_definition = await activity_repo.get_effective_role_definition(
@@ -372,7 +383,6 @@ async def _apply_moderation_action(
         user_id=message.from_user.id,
     )
     if actor_role_definition is None:
-        await message.answer("Недостаточно прав для модерации.")
         return
 
     if use_reply_target and message.reply_to_message is not None:
@@ -403,7 +413,13 @@ async def _apply_moderation_action(
         actor_rank=actor_role_definition.rank,
         target_rank=target_role_definition.rank if target_role_definition is not None else None,
     ):
-        await message.answer("Недостаточно уровня доступа для этого пользователя.")
+        return
+
+    if command_name in {"pred", "warn", "ban"} and await _target_is_telegram_admin(
+        bot,
+        chat_id=message.chat.id,
+        user_id=target.telegram_user_id,
+    ):
         return
 
     chat = build_chat_snapshot(chat_id=message.chat.id, chat_type=message.chat.type, chat_title=message.chat.title)

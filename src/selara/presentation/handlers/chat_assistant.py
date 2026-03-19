@@ -33,12 +33,28 @@ from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission
 from selara.presentation.family_tree import build_family_tree_image
+from selara.presentation.handlers.settings_common import settings_to_dict
 
 router = Router(name="chat_assistant")
 
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
 _TRIGGER_CACHE_TTL = timedelta(seconds=45)
 _CUSTOM_ACTION_CACHE_TTL = timedelta(seconds=45)
+_CHAT_PERMISSION_FIELDS: tuple[str, ...] = tuple(ChatPermissions.model_fields.keys())
+_SEND_PERMISSION_FIELDS: tuple[str, ...] = (
+    "can_send_messages",
+    "can_send_audios",
+    "can_send_documents",
+    "can_send_photos",
+    "can_send_videos",
+    "can_send_video_notes",
+    "can_send_voice_notes",
+    "can_send_polls",
+    "can_send_other_messages",
+    "can_add_web_page_previews",
+)
+_CHAT_PERMISSIONS_BASELINE_ACTION = "chat_permissions_baseline"
+_CHAT_MEMBER_JOINED_ACTION = "member_joined"
 _CAPTCHA_EMOJIS = ("🍎", "🍋", "🍇", "🍓", "🥝", "🍉", "🍒", "🥥")
 _CAPTCHA_TIMEOUT_GRACE = 5
 _FAMILY_REQUEST_TTL_HOURS = 24
@@ -120,6 +136,10 @@ def _is_chat_member_active(member: ChatMember) -> bool:
     return False
 
 
+def _is_chat_member_admin(member: ChatMember) -> bool:
+    return getattr(member, "status", None) in {"administrator", "creator"}
+
+
 def _format_user_mention(*, user_id: int, label: str) -> str:
     return f'<a href="tg://user?id={user_id}">{escape(label)}</a>'
 
@@ -159,6 +179,41 @@ def _full_member_permissions() -> ChatPermissions:
     )
 
 
+def _effective_chat_lock(chat_settings: ChatSettings) -> bool:
+    return bool(chat_settings.chat_write_locked or chat_settings.antiraid_enabled)
+
+
+def _permissions_to_payload(permissions: ChatPermissions | None) -> dict[str, bool]:
+    if permissions is None:
+        return {}
+    dumped = permissions.model_dump(exclude_none=True)
+    return {
+        field: bool(dumped[field])
+        for field in _CHAT_PERMISSION_FIELDS
+        if field in dumped and isinstance(dumped[field], bool)
+    }
+
+
+def _permissions_from_payload(payload: dict | None) -> ChatPermissions | None:
+    if not isinstance(payload, dict):
+        return None
+    normalized = {
+        field: bool(payload[field])
+        for field in _CHAT_PERMISSION_FIELDS
+        if field in payload and isinstance(payload[field], bool)
+    }
+    if not normalized:
+        return None
+    return ChatPermissions(**normalized)
+
+
+def _locked_chat_permissions(*, baseline: ChatPermissions | None) -> ChatPermissions:
+    payload = _permissions_to_payload(baseline or _full_member_permissions())
+    for field in _SEND_PERMISSION_FIELDS:
+        payload[field] = False
+    return ChatPermissions(**payload)
+
+
 async def _safe_delete_message(bot: Bot, *, chat_id: int, message_id: int) -> bool:
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -195,6 +250,84 @@ async def _safe_kick(bot: Bot, *, chat_id: int, user_id: int) -> bool:
     try:
         await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
         await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+
+async def _safe_ban(bot: Bot, *, chat_id: int, user_id: int) -> bool:
+    try:
+        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+
+async def _save_chat_permissions_baseline(
+    bot: Bot,
+    activity_repo,
+    *,
+    chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+    actor_user_id: int | None,
+) -> ChatPermissions | None:
+    try:
+        chat = await bot.get_chat(chat_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return None
+
+    permissions = _permissions_from_payload(_permissions_to_payload(getattr(chat, "permissions", None)))
+    await log_chat_action(
+        activity_repo,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        chat_title=chat_title,
+        action_code=_CHAT_PERMISSIONS_BASELINE_ACTION,
+        description="Сохранён baseline default chat permissions перед закрытием чата.",
+        actor_user_id=actor_user_id,
+        meta_json={
+            "permissions": _permissions_to_payload(permissions),
+            "use_independent_chat_permissions": getattr(chat, "use_independent_chat_permissions", None),
+        },
+    )
+    return permissions
+
+
+async def _load_chat_permissions_baseline(activity_repo, *, chat_id: int) -> tuple[ChatPermissions | None, bool | None]:
+    entries = await activity_repo.list_audit_logs_by_action(
+        chat_id=chat_id,
+        action_code=_CHAT_PERMISSIONS_BASELINE_ACTION,
+        limit=1,
+    )
+    if not entries:
+        return None, None
+    meta = entries[0].meta_json if isinstance(entries[0].meta_json, dict) else {}
+    use_independent = meta.get("use_independent_chat_permissions")
+    return _permissions_from_payload(meta.get("permissions")), use_independent if isinstance(use_independent, bool) else None
+
+
+async def _lock_chat(bot: Bot, *, chat_id: int, baseline_permissions: ChatPermissions | None) -> bool:
+    try:
+        await bot.set_chat_permissions(
+            chat_id=chat_id,
+            permissions=_locked_chat_permissions(baseline=baseline_permissions),
+            use_independent_chat_permissions=True,
+        )
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+
+async def _restore_chat_permissions(bot: Bot, activity_repo, *, chat_id: int) -> bool:
+    permissions, use_independent = await _load_chat_permissions_baseline(activity_repo, chat_id=chat_id)
+    restored = permissions or _full_member_permissions()
+    try:
+        await bot.set_chat_permissions(
+            chat_id=chat_id,
+            permissions=restored,
+            use_independent_chat_permissions=True if use_independent is None else use_independent,
+        )
         return True
     except (TelegramBadRequest, TelegramForbiddenError):
         return False
@@ -462,6 +595,258 @@ async def _require_manage_settings(message: Message, activity_repo) -> bool:
         await message.answer("Недостаточно прав для управления этой функцией.")
         return False
     return True
+
+
+async def _require_moderate_users(message: Message, activity_repo) -> bool:
+    if not _group_only(message):
+        await message.answer("Команда доступна только в группе.")
+        return False
+    if message.from_user is None:
+        return False
+    allowed, _, _ = await has_permission(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        permission="moderate_users",
+        bootstrap_if_missing_owner=False,
+    )
+    if not allowed:
+        await message.answer("Недостаточно прав для модерации этого чата.")
+        return False
+    return True
+
+
+def _chat_snapshot_from_message(message: Message) -> ChatSnapshot:
+    return ChatSnapshot(
+        telegram_chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        title=message.chat.title,
+    )
+
+
+def _user_snapshot_from_message(message: Message) -> UserSnapshot | None:
+    if message.from_user is None:
+        return None
+    return UserSnapshot(
+        telegram_user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+
+
+async def _ban_recent_joiners(
+    bot: Bot,
+    activity_repo,
+    *,
+    chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+    window_minutes: int,
+) -> int:
+    joined_entries = await activity_repo.list_audit_logs_by_action(
+        chat_id=chat_id,
+        action_code=_CHAT_MEMBER_JOINED_ACTION,
+        since=datetime.now(timezone.utc) - timedelta(minutes=window_minutes),
+        limit=500,
+    )
+    banned_count = 0
+    processed_user_ids: set[int] = set()
+    for entry in sorted(joined_entries, key=lambda item: (item.created_at, item.id)):
+        user_id = entry.target_user_id
+        if user_id is None or user_id in processed_user_ids:
+            continue
+        processed_user_ids.add(user_id)
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            continue
+        member_user = getattr(member, "user", None)
+        if member_user is None or getattr(member_user, "is_bot", False):
+            continue
+        if _is_chat_member_admin(member) or getattr(member, "status", None) in {"left", "kicked"}:
+            continue
+        banned = await _safe_ban(bot, chat_id=chat_id, user_id=user_id)
+        if not banned:
+            continue
+        banned_count += 1
+        await activity_repo.set_chat_member_active(
+            chat=ChatSnapshot(
+                telegram_chat_id=chat_id,
+                chat_type=chat_type,
+                title=chat_title,
+            ),
+            user=UserSnapshot(
+                telegram_user_id=member_user.id,
+                username=getattr(member_user, "username", None),
+                first_name=getattr(member_user, "first_name", None),
+                last_name=getattr(member_user, "last_name", None),
+                is_bot=bool(getattr(member_user, "is_bot", False)),
+            ),
+            is_active=False,
+            event_at=datetime.now(timezone.utc),
+        )
+        await log_chat_action(
+            activity_repo,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            chat_title=chat_title,
+            action_code="antiraid_retro_ban",
+            description=f"Пользователь {user_id} забанен retro-sweep антирейда.",
+            target_user_id=user_id,
+        )
+    return banned_count
+
+
+async def manage_chat_gate_command(
+    message: Message,
+    *,
+    activity_repo,
+    bot: Bot,
+    chat_settings: ChatSettings,
+    command_key: str,
+    raw_args: str | None = None,
+) -> None:
+    if not await _require_moderate_users(message, activity_repo):
+        return
+    actor = _user_snapshot_from_message(message)
+    if actor is None:
+        return
+
+    current_values = settings_to_dict(chat_settings)
+    updated_values = dict(current_values)
+    raw_tail = (raw_args or "").strip()
+    antiraid_window = chat_settings.antiraid_recent_window_minutes
+
+    if command_key == "antiraid_on":
+        if raw_tail:
+            antiraid_window = int(raw_tail)
+        updated_values["antiraid_enabled"] = True
+        updated_values["antiraid_recent_window_minutes"] = antiraid_window
+    elif command_key == "antiraid_off":
+        updated_values["antiraid_enabled"] = False
+    elif command_key == "chat_lock":
+        updated_values["chat_write_locked"] = True
+    elif command_key == "chat_unlock":
+        updated_values["chat_write_locked"] = False
+    else:
+        return
+
+    current_effective_lock = _effective_chat_lock(chat_settings)
+    next_effective_lock = bool(updated_values["chat_write_locked"] or updated_values["antiraid_enabled"])
+
+    baseline_permissions: ChatPermissions | None = None
+    if not current_effective_lock and next_effective_lock:
+        baseline_permissions = await _save_chat_permissions_baseline(
+            bot,
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            actor_user_id=actor.telegram_user_id,
+        )
+        if not await _lock_chat(bot, chat_id=message.chat.id, baseline_permissions=baseline_permissions):
+            await message.answer("Не удалось закрыть чат. Проверьте права бота на ограничение участников.")
+            return
+    elif current_effective_lock and not next_effective_lock:
+        if not await _restore_chat_permissions(bot, activity_repo, chat_id=message.chat.id):
+            await message.answer("Не удалось открыть чат. Проверьте права бота на управление разрешениями.")
+            return
+
+    updated = await activity_repo.upsert_chat_settings(chat=_chat_snapshot_from_message(message), values=updated_values)
+
+    if command_key == "antiraid_on":
+        banned_count = await _ban_recent_joiners(
+            bot,
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            window_minutes=updated.antiraid_recent_window_minutes,
+        )
+        await log_chat_action(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            action_code="antiraid_enabled",
+            description=(
+                f"Антирейд включён. Окно retro-ban: {updated.antiraid_recent_window_minutes} мин. "
+                f"Забанено: {banned_count}."
+            ),
+            actor_user_id=actor.telegram_user_id,
+            meta_json={
+                "window_minutes": updated.antiraid_recent_window_minutes,
+                "retro_ban_count": banned_count,
+                "chat_write_locked": updated.chat_write_locked,
+            },
+        )
+        if updated.chat_write_locked:
+            await message.answer(
+                f"Антирейд включён на {updated.antiraid_recent_window_minutes} мин. Чат уже был закрыт вручную. "
+                f"Retro-ban: {banned_count}."
+            )
+        else:
+            await message.answer(
+                f"Антирейд включён на {updated.antiraid_recent_window_minutes} мин. Чат закрыт. Retro-ban: {banned_count}."
+            )
+        return
+
+    if command_key == "antiraid_off":
+        await log_chat_action(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            action_code="antiraid_disabled",
+            description="Антирейд выключен.",
+            actor_user_id=actor.telegram_user_id,
+            meta_json={"chat_write_locked": updated.chat_write_locked},
+        )
+        if updated.chat_write_locked:
+            await message.answer("Антирейд выключен. Чат остаётся закрытым из-за ручного lock-режима.")
+        else:
+            await message.answer("Антирейд выключен. Чат снова открыт.")
+        return
+
+    if command_key == "chat_lock":
+        await log_chat_action(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            action_code="chat_locked",
+            description="Чат закрыт для записи участников.",
+            actor_user_id=actor.telegram_user_id,
+            meta_json={"antiraid_enabled": updated.antiraid_enabled},
+        )
+        if updated.antiraid_enabled:
+            await message.answer("Ручной lock включён. Антирейд уже держит чат закрытым.")
+        else:
+            await message.answer("Чат закрыт. Писать могут только админы.")
+        return
+
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="chat_unlocked",
+        description="Ручной lock чата снят.",
+        actor_user_id=actor.telegram_user_id,
+        meta_json={"antiraid_enabled": updated.antiraid_enabled},
+    )
+    if updated.antiraid_enabled:
+        await message.answer("Ручной lock снят, но чат остаётся закрытым, пока активен антирейд.")
+    else:
+        await message.answer("Чат открыт.")
 
 
 async def _cached_triggers(activity_repo, *, chat_id: int) -> list[ChatTrigger]:
@@ -1067,21 +1452,32 @@ async def new_chat_members_handler(
             )
 
     for member in new_members:
+        member_snapshot = UserSnapshot(
+            telegram_user_id=member.id,
+            username=member.username,
+            first_name=member.first_name,
+            last_name=member.last_name,
+            is_bot=bool(member.is_bot),
+        )
         await activity_repo.set_chat_member_active(
             chat=ChatSnapshot(
                 telegram_chat_id=message.chat.id,
                 chat_type=message.chat.type,
                 title=message.chat.title,
             ),
-            user=UserSnapshot(
-                telegram_user_id=member.id,
-                username=member.username,
-                first_name=member.first_name,
-                last_name=member.last_name,
-                is_bot=bool(member.is_bot),
-            ),
+            user=member_snapshot,
             is_active=True,
             event_at=message.date,
+        )
+        await log_chat_action(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            action_code=_CHAT_MEMBER_JOINED_ACTION,
+            description=f"Пользователь {member.id} вошёл в чат.",
+            target_user_id=member.id,
+            created_at=message.date,
         )
         if achievement_orchestrator is not None:
             await achievement_orchestrator.process_membership(
@@ -1094,14 +1490,39 @@ async def new_chat_members_handler(
             activity_repo,
             chat_id=message.chat.id,
             user_id=member.id,
-            fallback_user=UserSnapshot(
-                telegram_user_id=member.id,
-                username=member.username,
-                first_name=member.first_name,
-                last_name=member.last_name,
-                is_bot=bool(member.is_bot),
-            ),
+            fallback_user=member_snapshot,
         )
+        if chat_settings.antiraid_enabled:
+            try:
+                current_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=member.id)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                current_member = None
+            if current_member is None or not _is_chat_member_admin(current_member):
+                banned = await _safe_ban(bot, chat_id=message.chat.id, user_id=member.id)
+                if banned:
+                    await activity_repo.set_chat_member_active(
+                        chat=ChatSnapshot(
+                            telegram_chat_id=message.chat.id,
+                            chat_type=message.chat.type,
+                            title=message.chat.title,
+                        ),
+                        user=member_snapshot,
+                        is_active=False,
+                        event_at=message.date,
+                    )
+                await log_chat_action(
+                    activity_repo,
+                    chat_id=message.chat.id,
+                    chat_type=message.chat.type,
+                    chat_title=message.chat.title,
+                    action_code="antiraid_join_ban" if banned else "antiraid_join_ban_failed",
+                    description=(
+                        f"Пользователь {member.id} "
+                        f"{'забанен' if banned else 'не был забанен'} при активном антирейде."
+                    ),
+                    target_user_id=member.id,
+                )
+            continue
         if chat_settings.entry_captcha_enabled:
             token = secrets.token_hex(8)
             correct = "🍎"

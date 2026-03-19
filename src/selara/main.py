@@ -12,6 +12,7 @@ from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.presentation.game_state import GAME_STORE
+from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="modstat", description="Статус предов/варнов/бана"),
         BotCommand(command="settings", description="Настройки бота для текущей группы"),
         BotCommand(command="setcfg", description="Изменить настройку группы"),
+        BotCommand(command="facttest", description="Превью случайного автофакта"),
         BotCommand(command="setrank", description="Установить минимальный ранг для команды"),
         BotCommand(command="ranks", description="Показать настроенные ранги команд"),
         BotCommand(command="setalias", description='Задать кастомный алиас: /setalias "стандартный" "новый"'),
@@ -115,6 +117,10 @@ async def _run_bot(settings, session_factory) -> None:
     await bot.set_my_commands(build_bot_commands())
     await activity_batcher.start()
     backup_task = None
+    interesting_facts_task = asyncio.create_task(
+        run_interesting_facts_scheduler(bot=bot, session_factory=session_factory),
+        name="interesting-facts",
+    )
     if settings.admin_user_id is not None:
         backup_task = asyncio.create_task(run_daily_backup_scheduler(bot=bot, settings=settings), name="daily-backup")
     else:
@@ -123,6 +129,8 @@ async def _run_bot(settings, session_factory) -> None:
     try:
         await dispatcher.start_polling(bot, settings=settings)
     finally:
+        interesting_facts_task.cancel()
+        await asyncio.gather(interesting_facts_task, return_exceptions=True)
         if backup_task is not None:
             backup_task.cancel()
             await asyncio.gather(backup_task, return_exceptions=True)

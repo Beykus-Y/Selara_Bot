@@ -52,8 +52,15 @@ class ChatSettings:
     economy_market_fee_percent: int
     economy_negative_event_chance_percent: int
     economy_negative_event_loss_percent: int
+    antiraid_enabled: bool = False
+    antiraid_recent_window_minutes: int = 10
+    chat_write_locked: bool = False
     cleanup_economy_commands: bool = False
     leaderboard_hybrid_buttons_enabled: bool = False
+    interesting_facts_enabled: bool = False
+    interesting_facts_interval_minutes: int = 180
+    interesting_facts_target_messages: int = 150
+    interesting_facts_sleep_cap_minutes: int = 1440
 
 
 CHAT_SETTINGS_KEYS: tuple[str, ...] = (
@@ -84,8 +91,15 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "entry_captcha_enabled",
     "entry_captcha_timeout_seconds",
     "entry_captcha_kick_on_fail",
+    "antiraid_enabled",
+    "antiraid_recent_window_minutes",
+    "chat_write_locked",
     "custom_rp_enabled",
     "family_tree_enabled",
+    "interesting_facts_enabled",
+    "interesting_facts_interval_minutes",
+    "interesting_facts_target_messages",
+    "interesting_facts_sleep_cap_minutes",
     "titles_enabled",
     "title_price",
     "craft_enabled",
@@ -137,6 +151,9 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         entry_captcha_enabled=settings.entry_captcha_enabled,
         entry_captcha_timeout_seconds=settings.entry_captcha_timeout_seconds,
         entry_captcha_kick_on_fail=settings.entry_captcha_kick_on_fail,
+        antiraid_enabled=False,
+        antiraid_recent_window_minutes=10,
+        chat_write_locked=False,
         custom_rp_enabled=settings.custom_rp_enabled,
         family_tree_enabled=settings.family_tree_enabled,
         titles_enabled=settings.titles_enabled,
@@ -158,6 +175,10 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         economy_negative_event_chance_percent=settings.economy_negative_event_chance_percent,
         economy_negative_event_loss_percent=settings.economy_negative_event_loss_percent,
         cleanup_economy_commands=settings.cleanup_economy_commands,
+        interesting_facts_enabled=False,
+        interesting_facts_interval_minutes=180,
+        interesting_facts_target_messages=150,
+        interesting_facts_sleep_cap_minutes=1440,
     )
 
 
@@ -173,9 +194,13 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "mafia_day_seconds",
         "mafia_vote_seconds",
         "entry_captcha_timeout_seconds",
+        "antiraid_recent_window_minutes",
         "title_price",
         "auction_duration_minutes",
         "auction_min_increment",
+        "interesting_facts_interval_minutes",
+        "interesting_facts_target_messages",
+        "interesting_facts_sleep_cap_minutes",
         "economy_tap_cooldown_seconds",
         "economy_daily_base_reward",
         "economy_daily_streak_cap",
@@ -226,8 +251,11 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "welcome_cleanup_service_messages",
         "entry_captcha_enabled",
         "entry_captcha_kick_on_fail",
+        "antiraid_enabled",
+        "chat_write_locked",
         "custom_rp_enabled",
         "family_tree_enabled",
+        "interesting_facts_enabled",
         "titles_enabled",
         "craft_enabled",
         "auctions_enabled",
