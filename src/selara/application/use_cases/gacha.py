@@ -16,7 +16,7 @@ from selara.infrastructure.http.gacha_client import (
 )
 
 GACHA_CURRENCY_PER_COIN_RATE = 10
-GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT = 180
+GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT = 160
 
 
 class GachaUseCaseError(RuntimeError):

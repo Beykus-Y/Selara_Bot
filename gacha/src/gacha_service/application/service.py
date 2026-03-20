@@ -21,7 +21,7 @@ from gacha_service.domain.models import (
 )
 from gacha_service.infrastructure.repository import GachaRepository
 
-PAID_PULL_PRICE = 180
+PAID_PULL_PRICE = 160
 
 
 def _utc_now() -> datetime:

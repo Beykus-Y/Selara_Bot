@@ -521,7 +521,7 @@ async def test_paid_pull_spends_banner_currency_and_sets_new_cooldown() -> None:
     assert result.card is not None
     assert result.player.total_primogems == 250 - PAID_PULL_PRICE + result.card.primogems
     assert result.cooldown_until == now + timedelta(seconds=get_banner_config("genshin").cooldown_seconds)
-    assert "Платная крутка: -180" in result.message
+    assert "Платная крутка: -160" in result.message
 
 
 @pytest.mark.asyncio
@@ -598,13 +598,13 @@ async def test_grant_currency_adds_banner_balance_without_touching_progress() ->
         user_id=707,
         username="buyer",
         banner="genshin",
-        amount=180,
+        amount=160,
     )
 
     assert result.status == "ok"
     assert result.banner == "genshin"
-    assert result.amount == 180
-    assert result.player.total_primogems == 180
+    assert result.amount == 160
+    assert result.player.total_primogems == 160
     assert result.player.total_points == 0
     assert result.player.adventure_xp == 0
     assert "Баланс пополнен" in result.message
@@ -615,10 +615,10 @@ async def test_grant_currency_allows_negative_adjustment_within_wallet() -> None
     repo = FakeGachaRepository()
     service = GachaService(repo)
 
-    await service.grant_currency(user_id=808, username="buyer", banner="hsr", amount=180)
+    await service.grant_currency(user_id=808, username="buyer", banner="hsr", amount=160)
     result = await service.grant_currency(user_id=808, username="buyer", banner="hsr", amount=-60)
 
-    assert result.player.total_primogems == 120
+    assert result.player.total_primogems == 100
     assert result.amount == -60
     assert "скорректирован" in result.message
 

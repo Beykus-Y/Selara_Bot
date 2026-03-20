@@ -41,7 +41,7 @@ async def test_buy_currency_with_coins_debits_balance_and_returns_result(monkeyp
         "grant_currency",
         AsyncMock(
             return_value=SimpleNamespace(
-                player=SimpleNamespace(total_primogems=180),
+                player=SimpleNamespace(total_primogems=160),
             )
         ),
     )
@@ -57,10 +57,10 @@ async def test_buy_currency_with_coins_debits_balance_and_returns_result(monkeyp
     )
 
     assert result.currency_amount == gacha_use_cases.GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT
-    assert result.coin_price == 1800
-    assert result.new_coin_balance == 3200
-    assert result.gacha_balance == 180
-    assert repo.account.balance == 3200
+    assert result.coin_price == 1600
+    assert result.new_coin_balance == 3400
+    assert result.gacha_balance == 160
+    assert repo.account.balance == 3400
     assert repo.ledger_calls[0]["reason"] == "gacha_currency_purchase"
 
 
@@ -90,7 +90,7 @@ async def test_buy_currency_with_coins_refunds_balance_when_gacha_topup_fails(mo
 
 @pytest.mark.asyncio
 async def test_buy_currency_with_coins_requires_enough_coins() -> None:
-    repo = _FakeEconomyRepo(balance=1_799)
+    repo = _FakeEconomyRepo(balance=1_599)
 
     with pytest.raises(gacha_use_cases.GachaUseCaseError, match="Недостаточно монет"):
         await gacha_use_cases.buy_currency_with_coins(

@@ -106,12 +106,12 @@ async def test_gacha_sell_callback_removes_markup_and_answers(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypatch: pytest.MonkeyPatch) -> None:
-    query = _DummyQuery(data="gacha:currency:hsr:180:u1", user_id=1)
+    query = _DummyQuery(data="gacha:currency:hsr:160:u1", user_id=1)
     settings = SimpleNamespace()
     economy_repo = object()
     buy_currency_mock = AsyncMock(
         return_value=SimpleNamespace(
-            message="Обмен: -1800 монет, +180 звездного нефрита. Баланс монет: 1200.",
+            message="Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.",
         )
     )
     build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
@@ -128,7 +128,7 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         user_id=1,
         username="actor",
         banner="hsr",
-        currency_amount=180,
+        currency_amount=160,
     )
     build_info_mock.assert_awaited_once_with(
         settings,
@@ -137,7 +137,7 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         economy_mode="global",
         chat_id=-100123,
     )
-    assert query.answers[-1] == ("Обмен: -1800 монет, +180 звездного нефрита. Баланс монет: 1200.", False)
+    assert query.answers[-1] == ("Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.", False)
 
 
 @pytest.mark.asyncio

@@ -1140,7 +1140,7 @@
       "adventure_xp": 160,
       "image_url": "/images/genshin/toma.jpg",
       "weight": 18.0,
-      "region_code": "liyue",
+      "region_code": "inazuma",
       "element_code": "pyro"
     },
     {
@@ -1368,7 +1368,7 @@
       "adventure_xp": 220,
       "image_url": "/images/genshin/eemia.jpg",
       "weight": 2.0,
-      "region_code": "fontaine",
+      "region_code": "inazuma",
       "element_code": "pyro"
     }
   ]
