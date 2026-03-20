@@ -301,6 +301,78 @@ async def test_repository_lists_inactive_members_oldest_first_and_skips_bots_and
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_repository_get_announcement_recipients_excludes_inactive_and_banned_members() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-10079, chat_type="group", title="Recipients Group")
+    moderator = UserSnapshot(
+        telegram_user_id=1099,
+        username="mod",
+        first_name="Mod",
+        last_name=None,
+        is_bot=False,
+    )
+    active_user = UserSnapshot(
+        telegram_user_id=1101,
+        username="active",
+        first_name="Active",
+        last_name=None,
+        is_bot=False,
+    )
+    inactive_user = UserSnapshot(
+        telegram_user_id=1102,
+        username="inactive",
+        first_name="Inactive",
+        last_name=None,
+        is_bot=False,
+    )
+    banned_user = UserSnapshot(
+        telegram_user_id=1103,
+        username="banned",
+        first_name="Banned",
+        last_name=None,
+        is_bot=False,
+    )
+    bot_user = UserSnapshot(
+        telegram_user_id=1104,
+        username="service_bot",
+        first_name="Service",
+        last_name="Bot",
+        is_bot=True,
+    )
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=active_user, event_at=now - timedelta(minutes=1))
+        await repo.upsert_activity(chat=chat, user=inactive_user, event_at=now - timedelta(minutes=2))
+        await repo.upsert_activity(chat=chat, user=banned_user, event_at=now - timedelta(minutes=3))
+        await repo.upsert_activity(chat=chat, user=bot_user, event_at=now - timedelta(minutes=4))
+
+        await repo.set_chat_member_active(chat=chat, user=inactive_user, is_active=False, event_at=now)
+        await repo.apply_moderation_action(chat=chat, actor=moderator, target=banned_user, action="ban")
+
+        recipients = await repo.get_announcement_recipients(chat_id=chat.telegram_chat_id)
+
+        assert [user.telegram_user_id for user in recipients] == [active_user.telegram_user_id]
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repository_backfill_syncs_event_reads_for_chat() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:

@@ -2815,6 +2815,7 @@ class SqlAlchemyActivityRepository:
     async def get_announcement_recipients(self, *, chat_id: int) -> list[UserSnapshot]:
         prefs = UserChatAnnouncementSubscriptionModel
         activity = UserChatActivityModel
+        moderation = UserChatModerationStateModel
         users = UserModel
 
         stmt = (
@@ -2827,10 +2828,19 @@ class SqlAlchemyActivityRepository:
                     prefs.user_id == activity.user_id,
                 ),
             )
+            .outerjoin(
+                moderation,
+                and_(
+                    moderation.chat_id == activity.chat_id,
+                    moderation.user_id == activity.user_id,
+                ),
+            )
             .where(
                 activity.chat_id == chat_id,
+                activity.is_active_member.is_(True),
                 users.is_bot.is_(False),
                 func.coalesce(prefs.is_enabled, True).is_(True),
+                func.coalesce(moderation.is_banned, False).is_(False),
             )
             .order_by(
                 activity.last_seen_at.desc(),
