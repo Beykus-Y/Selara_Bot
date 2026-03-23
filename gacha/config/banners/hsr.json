@@ -1,7 +1,7 @@
 {
   "code": "hsr",
   "title": "Honkai: Star Rail",
-  "cooldown_seconds": 7200,
+  "cooldown_seconds": 10800,
   "cards": [
     {
       "code": "aglaya",

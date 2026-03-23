@@ -1,7 +1,7 @@
 {
   "code": "genshin",
   "title": "Геншин",
-  "cooldown_seconds": 3600,
+  "cooldown_seconds": 7200,
   "cards": [
     {
       "code": "cun_yun",
