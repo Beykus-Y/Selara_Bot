@@ -265,8 +265,8 @@ async def test_hsr_uses_banner_specific_cooldown() -> None:
     assert result.status == "ok"
     assert result.card is not None
     assert result.card.banner == "hsr"
-    assert result.cooldown_until == now + timedelta(hours=2)
-    assert result.seconds_remaining == 2 * 60 * 60
+    assert result.cooldown_until == now + timedelta(hours=3)
+    assert result.seconds_remaining == 3 * 60 * 60
     assert "Опыт освоения" in result.message
     assert "Уровень освоения" in result.message
     assert "Звездный нефрит" in result.message

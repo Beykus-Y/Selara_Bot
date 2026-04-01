@@ -50,8 +50,9 @@ async def test_gacha_callback_rejects_foreign_owner(monkeypatch: pytest.MonkeyPa
     query = _DummyQuery(data="gacha:buy:genshin:u99", user_id=1)
     purchase_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    bot = AsyncMock()
 
-    await text_commands.gacha_callback(query, settings=SimpleNamespace(), economy_repo=object(), chat_settings=_CHAT_SETTINGS)
+    await text_commands.gacha_callback(query, bot=bot, settings=SimpleNamespace(), economy_repo=object(), chat_settings=_CHAT_SETTINGS)
 
     purchase_mock.assert_not_awaited()
     assert query.answers == [("Эта кнопка не для вас.", True)]
@@ -75,8 +76,10 @@ async def test_gacha_buy_callback_refreshes_info_message(monkeypatch: pytest.Mon
     monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    bot = AsyncMock()
 
-    await text_commands.gacha_callback(query, settings=settings, economy_repo=economy_repo, chat_settings=_CHAT_SETTINGS)
+    await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, chat_settings=_CHAT_SETTINGS)
 
     purchase_mock.assert_awaited_once()
     deliver_mock.assert_awaited_once()
@@ -96,8 +99,10 @@ async def test_gacha_sell_callback_removes_markup_and_answers(monkeypatch: pytes
     query = _DummyQuery(data="gacha:sell:genshin:42:u1", user_id=1)
     sell_mock = AsyncMock(return_value=SimpleNamespace(message="Продажа: +54 примогемов. Баланс: 120."))
     monkeypatch.setattr(text_commands, "sell_gacha_pull", sell_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    bot = AsyncMock()
 
-    await text_commands.gacha_callback(query, settings=SimpleNamespace(), economy_repo=object(), chat_settings=_CHAT_SETTINGS)
+    await text_commands.gacha_callback(query, bot=bot, settings=SimpleNamespace(), economy_repo=object(), chat_settings=_CHAT_SETTINGS)
 
     sell_mock.assert_awaited_once()
     assert query.message.edit_reply_markup_calls == [{"reply_markup": None}]
@@ -117,8 +122,10 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
     build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
     monkeypatch.setattr(text_commands, "buy_gacha_currency_with_coins", buy_currency_mock)
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    bot = AsyncMock()
 
-    await text_commands.gacha_callback(query, settings=settings, economy_repo=economy_repo, chat_settings=_CHAT_SETTINGS)
+    await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, chat_settings=_CHAT_SETTINGS)
 
     buy_currency_mock.assert_awaited_once_with(
         settings,

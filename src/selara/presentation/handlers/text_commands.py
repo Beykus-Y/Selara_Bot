@@ -4,6 +4,7 @@ import logging
 import random
 import re
 import hashlib
+import time
 from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -392,6 +393,10 @@ _GACHA_CALLBACK_PREFIX = "gacha:"
 _GACHA_PAID_PULL_PRICE = 160
 _GACHA_CURRENCY_PURCHASE_AMOUNT = GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT
 _GACHA_COIN_EXCHANGE_RATE = GACHA_CURRENCY_PER_COIN_RATE
+_GACHA_SUBSCRIPTION_CHANNEL = "@SelaraBot_Chanel"
+_GACHA_SUBSCRIPTION_CHANNEL_URL = "https://t.me/SelaraBot_Chanel"
+_GACHA_SUBSCRIPTION_CACHE_TTL = 600
+_gacha_subscription_cache: dict[int, tuple[bool, float]] = {}
 _GACHA_BANNER_LABELS: dict[str, str] = {
     "genshin": "Геншин",
     "hsr": "HSR",
@@ -895,6 +900,43 @@ def _gacha_economy_chat_id(*, chat_type: str, chat_id: int) -> int | None:
     return None
 
 
+async def _is_subscribed_to_channel(bot: Bot, user_id: int) -> bool:
+    cached = _gacha_subscription_cache.get(user_id)
+    if cached is not None:
+        subscribed, ts = cached
+        if time.monotonic() - ts < _GACHA_SUBSCRIPTION_CACHE_TTL:
+            return subscribed
+    try:
+        member = await bot.get_chat_member(chat_id=_GACHA_SUBSCRIPTION_CHANNEL, user_id=user_id)
+        subscribed = member.status not in {"left", "kicked"}
+    except Exception:
+        subscribed = True
+    _gacha_subscription_cache[user_id] = (subscribed, time.monotonic())
+    return subscribed
+
+
+async def _require_channel_subscription(bot: Bot, message: Message, user_id: int) -> bool:
+    if await _is_subscribed_to_channel(bot, user_id):
+        return True
+    await message.answer(
+        f'Для использования гачи нужно подписаться на наш канал: '
+        f'<a href="{_GACHA_SUBSCRIPTION_CHANNEL_URL}">SelaraBot Chanel</a>',
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    return False
+
+
+async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery, user_id: int) -> bool:
+    if await _is_subscribed_to_channel(bot, user_id):
+        return True
+    await query.answer(
+        f"Для гачи нужно подписаться на канал {_GACHA_SUBSCRIPTION_CHANNEL}",
+        show_alert=True,
+    )
+    return False
+
+
 async def _load_gacha_coin_balance(
     economy_repo,
     *,
@@ -1388,10 +1430,14 @@ async def _send_gacha_skip(
 async def gachagive_command(
     message: Message,
     command: CommandObject,
+    bot: Bot,
     activity_repo,
     settings: Settings,
 ) -> None:
     if message.from_user is None:
+        return
+
+    if not await _require_channel_subscription(bot, message, message.from_user.id):
         return
 
     raw = (command.args or "").strip()
@@ -3189,7 +3235,7 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
 
 
 @router.callback_query(F.data.startswith(_GACHA_CALLBACK_PREFIX))
-async def gacha_callback(query: CallbackQuery, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
+async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
     action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
     if action is None or banner is None or owner_user_id is None:
         await _safe_callback_answer(query)
@@ -3203,6 +3249,9 @@ async def gacha_callback(query: CallbackQuery, settings: Settings, economy_repo,
 
     if not chat_settings.gacha_enabled:
         await _safe_callback_answer(query)
+        return
+
+    if not await _require_channel_subscription_callback(bot, query, query.from_user.id):
         return
 
     economy_mode = _gacha_economy_mode(chat_type=query.message.chat.type, chat_settings=chat_settings)
@@ -3660,6 +3709,8 @@ async def text_commands_handler(
         return
 
     if intent.name in {"gacha_on", "gacha_off"}:
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+            return
         await _manage_gacha_toggle(
             message,
             activity_repo,
@@ -3685,6 +3736,8 @@ async def text_commands_handler(
         chat_settings = await _check_and_maybe_restore_gacha(message, activity_repo, chat_settings)
         if not chat_settings.gacha_enabled:
             return
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+            return
 
     if intent.name == "gacha_pull":
         await _send_gacha_pull(message, settings, banner=str(intent.args.get("banner", "")))
@@ -3699,6 +3752,8 @@ async def text_commands_handler(
         return
 
     if intent.name == "gacha_skip":
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+            return
         await _send_gacha_skip(
             message,
             activity_repo,
