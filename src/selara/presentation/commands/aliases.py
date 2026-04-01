@@ -15,8 +15,6 @@ EXACT_ALIASES: dict[str, str] = {
     "мои ачивки": "achievements",
     "актив": "active",
     "кто неактив": "inactive",
-    "когда был": "lastseen",
-    "когда была": "lastseen",
     "баланс": "eco",
     "ферма": "farm",
     "магазин": "shop",

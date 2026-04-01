@@ -5774,11 +5774,29 @@ class SqlAlchemyActivityRepository:
             affection_points=int(row.affection_points),
             last_affection_at=row.last_affection_at,
             last_affection_by_user_id=int(row.last_affection_by_user_id) if row.last_affection_by_user_id is not None else None,
+            last_milestone_days=int(row.last_milestone_days) if row.last_milestone_days is not None else 0,
             is_active=bool(row.is_active),
             ended_at=row.ended_at,
             ended_by_user_id=int(row.ended_by_user_id) if row.ended_by_user_id is not None else None,
             ended_reason=row.ended_reason,
         )
+
+    async def advance_marriage_milestone(
+        self,
+        *,
+        marriage_id: int,
+        milestone_days: int,
+        event_at: datetime,
+    ) -> MarriageState | None:
+        row = await self._session.get(MarriageModel, marriage_id)
+        if row is None or not row.is_active:
+            return None
+        if int(row.last_milestone_days) >= milestone_days:
+            return None
+        row.last_milestone_days = milestone_days
+        row.updated_at = event_at
+        await self._session.flush()
+        return self._to_marriage_state(row)
 
     @staticmethod
     def _relationship_state_from_pair(value: PairState | None) -> RelationshipState | None:

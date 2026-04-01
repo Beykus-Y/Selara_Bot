@@ -74,6 +74,7 @@ def _marriage_state() -> MarriageState:
         affection_points=15,
         last_affection_at=None,
         last_affection_by_user_id=None,
+        last_milestone_days=9999,
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta, timezone
 from html import escape
+from typing import NamedTuple
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -23,6 +24,103 @@ from selara.presentation.audit import log_chat_action
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 
 router = Router(name="relationships")
+
+# ---------------------------------------------------------------------------
+# Affection stages (pair and marriage)
+# ---------------------------------------------------------------------------
+
+# (min_points_inclusive, label)
+_AFFECTION_STAGES: list[tuple[int, str]] = [
+    (0,    "Знакомые 🤝"),
+    (30,   "Симпатия 🌱"),
+    (80,   "Флирт 😊"),
+    (150,  "Влюблённость 💕"),
+    (300,  "Близость 🌸"),
+    (500,  "Страсть 🔥"),
+    (800,  "Преданность 💫"),
+    (1200, "Глубокая связь 💞"),
+    (2000, "Родственные души ✨"),
+    (3000, "Вечная любовь 🌟"),
+]
+
+
+def _affection_stage_label(points: int) -> str:
+    label = _AFFECTION_STAGES[0][1]
+    for threshold, name in _AFFECTION_STAGES:
+        if points >= threshold:
+            label = name
+        else:
+            break
+    return label
+
+
+def _next_affection_stage(points: int) -> tuple[int, str] | None:
+    """Returns (threshold, label) of the next stage, or None if already at max."""
+    for threshold, name in _AFFECTION_STAGES:
+        if points < threshold:
+            return threshold, name
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Marriage duration milestones
+# ---------------------------------------------------------------------------
+
+class _Milestone(NamedTuple):
+    days: int
+    label: str
+
+
+_MARRIAGE_MILESTONES: list[_Milestone] = [
+    _Milestone(1,     "Медовый день 🍯"),
+    _Milestone(7,     "Первая неделя 💌"),
+    _Milestone(14,    "Две недели вместе 💞"),
+    _Milestone(30,    "Первый месяц 🌸"),
+    _Milestone(60,    "Два месяца вместе 🌺"),
+    _Milestone(90,    "Три месяца вместе 🌻"),
+    _Milestone(180,   "Полгода вместе 🌿"),
+    _Milestone(270,   "Девять месяцев вместе ✨"),
+    _Milestone(365,   "Ситцевая свадьба 🎀"),
+    _Milestone(500,   "500 дней вместе ⭐"),
+    _Milestone(730,   "Бумажная свадьба 📜"),
+    _Milestone(1095,  "Кожаная свадьба 🍂"),
+    _Milestone(1825,  "Деревянная свадьба 🌳"),
+    _Milestone(2555,  "Железная свадьба ⚙️"),
+    _Milestone(3650,  "Оловянная свадьба 🔩"),
+    _Milestone(9131,  "Серебряная свадьба 🥈"),
+    _Milestone(18262, "Золотая свадьба 👑"),
+]
+
+
+def _current_marriage_milestone(days_elapsed: int) -> _Milestone | None:
+    """Returns the highest milestone reached so far."""
+    reached = None
+    for m in _MARRIAGE_MILESTONES:
+        if days_elapsed >= m.days:
+            reached = m
+        else:
+            break
+    return reached
+
+
+def _next_marriage_milestone(days_elapsed: int) -> _Milestone | None:
+    """Returns the next milestone not yet reached."""
+    for m in _MARRIAGE_MILESTONES:
+        if days_elapsed < m.days:
+            return m
+    return None
+
+
+def _pending_marriage_milestone(*, days_elapsed: int, last_milestone_days: int) -> _Milestone | None:
+    """Returns the highest milestone that was crossed but not yet announced."""
+    pending = None
+    for m in _MARRIAGE_MILESTONES:
+        if m.days <= days_elapsed and m.days > last_milestone_days:
+            pending = m
+        elif m.days > days_elapsed:
+            break
+    return pending
+
 
 _PROPOSAL_TTL_HOURS = 24
 _RELATION_ACTION_COOLDOWN_SECONDS = 30 * 60
@@ -307,6 +405,7 @@ async def _build_relationship_status_text(
     actor_user_id: int,
     chat_id: int,
     title: str,
+    marriage: MarriageState | None = None,
 ) -> str:
     partner_user_id = _partner_id(relationship, user_id=actor_user_id)
     partner = await activity_repo.get_user_snapshot(user_id=partner_user_id)
@@ -324,14 +423,37 @@ async def _build_relationship_status_text(
         )
         action_lines.append(f"<b>{escape(_RELATION_ACTION_LABELS[code])}:</b> {escape(status)}")
 
-    return (
-        f"<b>{escape(title)}</b>\n"
-        f"<b>Статус:</b> <code>{escape(_relation_status_title(relationship.kind))}</code>\n"
-        f"<b>Партнёр:</b> {partner_mention}\n"
-        f"<b>Вместе:</b> <code>{_format_relationship_duration(started_at=relationship.started_at, now=now)}</code>\n"
-        f"<b>Уровень отношений:</b> <code>{relationship.affection_points}</code> 💞\n"
-        + "\n".join(action_lines)
+    stage_label = _affection_stage_label(relationship.affection_points)
+    next_stage = _next_affection_stage(relationship.affection_points)
+    next_stage_line = (
+        f" → <i>{escape(next_stage[1])}</i> через <code>{next_stage[0] - relationship.affection_points}</code> 💞"
+        if next_stage else ""
     )
+
+    extra_lines: list[str] = []
+    if relationship.kind == "marriage" and marriage is not None:
+        days_elapsed = max(0, (now - marriage.married_at).days)
+        current_milestone = _current_marriage_milestone(days_elapsed)
+        next_milestone = _next_marriage_milestone(days_elapsed)
+        if current_milestone:
+            extra_lines.append(f"<b>Этап брака:</b> {escape(current_milestone.label)}")
+        if next_milestone:
+            days_left = next_milestone.days - days_elapsed
+            extra_lines.append(
+                f"<b>Следующий этап:</b> {escape(next_milestone.label)} — через <code>{days_left}</code> дн."
+            )
+
+    lines = [
+        f"<b>{escape(title)}</b>",
+        f"<b>Статус:</b> <code>{escape(_relation_status_title(relationship.kind))}</code>",
+        f"<b>Партнёр:</b> {partner_mention}",
+        f"<b>Вместе:</b> <code>{_format_relationship_duration(started_at=relationship.started_at, now=now)}</code>",
+        f"<b>Стадия связи:</b> {escape(stage_label)}{next_stage_line}",
+        f"<b>Очки:</b> <code>{relationship.affection_points}</code> 💞",
+        *extra_lines,
+        *action_lines,
+    ]
+    return "\n".join(lines)
 
 
 async def _render_relationship_panel(
@@ -342,6 +464,7 @@ async def _render_relationship_panel(
     chat_id: int,
     title: str,
     view: str,
+    marriage: MarriageState | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     return (
         await _build_relationship_status_text(
@@ -350,6 +473,7 @@ async def _render_relationship_panel(
             actor_user_id=actor_user_id,
             chat_id=chat_id,
             title=title,
+            marriage=marriage,
         ),
         _build_relationship_action_keyboard(relationship.kind, owner_user_id=actor_user_id, view=view),
     )
@@ -385,6 +509,7 @@ async def _edit_relationship_panel(
                 chat_id=query.message.chat.id,
                 title="Ваш брак",
                 view=_RELATION_VIEW_MARRIAGE,
+                marriage=marriage,
             )
     else:
         relationship = await activity_repo.get_active_relationship(user_id=query.from_user.id, chat_id=query.message.chat.id)
@@ -395,6 +520,11 @@ async def _edit_relationship_panel(
                 "Брак: <code>/marry @username</code>"
             )
         else:
+            marriage_for_panel: MarriageState | None = None
+            if relationship.kind == "marriage":
+                marriage_for_panel = await activity_repo.get_active_marriage(
+                    user_id=query.from_user.id, chat_id=query.message.chat.id
+                )
             text, reply_markup = await _render_relationship_panel(
                 activity_repo,
                 relationship=relationship,
@@ -402,6 +532,7 @@ async def _edit_relationship_panel(
                 chat_id=query.message.chat.id,
                 title="Ваши отношения",
                 view=_RELATION_VIEW_RELATION,
+                marriage=marriage_for_panel,
             )
 
     try:
@@ -409,6 +540,36 @@ async def _edit_relationship_panel(
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc).lower():
             raise
+
+
+async def _check_and_announce_milestone(
+    activity_repo,
+    *,
+    marriage: MarriageState,
+    actor_mention: str,
+    partner_mention: str,
+    now: datetime,
+) -> str | None:
+    """Checks if a new marriage milestone was crossed. If yes, records it and returns announcement text."""
+    days_elapsed = max(0, (now - marriage.married_at).days)
+    pending = _pending_marriage_milestone(
+        days_elapsed=days_elapsed,
+        last_milestone_days=marriage.last_milestone_days,
+    )
+    if pending is None:
+        return None
+    advanced = await activity_repo.advance_marriage_milestone(
+        marriage_id=marriage.id,
+        milestone_days=pending.days,
+        event_at=now,
+    )
+    if advanced is None:
+        return None
+    return (
+        f"🎉 <b>Новый этап брака!</b>\n"
+        f"{actor_mention} и {partner_mention} достигли вехи:\n"
+        f"<b>{escape(pending.label)}</b> — {pending.days} дней вместе!"
+    )
 
 
 async def _perform_relation_action(
@@ -419,14 +580,15 @@ async def _perform_relation_action(
     chat: ChatSnapshot,
     action_code: RelationshipActionCode,
     reply_target_user_id: int | None = None,
-) -> tuple[RelationshipState | None, str | None, str | None]:
+) -> tuple[RelationshipState | None, str | None, str | None, str | None]:
+    # returns: (updated_state, action_text, error, milestone_announcement)
     action_kind_ranges = _RELATION_ACTION_RANGES[action_code]
     if relationship.kind not in action_kind_ranges:
-        return None, None, _action_unavailable_text(action_code=action_code, relationship_kind=relationship.kind)
+        return None, None, _action_unavailable_text(action_code=action_code, relationship_kind=relationship.kind), None
 
     partner_user_id = _partner_id(relationship, user_id=actor_user.telegram_user_id)
     if reply_target_user_id is not None and reply_target_user_id != partner_user_id:
-        return None, None, "Это действие можно отправить только своему партнёру."
+        return None, None, "Это действие можно отправить только своему партнёру.", None
 
     now = datetime.now(timezone.utc)
     last_used_at = await activity_repo.get_relationship_action_last_used_at(
@@ -438,7 +600,7 @@ async def _perform_relation_action(
         next_time = last_used_at + timedelta(seconds=_RELATION_ACTION_COOLDOWN_SECONDS)
         if next_time > now:
             remain = int((next_time - now).total_seconds())
-            return None, None, f"Слишком рано. До {_RELATION_ACTION_LABELS[action_code]}: {_format_seconds(remain)}."
+            return None, None, f"Слишком рано. До {_RELATION_ACTION_LABELS[action_code]}: {_format_seconds(remain)}.", None
 
     min_gain, max_gain = action_kind_ranges[relationship.kind]
     gain = random.randint(min_gain, max_gain)
@@ -449,7 +611,7 @@ async def _perform_relation_action(
         event_at=now,
     )
     if updated is None:
-        return None, None, "Не удалось применить действие."
+        return None, None, "Не удалось применить действие.", None
 
     await activity_repo.set_relationship_action_last_used_at(
         relationship=updated,
@@ -477,7 +639,22 @@ async def _perform_relation_action(
         f"+<code>{gain}</code> 💞 | Итого: <code>{updated.affection_points}</code> 💞\n"
         f"Кулдаун {_RELATION_ACTION_LABELS[action_code]}: <code>{_format_seconds(_RELATION_ACTION_COOLDOWN_SECONDS)}</code>"
     )
-    return updated, text, None
+
+    milestone_text: str | None = None
+    if relationship.kind == "marriage":
+        marriage = await activity_repo.get_active_marriage(
+            user_id=actor_user.telegram_user_id, chat_id=chat.telegram_chat_id
+        )
+        if marriage is not None:
+            milestone_text = await _check_and_announce_milestone(
+                activity_repo,
+                marriage=marriage,
+                actor_mention=actor_mention,
+                partner_mention=partner_mention,
+                now=now,
+            )
+
+    return updated, text, None, milestone_text
 
 
 async def _send_relationship_proposal(
@@ -567,7 +744,7 @@ async def _run_relation_action(
         last_name=message.from_user.last_name,
         is_bot=bool(message.from_user.is_bot),
     )
-    updated, action_text, error = await _perform_relation_action(
+    updated, action_text, error, milestone_text = await _perform_relation_action(
         activity_repo,
         relationship=relationship,
         actor_user=actor,
@@ -591,6 +768,8 @@ async def _run_relation_action(
         return
 
     await message.answer(action_text, parse_mode="HTML", disable_notification=True)
+    if milestone_text:
+        await message.answer(milestone_text, parse_mode="HTML")
 
 
 @router.message(Command("relation"))
@@ -611,6 +790,12 @@ async def relation_command(message: Message, activity_repo) -> None:
         )
         return
 
+    marriage_for_panel: MarriageState | None = None
+    if relationship.kind == "marriage":
+        marriage_for_panel = await activity_repo.get_active_marriage(
+            user_id=message.from_user.id, chat_id=message.chat.id
+        )
+
     text, keyboard = await _render_relationship_panel(
         activity_repo,
         relationship=relationship,
@@ -618,8 +803,38 @@ async def relation_command(message: Message, activity_repo) -> None:
         chat_id=message.chat.id,
         title="Ваши отношения",
         view=_RELATION_VIEW_RELATION,
+        marriage=marriage_for_panel,
     )
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+    if marriage_for_panel is not None:
+        now = datetime.now(timezone.utc)
+        actor_mention = await _build_actor_mention(
+            activity_repo,
+            chat_id=message.chat.id,
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+        )
+        partner_user_id = (
+            marriage_for_panel.user_high_id
+            if marriage_for_panel.user_low_id == message.from_user.id
+            else marriage_for_panel.user_low_id
+        )
+        partner_mention = await _build_partner_mention(
+            activity_repo, chat_id=message.chat.id, partner_user_id=partner_user_id
+        )
+        milestone_text = await _check_and_announce_milestone(
+            activity_repo,
+            marriage=marriage_for_panel,
+            actor_mention=actor_mention,
+            partner_mention=partner_mention,
+            now=now,
+        )
+        if milestone_text:
+            await message.answer(milestone_text, parse_mode="HTML")
 
 
 async def marriage_status_command(message: Message, activity_repo) -> None:
@@ -653,8 +868,35 @@ async def marriage_status_command(message: Message, activity_repo) -> None:
         chat_id=message.chat.id,
         title="Ваш брак",
         view=_RELATION_VIEW_MARRIAGE,
+        marriage=marriage,
     )
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+    now = datetime.now(timezone.utc)
+    actor_mention = await _build_actor_mention(
+        activity_repo,
+        chat_id=message.chat.id,
+        telegram_user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+    partner_user_id = (
+        marriage.user_high_id if marriage.user_low_id == message.from_user.id else marriage.user_low_id
+    )
+    partner_mention = await _build_partner_mention(
+        activity_repo, chat_id=message.chat.id, partner_user_id=partner_user_id
+    )
+    milestone_text = await _check_and_announce_milestone(
+        activity_repo,
+        marriage=marriage,
+        actor_mention=actor_mention,
+        partner_mention=partner_mention,
+        now=now,
+    )
+    if milestone_text:
+        await message.answer(milestone_text, parse_mode="HTML")
 
 
 async def marriages_command(message: Message, activity_repo) -> None:
@@ -961,7 +1203,7 @@ async def relationship_action_callback(query: CallbackQuery, activity_repo) -> N
         last_name=query.from_user.last_name,
         is_bot=bool(query.from_user.is_bot),
     )
-    updated, action_text, error = await _perform_relation_action(
+    updated, action_text, error, milestone_text = await _perform_relation_action(
         activity_repo,
         relationship=relationship,
         actor_user=actor,
@@ -980,6 +1222,8 @@ async def relationship_action_callback(query: CallbackQuery, activity_repo) -> N
         return
 
     await query.message.answer(action_text, parse_mode="HTML", disable_notification=True)
+    if milestone_text:
+        await query.message.answer(milestone_text, parse_mode="HTML")
     await _edit_relationship_panel(query, activity_repo=activity_repo, view=view)
     await _safe_callback_answer(query, "Готово")
 

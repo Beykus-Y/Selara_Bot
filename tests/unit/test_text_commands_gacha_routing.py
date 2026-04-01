@@ -90,3 +90,27 @@ async def test_text_commands_handler_routes_gacha_commands(
         assert target_handler.await_args.args[1] is settings
     if banner is not None:
         assert target_handler.await_args.kwargs["banner"] == banner
+
+
+@pytest.mark.asyncio
+async def test_is_subscribed_to_channel_does_not_cache_negative_result() -> None:
+    text_commands._gacha_subscription_cache.clear()
+    bot = SimpleNamespace(
+        get_chat_member=AsyncMock(
+            side_effect=[
+                SimpleNamespace(status="left"),
+                SimpleNamespace(status="member"),
+            ]
+        )
+    )
+
+    first = await text_commands._is_subscribed_to_channel(bot, user_id=1)
+    assert first is False
+    assert 1 not in text_commands._gacha_subscription_cache
+
+    second = await text_commands._is_subscribed_to_channel(bot, user_id=1)
+    assert second is True
+    assert text_commands._gacha_subscription_cache[1][0] is True
+    assert bot.get_chat_member.await_count == 2
+
+    text_commands._gacha_subscription_cache.clear()

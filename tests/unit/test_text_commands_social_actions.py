@@ -61,18 +61,20 @@ def test_extract_social_action_request_supports_inline_replica_with_punctuation(
 
 
 def test_extract_social_action_target_request_supports_all_targets() -> None:
-    action_key, mass_target, replica = _extract_social_action_target_request("Обнять всех")
+    action_key, mass_target, username_arg, replica = _extract_social_action_target_request("Обнять всех")
 
     assert action_key == "hug"
     assert mass_target is True
+    assert username_arg is None
     assert replica is None
 
 
 def test_extract_social_action_target_request_supports_all_targets_with_replica() -> None:
-    action_key, mass_target, replica = _extract_social_action_target_request("поцеловать всем\nвы лучшие")
+    action_key, mass_target, username_arg, replica = _extract_social_action_target_request("поцеловать всем\nвы лучшие")
 
     assert action_key == "kiss"
     assert mass_target is True
+    assert username_arg is None
     assert replica == "вы лучшие"
 
 

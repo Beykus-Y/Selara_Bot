@@ -911,7 +911,10 @@ async def _is_subscribed_to_channel(bot: Bot, user_id: int) -> bool:
         subscribed = member.status not in {"left", "kicked"}
     except Exception:
         subscribed = True
-    _gacha_subscription_cache[user_id] = (subscribed, time.monotonic())
+    if subscribed:
+        _gacha_subscription_cache[user_id] = (True, time.monotonic())
+    else:
+        _gacha_subscription_cache.pop(user_id, None)
     return subscribed
 
 
@@ -1605,7 +1608,7 @@ def _extract_zhmyh_level(text: str) -> tuple[bool, int | None, str | None]:
 
 
 def _extract_social_action(text: str) -> str | None:
-    action_key, _mass_target, _replica = _extract_social_action_target_request(text)
+    action_key, _mass_target, _username_arg, _replica = _extract_social_action_target_request(text)
     return action_key
 
 
@@ -1629,23 +1632,28 @@ def _extract_social_action_request(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _extract_social_action_target_request(text: str) -> tuple[str | None, bool, str | None]:
+def _extract_social_action_target_request(text: str) -> tuple[str | None, bool, str | None, str | None]:
     action_key, tail = _extract_social_action_request(text)
     if action_key is None:
-        return None, False, None
+        return None, False, None, None
     if not tail:
-        return action_key, False, None
+        return action_key, False, None, None
 
     match = re.match(r"^(?P<marker>\S+)(?:[?!.,:;…]+)?(?:\s+(?P<rest>[\s\S]*))?\s*$", tail)
     if match is None:
-        return action_key, False, tail
+        return action_key, False, None, tail
 
-    marker = normalize_text_command(match.group("marker") or "")
-    if marker not in {"всех", "всем"}:
-        return action_key, False, tail
+    marker_raw = match.group("marker") or ""
+    rest = " ".join(((match.group("rest") or "")).split()).strip() or None
+    marker_norm = normalize_text_command(marker_raw)
 
-    replica = " ".join(((match.group("rest") or "")).split()).strip() or None
-    return action_key, True, replica
+    if marker_norm in {"всех", "всем"}:
+        return action_key, True, None, rest
+
+    if marker_raw.startswith("@") or marker_raw.lstrip("-").isdigit():
+        return action_key, False, marker_raw, rest
+
+    return action_key, False, None, tail
 
 
 def _build_social_action_replica_line(replica: str) -> str:
@@ -2416,7 +2424,7 @@ async def _social_action_user_snapshot(message: Message, activity_repo, *, user)
 
 async def _send_social_action(message: Message, activity_repo, chat_settings: ChatSettings, *, action_key: str) -> None:
     canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, "действие")
-    _, mass_target, replica = _extract_social_action_target_request(message.text or message.caption or "")
+    _, mass_target, username_arg, replica = _extract_social_action_target_request(message.text or message.caption or "")
     if message.chat.type not in {"group", "supergroup"}:
         await _answer_quiet(message, "Эта команда работает только в группе.")
         return
@@ -2465,23 +2473,39 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
             )
         return
 
-    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+    target: UserSnapshot | None = None
+    if message.reply_to_message and message.reply_to_message.from_user is not None:
+        target = await _social_action_user_snapshot(message, activity_repo, user=message.reply_to_message.from_user)
+    elif username_arg:
+        if username_arg.startswith("@"):
+            target = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=username_arg)
+        elif username_arg.lstrip("-").isdigit():
+            user_id = int(username_arg)
+            existing = await activity_repo.get_user_snapshot(user_id=user_id)
+            chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
+            target = UserSnapshot(
+                telegram_user_id=user_id,
+                username=existing.username if existing else None,
+                first_name=existing.first_name if existing else None,
+                last_name=existing.last_name if existing else None,
+                is_bot=existing.is_bot if existing else False,
+                chat_display_name=chat_display_name,
+            )
+
+    if target is None:
         await _answer_quiet(
             message,
-            f"Сделайте reply на сообщение участника и напишите <code>{canonical}</code>.",
+            f"Сделайте reply на сообщение участника или укажите @username и напишите <code>{canonical}</code>.",
             parse_mode="HTML",
         )
         return
 
-    target_user = message.reply_to_message.from_user
-    if target_user.id == message.from_user.id:
-        await _answer_quiet(message, "Нужно ответить на сообщение другого участника.")
+    if target.telegram_user_id == message.from_user.id:
+        await _answer_quiet(message, "Нужно выбрать другого участника, а не себя.")
         return
-    if bool(target_user.is_bot):
+    if target.is_bot:
         await _answer_quiet(message, "Нужно выбрать живого участника, а не бота.")
         return
-
-    target = await _social_action_user_snapshot(message, activity_repo, user=target_user)
     response_text = template.format(actor=actor_mention, target=_social_action_mention(target))
     if replica:
         response_text = f"{response_text}\n{_build_social_action_replica_line(replica)}"
@@ -3875,7 +3899,20 @@ async def text_commands_handler(
         return
 
     if intent.name == "lastseen":
-        await send_last_seen(message, activity_repo, settings, target_user_id=intent.target_user_id)
+        raw_arg = (intent.args.get("raw_args") or "").strip()
+        target_user_id: int | None = None
+        target_label: str | None = None
+        if raw_arg.startswith("@"):
+            snap = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=raw_arg)
+            if snap is not None:
+                target_user_id = snap.telegram_user_id
+                target_label = snap.chat_display_name or snap.first_name or raw_arg
+            else:
+                await _answer_quiet(message, f"Пользователь {raw_arg} не найден в этом чате.")
+                return
+        elif raw_arg.lstrip("-").isdigit():
+            target_user_id = int(raw_arg)
+        await send_last_seen(message, activity_repo, settings, target_user_id=target_user_id, target_label=target_label)
         return
 
     if intent.name == "role":

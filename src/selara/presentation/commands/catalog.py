@@ -104,6 +104,8 @@ PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "рост": "growth",
     "перевод": "pay",
     "платеж": "pay",
+    "когда был": "lastseen",
+    "когда была": "lastseen",
     "пара": "pair",
     "предложить встречаться": "pair",
     "жениться": "marry",
@@ -211,6 +213,7 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
 }
 
 COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
+    "lastseen",
     "naming",
     "announce",
     "game",
@@ -400,6 +403,9 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
     if command_key == "growth":
         rest = _strip_mode_hint(tokens)
         return not rest or len(rest) == 1 and rest[0] in _GROWTH_ACTION_TOKENS
+
+    if command_key == "lastseen":
+        return len(tokens) == 1 and _is_user_ref_token(tokens[0])
 
     if command_key in {"pair", "marry", "adopt", "pet", "family"}:
         return len(tokens) == 1 and _is_user_ref_token(tokens[0])
