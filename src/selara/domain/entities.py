@@ -177,6 +177,22 @@ class ModerationResult:
 
 
 @dataclass(frozen=True)
+class RestState:
+    chat_id: int
+    user_id: int
+    expires_at: datetime
+    granted_by_user_id: int | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ActiveRestEntry:
+    user: UserSnapshot
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class RelationshipProposal:
     id: int
     kind: RelationshipKind

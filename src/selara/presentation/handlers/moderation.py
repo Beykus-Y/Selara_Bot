@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timezone
 import re
 import shlex
 from html import escape
@@ -53,6 +54,9 @@ _REPLY_MODERATION_PATTERN = re.compile(
     r"^\s*(?:снять\s+пред|разпред|анпред|снять\s+варн|разварн|анварн|снять\s+бан|разбан|анбан|pred|warn|ban|unban|unwarn|пред|варн|бан)\b",
     re.IGNORECASE,
 )
+_REST_GRANT_PATTERN = re.compile(r"^\s*выдать\s+рест\s+(?P<days>\d+)(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
+_REST_LIST_PATTERN = re.compile(r"^\s*ресты\s*$", re.IGNORECASE)
+_REST_REVOKE_PATTERN = re.compile(r"^\s*забрать\s+рест(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
 _REPLY_ROLE_STEP_PATTERN = re.compile(r"^\s*(?:повысить|понизить)\b", re.IGNORECASE)
 _PERMISSION_LABELS_RU: dict[str, str] = {
     "manage_roles": "управление ролями",
@@ -305,6 +309,39 @@ def _parse_reply_text_action(text: str) -> tuple[str, str] | None:
     return _parse_text_action(text)
 
 
+def _format_rest_expires_at(value) -> str:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    localized = normalized.astimezone(timezone.utc)
+    return localized.strftime("%d.%m.%Y %H:%M UTC")
+
+
+def _build_rest_list_messages(entries) -> list[str]:
+    if not entries:
+        return ["✅ <b>Активных рестов сейчас нет.</b>"]
+
+    header = "<b>Активные ресты:</b>"
+    continuation = "<b>Продолжение списка рестов:</b>"
+    chunks: list[str] = []
+    current_lines = [header]
+    current_len = len(header)
+
+    for index, entry in enumerate(entries, start=1):
+        line = (
+            f"{index}. <b>{escape(_target_label(entry.user))}</b>"
+            f" - до <code>{_format_rest_expires_at(entry.expires_at)}</code>"
+        )
+        extra_len = len(line) + 1
+        if current_lines and current_len + extra_len > 3900:
+            chunks.append("\n".join(current_lines))
+            current_lines = [continuation]
+            current_len = len(continuation)
+        current_lines.append(line)
+        current_len += extra_len
+
+    chunks.append("\n".join(current_lines))
+    return chunks
+
+
 def _parse_role_step_action(text: str) -> str | None:
     raw = text.strip()
     if not raw or raw.startswith("/"):
@@ -479,6 +516,129 @@ async def _apply_moderation_action(
         lines.append("<i>Telegram-бан/разбан не применён (нет прав у бота), но внутренний статус обновлён.</i>")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+async def _ensure_rest_command_access(message: Message, activity_repo, *, command_key: str) -> bool:
+    command_allowed, actor_role_code, required_role_code, _ = await has_command_access(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        command_key=command_key,
+        bootstrap_if_missing_owner=True,
+        bot=getattr(message, "bot", None),
+    )
+    if command_allowed:
+        return True
+
+    actor_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=actor_role_code)
+    required_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=required_role_code)
+    await message.answer(
+        (
+            f"Недостаточно прав для команды <code>{escape(command_key)}</code>.\n"
+            f"Ваш ранг: <code>{escape(actor_label)}</code>\n"
+            f"Нужный ранг: <code>{escape(required_label)}</code>"
+        ),
+        parse_mode="HTML",
+    )
+    return False
+
+
+async def _apply_rest_command(
+    *,
+    message: Message,
+    activity_repo,
+    action: str,
+    duration_days: int | None,
+    target_token: str | None,
+) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.from_user is None:
+        return
+
+    command_key = "rest_grant" if action == "grant" else "rest_revoke"
+    if not await _ensure_rest_command_access(message, activity_repo, command_key=command_key):
+        return
+
+    if action == "grant" and (duration_days is None or duration_days <= 0):
+        await message.answer("Формат: reply на сообщение или <code>выдать рест 7 @username</code>.", parse_mode="HTML")
+        return
+
+    target = await _resolve_target_user(message, activity_repo, target_token)
+    if target is None:
+        await message.answer("Укажите пользователя через reply или @username/id.")
+        return
+    if target.is_bot:
+        await message.answer("Нельзя управлять рестом у бота.")
+        return
+
+    chat = build_chat_snapshot(chat_id=message.chat.id, chat_type=message.chat.type, chat_title=message.chat.title)
+    actor = build_user_snapshot(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+    )
+
+    if action == "grant":
+        state = await activity_repo.grant_rest(
+            chat=chat,
+            actor=actor,
+            target=target,
+            duration_days=int(duration_days or 0),
+        )
+        await message.answer(
+            "\n".join(
+                [
+                    f"<b>{escape(_target_label(target))}</b>",
+                    f"Рест выдан на <b>{int(duration_days or 0)}</b> дн.",
+                    f"Активен до <code>{_format_rest_expires_at(state.expires_at)}</code>",
+                ]
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    state = await activity_repo.revoke_rest(chat=chat, actor=actor, target=target)
+    if state is None:
+        await message.answer(
+            f"У <b>{escape(_target_label(target))}</b> нет активного реста.",
+            parse_mode="HTML",
+        )
+        return
+
+    await message.answer(
+        "\n".join(
+            [
+                f"<b>{escape(_target_label(target))}</b>",
+                "Рест снят.",
+            ]
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text.regexp(_REST_LIST_PATTERN))
+async def rest_list_text_command(message: Message, activity_repo) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.from_user is None:
+        return
+    if not await _ensure_rest_command_access(message, activity_repo, command_key="rest_list"):
+        return
+
+    entries = await activity_repo.list_active_rest_entries(chat_id=message.chat.id)
+    for chunk in _build_rest_list_messages(entries):
+        await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def _apply_role_step_action(*, message: Message, activity_repo, action: str) -> None:
@@ -1237,6 +1397,34 @@ async def modstat_command(message: Message, command: CommandObject, activity_rep
     if state.last_reason:
         lines.append(f"Причина: {escape(state.last_reason)}")
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(F.text.regexp(_REST_GRANT_PATTERN))
+async def rest_grant_text_command(message: Message, activity_repo) -> None:
+    match = _REST_GRANT_PATTERN.match(message.text or "")
+    if match is None:
+        return
+    await _apply_rest_command(
+        message=message,
+        activity_repo=activity_repo,
+        action="grant",
+        duration_days=int(match.group("days")),
+        target_token=(match.group("target") or "").strip() or None,
+    )
+
+
+@router.message(F.text.regexp(_REST_REVOKE_PATTERN))
+async def rest_revoke_text_command(message: Message, activity_repo) -> None:
+    match = _REST_REVOKE_PATTERN.match(message.text or "")
+    if match is None:
+        return
+    await _apply_rest_command(
+        message=message,
+        activity_repo=activity_repo,
+        action="revoke",
+        duration_days=None,
+        target_token=(match.group("target") or "").strip() or None,
+    )
 
 
 @router.message(Command(*_SLASH_MODERATION_COMMANDS))

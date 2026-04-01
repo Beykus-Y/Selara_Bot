@@ -1292,7 +1292,7 @@ async def _build_profile_social_lines(message: Message, activity_repo, *, user_i
 
     return lines
 
-async def _build_profile_meta_lines(message: Message, activity_repo, bot: Bot, *, user_id: int) -> list[str]:
+async def _build_profile_meta_lines(message: Message, activity_repo, bot: Bot, *, user_id: int, timezone_name: str) -> list[str]:
     lines: list[str] = []
     group_status: str | None = None
     if message.chat.type in {"group", "supergroup"}:
@@ -1329,6 +1329,15 @@ async def _build_profile_meta_lines(message: Message, activity_repo, bot: Bot, *
         status_parts.append(role_part)
     if status_parts:
         lines.append(f"<b>Статус:</b> {' • '.join(status_parts)}")
+
+    try:
+        rest_state = await activity_repo.get_active_rest_state(chat_id=message.chat.id, user_id=user_id)
+    except SQLAlchemyError:
+        await safe_rollback(activity_repo)
+        rest_state = None
+    if rest_state is not None:
+        rest_until = to_timezone(rest_state.expires_at, timezone_name).strftime("%d.%m.%Y %H:%M")
+        lines.append(f"<b>Активный рест до</b> <code>{rest_until}</code>")
 
     try:
         moderation = await activity_repo.get_moderation_state(chat_id=message.chat.id, user_id=user_id)
@@ -1509,7 +1518,13 @@ async def send_user_stats(
     )
 
     social_lines = await _build_profile_social_lines(message, activity_repo, user_id=user_id)
-    meta_lines = await _build_profile_meta_lines(message, activity_repo, bot, user_id=user_id)
+    meta_lines = await _build_profile_meta_lines(
+        message,
+        activity_repo,
+        bot,
+        user_id=user_id,
+        timezone_name=settings.bot_timezone,
+    )
     extra_section = "\n".join(meta_lines + social_lines) if (meta_lines or social_lines) else None
 
     text = _join_profile_sections(

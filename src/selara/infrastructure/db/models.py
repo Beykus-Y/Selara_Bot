@@ -491,6 +491,37 @@ class UserChatModerationStateModel(Base):
 Index("idx_user_chat_moderation_states_chat_banned", UserChatModerationStateModel.chat_id, UserChatModerationStateModel.is_banned)
 
 
+class UserChatRestStateModel(Base):
+    __tablename__ = "user_chat_rest_states"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    granted_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+Index("idx_user_chat_rest_states_chat_expires", UserChatRestStateModel.chat_id, UserChatRestStateModel.expires_at)
+
+
 class RelationshipProposalModel(Base):
     __tablename__ = "relationship_proposals"
 

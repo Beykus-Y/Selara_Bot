@@ -22,6 +22,7 @@ from selara.core.roles import (
 )
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.domain.entities import (
+    ActiveRestEntry,
     ActivityStats,
     AchievementAward,
     BotRole,
@@ -55,6 +56,7 @@ from selara.domain.entities import (
     ModerationAction,
     ModerationResult,
     ModerationState,
+    RestState,
     RelationshipProposal,
     TextAliasMode,
     UserChatOverview,
@@ -111,6 +113,7 @@ from selara.infrastructure.db.models import (
     UserChatAwardModel,
     UserChatBotRoleModel,
     UserChatModerationStateModel,
+    UserChatRestStateModel,
     UserChatIrisImportHistoryModel,
     UserChatIrisImportStateModel,
     UserChatMessageEventModel,
@@ -1548,12 +1551,22 @@ class SqlAlchemyActivityRepository:
         return await self._get_top_legacy(chat_id=chat_id, limit=limit)
 
     async def _get_top_legacy(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .outerjoin(
+                UserChatRestStateModel,
+                and_(
+                    UserChatRestStateModel.chat_id == UserChatActivityModel.chat_id,
+                    UserChatRestStateModel.user_id == UserChatActivityModel.user_id,
+                    UserChatRestStateModel.expires_at > rest_cutoff,
+                ),
+            )
             .where(
                 UserChatActivityModel.chat_id == chat_id,
                 UserChatActivityModel.is_active_member.is_(True),
+                UserChatRestStateModel.user_id.is_(None),
             )
             .order_by(
                 UserChatActivityModel.message_count.desc(),
@@ -1566,6 +1579,7 @@ class SqlAlchemyActivityRepository:
         return [self._to_stats(activity, user) for activity, user in rows]
 
     async def _get_top_from_events(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(
                 UserChatMessageEventModel.user_id,
@@ -1580,8 +1594,17 @@ class SqlAlchemyActivityRepository:
                     UserChatActivityModel.user_id == UserChatMessageEventModel.user_id,
                 ),
             )
+            .outerjoin(
+                UserChatRestStateModel,
+                and_(
+                    UserChatRestStateModel.chat_id == UserChatMessageEventModel.chat_id,
+                    UserChatRestStateModel.user_id == UserChatMessageEventModel.user_id,
+                    UserChatRestStateModel.expires_at > rest_cutoff,
+                ),
+            )
             .where(UserChatMessageEventModel.chat_id == chat_id)
             .where(UserChatActivityModel.is_active_member.is_(True))
+            .where(UserChatRestStateModel.user_id.is_(None))
             .group_by(UserChatMessageEventModel.user_id)
             .order_by(
                 func.count(UserChatMessageEventModel.id).desc(),
@@ -1647,14 +1670,24 @@ class SqlAlchemyActivityRepository:
         inactive_since: datetime,
         limit: int | None = None,
     ) -> list[ActivityStats]:
+        rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .outerjoin(
+                UserChatRestStateModel,
+                and_(
+                    UserChatRestStateModel.chat_id == UserChatActivityModel.chat_id,
+                    UserChatRestStateModel.user_id == UserChatActivityModel.user_id,
+                    UserChatRestStateModel.expires_at > rest_cutoff,
+                ),
+            )
             .where(
                 UserChatActivityModel.chat_id == chat_id,
                 UserChatActivityModel.is_active_member.is_(True),
                 UserChatActivityModel.last_seen_at < _coerce_utc_datetime(inactive_since),
                 UserModel.is_bot.is_(False),
+                UserChatRestStateModel.user_id.is_(None),
             )
             .order_by(
                 UserChatActivityModel.last_seen_at.asc(),
@@ -1709,6 +1742,19 @@ class SqlAlchemyActivityRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         return {int(row.user_id): row for row in rows}
 
+    async def _get_active_rest_user_ids(self, *, chat_id: int, user_ids: Sequence[int] | None = None) -> set[int]:
+        stmt = select(UserChatRestStateModel.user_id).where(
+            UserChatRestStateModel.chat_id == chat_id,
+            UserChatRestStateModel.expires_at > datetime.now(timezone.utc),
+        )
+        if user_ids is not None:
+            normalized_user_ids = tuple(int(user_id) for user_id in user_ids)
+            if not normalized_user_ids:
+                return set()
+            stmt = stmt.where(UserChatRestStateModel.user_id.in_(list(normalized_user_ids)))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {int(user_id) for user_id in rows}
+
     async def _list_inactive_members_from_events(
         self,
         *,
@@ -1717,13 +1763,23 @@ class SqlAlchemyActivityRepository:
         limit: int | None = None,
     ) -> list[ActivityStats]:
         normalized_inactive_since = _coerce_utc_datetime(inactive_since)
+        rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .outerjoin(
+                UserChatRestStateModel,
+                and_(
+                    UserChatRestStateModel.chat_id == UserChatActivityModel.chat_id,
+                    UserChatRestStateModel.user_id == UserChatActivityModel.user_id,
+                    UserChatRestStateModel.expires_at > rest_cutoff,
+                ),
+            )
             .where(
                 UserChatActivityModel.chat_id == chat_id,
                 UserChatActivityModel.is_active_member.is_(True),
                 UserModel.is_bot.is_(False),
+                UserChatRestStateModel.user_id.is_(None),
             )
         )
         rows = (await self._session.execute(stmt)).all()
@@ -2720,11 +2776,17 @@ class SqlAlchemyActivityRepository:
         if not all_user_ids:
             return []
 
+        rested_user_ids = await self._get_active_rest_user_ids(chat_id=chat_id, user_ids=tuple(all_user_ids))
+        if rested_user_ids:
+            all_user_ids.difference_update(rested_user_ids)
+        if not all_user_ids:
+            return []
+
         users = await self._get_users_by_ids(tuple(all_user_ids))
         display_overrides = await self._get_chat_display_overrides(chat_id=chat_id, user_ids=tuple(all_user_ids))
 
-        max_activity = max((value[0] for value in activity_rows.values()), default=0)
-        karma_values = [value for value in karma_rows.values()]
+        max_activity = max((activity_rows.get(user_id, (0, None))[0] for user_id in all_user_ids), default=0)
+        karma_values = [karma_rows.get(user_id, 0) for user_id in all_user_ids]
         min_karma = min(karma_values, default=0)
         max_karma = max(karma_values, default=0)
 
@@ -4871,6 +4933,137 @@ class SqlAlchemyActivityRepository:
             return None
         return self._to_moderation_state(row)
 
+    async def get_active_rest_state(self, *, chat_id: int, user_id: int) -> RestState | None:
+        row = await self._session.get(
+            UserChatRestStateModel,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        if row is None:
+            return None
+        if _coerce_utc_datetime(row.expires_at) <= datetime.now(timezone.utc):
+            return None
+        return self._to_rest_state(row)
+
+    async def list_active_rest_entries(self, *, chat_id: int) -> list[ActiveRestEntry]:
+        now = datetime.now(timezone.utc)
+        stmt = (
+            select(
+                UserChatRestStateModel,
+                UserModel,
+                UserChatActivityModel.display_name_override,
+                UserChatActivityModel.title_prefix,
+            )
+            .join(UserModel, UserModel.telegram_user_id == UserChatRestStateModel.user_id)
+            .outerjoin(
+                UserChatActivityModel,
+                and_(
+                    UserChatActivityModel.chat_id == UserChatRestStateModel.chat_id,
+                    UserChatActivityModel.user_id == UserChatRestStateModel.user_id,
+                ),
+            )
+            .where(
+                UserChatRestStateModel.chat_id == chat_id,
+                UserChatRestStateModel.expires_at > now,
+                UserModel.is_bot.is_(False),
+            )
+            .order_by(
+                UserChatRestStateModel.expires_at.asc(),
+                UserChatRestStateModel.user_id.asc(),
+            )
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ActiveRestEntry(
+                user=self._to_user_snapshot(
+                    user,
+                    chat_display_name=display_name_override,
+                    title_prefix=title_prefix,
+                ),
+                expires_at=_coerce_utc_datetime(rest_state.expires_at),
+            )
+            for rest_state, user, display_name_override, title_prefix in rows
+        ]
+
+    async def grant_rest(
+        self,
+        *,
+        chat: ChatSnapshot,
+        actor: UserSnapshot,
+        target: UserSnapshot,
+        duration_days: int,
+    ) -> RestState:
+        await self._upsert_chat(chat)
+        await self._upsert_user(actor)
+        await self._upsert_user(target)
+
+        now = datetime.now(timezone.utc)
+        normalized_days = max(1, int(duration_days))
+        row = await self._session.get(
+            UserChatRestStateModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": target.telegram_user_id},
+        )
+        if row is None:
+            row = UserChatRestStateModel(
+                chat_id=chat.telegram_chat_id,
+                user_id=target.telegram_user_id,
+                expires_at=now + timedelta(days=normalized_days),
+                granted_by_user_id=actor.telegram_user_id,
+            )
+            self._session.add(row)
+        else:
+            base = _latest_datetime(row.expires_at, now)
+            row.expires_at = base + timedelta(days=normalized_days)
+            row.granted_by_user_id = actor.telegram_user_id
+            row.updated_at = now
+        await self._session.flush()
+
+        await self.add_audit_log(
+            chat=chat,
+            action_code="rest_granted",
+            description=f"Выдан рест на {normalized_days} дн.",
+            actor_user_id=actor.telegram_user_id,
+            target_user_id=target.telegram_user_id,
+            meta_json={
+                "duration_days": normalized_days,
+                "expires_at": _serialize_datetime(row.expires_at),
+            },
+            created_at=now,
+        )
+        return self._to_rest_state(row)
+
+    async def revoke_rest(
+        self,
+        *,
+        chat: ChatSnapshot,
+        actor: UserSnapshot,
+        target: UserSnapshot,
+    ) -> RestState | None:
+        await self._upsert_chat(chat)
+        await self._upsert_user(actor)
+        await self._upsert_user(target)
+
+        row = await self._session.get(
+            UserChatRestStateModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": target.telegram_user_id},
+        )
+        if row is None:
+            return None
+
+        state = self._to_rest_state(row) if _coerce_utc_datetime(row.expires_at) > datetime.now(timezone.utc) else None
+        await self._session.delete(row)
+        await self._session.flush()
+
+        if state is not None:
+            await self.add_audit_log(
+                chat=chat,
+                action_code="rest_revoked",
+                description="Рест снят.",
+                actor_user_id=actor.telegram_user_id,
+                target_user_id=target.telegram_user_id,
+                meta_json={"expires_at": _serialize_datetime(state.expires_at)},
+            )
+        return state
+
     async def _accept_pair_proposal(
         self,
         *,
@@ -5870,6 +6063,17 @@ class SqlAlchemyActivityRepository:
             is_banned=bool(row.is_banned),
             last_reason=row.last_reason,
             updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_rest_state(row: UserChatRestStateModel) -> RestState:
+        return RestState(
+            chat_id=int(row.chat_id),
+            user_id=int(row.user_id),
+            expires_at=_coerce_utc_datetime(row.expires_at),
+            granted_by_user_id=int(row.granted_by_user_id) if row.granted_by_user_id is not None else None,
+            created_at=_normalize_optional_datetime(row.created_at),
+            updated_at=_normalize_optional_datetime(row.updated_at),
         )
 
 

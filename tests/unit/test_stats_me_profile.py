@@ -122,6 +122,27 @@ async def test_resolve_profile_mention_uses_fallback_user_when_repo_has_no_snaps
     assert mention == '<a href="tg://user?id=10">Крис</a>'
 
 
+@pytest.mark.asyncio
+async def test_build_profile_meta_lines_include_active_rest() -> None:
+    message = SimpleNamespace(chat=SimpleNamespace(id=777, type="group"))
+    bot = SimpleNamespace(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")))
+    activity_repo = SimpleNamespace(
+        get_bot_role=AsyncMock(return_value=None),
+        get_active_rest_state=AsyncMock(return_value=SimpleNamespace(expires_at=datetime(2026, 4, 15, 9, 30, tzinfo=timezone.utc))),
+        get_moderation_state=AsyncMock(return_value=None),
+    )
+
+    lines = await stats_module._build_profile_meta_lines(
+        message,
+        activity_repo,
+        bot,
+        user_id=10,
+        timezone_name="UTC",
+    )
+
+    assert any("Активный рест до" in line and "15.04.2026 09:30" in line for line in lines)
+
+
 def test_extract_linked_user_label_from_message_reads_tg_text_link() -> None:
     message = SimpleNamespace(
         text="Крис",

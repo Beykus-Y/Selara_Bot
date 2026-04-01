@@ -97,6 +97,50 @@ async def test_inactive_command_allows_junior_admin() -> None:
     assert bootstrapped is False
 
 
+@pytest.mark.parametrize("command_key", ["rest_grant", "rest_list", "rest_revoke"])
+async def test_rest_commands_require_junior_admin_by_default(command_key: str) -> None:
+    allowed, actor_role_code, required_role_code, bootstrapped = await has_command_access(
+        _FakeActivityRepo("participant"),
+        chat_id=-100,
+        chat_type="group",
+        chat_title="Test",
+        user_id=1,
+        username="user",
+        first_name="User",
+        last_name=None,
+        is_bot=False,
+        command_key=command_key,
+        bootstrap_if_missing_owner=False,
+    )
+
+    assert allowed is False
+    assert actor_role_code == "participant"
+    assert required_role_code == "junior_admin"
+    assert bootstrapped is False
+
+
+@pytest.mark.parametrize("command_key", ["rest_grant", "rest_list", "rest_revoke"])
+async def test_rest_commands_allow_junior_admin(command_key: str) -> None:
+    allowed, actor_role_code, required_role_code, bootstrapped = await has_command_access(
+        _FakeActivityRepo("junior_admin"),
+        chat_id=-100,
+        chat_type="group",
+        chat_title="Test",
+        user_id=1,
+        username="user",
+        first_name="User",
+        last_name=None,
+        is_bot=False,
+        command_key=command_key,
+        bootstrap_if_missing_owner=False,
+    )
+
+    assert allowed is True
+    assert actor_role_code == "junior_admin"
+    assert required_role_code == "junior_admin"
+    assert bootstrapped is False
+
+
 @pytest.mark.parametrize("command_key", ["antiraid_on", "antiraid_off", "chat_lock", "chat_unlock"])
 async def test_chat_gate_commands_require_senior_admin_by_default(command_key: str) -> None:
     allowed, actor_role_code, required_role_code, bootstrapped = await has_command_access(

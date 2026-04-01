@@ -491,3 +491,88 @@ async def test_activity_event_runtime_tops_exclude_inactive_members_without_dele
         assert inactive_user.telegram_user_id not in {item.user_id for item in synced_karma}
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_excludes_rest_users_from_tops_and_inactive_lists() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=9191, chat_type="group", title="Rest Filter")
+    actor = UserSnapshot(telegram_user_id=2000, username="actor", first_name="Actor", last_name=None, is_bot=False)
+    active_user = UserSnapshot(telegram_user_id=2001, username="active", first_name="Active", last_name=None, is_bot=False)
+    rested_user = UserSnapshot(telegram_user_id=2002, username="rested", first_name="Rested", last_name=None, is_bot=False)
+    inactive_user = UserSnapshot(telegram_user_id=2003, username="silent", first_name="Silent", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 20, 18, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_activity(chat=chat, user=active_user, event_at=now - timedelta(hours=1), telegram_message_id=1)
+        await repo.upsert_activity(chat=chat, user=rested_user, event_at=now - timedelta(days=3), telegram_message_id=2)
+        await repo.upsert_activity(chat=chat, user=rested_user, event_at=now - timedelta(days=2, hours=23), telegram_message_id=3)
+        await repo.upsert_activity(chat=chat, user=rested_user, event_at=now - timedelta(days=2, hours=22), telegram_message_id=4)
+        await repo.upsert_activity(chat=chat, user=inactive_user, event_at=now - timedelta(days=2), telegram_message_id=5)
+        await repo.record_vote(chat=chat, voter=active_user, target=rested_user, vote_value=1, event_at=now - timedelta(hours=2))
+        await repo.record_vote(chat=chat, voter=active_user, target=inactive_user, vote_value=1, event_at=now - timedelta(hours=3))
+
+        first_rest = await repo.grant_rest(chat=chat, actor=actor, target=rested_user, duration_days=2)
+        second_rest = await repo.grant_rest(chat=chat, actor=actor, target=rested_user, duration_days=1)
+        current_rest = await repo.get_active_rest_state(chat_id=chat.telegram_chat_id, user_id=rested_user.telegram_user_id)
+        active_rest_entries = await repo.list_active_rest_entries(chat_id=chat.telegram_chat_id)
+
+        legacy_top = await repo.get_top(chat_id=chat.telegram_chat_id, limit=10)
+        legacy_karma = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="karma",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=1.0,
+            activity_weight=0.0,
+        )
+        legacy_inactive = await repo.list_inactive_members(
+            chat_id=chat.telegram_chat_id,
+            inactive_since=now - timedelta(days=1),
+        )
+
+        synced = await repo.backfill_message_events_for_chat(chat_id=chat.telegram_chat_id)
+        synced_top = await repo.get_top(chat_id=chat.telegram_chat_id, limit=10)
+        synced_karma = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="karma",
+            period="all",
+            since=None,
+            limit=10,
+            karma_weight=1.0,
+            activity_weight=0.0,
+        )
+        synced_inactive = await repo.list_inactive_members(
+            chat_id=chat.telegram_chat_id,
+            inactive_since=now - timedelta(days=1),
+        )
+
+        revoked = await repo.revoke_rest(chat=chat, actor=actor, target=rested_user)
+        after_revoke = await repo.get_active_rest_state(chat_id=chat.telegram_chat_id, user_id=rested_user.telegram_user_id)
+
+        assert current_rest is not None
+        assert second_rest.expires_at > first_rest.expires_at
+        assert current_rest.expires_at == second_rest.expires_at
+        assert [entry.user.telegram_user_id for entry in active_rest_entries] == [rested_user.telegram_user_id]
+        assert rested_user.telegram_user_id not in {item.user_id for item in legacy_top}
+        assert rested_user.telegram_user_id not in {item.user_id for item in legacy_karma}
+        assert rested_user.telegram_user_id not in {item.user_id for item in legacy_inactive}
+        assert inactive_user.telegram_user_id in {item.user_id for item in legacy_inactive}
+
+        assert synced is True
+        assert rested_user.telegram_user_id not in {item.user_id for item in synced_top}
+        assert rested_user.telegram_user_id not in {item.user_id for item in synced_karma}
+        assert rested_user.telegram_user_id not in {item.user_id for item in synced_inactive}
+        assert inactive_user.telegram_user_id in {item.user_id for item in synced_inactive}
+
+        assert revoked is not None
+        assert after_revoke is None
+
+    await engine.dispose()

@@ -27,6 +27,7 @@ from selara.infrastructure.db.models import (
     UserChatAnnouncementSubscriptionModel,
     UserChatBotRoleModel,
     UserChatModerationStateModel,
+    UserChatRestStateModel,
     UserKarmaVoteModel,
 )
 
@@ -115,6 +116,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _merge_text_aliases_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_bot_roles_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_moderation_state_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_rest_state_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -131,6 +133,7 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _merge_text_aliases_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_bot_roles_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_moderation_state_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_rest_state_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -383,6 +386,32 @@ async def _merge_moderation_state_postgresql(session: AsyncSession, *, old_chat_
     await session.execute(delete(UserChatModerationStateModel).where(UserChatModerationStateModel.chat_id == old_chat_id))
 
 
+async def _merge_rest_state_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    source = (
+        select(
+            literal(new_chat_id).label("chat_id"),
+            UserChatRestStateModel.user_id,
+            UserChatRestStateModel.expires_at,
+            UserChatRestStateModel.granted_by_user_id,
+        )
+        .where(UserChatRestStateModel.chat_id == old_chat_id)
+    )
+    stmt = pg_insert(UserChatRestStateModel).from_select(
+        ["chat_id", "user_id", "expires_at", "granted_by_user_id"],
+        source,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[UserChatRestStateModel.chat_id, UserChatRestStateModel.user_id],
+        set_={
+            "expires_at": func.greatest(UserChatRestStateModel.expires_at, stmt.excluded.expires_at),
+            "granted_by_user_id": func.coalesce(stmt.excluded.granted_by_user_id, UserChatRestStateModel.granted_by_user_id),
+            "updated_at": func.now(),
+        },
+    )
+    await session.execute(stmt)
+    await session.execute(delete(UserChatRestStateModel).where(UserChatRestStateModel.chat_id == old_chat_id))
+
+
 async def _merge_activity_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
     rows = (await session.execute(select(UserChatActivityModel).where(UserChatActivityModel.chat_id == old_chat_id))).scalars().all()
     for row in rows:
@@ -555,6 +584,24 @@ async def _merge_moderation_state_generic(session: AsyncSession, *, old_chat_id:
         current.is_banned = bool(current.is_banned or row.is_banned)
         if current.last_reason is None:
             current.last_reason = row.last_reason
+        await session.delete(row)
+
+
+async def _merge_rest_state_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    rows = (await session.execute(select(UserChatRestStateModel).where(UserChatRestStateModel.chat_id == old_chat_id))).scalars().all()
+    for row in rows:
+        current = await session.get(
+            UserChatRestStateModel,
+            {"chat_id": new_chat_id, "user_id": row.user_id},
+        )
+        if current is None:
+            row.chat_id = new_chat_id
+            continue
+
+        if current.expires_at < row.expires_at:
+            current.expires_at = row.expires_at
+        if current.granted_by_user_id is None:
+            current.granted_by_user_id = row.granted_by_user_id
         await session.delete(row)
 
 

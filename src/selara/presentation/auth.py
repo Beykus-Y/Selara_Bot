@@ -21,6 +21,9 @@ BotPermission = Literal[
 
 _DEFAULT_MIN_ROLE_BY_COMMAND_KEY: dict[str, str] = {
     "inactive": "junior_admin",
+    "rest_grant": "junior_admin",
+    "rest_list": "junior_admin",
+    "rest_revoke": "junior_admin",
     "antiraid_on": "senior_admin",
     "antiraid_off": "senior_admin",
     "chat_lock": "senior_admin",

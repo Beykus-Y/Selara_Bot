@@ -3,6 +3,7 @@ from datetime import date, datetime
 from typing import Protocol
 
 from selara.domain.entities import (
+    ActiveRestEntry,
     ActivityStats,
     BotRole,
     ChatAuditLogEntry,
@@ -30,6 +31,7 @@ from selara.domain.entities import (
     LeaderboardItem,
     LeaderboardMode,
     LeaderboardPeriod,
+    RestState,
     RelationshipProposal,
     TextAliasMode,
     UserChatOverview,
@@ -400,3 +402,20 @@ class ActivityRepository(Protocol):
     ) -> ModerationResult: ...
 
     async def get_moderation_state(self, *, chat_id: int, user_id: int) -> ModerationState | None: ...
+    async def get_active_rest_state(self, *, chat_id: int, user_id: int) -> RestState | None: ...
+    async def list_active_rest_entries(self, *, chat_id: int) -> list[ActiveRestEntry]: ...
+    async def grant_rest(
+        self,
+        *,
+        chat: ChatSnapshot,
+        actor: UserSnapshot,
+        target: UserSnapshot,
+        duration_days: int,
+    ) -> RestState: ...
+    async def revoke_rest(
+        self,
+        *,
+        chat: ChatSnapshot,
+        actor: UserSnapshot,
+        target: UserSnapshot,
+    ) -> RestState | None: ...
