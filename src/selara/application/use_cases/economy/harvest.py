@@ -12,6 +12,44 @@ POSITIVE_EVENT_CHANCE_PCT = 14
 POSITIVE_EVENT_BONUS_PCT = 25
 
 
+def calculate_harvest_outcome(
+    *,
+    crop,
+    size_tier_code: str,
+    sprinkler_level: int,
+    yield_boost_pct: int,
+    shield_active: bool,
+    negative_event_streak: int,
+    negative_event_chance_percent: int,
+    negative_event_loss_percent: int,
+) -> tuple[int, str | None, int]:
+    size = get_size_tier(size_tier_code)
+    size_yield_mult = size.yield_mult if size is not None else 1.0
+    sprinkler_mult = 1.0 + max(0, sprinkler_level) * 0.08
+    boost_mult = 1.0 + max(0, yield_boost_pct) / 100.0
+
+    base_amount = random.randint(crop.min_yield, crop.max_yield)
+    amount = int(round(base_amount * size_yield_mult * sprinkler_mult * boost_mult))
+    amount = max(1, amount)
+
+    event: str | None = None
+    next_negative_event_streak = 0
+    roll = random.random() * 100.0
+
+    if negative_event_streak < 2 and roll < max(0, negative_event_chance_percent):
+        if shield_active:
+            event = "shielded"
+        else:
+            event = "negative"
+            amount = max(1, int(round(amount * (1.0 - max(0, negative_event_loss_percent) / 100.0))))
+            next_negative_event_streak = negative_event_streak + 1
+    elif roll < max(0, negative_event_chance_percent) + POSITIVE_EVENT_CHANCE_PCT:
+        event = "positive"
+        amount = max(1, int(round(amount * (1.0 + POSITIVE_EVENT_BONUS_PCT / 100.0))))
+
+    return amount, event, next_negative_event_streak
+
+
 async def execute(
     repo: EconomyRepository,
     *,
@@ -66,32 +104,17 @@ async def execute(
             event=None,
         )
 
-    size = get_size_tier(farm.size_tier)
-    size_yield_mult = size.yield_mult if size is not None else 1.0
-    sprinkler_mult = 1.0 + max(0, account.sprinkler_level) * 0.08
-    boost_mult = 1.0 + max(0, plot.yield_boost_pct) / 100.0
-
-    base_amount = random.randint(crop.min_yield, crop.max_yield)
-    amount = int(round(base_amount * size_yield_mult * sprinkler_mult * boost_mult))
-    amount = max(1, amount)
-
-    event: str | None = None
-    roll = random.random() * 100.0
-
-    if farm.negative_event_streak < 2 and roll < max(0, negative_event_chance_percent):
-        if plot.shield_active:
-            event = "shielded"
-            await repo.set_negative_event_streak(account_id=account.id, value=0)
-        else:
-            event = "negative"
-            amount = max(1, int(round(amount * (1.0 - max(0, negative_event_loss_percent) / 100.0))))
-            await repo.set_negative_event_streak(account_id=account.id, value=farm.negative_event_streak + 1)
-    elif roll < max(0, negative_event_chance_percent) + POSITIVE_EVENT_CHANCE_PCT:
-        event = "positive"
-        amount = max(1, int(round(amount * (1.0 + POSITIVE_EVENT_BONUS_PCT / 100.0))))
-        await repo.set_negative_event_streak(account_id=account.id, value=0)
-    else:
-        await repo.set_negative_event_streak(account_id=account.id, value=0)
+    amount, event, next_negative_event_streak = calculate_harvest_outcome(
+        crop=crop,
+        size_tier_code=farm.size_tier,
+        sprinkler_level=account.sprinkler_level,
+        yield_boost_pct=plot.yield_boost_pct,
+        shield_active=plot.shield_active,
+        negative_event_streak=farm.negative_event_streak,
+        negative_event_chance_percent=negative_event_chance_percent,
+        negative_event_loss_percent=negative_event_loss_percent,
+    )
+    await repo.set_negative_event_streak(account_id=account.id, value=next_negative_event_streak)
 
     await repo.add_inventory_item(account_id=account.id, item_code=f"crop:{crop.code}", delta=amount)
     await repo.upsert_plot(

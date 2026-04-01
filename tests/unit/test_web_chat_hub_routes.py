@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -52,6 +52,13 @@ class ChatHubState:
     richest_payload: dict[str, object] | None = None
     audit_log_calls: list[dict[str, object]] = field(default_factory=list)
     alias_upsert_calls: list[dict[str, object]] = field(default_factory=list)
+    economy_account: object | None = None
+    economy_farm: object | None = None
+    economy_plots: list[object] = field(default_factory=list)
+    economy_inventory: list[object] = field(default_factory=list)
+    economy_listings: list[object] = field(default_factory=list)
+    economy_trades: list[object] = field(default_factory=list)
+    scope_resolve_calls: int = 0
 
 
 class FakeActivityRepo:
@@ -182,13 +189,34 @@ class FakeEconomyRepo:
 
     async def resolve_scope(self, *, mode: str, chat_id: int | None, user_id: int):
         _ = mode, user_id
+        self._state.scope_resolve_calls += 1
         if chat_id is None:
             return None, "chat_id is required"
-        return SimpleNamespace(scope_id=f"chat:{chat_id}"), None
+        return SimpleNamespace(scope_id=f"chat:{chat_id}", scope_type="chat", chat_id=chat_id), None
 
     async def get_account(self, *, scope, user_id: int):
         _ = scope, user_id
-        return None
+        return self._state.economy_account
+
+    async def get_farm_state(self, *, account_id: int):
+        _ = account_id
+        return self._state.economy_farm
+
+    async def list_plots(self, *, account_id: int):
+        _ = account_id
+        return list(self._state.economy_plots)
+
+    async def list_inventory(self, *, account_id: int):
+        _ = account_id
+        return list(self._state.economy_inventory)
+
+    async def list_market_open(self, *, scope, limit: int = 20):
+        _ = scope, limit
+        return list(self._state.economy_listings)
+
+    async def list_market_trades(self, *, scope, item_code=None, since=None, limit: int = 100):
+        _ = scope, item_code, since, limit
+        return list(self._state.economy_trades)
 
 
 class FakeWebAuthRepo:
@@ -463,3 +491,63 @@ async def test_chat_alias_route_accepts_daily_article_source(monkeypatch) -> Non
     assert state.alias_upsert_calls[-1]["command_key"] == "article"
     assert state.alias_upsert_calls[-1]["source_trigger_norm"] == "моя статья"
     assert state.alias_upsert_calls[-1]["alias_text_norm"] == "за что сужусь"
+
+
+@pytest.mark.asyncio
+async def test_chat_economy_page_api_resolves_scope_once(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        chat_settings_by_chat={
+            -1001: replace(
+                default_chat_settings(settings),
+                economy_enabled=True,
+                economy_mode="local",
+            )
+        },
+        economy_account=SimpleNamespace(id=1, balance=420, growth_size_mm=15, growth_actions=2),
+        economy_farm=SimpleNamespace(
+            account_id=1,
+            farm_level=2,
+            size_tier="small",
+            negative_event_streak=0,
+            last_planted_crop_code="radish",
+        ),
+        economy_plots=[
+            SimpleNamespace(plot_no=2, crop_code=None, ready_at=None),
+            SimpleNamespace(plot_no=1, crop_code="radish", ready_at=datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)),
+        ],
+        economy_inventory=[
+            SimpleNamespace(item_code="item:energy_drink", quantity=2),
+        ],
+        economy_listings=[
+            SimpleNamespace(
+                id=10,
+                item_code="crop:radish",
+                qty_left=3,
+                qty_total=5,
+                unit_price=25,
+                seller_user_id=77,
+            )
+        ],
+        economy_trades=[
+            SimpleNamespace(
+                item_code="crop:radish",
+                created_at=datetime(2026, 3, 9, 10, 0, tzinfo=timezone.utc),
+                quantity=1,
+                unit_price=20,
+                total_price=20,
+            )
+        ],
+    )
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get("/api/chat/-1001/economy")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["page"]["scope_id"] == "chat:-1001"
+    assert state.scope_resolve_calls == 1

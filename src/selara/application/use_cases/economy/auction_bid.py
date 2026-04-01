@@ -3,13 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error
+from selara.application.use_cases.economy.common import get_account_or_error, scope_from_snapshot
 from selara.application.use_cases.economy.results import AuctionBidResult
-from selara.domain.economy_entities import EconomyScope
-
-
-def _scope_from_auction(chat_id: int, scope_id: str, scope_type: str) -> EconomyScope:
-    return EconomyScope(scope_id=scope_id, scope_type=scope_type, chat_id=chat_id if scope_type == "chat" else None)
 
 
 async def execute(
@@ -42,7 +37,7 @@ async def execute(
             auction=auction,
         )
 
-    scope = _scope_from_auction(auction.chat_id, auction.scope_id, auction.scope_type)
+    scope = scope_from_snapshot(chat_id=auction.chat_id, scope_id=auction.scope_id, scope_type=auction.scope_type)
     bidder_account, _ = await get_account_or_error(repo, scope=scope, user_id=bidder_user_id)
     if bidder_account.balance < bid_amount:
         return AuctionBidResult(accepted=False, reason="Недостаточно монет для этой ставки.", auction=auction)

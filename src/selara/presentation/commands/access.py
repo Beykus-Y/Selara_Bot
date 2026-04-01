@@ -112,6 +112,8 @@ KNOWN_COMMAND_KEYS.update(
         "gacha_profile",
         "gacha_info",
         "gacha_skip",
+        "gacha_on",
+        "gacha_off",
         "shipperim",
         "zhmyh",
         "growth_action",

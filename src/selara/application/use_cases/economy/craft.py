@@ -48,9 +48,10 @@ async def execute(
         )
 
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
+    inventory = {item.item_code: item for item in await repo.list_inventory(account_id=account.id)}
 
     for item_code, quantity in recipe.ingredients:
-        item = await repo.get_inventory_item(account_id=account.id, item_code=item_code)
+        item = inventory.get(item_code)
         if item is None or item.quantity < quantity:
             return CraftResult(
                 accepted=False,

@@ -11,7 +11,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from selara.application.use_cases.economy.buy_shop_item import list_shop_offers
+from selara.application.use_cases.economy.buy_shop_item import build_shop_offers
 from selara.application.use_cases.economy.auction_bid import execute as auction_bid
 from selara.application.use_cases.economy.auction_finalize import execute as auction_finalize
 from selara.application.use_cases.economy.auction_start import execute as auction_start
@@ -1168,21 +1168,16 @@ async def shop_command(message: Message, command: CommandObject, bot: Bot, econo
     mode, tokens = _extract_mode_and_tokens(message, chat_settings, command.args)
     chat_id = message.chat.id if message.chat.type in {"group", "supergroup"} else None
 
-    scope, error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=message.from_user.id)
-    if scope is None:
-        await _answer_message(message, error or "Не удалось открыть магазин")
-        return
-
     dashboard, error = await get_dashboard(economy_repo, economy_mode=mode, chat_id=chat_id, user_id=message.from_user.id)
     if dashboard is None:
         await _answer_message(message, error or "Не удалось открыть магазин")
         return
 
-    offers, _ = await list_shop_offers(
-        economy_repo,
-        scope=scope,
+    offers = build_shop_offers(
+        scope=dashboard.scope,
         user_id=message.from_user.id,
         current_day=date.today(),
+        account=dashboard.account,
     )
 
     if tokens and tokens[0].lower() == "buy":
@@ -1221,7 +1216,7 @@ async def shop_command(message: Message, command: CommandObject, bot: Bot, econo
         return
 
     await _answer_message(message, 
-        _shop_text(offers, dashboard.account.balance, scope.scope_id),
+        _shop_text(offers, dashboard.account.balance, dashboard.scope.scope_id),
         parse_mode="HTML",
         reply_markup=_build_shop_keyboard(mode, offers, owner_user_id=message.from_user.id),
     )
@@ -1990,11 +1985,6 @@ async def shop_callback(query: CallbackQuery, economy_repo, chat_settings: ChatS
     mode = _parse_mode_from_callback(query, 2, chat_settings)
     chat_id = query.message.chat.id if query.message and query.message.chat.type in {"group", "supergroup"} else None
 
-    scope, error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=query.from_user.id)
-    if scope is None:
-        await _safe_query_answer(query, error or "Ошибка scope", show_alert=True)
-        return
-
     if action == "b" and len(parts) >= 4:
         offer_code = parts[3]
         from selara.application.use_cases.economy.buy_shop_item import execute as buy_shop_item
@@ -2014,15 +2004,15 @@ async def shop_callback(query: CallbackQuery, economy_repo, chat_settings: ChatS
         await _safe_query_answer(query, error or "Ошибка", show_alert=True)
         return
 
-    offers, _ = await list_shop_offers(
-        economy_repo,
-        scope=scope,
+    offers = build_shop_offers(
+        scope=dashboard.scope,
         user_id=query.from_user.id,
         current_day=date.today(),
+        account=dashboard.account,
     )
     await _edit_or_answer(
         query,
-        _shop_text(offers, dashboard.account.balance, scope.scope_id),
+        _shop_text(offers, dashboard.account.balance, dashboard.scope.scope_id),
         _build_shop_keyboard(mode, offers, owner_user_id=panel_owner_user_id),
     )
     await _safe_query_answer(query)

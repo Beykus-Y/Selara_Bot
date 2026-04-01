@@ -6,7 +6,24 @@ from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import UPGRADE_MAX_LEVEL, build_daily_shop_offers, inventory_stack_limit
 from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
 from selara.application.use_cases.economy.results import BuyShopResult
-from selara.domain.economy_entities import EconomyScope, ShopOffer
+from selara.domain.economy_entities import EconomyAccount, EconomyScope, ShopOffer
+
+
+def build_shop_offers(
+    *,
+    scope: EconomyScope,
+    user_id: int,
+    current_day: date,
+    account: EconomyAccount,
+) -> list[ShopOffer]:
+    return build_daily_shop_offers(
+        scope_id=scope.scope_id,
+        account_user_id=user_id,
+        current_day=current_day,
+        sprinkler_level=account.sprinkler_level,
+        tap_glove_level=account.tap_glove_level,
+        storage_level=account.storage_level,
+    )
 
 
 async def list_shop_offers(
@@ -17,15 +34,7 @@ async def list_shop_offers(
     current_day: date,
 ) -> tuple[list[ShopOffer], str | None]:
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
-    offers = build_daily_shop_offers(
-        scope_id=scope.scope_id,
-        account_user_id=user_id,
-        current_day=current_day,
-        sprinkler_level=account.sprinkler_level,
-        tap_glove_level=account.tap_glove_level,
-        storage_level=account.storage_level,
-    )
-    return offers, None
+    return build_shop_offers(scope=scope, user_id=user_id, current_day=current_day, account=account), None
 
 
 async def execute(
@@ -42,14 +51,7 @@ async def execute(
         return BuyShopResult(accepted=False, reason=error or "Не удалось определить режим экономики", offer=None, new_balance=None)
 
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
-    offers = build_daily_shop_offers(
-        scope_id=scope.scope_id,
-        account_user_id=user_id,
-        current_day=current_day,
-        sprinkler_level=account.sprinkler_level,
-        tap_glove_level=account.tap_glove_level,
-        storage_level=account.storage_level,
-    )
+    offers = build_shop_offers(scope=scope, user_id=user_id, current_day=current_day, account=account)
 
     offer = next((item for item in offers if item.offer_code == offer_code), None)
     if offer is None:

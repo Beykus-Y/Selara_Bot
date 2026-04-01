@@ -25,6 +25,8 @@ _CHAT_SETTINGS = SimpleNamespace(
     smart_triggers_enabled=False,
     top_limit_default=10,
     top_limit_max=50,
+    gacha_enabled=True,
+    gacha_restore_at=None,
 )
 
 

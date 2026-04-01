@@ -20,6 +20,7 @@ from selara.domain.entities import (
 )
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
+from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 
 router = Router(name="relationships")
 
@@ -132,14 +133,6 @@ def _build_relationship_end_keyboard(*, action: str, owner_user_id: int) -> Inli
     builder.button(text="❌ Отмена", callback_data=f"relend:cancel:{action}:{owner_user_id}")
     builder.adjust(2)
     return builder.as_markup()
-
-
-async def _safe_callback_answer(query: CallbackQuery, text: str | None = None, *, show_alert: bool = False) -> None:
-    try:
-        await query.answer(text=text, show_alert=show_alert)
-    except TelegramBadRequest:
-        return
-
 
 async def _get_user_label(activity_repo, *, chat_id: int, user: UserSnapshot | None, user_id: int) -> str:
     display_name = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)

@@ -73,9 +73,35 @@ def _parse_top_command(tokens: list[str], *, top_default: int, top_max: int) -> 
     return CommandIntent(name="top", args={"mode": mode, "period": period, "limit": limit})
 
 
+def _parse_duration_seconds(token: str) -> int | None:
+    """Parse duration token like '2ч', '30м', '1д' → seconds. Returns None if invalid."""
+    t = token.strip().lower()
+    if t.endswith("м") and t[:-1].isdigit():
+        return int(t[:-1]) * 60
+    if t.endswith("ч") and t[:-1].isdigit():
+        return int(t[:-1]) * 3600
+    if t.endswith("д") and t[:-1].isdigit():
+        return int(t[:-1]) * 86400
+    return None
+
+
 def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
     usage = "Формат: гача генш|геншин|хср, моя гача генш|геншин|хср или гача инфо"
     skip_usage = "Формат: гача скип генш|геншин|хср [@username]"
+    toggle_usage = "Формат: гача вкл/выкл [5м|2ч|1д]"
+
+    if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] in {"вкл", "выкл"}:
+        action = "on" if tokens[1] == "вкл" else "off"
+        if len(tokens) == 2:
+            return CommandIntent(name=f"gacha_{action}", args={"duration_seconds": None})
+        if len(tokens) == 3:
+            duration = _parse_duration_seconds(tokens[2])
+            if duration is None:
+                raise TextCommandResolutionError(toggle_usage)
+            if duration <= 0 or duration > 30 * 86400:
+                raise TextCommandResolutionError("Допустимый диапазон: 1м .. 30д")
+            return CommandIntent(name=f"gacha_{action}", args={"duration_seconds": duration})
+        raise TextCommandResolutionError(toggle_usage)
 
     if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] == "скип":
         if len(tokens) not in {3, 4}:

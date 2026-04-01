@@ -777,6 +777,8 @@ class ChatSettingsModel(Base):
     economy_negative_event_chance_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=22, server_default="22")
     economy_negative_event_loss_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=30, server_default="30")
     cleanup_economy_commands: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    gacha_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    gacha_restore_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

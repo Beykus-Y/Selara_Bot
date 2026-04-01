@@ -25,6 +25,8 @@ _DEFAULT_MIN_ROLE_BY_COMMAND_KEY: dict[str, str] = {
     "antiraid_off": "senior_admin",
     "chat_lock": "senior_admin",
     "chat_unlock": "senior_admin",
+    "gacha_on": "senior_admin",
+    "gacha_off": "senior_admin",
 }
 
 logger = logging.getLogger(__name__)

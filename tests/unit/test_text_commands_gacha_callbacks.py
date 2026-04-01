@@ -7,7 +7,7 @@ import pytest
 
 from selara.presentation.handlers import text_commands
 
-_CHAT_SETTINGS = SimpleNamespace(economy_mode="global")
+_CHAT_SETTINGS = SimpleNamespace(economy_mode="global", gacha_enabled=True)
 
 
 class _DummyCallbackMessage:

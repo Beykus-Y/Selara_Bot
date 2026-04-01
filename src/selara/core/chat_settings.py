@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from selara.core.config import Settings
@@ -61,6 +64,8 @@ class ChatSettings:
     interesting_facts_interval_minutes: int = 180
     interesting_facts_target_messages: int = 150
     interesting_facts_sleep_cap_minutes: int = 1440
+    gacha_enabled: bool = True
+    gacha_restore_at: datetime | None = None
 
 
 CHAT_SETTINGS_KEYS: tuple[str, ...] = (

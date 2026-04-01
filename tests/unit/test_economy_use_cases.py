@@ -6,11 +6,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from selara.application.use_cases.economy.claim_daily import execute as claim_daily
+from selara.application.use_cases.economy.get_dashboard import execute as get_dashboard
 from selara.application.use_cases.economy.growth import get_profile as get_growth_profile
 from selara.application.use_cases.economy.growth import perform_action as perform_growth_action
 from selara.application.use_cases.economy.tap import execute as tap
 from selara.application.use_cases.economy.use_item import execute as use_item
-from selara.domain.economy_entities import EconomyAccount, EconomyScope, FarmState, InventoryItem
+from selara.domain.economy_entities import EconomyAccount, EconomyScope, FarmState, InventoryItem, PlotState
 
 
 class FakeEconomyRepo:
@@ -36,6 +37,7 @@ class FakeEconomyRepo:
         )
         self.farm = FarmState(account_id=1, farm_level=1, size_tier="small", negative_event_streak=0)
         self.inventory: dict[str, int] = {}
+        self.plots: list[PlotState] = []
 
     async def resolve_scope(self, *, mode: str, chat_id: int | None, user_id: int):
         return self.scope, None
@@ -86,6 +88,17 @@ class FakeEconomyRepo:
         if qty <= 0:
             return None
         return InventoryItem(account_id=account_id, item_code=item_code, quantity=qty)
+
+    async def list_inventory(self, *, account_id: int):
+        return [
+            InventoryItem(account_id=account_id, item_code=item_code, quantity=quantity)
+            for item_code, quantity in self.inventory.items()
+            if quantity > 0
+        ]
+
+    async def list_plots(self, *, account_id: int):
+        _ = account_id
+        return list(self.plots)
 
 
 @pytest.mark.asyncio
@@ -271,3 +284,26 @@ async def test_use_item_stimulant_shot_applies_boost_and_stress() -> None:
     assert repo.account.growth_boost_pct == 90
     assert repo.account.growth_stress_pct == 25
     assert repo.inventory.get("item:stimulant_shot", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_dashboard_sorts_plots_and_inventory() -> None:
+    repo = FakeEconomyRepo()
+    repo.plots = [
+        PlotState(id=2, account_id=1, plot_no=2, crop_code=None, planted_at=None, ready_at=None, yield_boost_pct=0, shield_active=False),
+        PlotState(id=1, account_id=1, plot_no=1, crop_code="radish", planted_at=None, ready_at=None, yield_boost_pct=0, shield_active=False),
+    ]
+    repo.inventory["item:zeta"] = 1
+    repo.inventory["crop:alpha"] = 2
+
+    dashboard, error = await get_dashboard(
+        repo,
+        economy_mode="global",
+        chat_id=None,
+        user_id=10,
+    )
+
+    assert error is None
+    assert dashboard is not None
+    assert [plot.plot_no for plot in dashboard.plots] == [1, 2]
+    assert [item.item_code for item in dashboard.inventory] == ["crop:alpha", "item:zeta"]

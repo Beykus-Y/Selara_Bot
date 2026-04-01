@@ -20,6 +20,39 @@ def _find_target_plot_no(plot_no: int | None, active_plot_nos: list[int]) -> int
     return None
 
 
+async def _consume_item(repo: EconomyRepository, *, account_id: int, item_code: str) -> None:
+    await repo.add_inventory_item(account_id=account_id, item_code=item_code, delta=-1)
+
+
+async def _apply_growth_item(
+    repo: EconomyRepository,
+    *,
+    account,
+    item_code: str,
+    growth_stress_pct: int,
+    last_growth_at: datetime | None,
+    growth_boost_pct: int,
+    growth_cooldown_discount_seconds: int,
+    details: str,
+) -> UseItemResult:
+    await repo.update_growth_state(
+        account_id=account.id,
+        growth_size_mm=account.growth_size_mm,
+        growth_stress_pct=growth_stress_pct,
+        growth_actions=account.growth_actions,
+        last_growth_at=last_growth_at,
+        growth_boost_pct=growth_boost_pct,
+        growth_cooldown_discount_seconds=growth_cooldown_discount_seconds,
+    )
+    await _consume_item(repo, account_id=account.id, item_code=item_code)
+    return UseItemResult(
+        accepted=True,
+        reason=None,
+        item_code=item_code,
+        details=details,
+    )
+
+
 async def execute(
     repo: EconomyRepository,
     *,
@@ -70,146 +103,104 @@ async def execute(
 
     if action == "energy_drink":
         new_stress = max(0, current_effective_stress - 25)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=stored_growth_stress_pct(
                 last_growth_at=account.last_growth_at,
                 effective_stress_pct=new_stress,
                 as_of=now,
             ),
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=account.growth_boost_pct,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details=f"Стресс снижен до {new_stress}%.",
         )
 
     if action == "veggie_salad":
         new_stress = max(0, current_effective_stress - 15)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=stored_growth_stress_pct(
                 last_growth_at=account.last_growth_at,
                 effective_stress_pct=new_stress,
                 as_of=now,
             ),
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=account.growth_boost_pct,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details=f"Салат освежил персонажа: стресс снижен до {new_stress}%.",
         )
 
     if action == "growth_gel":
         new_boost = min(200, account.growth_boost_pct + 40)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=current_stored_stress,
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=new_boost,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details=f"Буст роста подготовлен: +{new_boost}% к следующему действию.",
         )
 
     if action == "cooling_pack":
         new_discount = min(3600, account.growth_cooldown_discount_seconds + 1200)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=current_stored_stress,
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=account.growth_boost_pct,
             growth_cooldown_discount_seconds=new_discount,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details="Следующий кулдаун в механике роста будет уменьшен.",
         )
 
     if action == "corn_chips":
         new_boost = min(200, account.growth_boost_pct + 20)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=current_stored_stress,
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=new_boost,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details=f"Чипсы добавили +20% буста к следующему росту. Теперь буст: {new_boost}%.",
         )
 
     if action == "stimulant_shot":
         new_boost = min(250, account.growth_boost_pct + 70)
         new_stress = min(100, current_effective_stress + 10)
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=stored_growth_stress_pct(
                 last_growth_at=account.last_growth_at,
                 effective_stress_pct=new_stress,
                 as_of=now,
             ),
-            growth_actions=account.growth_actions,
             last_growth_at=account.last_growth_at,
             growth_boost_pct=new_boost,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details=f"Стимулятор активирован: буст +{new_boost}%, стресс {new_stress}%.",
         )
 
     if action == "pizza":
-        await repo.update_growth_state(
-            account_id=account.id,
-            growth_size_mm=account.growth_size_mm,
+        return await _apply_growth_item(
+            repo,
+            account=account,
+            item_code=normalized,
             growth_stress_pct=current_stored_stress,
-            growth_actions=account.growth_actions,
             last_growth_at=None,
             growth_boost_pct=account.growth_boost_pct,
             growth_cooldown_discount_seconds=account.growth_cooldown_discount_seconds,
-        )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
-        return UseItemResult(
-            accepted=True,
-            reason=None,
-            item_code=normalized,
             details="Пицца сработала: кулдаун роста сброшен, действие можно делать сразу.",
         )
 
@@ -239,7 +230,7 @@ async def execute(
                 yield_boost_pct=target.yield_boost_pct,
                 shield_active=target.shield_active,
             )
-            await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
+            await _consume_item(repo, account_id=account.id, item_code=normalized)
             return UseItemResult(
                 accepted=True,
                 reason=None,
@@ -257,7 +248,7 @@ async def execute(
                 yield_boost_pct=min(200, target.yield_boost_pct + 25),
                 shield_active=target.shield_active,
             )
-            await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
+            await _consume_item(repo, account_id=account.id, item_code=normalized)
             return UseItemResult(
                 accepted=True,
                 reason=None,
@@ -274,7 +265,7 @@ async def execute(
             yield_boost_pct=target.yield_boost_pct,
             shield_active=True,
         )
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
+        await _consume_item(repo, account_id=account.id, item_code=normalized)
         return UseItemResult(
             accepted=True,
             reason=None,
@@ -283,7 +274,7 @@ async def execute(
         )
 
     if action == "mystery_pack":
-        await repo.add_inventory_item(account_id=account.id, item_code=normalized, delta=-1)
+        await _consume_item(repo, account_id=account.id, item_code=normalized)
         if random.random() < 0.6:
             coins = random.randint(120, 380)
             await repo.add_balance(account_id=account.id, delta=coins)

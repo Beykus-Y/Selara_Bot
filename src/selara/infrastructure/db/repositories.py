@@ -5730,6 +5730,8 @@ class SqlAlchemyActivityRepository:
             interesting_facts_interval_minutes=int(row.interesting_facts_interval_minutes),
             interesting_facts_target_messages=int(row.interesting_facts_target_messages),
             interesting_facts_sleep_cap_minutes=int(row.interesting_facts_sleep_cap_minutes),
+            gacha_enabled=bool(row.gacha_enabled),
+            gacha_restore_at=_normalize_optional_datetime(row.gacha_restore_at),
         )
 
     @staticmethod

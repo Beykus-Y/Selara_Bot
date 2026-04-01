@@ -8,6 +8,13 @@ from selara.application.use_cases.economy.common import get_account_or_error, re
 from selara.application.use_cases.economy.results import PlantResult
 
 
+def calculate_ready_at(*, crop, size_tier_code: str, now: datetime) -> datetime:
+    size_tier = get_size_tier(size_tier_code)
+    time_mult = size_tier.time_mult if size_tier is not None else 1.0
+    grow_seconds = max(60, int(round(crop.grow_seconds * time_mult)))
+    return now + timedelta(seconds=grow_seconds)
+
+
 async def execute(
     repo: EconomyRepository,
     *,
@@ -43,12 +50,13 @@ async def execute(
         )
 
     account, farm = await get_account_or_error(repo, scope=scope, user_id=user_id)
+    plots_by_no = {plot.plot_no: plot for plot in await repo.list_plots(account_id=account.id)}
 
     slots = get_plot_slots(farm.farm_level)
     selected_plot = plot_no
     if selected_plot is None:
         for candidate in range(1, slots + 1):
-            candidate_plot = await repo.get_plot(account_id=account.id, plot_no=candidate)
+            candidate_plot = plots_by_no.get(candidate)
             if candidate_plot is None or candidate_plot.crop_code is None:
                 selected_plot = candidate
                 break
@@ -73,7 +81,7 @@ async def execute(
             new_balance=None,
         )
 
-    plot = await repo.get_plot(account_id=account.id, plot_no=selected_plot)
+    plot = plots_by_no.get(selected_plot)
     if plot is not None and plot.crop_code is not None:
         return PlantResult(
             accepted=False,
@@ -94,10 +102,7 @@ async def execute(
             new_balance=None,
         )
 
-    size_tier = get_size_tier(farm.size_tier)
-    time_mult = size_tier.time_mult if size_tier is not None else 1.0
-    grow_seconds = max(60, int(round(crop.grow_seconds * time_mult)))
-    ready_at = now + timedelta(seconds=grow_seconds)
+    ready_at = calculate_ready_at(crop=crop, size_tier_code=farm.size_tier, now=now)
 
     balance = await repo.add_balance(account_id=account.id, delta=-crop.seed_cost)
     await repo.upsert_plot(

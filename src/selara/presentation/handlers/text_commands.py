@@ -60,6 +60,7 @@ from selara.presentation.commands.catalog import (
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.commands.resolver import TextCommandResolutionError, resolve_text_command
 from selara.presentation.game_state import GAME_STORE
+from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 from selara.presentation.handlers.economy import (
     auction_command as economy_auction_command,
     bid_command as economy_bid_command,
@@ -124,6 +125,7 @@ from selara.presentation.handlers.stats import (
     should_include_hybrid_top_keyboard,
 )
 from selara.presentation.formatters import format_user_link, preferred_mention_label_from_parts
+from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.db_recovery import safe_rollback
 
 router = Router(name="text_commands")
@@ -416,14 +418,6 @@ class _InlineRpPayload:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-
-async def _safe_callback_answer(query: CallbackQuery, text: str | None = None, *, show_alert: bool = False) -> None:
-    try:
-        await query.answer(text=text, show_alert=show_alert)
-    except TelegramBadRequest:
-        return
-
 
 async def _safe_inline_query_answer(
     inline_query: InlineQuery,
@@ -1250,6 +1244,101 @@ async def _ensure_gacha_admin_user(
         await _answer_quiet(message, denied_message)
         return False
     return True
+
+
+def _format_gacha_toggle_duration(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        n = seconds // 86400
+        return f"{n} д."
+    if seconds % 3600 == 0:
+        n = seconds // 3600
+        return f"{n} ч."
+    n = seconds // 60
+    return f"{n} мин."
+
+
+async def _manage_gacha_toggle(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    chat_settings: ChatSettings,
+    *,
+    command_key: str,
+    duration_seconds: int | None,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    user_id = message.from_user.id
+    is_env_admin = (
+        (settings.gacha_admin_user_id is not None and user_id == settings.gacha_admin_user_id)
+        or (settings.admin_user_id is not None and user_id == settings.admin_user_id)
+    )
+
+    if not is_env_admin:
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            user_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            permission="manage_settings",
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            return
+
+    enable = command_key == "gacha_on"
+    restore_at: datetime | None = None
+    if duration_seconds is not None:
+        restore_at = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+
+    chat = ChatSnapshot(
+        telegram_chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        title=message.chat.title,
+    )
+    values = settings_to_dict(chat_settings)
+    values["gacha_enabled"] = enable
+    values["gacha_restore_at"] = restore_at
+    await activity_repo.upsert_chat_settings(chat=chat, values=values)
+
+    state_label = "включена" if enable else "выключена"
+    if duration_seconds is not None:
+        duration_label = _format_gacha_toggle_duration(duration_seconds)
+        restore_label = "выключится" if enable else "включится"
+        await message.answer(f"Гача {state_label} на {duration_label}, затем {restore_label} автоматически.")
+    else:
+        await message.answer(f"Гача {state_label}.")
+
+
+async def _check_and_maybe_restore_gacha(
+    message: Message,
+    activity_repo,
+    chat_settings: ChatSettings,
+) -> ChatSettings:
+    """If a timed toggle has expired, flip gacha_enabled back and clear restore_at."""
+    if chat_settings.gacha_restore_at is None:
+        return chat_settings
+    if datetime.now(timezone.utc) < chat_settings.gacha_restore_at:
+        return chat_settings
+    new_enabled = not chat_settings.gacha_enabled
+    chat = ChatSnapshot(
+        telegram_chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        title=message.chat.title,
+    )
+    values = settings_to_dict(chat_settings)
+    values["gacha_enabled"] = new_enabled
+    values["gacha_restore_at"] = None
+    return await activity_repo.upsert_chat_settings(chat=chat, values=values)
 
 
 async def _send_gacha_skip(
@@ -3112,6 +3201,10 @@ async def gacha_callback(query: CallbackQuery, settings: Settings, economy_repo,
         await _safe_callback_answer(query, "Эта кнопка не для вас.", show_alert=True)
         return
 
+    if not chat_settings.gacha_enabled:
+        await _safe_callback_answer(query)
+        return
+
     economy_mode = _gacha_economy_mode(chat_type=query.message.chat.type, chat_settings=chat_settings)
     economy_chat_id = _gacha_economy_chat_id(chat_type=query.message.chat.type, chat_id=query.message.chat.id)
 
@@ -3566,6 +3659,17 @@ async def text_commands_handler(
                 await send_chat_trigger(message, activity_repo, trigger)
         return
 
+    if intent.name in {"gacha_on", "gacha_off"}:
+        await _manage_gacha_toggle(
+            message,
+            activity_repo,
+            settings,
+            chat_settings,
+            command_key=intent.name,
+            duration_seconds=intent.args.get("duration_seconds") if intent.args else None,
+        )
+        return
+
     if not await _enforce_command_access(message, activity_repo, command_key=intent.name):
         return
 
@@ -3576,6 +3680,11 @@ async def text_commands_handler(
     if intent.name == "alive":
         await message.answer("<b>Я на связи и работаю.</b>", parse_mode="HTML")
         return
+
+    if intent.name in {"gacha_pull", "gacha_profile", "gacha_info"}:
+        chat_settings = await _check_and_maybe_restore_gacha(message, activity_repo, chat_settings)
+        if not chat_settings.gacha_enabled:
+            return
 
     if intent.name == "gacha_pull":
         await _send_gacha_pull(message, settings, banner=str(intent.args.get("banner", "")))

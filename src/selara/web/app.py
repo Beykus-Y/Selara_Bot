@@ -20,6 +20,7 @@ from sqlalchemy import and_, func, select, String, Text, Integer, BigInteger, Sm
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from selara.application.use_cases.economy.common import load_dashboard_for_scope
 from selara.application.use_cases.economy.results import EconomyDashboard
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.use_cases.economy.catalog import localize_crop_code, localize_item_code
@@ -30,7 +31,7 @@ from selara.application.use_cases.economy.plant_crop import execute as plant_cro
 from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
-from selara.core.chat_settings import default_chat_settings
+from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
@@ -41,7 +42,6 @@ from selara.core.web_auth import (
     normalize_login_code,
 )
 from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
-from selara.domain.economy_entities import FarmState
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
     ChatModel,
@@ -866,6 +866,28 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             touch=touch,
         )
 
+    async def _load_request_user_and_chat(
+        session: AsyncSession,
+        request: Request,
+        *,
+        chat_id: int,
+        touch: bool,
+    ) -> tuple[UserSnapshot | None, SqlAlchemyActivityRepository, UserChatOverview | None]:
+        activity_repo = SqlAlchemyActivityRepository(session)
+        user = await _load_user_from_request(session, request, touch=touch)
+        if user is None:
+            return None, activity_repo, None
+        chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
+        return user, activity_repo, chat
+
+    async def _chat_settings_or_defaults(
+        activity_repo: SqlAlchemyActivityRepository,
+        *,
+        chat_id: int,
+        defaults: ChatSettings | None = None,
+    ) -> ChatSettings:
+        return await activity_repo.get_chat_settings(chat_id=chat_id) or defaults or chat_settings_defaults
+
     async def _load_dashboard_if_exists(
         economy_repo: SqlAlchemyEconomyRepository,
         *,
@@ -876,27 +898,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         scope, error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=user_id)
         if scope is None:
             return None, error or "Не удалось определить режим экономики"
-
-        account = await economy_repo.get_account(scope=scope, user_id=user_id)
-        if account is None:
-            return None, "Аккаунт не найден"
-
-        farm = await economy_repo.get_farm_state(account_id=account.id)
-        if farm is None:
-            farm = FarmState(account_id=account.id, farm_level=1, size_tier="small", negative_event_streak=0)
-
-        plots = await economy_repo.list_plots(account_id=account.id)
-        inventory = await economy_repo.list_inventory(account_id=account.id)
-        return (
-            EconomyDashboard(
-                scope=scope,
-                account=account,
-                farm=farm,
-                plots=tuple(sorted(plots, key=lambda item: item.plot_no)),
-                inventory=tuple(sorted(inventory, key=lambda item: item.item_code)),
-            ),
-            None,
-        )
+        return await load_dashboard_for_scope(economy_repo, scope=scope, user_id=user_id, create_account=False)
 
     def _viewer_initials(user: UserSnapshot) -> str:
         letters = "".join(
@@ -997,7 +999,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
 
     async def _chat_settings_for_game(activity_repo: SqlAlchemyActivityRepository, *, chat_id: int):
-        return await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+        return await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
 
     async def _resolve_chat_member_label(activity_repo: SqlAlchemyActivityRepository, *, chat_id: int, user_id: int) -> str:
         label = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)
@@ -4980,20 +4982,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     async def chat_page(chat_id: int, request: Request):
         requested_tab = (request.query_params.get("tab") or "overview").strip().lower()
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _redirect(_with_message("/login", key="error", text="Сессия истекла. Войдите снова."))
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-
-            visible_groups: dict[int, UserChatOverview] = {group.chat_id: group for group in activity_groups}
-            for group in admin_groups:
-                visible_groups[group.chat_id] = group
-
-            chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
                 return _render_template(
@@ -5007,8 +5000,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     ),
                 )
 
-            defaults = default_chat_settings(settings)
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or defaults
+            defaults = chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id, defaults=defaults)
             role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
             can_manage_settings = await _can_manage_chat_settings(
                 activity_repo,
@@ -5139,20 +5132,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/api/chat/{chat_id}/overview")
     async def chat_overview_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
-            defaults = default_chat_settings(settings)
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            defaults = chat_settings_defaults
             role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
             can_manage_settings = await _can_manage_chat_settings(
                 activity_repo,
@@ -5306,18 +5296,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         page = max(1, page)
 
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             leaderboard_items = await activity_repo.get_leaderboard(
                 chat_id=chat_id,
                 mode=mode,
@@ -5379,13 +5366,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/api/chat/{chat_id}/achievements")
     async def chat_achievements_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
@@ -5419,18 +5403,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/api/chat/{chat_id}/settings")
     async def chat_settings_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             can_manage_settings = await _can_manage_chat_settings(
                 activity_repo,
                 chat=chat,
@@ -5623,16 +5604,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         request: Request,
     ) -> tuple[dict[str, object] | None, str | None, int | None]:
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова."), 401
 
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
-            visible_groups = _merge_visible_groups(admin_groups, activity_groups)
-            chat = visible_groups.get(chat_id)
             if chat is None:
                 await session.commit()
                 return None, "__chat_forbidden__", 403
@@ -5643,7 +5620,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 user=user,
             )
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             if not current_settings.economy_enabled:
                 await session.commit()
                 return None, "__economy_disabled__", 403
@@ -5655,7 +5632,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_id=chat_id,
                 user_id=user.telegram_user_id,
             )
-            scope, scope_error = await economy_repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=user.telegram_user_id)
+            scope = None if dashboard is None else dashboard.scope
             listings = [] if scope is None else await economy_repo.list_market_open(scope=scope, limit=100)
             trades = [] if scope is None else await economy_repo.list_market_trades(
                 scope=scope,
@@ -5665,7 +5642,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if dashboard is None or scope is None:
-            return None, error or scope_error or "Не удалось открыть экономический кабинет.", 400
+            return None, error or "Не удалось открыть экономический кабинет.", 400
 
         now = _now_utc()
         plots = []
@@ -5817,19 +5794,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/api/chat/{chat_id}/economy/market")
     async def market_data_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             scope, error = await economy_repo.resolve_scope(mode=current_settings.economy_mode, chat_id=chat_id, user_id=user.telegram_user_id)
             if scope is None:
                 await session.commit()
@@ -5871,19 +5845,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/api/chat/{chat_id}/economy/apply")
     async def apply_economy_item_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             form = await _parse_form(request)
             item_code = (form.get("item_code") or "").strip().lower()
             target_type = (form.get("target_type") or "").strip().lower()
@@ -5928,19 +5899,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/api/chat/{chat_id}/economy/market/create")
     async def create_market_listing_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             form = await _parse_form(request)
             item_code = (form.get("item_code") or "").strip().lower()
             quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
@@ -5964,19 +5932,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/api/chat/{chat_id}/economy/market/buy")
     async def buy_market_listing_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             form = await _parse_form(request)
             listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
             quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
@@ -5998,21 +5963,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/api/chat/{chat_id}/economy/market/cancel")
     async def cancel_market_listing_api(chat_id: int, request: Request):
         async with session_factory() as session:
-            user = await _load_user_from_request(session, request, touch=True)
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
             if user is None:
                 await session.commit()
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
-
-            activity_repo = SqlAlchemyActivityRepository(session)
             economy_repo = SqlAlchemyEconomyRepository(session)
-            chat = await _ensure_chat_visible_or_none(activity_repo, user_id=user.telegram_user_id, chat_id=chat_id)
             if chat is None:
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
             form = await _parse_form(request)
             listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             result = await market_cancel_listing(
                 economy_repo,
                 economy_mode=current_settings.economy_mode,
@@ -6549,8 +6511,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
                 )
 
-            defaults = default_chat_settings(settings)
-            current_settings = await activity_repo.get_chat_settings(chat_id=chat_id) or defaults
+            defaults = chat_settings_defaults
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id, defaults=defaults)
             current_map = settings_to_dict(current_settings)
             default_map = settings_to_dict(defaults)
             updated, error = apply_setting_update(

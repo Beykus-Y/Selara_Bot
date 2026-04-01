@@ -59,13 +59,14 @@ async def execute(
         )
 
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
-    stock = await repo.get_inventory_item(account_id=account.id, item_code=normalized_item)
+    inventory = {item.item_code: item for item in await repo.list_inventory(account_id=account.id)}
+    stock = inventory.get(normalized_item)
     if stock is None or stock.quantity < quantity:
         return MarketCreateResult(accepted=False, reason="Недостаточно предметов в инвентаре.", listing=None)
 
     total = quantity * unit_price
     fee = int(total * max(0, market_fee_percent) / 100)
-    coupon = await repo.get_inventory_item(account_id=account.id, item_code="item:market_fee_coupon")
+    coupon = inventory.get("item:market_fee_coupon")
     if coupon is not None and coupon.quantity > 0:
         fee = 0
         await repo.add_inventory_item(account_id=account.id, item_code="item:market_fee_coupon", delta=-1)
