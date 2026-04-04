@@ -61,7 +61,7 @@ async def test_build_profile_social_lines_include_compact_clan_and_family_summar
 
     assert lines == [
         "<b>Титул:</b> <code>[N&lt;7&gt;]</code>",
-        '<b>Семья:</b> брак с <a href="tg://user?id=20">Tom &amp; Jerry</a> • родители 2 • дети 1 • питомцы 1',
+        '<b>Семья:</b> брак с <code>Tom &amp; Jerry</code> • родители: <code>user:30</code>, <code>user:40</code> • дети: <code>user:50</code> • питомцы: <code>user:60</code>',
     ]
 
 

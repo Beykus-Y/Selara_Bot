@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, delete, func, or_, select, tuple_
+from sqlalchemy import and_, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -4663,6 +4663,57 @@ class SqlAlchemyActivityRepository:
             return None
         user, display_name_override, title_prefix = row
         return self._to_user_snapshot(user, chat_display_name=display_name_override, title_prefix=title_prefix)
+
+    async def is_subscription_exempt(self, *, user_id: int) -> bool:
+        stmt = select(UserModel.subscription_exempt).where(UserModel.telegram_user_id == user_id)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return bool(row) if row is not None else False
+
+    async def set_subscription_exempt(self, *, user_id: int, exempt: bool) -> None:
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+
+        if dialect == "postgresql":
+            existing_user_id = await self._session.scalar(
+                select(UserModel.telegram_user_id).where(UserModel.telegram_user_id == user_id).limit(1)
+            )
+            stmt = pg_insert(UserModel).values(
+                telegram_user_id=user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+                subscription_exempt=exempt,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[UserModel.telegram_user_id],
+                set_={
+                    "subscription_exempt": stmt.excluded.subscription_exempt,
+                    "updated_at": func.now(),
+                },
+            )
+            await self._session.execute(stmt)
+            if existing_user_id is None:
+                await increment_global_users_base_count(self._session)
+            return
+
+        user_row = await self._session.get(UserModel, user_id)
+        if user_row is None:
+            self._session.add(
+                UserModel(
+                    telegram_user_id=user_id,
+                    username=None,
+                    first_name=None,
+                    last_name=None,
+                    is_bot=False,
+                    subscription_exempt=exempt,
+                )
+            )
+            await self._session.flush()
+            await increment_global_users_base_count(self._session)
+            return
+
+        user_row.subscription_exempt = exempt
 
     async def create_inline_private_message(
         self,

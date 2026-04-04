@@ -90,6 +90,22 @@ def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
     skip_usage = "Формат: гача скип генш|геншин|хср [@username]"
     toggle_usage = "Формат: гача вкл/выкл [5м|2ч|1д]"
 
+    if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] == "админ":
+        admin_usage = "Формат: гача админ необяз [@username] или гача админ обяз [@username]"
+        if len(tokens) < 3:
+            raise TextCommandResolutionError(admin_usage)
+        if tokens[2] == "необяз":
+            target_username = tokens[3] if len(tokens) == 4 else None
+            if len(tokens) > 4:
+                raise TextCommandResolutionError(admin_usage)
+            return CommandIntent(name="gacha_admin_exempt", args={"target_username": target_username, "exempt": True})
+        if tokens[2] == "обяз":
+            target_username = tokens[3] if len(tokens) == 4 else None
+            if len(tokens) > 4:
+                raise TextCommandResolutionError(admin_usage)
+            return CommandIntent(name="gacha_admin_exempt", args={"target_username": target_username, "exempt": False})
+        raise TextCommandResolutionError(admin_usage)
+
     if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] in {"вкл", "выкл"}:
         action = "on" if tokens[1] == "вкл" else "off"
         if len(tokens) == 2:

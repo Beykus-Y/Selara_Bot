@@ -1,80 +1,8 @@
 {
   "code": "genshin",
-  "title": "Геншин",
-  "cooldown_seconds": 7200,
+  "title": "genshin",
+  "cooldown_seconds": 3600,
   "cards": [
-    {
-      "code": "cun_yun",
-      "name": "Чунь Юнь",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/cun_yun.jpg",
-      "weight": 18.0,
-      "region_code": "liyue",
-      "element_code": "cryo"
-    },
-    {
-      "code": "diona",
-      "name": "Диона",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/diona.jpg",
-      "weight": 18.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "rozaria",
-      "name": "Розария",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/rozaria.jpg",
-      "weight": 18.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "mika",
-      "name": "Мика",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/mika.jpg",
-      "weight": 18.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "layla",
-      "name": "Лайла",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/layla.jpg",
-      "weight": 18.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "fremine",
-      "name": "Фремине",
-      "rarity": "epic",
-      "points": 5400,
-      "primogems": 18,
-      "adventure_xp": 160,
-      "image_url": "/images/genshin/fremine.jpg",
-      "weight": 18.0,
-      "region_code": "fontaine",
-      "element_code": "cryo"
-    },
     {
       "code": "aino",
       "name": "Айно",
@@ -146,90 +74,6 @@
       "weight": 2.0,
       "region_code": "inazuma",
       "element_code": "hydro"
-    },
-    {
-      "code": "ci_ci",
-      "name": "Ци Ци",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/ci_ci.jpg",
-      "weight": 2.0,
-      "region_code": "liyue",
-      "element_code": "cryo"
-    },
-    {
-      "code": "gan_yuy",
-      "name": "Гань Юй",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/gan_yuy.jpg",
-      "weight": 2.0,
-      "region_code": "liyue",
-      "element_code": "cryo"
-    },
-    {
-      "code": "yeola",
-      "name": "Эола",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/yeola.jpg",
-      "weight": 2.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "yeoy",
-      "name": "Элой",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/yeoy.jpg",
-      "weight": 2.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
-    },
-    {
-      "code": "skirk",
-      "name": "Скирк",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/skirk.jpg",
-      "weight": 2.0,
-      "region_code": "fontaine",
-      "element_code": "cryo"
-    },
-    {
-      "code": "sitlaly",
-      "name": "Ситлали",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/sitlaly.jpg",
-      "weight": 2.0,
-      "region_code": "fontaine",
-      "element_code": "cryo"
-    },
-    {
-      "code": "shan_he",
-      "name": "Шань Хэ",
-      "rarity": "legendary",
-      "points": 10000,
-      "primogems": 22,
-      "adventure_xp": 220,
-      "image_url": "/images/genshin/shan_he.jpg",
-      "weight": 2.0,
-      "region_code": "mondstadt",
-      "element_code": "cryo"
     },
     {
       "code": "baizhu",
@@ -316,6 +160,18 @@
       "element_code": "anemo"
     },
     {
+      "code": "gan_yuy",
+      "name": "Гань Юй",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/gan_yuy.jpg",
+      "weight": 2.0,
+      "region_code": "liyue",
+      "element_code": "cryo"
+    },
+    {
       "code": "goro",
       "name": "Горо",
       "rarity": "epic",
@@ -386,6 +242,18 @@
       "weight": 2.0,
       "region_code": "mondstadt",
       "element_code": "pyro"
+    },
+    {
+      "code": "diona",
+      "name": "Диона",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/diona.jpg",
+      "weight": 18.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
     },
     {
       "code": "dori",
@@ -700,6 +568,18 @@
       "element_code": "cryo"
     },
     {
+      "code": "layla",
+      "name": "Лайла",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/layla.jpg",
+      "weight": 18.0,
+      "region_code": "sumeru",
+      "element_code": "cryo"
+    },
+    {
       "code": "lin_yan",
       "name": "Лань Янь",
       "rarity": "epic",
@@ -794,6 +674,18 @@
       "weight": 2.0,
       "region_code": "inazuma",
       "element_code": "anemo"
+    },
+    {
+      "code": "mika",
+      "name": "Мика",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/mika.jpg",
+      "weight": 18.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
     },
     {
       "code": "mona",
@@ -952,6 +844,18 @@
       "element_code": "cryo"
     },
     {
+      "code": "rozaria",
+      "name": "Розария",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/rozaria.jpg",
+      "weight": 18.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
+    },
+    {
       "code": "razor",
       "name": "Рэйзор",
       "rarity": "epic",
@@ -1046,6 +950,30 @@
       "weight": 18.0,
       "region_code": "liyue",
       "element_code": "pyro"
+    },
+    {
+      "code": "sitlaly",
+      "name": "Ситлали",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/sitlaly.jpg",
+      "weight": 2.0,
+      "region_code": "fontaine",
+      "element_code": "cryo"
+    },
+    {
+      "code": "skirk",
+      "name": "Скирк",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/skirk.jpg",
+      "weight": 2.0,
+      "region_code": "fontaine",
+      "element_code": "cryo"
     },
     {
       "code": "strannik",
@@ -1180,6 +1108,18 @@
       "element_code": "electro"
     },
     {
+      "code": "fremine",
+      "name": "Фремине",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/fremine.jpg",
+      "weight": 18.0,
+      "region_code": "fontaine",
+      "element_code": "cryo"
+    },
+    {
       "code": "furina",
       "name": "Фурина",
       "rarity": "legendary",
@@ -1216,6 +1156,18 @@
       "element_code": "anemo"
     },
     {
+      "code": "ci_ci",
+      "name": "Ци Ци",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/ci_ci.jpg",
+      "weight": 2.0,
+      "region_code": "liyue",
+      "element_code": "cryo"
+    },
+    {
       "code": "chaska",
       "name": "Часка",
       "rarity": "legendary",
@@ -1238,6 +1190,30 @@
       "weight": 2.0,
       "region_code": "liyue",
       "element_code": "geo"
+    },
+    {
+      "code": "cun_yun",
+      "name": "Чунь Юнь",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/cun_yun.jpg",
+      "weight": 18.0,
+      "region_code": "liyue",
+      "element_code": "cryo"
+    },
+    {
+      "code": "shan_he",
+      "name": "Шань Хэ",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/shan_he.jpg",
+      "weight": 2.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
     },
     {
       "code": "sharlotta",
@@ -1264,6 +1240,18 @@
       "element_code": "geo"
     },
     {
+      "code": "yeoy",
+      "name": "Элой",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/yeoy.jpg",
+      "weight": 2.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
+    },
+    {
       "code": "amber",
       "name": "Эмбер",
       "rarity": "epic",
@@ -1286,6 +1274,18 @@
       "weight": 2.0,
       "region_code": "fontaine",
       "element_code": "dendro"
+    },
+    {
+      "code": "yeola",
+      "name": "Эола",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/yeola.jpg",
+      "weight": 2.0,
+      "region_code": "mondstadt",
+      "element_code": "cryo"
     },
     {
       "code": "escoffie",

@@ -10,6 +10,7 @@ from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
     MarriageModel,
+    UserModel,
     UserChatActivityDailyModel,
     UserChatIrisImportHistoryModel,
     UserChatMessageEventModel,
@@ -250,6 +251,40 @@ async def test_repository_lists_user_manageable_game_chats() -> None:
         assert len(manageable_game_chats) == 1
         assert manageable_game_chats[0].chat_id == game_chat.telegram_chat_id
         assert manageable_game_chats[0].bot_role == "senior_admin"
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_subscription_exempt_upserts_missing_user() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        assert await repo.is_subscription_exempt(user_id=777001) is False
+
+        await repo.set_subscription_exempt(user_id=777001, exempt=True)
+        assert await repo.is_subscription_exempt(user_id=777001) is True
+
+        row = await session.get(UserModel, 777001)
+        assert row is not None
+        assert row.subscription_exempt is True
+
+        await repo.set_subscription_exempt(user_id=777001, exempt=False)
+        assert await repo.is_subscription_exempt(user_id=777001) is False
 
         await session.commit()
 

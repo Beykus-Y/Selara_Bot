@@ -918,7 +918,9 @@ async def _is_subscribed_to_channel(bot: Bot, user_id: int) -> bool:
     return subscribed
 
 
-async def _require_channel_subscription(bot: Bot, message: Message, user_id: int) -> bool:
+async def _require_channel_subscription(bot: Bot, message: Message, user_id: int, activity_repo=None) -> bool:
+    if activity_repo is not None and await activity_repo.is_subscription_exempt(user_id=user_id):
+        return True
     if await _is_subscribed_to_channel(bot, user_id):
         return True
     await message.answer(
@@ -930,7 +932,9 @@ async def _require_channel_subscription(bot: Bot, message: Message, user_id: int
     return False
 
 
-async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery, user_id: int) -> bool:
+async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery, user_id: int, activity_repo=None) -> bool:
+    if activity_repo is not None and await activity_repo.is_subscription_exempt(user_id=user_id):
+        return True
     if await _is_subscribed_to_channel(bot, user_id):
         return True
     await query.answer(
@@ -1291,6 +1295,67 @@ async def _ensure_gacha_admin_user(
     return True
 
 
+async def _manage_gacha_admin_exempt(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    *,
+    target_username: str | None,
+    exempt: bool,
+) -> None:
+    if not await _ensure_gacha_admin_user(message, settings, denied_message="Недостаточно прав."):
+        return
+
+    # Resolve target: reply > @username > error
+    target_user_id: int | None = None
+    target_label: str | None = None
+
+    if message.reply_to_message is not None and message.reply_to_message.from_user is not None:
+        ru = message.reply_to_message.from_user
+        target_user_id = ru.id
+        target_label = ru.first_name or ru.username or str(ru.id)
+    elif target_username is not None:
+        snapshot = await activity_repo.find_shared_group_user_by_username(
+            sender_user_id=message.from_user.id,  # type: ignore[union-attr]
+            username=target_username,
+        )
+        if snapshot is None:
+            await _answer_quiet(message, f"Пользователь {target_username} не найден.")
+            return
+        target_user_id = snapshot.telegram_user_id
+        target_label = preferred_mention_label_from_parts(
+            user_id=snapshot.telegram_user_id,
+            username=snapshot.username,
+            first_name=snapshot.first_name,
+            last_name=snapshot.last_name,
+            chat_display_name=snapshot.chat_display_name,
+        )
+    else:
+        await _answer_quiet(
+            message,
+            "Укажите пользователя: ответьте на его сообщение или добавьте @username.",
+        )
+        return
+
+    try:
+        await activity_repo.set_subscription_exempt(user_id=target_user_id, exempt=exempt)
+    except SQLAlchemyError:
+        logger.exception(
+            "Failed to update gacha subscription exemption",
+            extra={"target_user_id": target_user_id, "exempt": exempt},
+        )
+        await safe_rollback(activity_repo)
+        await _answer_quiet(message, "Не удалось обновить обязательность подписки. Попробуйте ещё раз.")
+        return
+
+    mention = format_user_link(user_id=target_user_id, label=target_label)
+    if exempt:
+        text = f"Поздравляю {mention}, вам теперь подписка не обязательна."
+    else:
+        text = f"{mention}, подписка снова обязательна."
+    await message.answer(text, parse_mode="HTML")
+
+
 def _format_gacha_toggle_duration(seconds: int) -> str:
     if seconds % 86400 == 0:
         n = seconds // 86400
@@ -1440,7 +1505,7 @@ async def gachagive_command(
     if message.from_user is None:
         return
 
-    if not await _require_channel_subscription(bot, message, message.from_user.id):
+    if not await _require_channel_subscription(bot, message, message.from_user.id, activity_repo):
         return
 
     raw = (command.args or "").strip()
@@ -3259,7 +3324,7 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
 
 
 @router.callback_query(F.data.startswith(_GACHA_CALLBACK_PREFIX))
-async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
+async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, economy_repo, activity_repo, chat_settings: ChatSettings) -> None:
     action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
     if action is None or banner is None or owner_user_id is None:
         await _safe_callback_answer(query)
@@ -3275,7 +3340,7 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
         await _safe_callback_answer(query)
         return
 
-    if not await _require_channel_subscription_callback(bot, query, query.from_user.id):
+    if not await _require_channel_subscription_callback(bot, query, query.from_user.id, activity_repo):
         return
 
     economy_mode = _gacha_economy_mode(chat_type=query.message.chat.type, chat_settings=chat_settings)
@@ -3733,7 +3798,7 @@ async def text_commands_handler(
         return
 
     if intent.name in {"gacha_on", "gacha_off"}:
-        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id, activity_repo):
             return
         await _manage_gacha_toggle(
             message,
@@ -3760,7 +3825,7 @@ async def text_commands_handler(
         chat_settings = await _check_and_maybe_restore_gacha(message, activity_repo, chat_settings)
         if not chat_settings.gacha_enabled:
             return
-        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id, activity_repo):
             return
 
     if intent.name == "gacha_pull":
@@ -3776,7 +3841,7 @@ async def text_commands_handler(
         return
 
     if intent.name == "gacha_skip":
-        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id):
+        if message.from_user and not await _require_channel_subscription(bot, message, message.from_user.id, activity_repo):
             return
         await _send_gacha_skip(
             message,
@@ -3784,6 +3849,16 @@ async def text_commands_handler(
             settings,
             banner=str(intent.args.get("banner", "")),
             target_username=intent.args.get("target_username"),
+        )
+        return
+
+    if intent.name == "gacha_admin_exempt":
+        await _manage_gacha_admin_exempt(
+            message,
+            activity_repo,
+            settings,
+            target_username=intent.args.get("target_username") if intent.args else None,
+            exempt=bool(intent.args.get("exempt", True)) if intent.args else True,
         )
         return
 

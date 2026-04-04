@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from selara.presentation.handlers import text_commands
 
@@ -55,6 +56,7 @@ async def test_text_commands_handler_routes_gacha_commands(
     activity_repo = SimpleNamespace(
         get_chat_alias_mode=AsyncMock(return_value="both"),
         list_chat_aliases=AsyncMock(return_value=[]),
+        is_subscription_exempt=AsyncMock(return_value=False),
     )
     target_handler = AsyncMock()
     settings = SimpleNamespace(supported_chat_types={"private", "group", "supergroup"})
@@ -114,3 +116,30 @@ async def test_is_subscribed_to_channel_does_not_cache_negative_result() -> None
     assert bot.get_chat_member.await_count == 2
 
     text_commands._gacha_subscription_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_manage_gacha_admin_exempt_reports_storage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage(text="гача админ необяз")
+    message.from_user = SimpleNamespace(id=999, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    message.reply_to_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=77, username="target", first_name="Target", last_name=None, is_bot=False)
+    )
+    activity_repo = SimpleNamespace(
+        set_subscription_exempt=AsyncMock(side_effect=SQLAlchemyError("write failed")),
+    )
+    rollback_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "safe_rollback", rollback_mock)
+
+    await text_commands._manage_gacha_admin_exempt(
+        message,
+        activity_repo,
+        SimpleNamespace(gacha_admin_user_id=999),
+        target_username=None,
+        exempt=True,
+    )
+
+    rollback_mock.assert_awaited_once_with(activity_repo)
+    assert message.answers == [
+        ("Не удалось обновить обязательность подписки. Попробуйте ещё раз.", {"disable_notification": True})
+    ]

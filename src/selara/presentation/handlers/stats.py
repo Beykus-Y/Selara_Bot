@@ -1255,6 +1255,18 @@ async def _build_profile_social_lines(message: Message, activity_repo, *, user_i
         elif item.relation_type == "spouse":
             spouse_ids.add(item.user_b if item.user_a == user_id else item.user_a)
 
+    label_cache: dict[int, str] = {}
+
+    async def _name(uid: int) -> str:
+        label = await _resolve_profile_label(activity_repo, chat_id=message.chat.id, user_id=uid, cache=label_cache)
+        return f"<code>{escape(label)}</code>"
+
+    async def _names(uids: set[int], limit: int = 3) -> str:
+        parts = [await _name(uid) for uid in sorted(uids)[:limit]]
+        if len(uids) > limit:
+            parts.append(f"ещё {len(uids) - limit}")
+        return ", ".join(parts)
+
     family_parts: list[str] = []
     if relationship is not None:
         partner_id = _relationship_partner_id(
@@ -1262,30 +1274,20 @@ async def _build_profile_social_lines(message: Message, activity_repo, *, user_i
             user_low_id=relationship.user_low_id,
             user_high_id=relationship.user_high_id,
         )
-        partner_mention = await _resolve_profile_mention(
-            activity_repo,
-            chat_id=message.chat.id,
-            user_id=partner_id,
-            cache=mention_cache,
-        )
+        partner_name = await _name(partner_id)
         relation_label = "брак" if relationship.kind == "marriage" else "пара"
-        family_parts.append(f"{relation_label} с {partner_mention}")
+        family_parts.append(f"{relation_label} с {partner_name}")
     elif spouse_ids:
         spouse_id = min(spouse_ids)
-        spouse_mention = await _resolve_profile_mention(
-            activity_repo,
-            chat_id=message.chat.id,
-            user_id=spouse_id,
-            cache=mention_cache,
-        )
-        family_parts.append(f"супруг(а) {spouse_mention}")
+        spouse_name = await _name(spouse_id)
+        family_parts.append(f"супруг(а) {spouse_name}")
 
     if parents:
-        family_parts.append(f"родители {len(parents)}")
+        family_parts.append(f"родители: {await _names(parents)}")
     if children:
-        family_parts.append(f"дети {len(children)}")
+        family_parts.append(f"дети: {await _names(children)}")
     if pets:
-        family_parts.append(f"питомцы {len(pets)}")
+        family_parts.append(f"питомцы: {await _names(pets)}")
 
     if family_parts:
         lines.append(f"<b>Семья:</b> {' • '.join(family_parts)}")
