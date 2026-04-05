@@ -21,6 +21,18 @@ RARITY_LABELS: dict[CardRarity, str] = {
     CardRarity.mythic: "🟥 Мифическая",
 }
 
+RARITY_SUMMARY_ORDER: tuple[CardRarity, ...] = (
+    CardRarity.legendary,
+    CardRarity.epic,
+    CardRarity.mythic,
+)
+
+RARITY_SUMMARY_LABELS: dict[CardRarity, str] = {
+    CardRarity.legendary: "Легендарных карт",
+    CardRarity.epic: "Эпических карт",
+    CardRarity.mythic: "Мифических карт",
+}
+
 REGION_LABELS: dict[str, str] = {
     "mondstadt": "Мондштадт",
     "liyue": "Ли Юэ",
@@ -74,6 +86,14 @@ def format_element_label(element_code: str | None) -> str:
 def format_element_icon(element_code: str | None) -> str:
     normalized = (element_code or "").strip().lower() or "unknown"
     return ELEMENT_ICONS.get(normalized, "✨")
+
+
+def format_rarity_icon(rarity: CardRarity) -> str:
+    return RARITY_LABELS[rarity].split(" ", 1)[0]
+
+
+def format_rarity_summary_label(rarity: CardRarity) -> str:
+    return RARITY_SUMMARY_LABELS[rarity]
 
 
 @dataclass(slots=True, frozen=True)

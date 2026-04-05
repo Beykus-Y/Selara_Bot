@@ -15,7 +15,10 @@ from gacha_service.config import settings
 from gacha_service.domain.models import (
     CardRarity,
     RARITY_LABELS,
+    RARITY_SUMMARY_ORDER,
     format_element_label,
+    format_rarity_icon,
+    format_rarity_summary_label,
     format_region_label,
     resolve_rank,
 )
@@ -86,6 +89,13 @@ class HistoryEntryPayload(BaseModel):
     element_label: str | None = None
 
 
+class RarityCountPayload(BaseModel):
+    rarity: str
+    rarity_label: str
+    summary_label: str
+    count: int
+
+
 class ProfileResponse(BaseModel):
     status: str
     banner: str
@@ -93,6 +103,7 @@ class ProfileResponse(BaseModel):
     player: PlayerPayload
     unique_cards: int
     total_copies: int
+    rarity_counts: list[RarityCountPayload]
     recent_pulls: list[HistoryEntryPayload]
 
 
@@ -231,6 +242,31 @@ def _resolve_public_image_url(request: Request, image_url: str) -> str:
     return f"{base_url}/{image_url.lstrip('/')}"
 
 
+def _build_rarity_counts(*, banner: str, collection_entries) -> list[RarityCountPayload]:
+    rarity_by_code = {card.code: card.rarity for card in get_banner_config(banner).cards}
+    counts = {rarity: 0 for rarity in RARITY_SUMMARY_ORDER}
+    for entry in collection_entries:
+        character_code = getattr(entry, "character_code", None)
+        if not character_code:
+            continue
+        rarity = rarity_by_code.get(str(character_code))
+        if rarity not in counts:
+            continue
+        copies_owned = int(getattr(entry, "copies_owned", 0) or 0)
+        if copies_owned > 0:
+            counts[rarity] += 1
+    return [
+        RarityCountPayload(
+            rarity=rarity.value,
+            rarity_label=RARITY_LABELS[rarity],
+            summary_label=format_rarity_summary_label(rarity),
+            count=counts[rarity],
+        )
+        for rarity in RARITY_SUMMARY_ORDER
+        if counts[rarity] > 0
+    ]
+
+
 def _pull_response_from_result(*, result, request: Request, fallback_banner: str) -> PullResponse:
     card_payload = None
     if result.card is not None:
@@ -286,6 +322,7 @@ def _render_profile_message(
     player_payload: PlayerPayload,
     unique_cards: int,
     total_copies: int,
+    rarity_counts: list[RarityCountPayload],
     recent_pulls: list[HistoryEntryPayload],
 ) -> str:
     if banner == "hsr":
@@ -304,9 +341,13 @@ def _render_profile_message(
         f"💠 {currency_label}: {player_payload.total_primogems}",
         f"🗂 Уникальных карт: {unique_cards}",
         f"📦 Всего копий: {total_copies}",
-        "",
-        "🕘 Последние крутки:",
     ]
+    lines.extend(
+        f"{format_rarity_icon(CardRarity(entry.rarity))} {entry.summary_label} у вас: {entry.count}"
+        for entry in rarity_counts
+        if entry.count > 0
+    )
+    lines.extend(["", "🕘 Последние крутки:"])
     if not recent_pulls:
         lines.append("Пока пусто.")
     else:
@@ -396,6 +437,8 @@ def build_router(session_factory):
 
         player = await repo.get_or_create_player(user_id=user_id, username=None, banner=banner)
         unique_cards, total_copies = await repo.get_collection_stats(user_id=user_id, banner=banner)
+        cards_collection = await repo.get_user_collection(user_id=user_id, banner=banner)
+        rarity_counts = _build_rarity_counts(banner=banner, collection_entries=cards_collection)
         recent_pulls = await repo.get_recent_pulls_by_banner(user_id=user_id, banner=banner, limit=max(1, min(limit, 10)))
         player_payload = _to_player_payload(player=player, user_id=user_id)
         history_payload = [
@@ -413,11 +456,13 @@ def build_router(session_factory):
                 player_payload=player_payload,
                 unique_cards=unique_cards,
                 total_copies=total_copies,
+                rarity_counts=rarity_counts,
                 recent_pulls=history_payload,
             ),
             player=player_payload,
             unique_cards=unique_cards,
             total_copies=total_copies,
+            rarity_counts=rarity_counts,
             recent_pulls=history_payload,
         )
 

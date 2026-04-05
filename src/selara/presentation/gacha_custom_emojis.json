@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "banner": "genshin",
+  "entries": [
+    {
+      "key": "pyro",
+      "name": "пиро",
+      "custom_emoji_id": "5251209444825519045",
+      "fallback": "🔥",
+      "line_number": 1,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 0,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5251209444825519045"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "primogem",
+      "name": "примогем",
+      "custom_emoji_id": "5264776220016385602",
+      "fallback": "💠",
+      "line_number": 2,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 8,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5264776220016385602"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "hydro",
+      "name": "гидро",
+      "custom_emoji_id": "5249431714912032765",
+      "fallback": "💧",
+      "line_number": 3,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 20,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5249431714912032765"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "anemo",
+      "name": "анемо",
+      "custom_emoji_id": "5249307744975999377",
+      "fallback": "🌪️",
+      "line_number": 4,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 29,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5249307744975999377"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "electro",
+      "name": "электро",
+      "custom_emoji_id": "5249068098685783139",
+      "fallback": "⚡",
+      "line_number": 5,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 38,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5249068098685783139"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "dendro",
+      "name": "дендро",
+      "custom_emoji_id": "5248960063078420736",
+      "fallback": "🌿",
+      "line_number": 6,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 49,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5248960063078420736"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "cryo",
+      "name": "крио",
+      "custom_emoji_id": "5249438389291208990",
+      "fallback": "❄️",
+      "line_number": 7,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 59,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5249438389291208990"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "geo",
+      "name": "гео",
+      "custom_emoji_id": "5251329540701047214",
+      "fallback": "🪨",
+      "line_number": 8,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 67,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5251329540701047214"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "standard_pull",
+      "name": "стандартная крутка",
+      "custom_emoji_id": "5265059425864916388",
+      "fallback": "🎴",
+      "line_number": 9,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 75,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5265059425864916388"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "event_pull",
+      "name": "крутая типо крутка",
+      "custom_emoji_id": "5265125521116634702",
+      "fallback": "🎴",
+      "line_number": 10,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 97,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5265125521116634702"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "welkin_moon",
+      "name": "луна",
+      "custom_emoji_id": "5192967184325812429",
+      "fallback": "⚡",
+      "line_number": 11,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 119,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5192967184325812429"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    },
+    {
+      "key": "condensed_resin",
+      "name": "густая смола",
+      "custom_emoji_id": "5194950570158334627",
+      "fallback": "⚡",
+      "line_number": 12,
+      "created_at": "2026-04-05T13:20:42.409808+00:00",
+      "entity": {
+        "offset": 127,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5194950570158334627"
+      },
+      "source_message": {
+        "message_id": 4703,
+        "date": 1775395241,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
+        "caption": null
+      }
+    }
+  ],
+  "updated_at": "2026-04-05T13:20:42.409808+00:00"
+}

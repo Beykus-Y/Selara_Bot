@@ -26,13 +26,22 @@ class _DummyMessage:
 async def test_send_gacha_pull_downloads_remote_image_before_telegram_send(monkeypatch: pytest.MonkeyPatch) -> None:
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
+    monkeypatch.setattr(
+        text_commands,
+        "_load_gacha_custom_emoji_catalog",
+        lambda: {
+            "event_pull": text_commands._GachaCustomEmoji(custom_emoji_id="event-id", fallback="🎴"),
+            "primogem": text_commands._GachaCustomEmoji(custom_emoji_id="primogem-id", fallback="💠"),
+            "hydro": text_commands._GachaCustomEmoji(custom_emoji_id="hydro-id", fallback="💧"),
+        },
+    )
 
     monkeypatch.setattr(
         text_commands,
         "pull_gacha_card",
         AsyncMock(
             return_value=SimpleNamespace(
-                message="🍀 Вы получили новую карту: Эмбер",
+                message="🍀 Вы получили новую карту: Эмбер\n💠 Примогемы: +10 [10]\n💧 Стихия: Гидро",
                 card=SimpleNamespace(name="Эмбер", image_url="http://example.com/images/genshin/amber.jpg"),
                 sell_offer=None,
                 pull_id=10,
@@ -50,7 +59,9 @@ async def test_send_gacha_pull_downloads_remote_image_before_telegram_send(monke
     assert len(message.photo_calls) == 1
     photo, kwargs = message.photo_calls[0]
     assert isinstance(photo, BufferedInputFile)
-    assert kwargs["caption"].startswith("<b>🎴 Геншин</b>")
+    assert kwargs["caption"].startswith('<b><tg-emoji emoji-id="event-id">🎴</tg-emoji> Геншин</b>')
+    assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji>' in kwargs["caption"]
+    assert '<tg-emoji emoji-id="hydro-id">💧</tg-emoji>' in kwargs["caption"]
     assert 'tg://user?id=1' in kwargs["caption"]
     assert kwargs["parse_mode"] == "HTML"
     assert message.text_calls == []
@@ -60,13 +71,22 @@ async def test_send_gacha_pull_downloads_remote_image_before_telegram_send(monke
 async def test_send_gacha_pull_falls_back_to_text_when_image_fetch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
+    monkeypatch.setattr(
+        text_commands,
+        "_load_gacha_custom_emoji_catalog",
+        lambda: {
+            "event_pull": text_commands._GachaCustomEmoji(custom_emoji_id="event-id", fallback="🎴"),
+            "primogem": text_commands._GachaCustomEmoji(custom_emoji_id="primogem-id", fallback="💠"),
+            "hydro": text_commands._GachaCustomEmoji(custom_emoji_id="hydro-id", fallback="💧"),
+        },
+    )
 
     monkeypatch.setattr(
         text_commands,
         "pull_gacha_card",
         AsyncMock(
             return_value=SimpleNamespace(
-                message="🍀 Вы получили новую карту: Эмбер",
+                message="🍀 Вы получили новую карту: Эмбер\n💠 Примогемы: +10 [10]\n💧 Стихия: Гидро",
                 card=SimpleNamespace(name="Эмбер", image_url="http://example.com/images/genshin/amber.jpg"),
                 sell_offer=None,
                 pull_id=10,
@@ -83,5 +103,7 @@ async def test_send_gacha_pull_falls_back_to_text_when_image_fetch_fails(monkeyp
 
     assert message.photo_calls == []
     assert len(message.text_calls) == 1
-    assert message.text_calls[0][0].startswith("<b>🎴 Геншин</b>")
+    assert message.text_calls[0][0].startswith('<b><tg-emoji emoji-id="event-id">🎴</tg-emoji> Геншин</b>')
+    assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji>' in message.text_calls[0][0]
+    assert '<tg-emoji emoji-id="hydro-id">💧</tg-emoji>' in message.text_calls[0][0]
     assert message.text_calls[0][1]["parse_mode"] == "HTML"

@@ -85,13 +85,10 @@ async def test_gacha_buy_callback_refreshes_info_message(monkeypatch: pytest.Mon
 
     purchase_mock.assert_awaited_once()
     deliver_mock.assert_awaited_once()
-    build_info_mock.assert_awaited_once_with(
-        settings,
-        economy_repo,
-        user_id=1,
-        economy_mode="global",
-        chat_id=-100123,
-    )
+    assert build_info_mock.await_args_list == [
+        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
+        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+    ]
     assert query.message.edit_text_calls[0][0] == "<b>Гача инфо</b>"
     assert query.answers[-1] == (None, False)
 
@@ -141,13 +138,10 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         banner="hsr",
         currency_amount=160,
     )
-    build_info_mock.assert_awaited_once_with(
-        settings,
-        economy_repo,
-        user_id=1,
-        economy_mode="global",
-        chat_id=-100123,
-    )
+    assert build_info_mock.await_args_list == [
+        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
+        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+    ]
     assert query.answers[-1] == ("Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.", False)
 
 
@@ -163,9 +157,31 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
         ),
         unique_cards=1,
         total_copies=1,
+        rarity_counts=[
+            SimpleNamespace(
+                rarity="legendary",
+                rarity_label="🟨 Легендарная",
+                summary_label="Легендарных карт",
+                count=10,
+            ),
+            SimpleNamespace(
+                rarity="epic",
+                rarity_label="🟪 Эпическая",
+                summary_label="Эпических карт",
+                count=7,
+            ),
+        ],
         recent_pulls=[],
     )
     monkeypatch.setattr(text_commands, "get_gacha_profile", AsyncMock(return_value=profile))
+    monkeypatch.setattr(
+        text_commands,
+        "_load_gacha_custom_emoji_catalog",
+        lambda: {
+            "event_pull": text_commands._GachaCustomEmoji(custom_emoji_id="event-id", fallback="🎴"),
+            "primogem": text_commands._GachaCustomEmoji(custom_emoji_id="primogem-id", fallback="💠"),
+        },
+    )
 
     text, markup = await text_commands._build_gacha_info_view(
         SimpleNamespace(),
@@ -178,6 +194,13 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert "Монеты бота" in text
     assert "200942" in text
     assert "1</code> валюты = <code>10" in text
+    assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
+    assert "🟨 Легендарных карт: <code>10</code>" in text
+    assert "🟪 Эпических карт: <code>7</code>" in text
     assert markup is not None
     assert len(markup.inline_keyboard) == 2
     assert len(markup.inline_keyboard[0]) == 2
+    assert markup.inline_keyboard[0][0].icon_custom_emoji_id == "event-id"
+    assert markup.inline_keyboard[0][1].icon_custom_emoji_id == "primogem-id"
+    assert markup.inline_keyboard[1][0].icon_custom_emoji_id is None
+    assert markup.inline_keyboard[1][1].icon_custom_emoji_id is None

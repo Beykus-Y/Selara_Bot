@@ -174,6 +174,18 @@ class FakeGachaRepository:
         }
         return len(owners), len(banner_players)
 
+    async def get_user_collection(self, *, user_id: int, banner: str):
+        return [
+            SimpleNamespace(
+                user_id=current_user_id,
+                banner=current_banner,
+                character_code=current_card_code,
+                copies_owned=copies_owned,
+            )
+            for (current_user_id, current_banner, current_card_code), copies_owned in self.collection.items()
+            if current_user_id == user_id and current_banner == banner and copies_owned > 0
+        ]
+
 
 @pytest.mark.asyncio
 async def test_pull_grants_card_and_updates_totals() -> None:
@@ -678,10 +690,19 @@ def test_profile_message_includes_recent_pulls_block() -> None:
         player_payload=player,
         unique_cards=1,
         total_copies=1,
+        rarity_counts=[
+            SimpleNamespace(
+                rarity="legendary",
+                rarity_label="🟨 Легендарная",
+                summary_label="Легендарных карт",
+                count=2,
+            )
+        ],
         recent_pulls=recent,
     )
 
     assert "Статистика гачи: Genshin Impact" in message
+    assert "Легендарных карт у вас: 2" in message
     assert "Последние крутки" in message
     assert "Эмбер" in message
     assert "Мондштадт" in message
@@ -705,6 +726,7 @@ def test_hsr_profile_message_uses_hsr_terms() -> None:
         player_payload=player,
         unique_cards=4,
         total_copies=6,
+        rarity_counts=[],
         recent_pulls=[],
     )
 
@@ -744,6 +766,7 @@ def test_hsr_profile_message_does_not_render_origin_block() -> None:
         player_payload=player,
         unique_cards=1,
         total_copies=1,
+        rarity_counts=[],
         recent_pulls=recent,
     )
 
@@ -783,10 +806,38 @@ def test_profile_message_uses_neizvestno_for_unknown_origin() -> None:
         player_payload=player,
         unique_cards=1,
         total_copies=1,
+        rarity_counts=[],
         recent_pulls=recent,
     )
 
     assert "Неизвестно" in message
+
+
+@pytest.mark.asyncio
+async def test_pull_message_includes_non_zero_rarity_summary() -> None:
+    repo = FakeGachaRepository()
+    now = datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc)
+    card = GachaCard(
+        code="albedo",
+        banner="genshin",
+        name="Альбедо",
+        rarity=CardRarity.legendary,
+        points=10000,
+        primogems=22,
+        adventure_xp=220,
+        image_url="https://example.com/albedo.png",
+        weight=1,
+    )
+
+    class FixedRandom:
+        def choices(self, population, weights=None, k=1):
+            return [card]
+
+    service = GachaService(repo, rng=FixedRandom())
+    result = await service.pull(user_id=1, username="tester", banner="genshin", now=now)
+
+    assert "🟨 Легендарных карт у вас: 1" in result.message
+    assert "Эпических карт у вас" not in result.message
 
 
 def test_resolve_public_image_url_builds_vps_link() -> None:

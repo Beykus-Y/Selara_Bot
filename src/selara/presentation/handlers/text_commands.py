@@ -8,6 +8,7 @@ import time
 from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from io import BytesIO
 from html import escape
 from pathlib import Path
@@ -401,6 +402,29 @@ _GACHA_BANNER_LABELS: dict[str, str] = {
     "genshin": "Геншин",
     "hsr": "HSR",
 }
+_GACHA_CUSTOM_EMOJI_CATALOG_PATH = Path(__file__).resolve().parents[1] / "gacha_custom_emojis.json"
+_GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT: tuple[tuple[str, str], ...] = (
+    ("🌪️", "anemo"),
+    ("❄️", "cryo"),
+    ("💠", "primogem"),
+    ("💧", "hydro"),
+    ("⚡", "electro"),
+    ("🔥", "pyro"),
+    ("🌿", "dendro"),
+    ("🪨", "geo"),
+)
+_GACHA_INFO_BUTTON_EMOJI_KEYS: dict[str, dict[str, str]] = {
+    "genshin": {
+        "buy": "event_pull",
+        "currency": "primogem",
+    }
+}
+
+
+@dataclass(frozen=True)
+class _GachaCustomEmoji:
+    custom_emoji_id: str
+    fallback: str
 
 
 @dataclass(frozen=True)
@@ -866,6 +890,93 @@ async def _answer_quiet(message: Message, text: str, **kwargs) -> None:
     await message.answer(text, **kwargs)
 
 
+@lru_cache(maxsize=1)
+def _load_gacha_custom_emoji_catalog() -> dict[str, _GachaCustomEmoji]:
+    try:
+        payload = json.loads(_GACHA_CUSTOM_EMOJI_CATALOG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load gacha custom emoji catalog", extra={"error": str(exc)})
+        return {}
+
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return {}
+
+    catalog: dict[str, _GachaCustomEmoji] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip().lower()
+        custom_emoji_id = str(entry.get("custom_emoji_id") or "").strip()
+        fallback = str(entry.get("fallback") or "").strip()
+        if not key or not custom_emoji_id or not fallback:
+            continue
+        catalog[key] = _GachaCustomEmoji(custom_emoji_id=custom_emoji_id, fallback=fallback)
+    return catalog
+
+
+def _gacha_custom_emoji_html(key: str, *, fallback: str) -> str:
+    entry = _load_gacha_custom_emoji_catalog().get((key or "").strip().lower())
+    if entry is None:
+        return escape(fallback)
+    return f'<tg-emoji emoji-id="{escape(entry.custom_emoji_id)}">{escape(entry.fallback)}</tg-emoji>'
+
+
+def _gacha_custom_emoji_button_id(*, banner: str, action: str, use_custom_emojis: bool) -> str | None:
+    if not use_custom_emojis:
+        return None
+    action_key = _GACHA_INFO_BUTTON_EMOJI_KEYS.get((banner or "").strip().lower(), {}).get(action)
+    if not action_key:
+        return None
+    entry = _load_gacha_custom_emoji_catalog().get(action_key)
+    if entry is None:
+        return None
+    return entry.custom_emoji_id
+
+
+def _apply_gacha_custom_emojis_html(text: str, *, banner: str, use_custom_emojis: bool = True) -> str:
+    if not use_custom_emojis or (banner or "").strip().lower() != "genshin":
+        return text
+    rendered = text
+    for fallback, key in _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT:
+        rendered = rendered.replace(fallback, _gacha_custom_emoji_html(key, fallback=fallback))
+    return rendered
+
+
+def _gacha_escape_message_html(text: str, *, banner: str, use_custom_emojis: bool = True) -> str:
+    return "\n".join(
+        _apply_gacha_custom_emojis_html(escape(line), banner=banner, use_custom_emojis=use_custom_emojis)
+        for line in text.splitlines()
+    )
+
+
+def _gacha_pull_header_html(*, banner: str, use_custom_emojis: bool = True) -> str:
+    if (banner or "").strip().lower() == "genshin" and use_custom_emojis:
+        icon = _gacha_custom_emoji_html("event_pull", fallback="🎴")
+    else:
+        icon = "🎴"
+    return f"<b>{icon} {_gacha_banner_label(banner)}</b>"
+
+
+async def _answer_gacha_html(
+    message: Message,
+    *,
+    primary_text: str,
+    fallback_text: str,
+    fallback_reply_markup: InlineKeyboardMarkup | None = None,
+    **kwargs,
+) -> None:
+    try:
+        await _answer_quiet(message, primary_text, parse_mode="HTML", **kwargs)
+    except TelegramBadRequest:
+        fallback_kwargs = dict(kwargs)
+        if "reply_markup" in kwargs or fallback_reply_markup is not None:
+            fallback_kwargs["reply_markup"] = fallback_reply_markup
+        await _answer_quiet(message, fallback_text, parse_mode="HTML", **fallback_kwargs)
+
+
 def _gacha_banner_label(banner: str) -> str:
     return _GACHA_BANNER_LABELS.get((banner or "").strip().lower(), banner)
 
@@ -977,17 +1088,13 @@ async def _fetch_gacha_image_file(image_url: str, *, timeout_seconds: float) -> 
     return BufferedInputFile(response.content, filename=_gacha_image_filename(image_url))
 
 
-def _gacha_escape_message_html(text: str) -> str:
-    return "\n".join(escape(line) for line in text.splitlines())
-
-
-def _render_gacha_pull_html(*, banner: str, response, owner_user_id: int) -> str:
-    header = f"<b>🎴 {_gacha_banner_label(banner)}</b>"
+def _render_gacha_pull_html(*, banner: str, response, owner_user_id: int, use_custom_emojis: bool = True) -> str:
+    header = _gacha_pull_header_html(banner=banner, use_custom_emojis=use_custom_emojis)
     if not response.message:
         return header
 
     if response.card is None:
-        return f"{header}\n\n{_gacha_escape_message_html(response.message)}"
+        return f"{header}\n\n{_gacha_escape_message_html(response.message, banner=banner, use_custom_emojis=use_custom_emojis)}"
 
     lines = response.message.splitlines()
     if lines:
@@ -997,8 +1104,12 @@ def _render_gacha_pull_html(*, banner: str, response, owner_user_id: int) -> str
             lines[0] = f"{escape(prefix)}: {format_user_link(user_id=owner_user_id, label=response.card.name)}"
         else:
             lines[0] = escape(first_line)
+        lines[0] = _apply_gacha_custom_emojis_html(lines[0], banner=banner, use_custom_emojis=use_custom_emojis)
     if len(lines) > 1:
-        lines[1:] = [escape(line) for line in lines[1:]]
+        lines[1:] = [
+            _apply_gacha_custom_emojis_html(escape(line), banner=banner, use_custom_emojis=use_custom_emojis)
+            for line in lines[1:]
+        ]
     return f"{header}\n\n" + "\n".join(lines)
 
 
@@ -1046,14 +1157,25 @@ def _build_gacha_sell_markup(*, banner: str, pull_id: int, owner_user_id: int) -
     )
 
 
-def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str]) -> InlineKeyboardMarkup | None:
+def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str], use_custom_emojis: bool = True) -> InlineKeyboardMarkup | None:
     rows: list[list[InlineKeyboardButton]] = []
     for banner in banners:
+        buy_icon_custom_emoji_id = _gacha_custom_emoji_button_id(
+            banner=banner,
+            action="buy",
+            use_custom_emojis=use_custom_emojis,
+        )
+        currency_icon_custom_emoji_id = _gacha_custom_emoji_button_id(
+            banner=banner,
+            action="currency",
+            use_custom_emojis=use_custom_emojis,
+        )
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"Крутка • {_gacha_banner_label(banner)}",
                     callback_data=_gacha_buy_callback_data(banner=banner, owner_user_id=owner_user_id),
+                    icon_custom_emoji_id=buy_icon_custom_emoji_id,
                 ),
                 InlineKeyboardButton(
                     text=_gacha_currency_button_label(banner),
@@ -1062,6 +1184,7 @@ def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str]) -> Inlin
                         amount=_GACHA_CURRENCY_PURCHASE_AMOUNT,
                         owner_user_id=owner_user_id,
                     ),
+                    icon_custom_emoji_id=currency_icon_custom_emoji_id,
                 ),
             ]
         )
@@ -1087,18 +1210,29 @@ def _format_gacha_recent_pull(entry) -> str:
     return f"{escape(entry.card_name)} • <code>{escape(timestamp)}</code>"
 
 
-def _render_gacha_info_section(*, banner: str, response) -> str:
+def _render_gacha_info_section(*, banner: str, response, use_custom_emojis: bool = True) -> str:
     recent = response.recent_pulls[0] if response.recent_pulls else None
-    return "\n".join(
-        [
-            f"<b>{_gacha_banner_label(banner)}</b>",
-            f"🧭 {_gacha_rank_label(banner)}: <code>{response.player.adventure_rank}</code> ({response.player.xp_into_rank}/{response.player.xp_for_next_rank})",
-            f"🌟 Очки: <code>{response.player.total_points}</code>",
-            f"💠 {_gacha_currency_label(banner)}: <code>{response.player.total_primogems}</code>",
-            f"🗂 Карты: <code>{response.unique_cards}</code> • копии <code>{response.total_copies}</code>",
-            f"🕘 Последняя: {_format_gacha_recent_pull(recent)}",
-        ]
-    )
+    if (banner or "").strip().lower() == "genshin" and use_custom_emojis:
+        currency_icon = _gacha_custom_emoji_html("primogem", fallback="💠")
+    else:
+        currency_icon = "💠"
+    lines = [
+        f"<b>{_gacha_banner_label(banner)}</b>",
+        f"🧭 {_gacha_rank_label(banner)}: <code>{response.player.adventure_rank}</code> ({response.player.xp_into_rank}/{response.player.xp_for_next_rank})",
+        f"🌟 Очки: <code>{response.player.total_points}</code>",
+        f"{currency_icon} {_gacha_currency_label(banner)}: <code>{response.player.total_primogems}</code>",
+        f"🗂 Карты: <code>{response.unique_cards}</code> • копии <code>{response.total_copies}</code>",
+    ]
+    for rarity_entry in getattr(response, "rarity_counts", []):
+        count = int(getattr(rarity_entry, "count", 0) or 0)
+        if count <= 0:
+            continue
+        rarity_label = str(getattr(rarity_entry, "rarity_label", "") or "")
+        rarity_icon = escape(rarity_label.split(" ", 1)[0]) if rarity_label else "⬜"
+        summary_label = escape(str(getattr(rarity_entry, "summary_label", "Карты") or "Карты"))
+        lines.append(f"{rarity_icon} {summary_label}: <code>{count}</code>")
+    lines.append(f"🕘 Последняя: {_format_gacha_recent_pull(recent)}")
+    return "\n".join(lines)
 
 
 async def _build_gacha_info_view(
@@ -1108,6 +1242,7 @@ async def _build_gacha_info_view(
     user_id: int,
     economy_mode: str,
     chat_id: int | None,
+    use_custom_emojis: bool = True,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     banners = ("genshin", "hsr")
     results = await asyncio.gather(
@@ -1136,7 +1271,7 @@ async def _build_gacha_info_view(
             errors.append(f"❌ {escape(_gacha_banner_label(banner))}: {escape(error_text)}")
             continue
         available_banners.append(banner)
-        sections.extend(["", _render_gacha_info_section(banner=banner, response=result)])
+        sections.extend(["", _render_gacha_info_section(banner=banner, response=result, use_custom_emojis=use_custom_emojis)])
 
     if not available_banners:
         if errors:
@@ -1145,17 +1280,32 @@ async def _build_gacha_info_view(
 
     if errors:
         sections.extend(["", *errors])
-    return "\n".join(sections), _build_gacha_info_markup(owner_user_id=user_id, banners=available_banners)
+    return "\n".join(sections), _build_gacha_info_markup(
+        owner_user_id=user_id,
+        banners=available_banners,
+        use_custom_emojis=use_custom_emojis,
+    )
 
 
 async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, banner: str, response, owner_user_id: int) -> None:
-    rendered_message = _render_gacha_pull_html(banner=banner, response=response, owner_user_id=owner_user_id)
+    rendered_message = _render_gacha_pull_html(
+        banner=banner,
+        response=response,
+        owner_user_id=owner_user_id,
+        use_custom_emojis=True,
+    )
+    fallback_rendered_message = _render_gacha_pull_html(
+        banner=banner,
+        response=response,
+        owner_user_id=owner_user_id,
+        use_custom_emojis=False,
+    )
     reply_markup = _build_gacha_pull_markup(response=response, banner=banner, owner_user_id=owner_user_id)
     if response.card is None or not response.card.image_url:
-        await _answer_quiet(
+        await _answer_gacha_html(
             message,
-            rendered_message,
-            parse_mode="HTML",
+            primary_text=rendered_message,
+            fallback_text=fallback_rendered_message,
             disable_web_page_preview=True,
             reply_markup=reply_markup,
         )
@@ -1166,14 +1316,7 @@ async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, 
             response.card.image_url,
             timeout_seconds=settings.gacha_timeout_seconds,
         )
-        await message.answer_photo(
-            photo=photo,
-            caption=rendered_message,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-            disable_notification=message.chat.type in {"group", "supergroup"},
-        )
-    except (httpx.HTTPError, TelegramBadRequest) as exc:
+    except httpx.HTTPError as exc:
         logger.warning(
             "Gacha image delivery failed, falling back to text",
             extra={
@@ -1184,10 +1327,38 @@ async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, 
                 "error": str(exc),
             },
         )
-        await _answer_quiet(
+        await _answer_gacha_html(
             message,
-            rendered_message,
+            primary_text=rendered_message,
+            fallback_text=fallback_rendered_message,
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+        return
+
+    try:
+        await message.answer_photo(
+            photo=photo,
+            caption=rendered_message,
             parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_notification=message.chat.type in {"group", "supergroup"},
+        )
+    except TelegramBadRequest as exc:
+        logger.warning(
+            "Gacha image delivery failed, falling back to text",
+            extra={
+                "chat_id": getattr(message.chat, "id", None),
+                "user_id": owner_user_id,
+                "banner": banner,
+                "image_url": response.card.image_url,
+                "error": str(exc),
+            },
+        )
+        await _answer_gacha_html(
+            message,
+            primary_text=fallback_rendered_message,
+            fallback_text=fallback_rendered_message,
             disable_web_page_preview=True,
             reply_markup=reply_markup,
         )
@@ -1231,7 +1402,12 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
         await _answer_quiet(message, exc.message)
         return
 
-    await _answer_quiet(message, response.message, disable_web_page_preview=True)
+    await _answer_gacha_html(
+        message,
+        primary_text=_gacha_escape_message_html(response.message, banner=banner, use_custom_emojis=True),
+        fallback_text=_gacha_escape_message_html(response.message, banner=banner, use_custom_emojis=False),
+        disable_web_page_preview=True,
+    )
 
 
 async def _send_gacha_info(message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
@@ -1244,8 +1420,24 @@ async def _send_gacha_info(message: Message, settings: Settings, economy_repo, c
         user_id=message.from_user.id,
         economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
         chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
+        use_custom_emojis=True,
     )
-    await _answer_quiet(message, text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
+    fallback_text, fallback_reply_markup = await _build_gacha_info_view(
+        settings,
+        economy_repo,
+        user_id=message.from_user.id,
+        economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
+        chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
+        use_custom_emojis=False,
+    )
+    await _answer_gacha_html(
+        message,
+        primary_text=text,
+        fallback_text=fallback_text,
+        fallback_reply_markup=fallback_reply_markup,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+    )
 
 
 async def _resolve_gacha_skip_target(
@@ -3371,11 +3563,28 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
+            use_custom_emojis=True,
+        )
+        fallback_text, fallback_reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+            use_custom_emojis=False,
         )
         try:
             await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
         except TelegramBadRequest:
-            pass
+            try:
+                await query.message.edit_text(
+                    fallback_text,
+                    parse_mode="HTML",
+                    reply_markup=fallback_reply_markup,
+                    disable_web_page_preview=True,
+                )
+            except TelegramBadRequest:
+                pass
         await _safe_callback_answer(query)
         return
 
@@ -3404,11 +3613,28 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
+            use_custom_emojis=True,
+        )
+        fallback_text, fallback_reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+            use_custom_emojis=False,
         )
         try:
             await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
         except TelegramBadRequest:
-            pass
+            try:
+                await query.message.edit_text(
+                    fallback_text,
+                    parse_mode="HTML",
+                    reply_markup=fallback_reply_markup,
+                    disable_web_page_preview=True,
+                )
+            except TelegramBadRequest:
+                pass
         await _safe_callback_answer(query, result.message)
         return
 

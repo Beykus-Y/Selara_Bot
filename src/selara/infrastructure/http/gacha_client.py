@@ -56,6 +56,13 @@ class GachaHistoryEntryPayload(BaseModel):
     image_url: str
 
 
+class GachaRarityCountPayload(BaseModel):
+    rarity: str
+    rarity_label: str
+    summary_label: str
+    count: int
+
+
 class GachaProfileResponse(BaseModel):
     status: str
     banner: str
@@ -63,6 +70,7 @@ class GachaProfileResponse(BaseModel):
     player: GachaPlayerPayload
     unique_cards: int
     total_copies: int
+    rarity_counts: list[GachaRarityCountPayload] = []
     recent_pulls: list[GachaHistoryEntryPayload]
 
 
