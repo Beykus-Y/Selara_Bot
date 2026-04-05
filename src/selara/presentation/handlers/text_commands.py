@@ -404,6 +404,7 @@ _GACHA_BANNER_LABELS: dict[str, str] = {
 }
 _GACHA_CUSTOM_EMOJI_CATALOG_PATH = Path(__file__).resolve().parents[1] / "gacha_custom_emojis.json"
 _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT: tuple[tuple[str, str], ...] = (
+    ("❔", "unknown"),
     ("🌪️", "anemo"),
     ("❄️", "cryo"),
     ("💠", "primogem"),

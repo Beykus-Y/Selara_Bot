@@ -65,7 +65,7 @@ ELEMENT_ICONS: dict[str, str] = {
     "anemo": "🌪️",
     "dendro": "🌿",
     "geo": "🪨",
-    "unknown": "✨",
+    "unknown": "❔",
 }
 
 
@@ -85,7 +85,7 @@ def format_element_label(element_code: str | None) -> str:
 
 def format_element_icon(element_code: str | None) -> str:
     normalized = (element_code or "").strip().lower() or "unknown"
-    return ELEMENT_ICONS.get(normalized, "✨")
+    return ELEMENT_ICONS.get(normalized, "❔")
 
 
 def format_rarity_icon(rarity: CardRarity) -> str:

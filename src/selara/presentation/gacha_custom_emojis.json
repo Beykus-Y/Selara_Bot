@@ -301,7 +301,32 @@
         "text": "🔥 пиро\n💎 примогем\n💦 гидро\n🌪 анемо\n⚡️ электро\n🌿 дендро\n❄️ крио\n🪨 гео \n💙 стандартная крутка\n💖 крутая типо крутка\n⚡️ луна\n⚡️ густая смола",
         "caption": null
       }
+    },
+    {
+      "key": "unknown",
+      "name": "геншин неизвестно",
+      "custom_emoji_id": "5465378719184985793",
+      "fallback": "❔",
+      "line_number": 1,
+      "created_at": "2026-04-05T13:55:41.202267+00:00",
+      "entity": {
+        "offset": 0,
+        "length": 1,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5465378719184985793"
+      },
+      "source_message": {
+        "message_id": 4707,
+        "date": 1775397340,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "❔ геншин неизвестно",
+        "caption": null
+      }
     }
   ],
-  "updated_at": "2026-04-05T13:20:42.409808+00:00"
+  "updated_at": "2026-04-05T13:55:41.202267+00:00"
 }
