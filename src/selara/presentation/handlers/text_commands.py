@@ -404,7 +404,11 @@ _GACHA_BANNER_LABELS: dict[str, str] = {
 }
 _GACHA_CUSTOM_EMOJI_CATALOG_PATH = Path(__file__).resolve().parents[1] / "gacha_custom_emojis.json"
 _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT: tuple[tuple[str, str], ...] = (
+    ("🍀", "new_card"),
     ("❔", "unknown"),
+    ("🟥", "mythic_rarity"),
+    ("🟨", "legendary_rarity"),
+    ("🟪", "epic_rarity"),
     ("🌪️", "anemo"),
     ("❄️", "cryo"),
     ("💠", "primogem"),
@@ -1000,6 +1004,86 @@ def _gacha_rank_label(banner: str) -> str:
     return "Ранг приключений"
 
 
+def _gacha_info_rank_label(banner: str) -> str:
+    if (banner or "").strip().lower() == "hsr":
+        return "Освоение"
+    return "Ранг"
+
+
+def _gacha_info_currency_label(banner: str) -> str:
+    if (banner or "").strip().lower() == "hsr":
+        return "Нефрит"
+    return "Примогемы"
+
+
+def _format_gacha_number(value: int | float) -> str:
+    return f"{int(value):,}".replace(",", " ")
+
+
+def _format_gacha_recent_timestamp(value) -> str:
+    if isinstance(value, datetime):
+        dt_value = value
+    elif isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return escape(str(value))
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            dt_value = datetime.fromisoformat(normalized)
+        except ValueError:
+            return escape(value)
+    else:
+        return escape(str(value))
+    return escape(dt_value.strftime("%d.%m в %H:%M"))
+
+
+def _gacha_info_banner_heading_html(*, banner: str, use_custom_emojis: bool = True) -> str:
+    normalized_banner = (banner or "").strip().lower()
+    if normalized_banner == "genshin":
+        icon = _gacha_custom_emoji_html("primogem", fallback="💠") if use_custom_emojis else "💠"
+        label = "Геншин"
+    elif normalized_banner == "hsr":
+        icon = "🌌"
+        label = "Honkai: Star Rail"
+    else:
+        icon = "🎴"
+        label = _gacha_banner_label(banner)
+    return f"{icon} <b>{escape(label)}</b>"
+
+
+def _render_gacha_info_collection_summary(*, response, banner: str, use_custom_emojis: bool) -> str | None:
+    order = {"mythic": 0, "legendary": 1, "epic": 2}
+    parts: list[str] = []
+    rarity_counts = sorted(
+        list(getattr(response, "rarity_counts", [])),
+        key=lambda item: order.get(str(getattr(item, "rarity", "")).strip().lower(), 99),
+    )
+    for rarity_entry in rarity_counts:
+        count = int(getattr(rarity_entry, "count", 0) or 0)
+        if count <= 0:
+            continue
+        rarity_label = str(getattr(rarity_entry, "rarity_label", "") or "")
+        rarity_icon = escape(rarity_label.split(" ", 1)[0]) if rarity_label else "⬜"
+        rarity_icon = _apply_gacha_custom_emojis_html(
+            rarity_icon,
+            banner=banner,
+            use_custom_emojis=use_custom_emojis,
+        )
+        parts.append(f"{rarity_icon} <b>{count}</b>")
+    if not parts:
+        return None
+    return f"📊 В коллекции: {' | '.join(parts)}"
+
+
+def _render_gacha_pull_detail_line_html(line: str, *, banner: str, use_custom_emojis: bool) -> str:
+    rendered = _apply_gacha_custom_emojis_html(escape(line), banner=banner, use_custom_emojis=use_custom_emojis)
+    if ": " in rendered:
+        prefix, value = rendered.split(": ", 1)
+        return f"{prefix}: <b>{value}</b>"
+    return re.sub(r"(\d+(?:\.\d+)?%)", r"<b>\1</b>", rendered, count=1)
+
+
 def _gacha_economy_mode(*, chat_type: str, chat_settings: ChatSettings) -> str:
     if chat_type in {"group", "supergroup"}:
         return chat_settings.economy_mode
@@ -1108,7 +1192,7 @@ def _render_gacha_pull_html(*, banner: str, response, owner_user_id: int, use_cu
         lines[0] = _apply_gacha_custom_emojis_html(lines[0], banner=banner, use_custom_emojis=use_custom_emojis)
     if len(lines) > 1:
         lines[1:] = [
-            _apply_gacha_custom_emojis_html(escape(line), banner=banner, use_custom_emojis=use_custom_emojis)
+            _render_gacha_pull_detail_line_html(line, banner=banner, use_custom_emojis=use_custom_emojis)
             for line in lines[1:]
         ]
     return f"{header}\n\n" + "\n".join(lines)
@@ -1203,36 +1287,76 @@ def _build_gacha_pull_markup(*, response, banner: str, owner_user_id: int) -> In
 def _format_gacha_recent_pull(entry) -> str:
     if entry is None:
         return "нет"
-    pulled_at = getattr(entry, "pulled_at", "")
-    if isinstance(pulled_at, str):
-        timestamp = pulled_at.replace("T", " ")[:16]
-    else:
-        timestamp = str(pulled_at)
-    return f"{escape(entry.card_name)} • <code>{escape(timestamp)}</code>"
+    pulled_at = _format_gacha_recent_timestamp(getattr(entry, "pulled_at", ""))
+    return f"{escape(entry.card_name)} (<b>{pulled_at}</b>)"
 
 
-def _render_gacha_info_section(*, banner: str, response, use_custom_emojis: bool = True) -> str:
-    recent = response.recent_pulls[0] if response.recent_pulls else None
+def _build_gacha_profile_summary_lines(*, banner: str, response, use_custom_emojis: bool = True) -> list[str]:
     if (banner or "").strip().lower() == "genshin" and use_custom_emojis:
         currency_icon = _gacha_custom_emoji_html("primogem", fallback="💠")
     else:
         currency_icon = "💠"
+    collection_summary = _render_gacha_info_collection_summary(
+        response=response,
+        banner=banner,
+        use_custom_emojis=use_custom_emojis,
+    )
     lines = [
-        f"<b>{_gacha_banner_label(banner)}</b>",
-        f"🧭 {_gacha_rank_label(banner)}: <code>{response.player.adventure_rank}</code> ({response.player.xp_into_rank}/{response.player.xp_for_next_rank})",
-        f"🌟 Очки: <code>{response.player.total_points}</code>",
-        f"{currency_icon} {_gacha_currency_label(banner)}: <code>{response.player.total_primogems}</code>",
-        f"🗂 Карты: <code>{response.unique_cards}</code> • копии <code>{response.total_copies}</code>",
+        _gacha_info_banner_heading_html(banner=banner, use_custom_emojis=use_custom_emojis),
+        f"🧭 {_gacha_info_rank_label(banner)}: <b>{response.player.adventure_rank}</b> ({response.player.xp_into_rank} / {response.player.xp_for_next_rank})",
+        f"⭐ Очки: <b>{_format_gacha_number(response.player.total_points)}</b> | {currency_icon} {_gacha_info_currency_label(banner)}: <b>{_format_gacha_number(response.player.total_primogems)}</b>",
+        f"🎴 Уникальных: <b>{_format_gacha_number(response.unique_cards)}</b> | Копий: <b>{_format_gacha_number(response.total_copies)}</b>",
     ]
-    for rarity_entry in getattr(response, "rarity_counts", []):
-        count = int(getattr(rarity_entry, "count", 0) or 0)
-        if count <= 0:
-            continue
-        rarity_label = str(getattr(rarity_entry, "rarity_label", "") or "")
+    if collection_summary is not None:
+        lines.append(collection_summary)
+    return lines
+
+
+def _render_gacha_info_section(*, banner: str, response, use_custom_emojis: bool = True) -> str:
+    recent = response.recent_pulls[0] if response.recent_pulls else None
+    lines = _build_gacha_profile_summary_lines(
+        banner=banner,
+        response=response,
+        use_custom_emojis=use_custom_emojis,
+    )
+    lines.append(f"⏱ Последняя: {_format_gacha_recent_pull(recent)}")
+    return "\n".join(lines)
+
+
+def _render_gacha_profile_recent_lines(*, banner: str, response, use_custom_emojis: bool) -> list[str]:
+    if not response.recent_pulls:
+        return ["🕘 Последние крутки: <b>нет</b>"]
+    lines = ["🕘 Последние крутки:"]
+    for entry in response.recent_pulls:
+        rarity_label = str(getattr(entry, "rarity_label", "") or "")
         rarity_icon = escape(rarity_label.split(" ", 1)[0]) if rarity_label else "⬜"
-        summary_label = escape(str(getattr(rarity_entry, "summary_label", "Карты") or "Карты"))
-        lines.append(f"{rarity_icon} {summary_label}: <code>{count}</code>")
-    lines.append(f"🕘 Последняя: {_format_gacha_recent_pull(recent)}")
+        rarity_icon = _apply_gacha_custom_emojis_html(
+            rarity_icon,
+            banner=banner,
+            use_custom_emojis=use_custom_emojis,
+        )
+        lines.append(
+            f"{rarity_icon} {escape(entry.card_name)} (<b>{_format_gacha_recent_timestamp(getattr(entry, 'pulled_at', ''))}</b>)"
+        )
+    return lines
+
+
+def _render_gacha_profile_html(*, banner: str, response, use_custom_emojis: bool = True) -> str:
+    lines = _build_gacha_profile_summary_lines(
+        banner=banner,
+        response=response,
+        use_custom_emojis=use_custom_emojis,
+    )
+    lines.extend(
+        [
+            "",
+            *_render_gacha_profile_recent_lines(
+                banner=banner,
+                response=response,
+                use_custom_emojis=use_custom_emojis,
+            ),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1258,12 +1382,12 @@ async def _build_gacha_info_view(
     )
 
     sections: list[str] = [
-        "<b>Гача инфо</b>",
-        f"💸 Платная крутка: <code>{_GACHA_PAID_PULL_PRICE}</code> валюты баннера",
-        f"💱 Обмен: <code>1</code> валюты = <code>{_GACHA_COIN_EXCHANGE_RATE}</code> монет",
+        "<b>🎰 Гача инфо</b>",
+        f"🎫 Крутка: <b>{_format_gacha_number(_GACHA_PAID_PULL_PRICE)}</b> валюты",
+        f"💱 Курс: <b>1</b> валюта = <b>{_format_gacha_number(_GACHA_COIN_EXCHANGE_RATE)}</b> монет",
     ]
     if coin_balance is not None:
-        sections.append(f"🪙 Монеты бота: <code>{coin_balance}</code>")
+        sections.append(f"🪙 Монеты бота: <b>{_format_gacha_number(coin_balance)}</b>")
     available_banners: list[str] = []
     errors: list[str] = []
     for banner, result in zip(banners, results, strict=True):
@@ -1405,8 +1529,8 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
 
     await _answer_gacha_html(
         message,
-        primary_text=_gacha_escape_message_html(response.message, banner=banner, use_custom_emojis=True),
-        fallback_text=_gacha_escape_message_html(response.message, banner=banner, use_custom_emojis=False),
+        primary_text=_render_gacha_profile_html(banner=banner, response=response, use_custom_emojis=True),
+        fallback_text=_render_gacha_profile_html(banner=banner, response=response, use_custom_emojis=False),
         disable_web_page_preview=True,
     )
 

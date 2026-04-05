@@ -204,6 +204,8 @@ async def test_pull_grants_card_and_updates_totals() -> None:
     assert result.is_new
     assert result.copies_owned == 1
     assert "Вы получили новую карту" in result.message
+    assert "Редкость: " in result.message
+    assert "⬜ Редкость" not in result.message
     assert "Такая карта есть у 100% игроков" in result.message
 
 
@@ -701,12 +703,13 @@ def test_profile_message_includes_recent_pulls_block() -> None:
         recent_pulls=recent,
     )
 
-    assert "Статистика гачи: Genshin Impact" in message
-    assert "Легендарных карт у вас: 2" in message
-    assert "Последние крутки" in message
-    assert "Эмбер" in message
-    assert "Мондштадт" in message
-    assert "Пиро" in message
+    assert "💠 Геншин" in message
+    assert "⭐ Очки: 1 500 | 💠 Примогемы: 12" in message
+    assert "📊 В коллекции: 🟨 2" in message
+    assert "🕘 Последние крутки:" in message
+    assert "⬜ Эмбер (14.03 в 12:00)" in message
+    assert "Мондштадт" not in message
+    assert "Пиро" not in message
 
 
 def test_hsr_profile_message_uses_hsr_terms() -> None:
@@ -730,8 +733,8 @@ def test_hsr_profile_message_uses_hsr_terms() -> None:
         recent_pulls=[],
     )
 
-    assert "Уровень освоения" in message
-    assert "Звездный нефрит" in message
+    assert "Освоение" in message
+    assert "Нефрит" in message
 
 
 def test_hsr_profile_message_does_not_render_origin_block() -> None:
@@ -774,7 +777,7 @@ def test_hsr_profile_message_does_not_render_origin_block() -> None:
     assert "Неизвестно" not in message
 
 
-def test_profile_message_uses_neizvestno_for_unknown_origin() -> None:
+def test_profile_message_renders_unknown_card_without_origin_details() -> None:
     player = PlayerPayload(
         user_id=3,
         adventure_rank=1,
@@ -810,7 +813,8 @@ def test_profile_message_uses_neizvestno_for_unknown_origin() -> None:
         recent_pulls=recent,
     )
 
-    assert "Неизвестно" in message
+    assert "⬜ Неизвестный (14.03 в 12:00)" in message
+    assert "Неизвестно" not in message
 
 
 @pytest.mark.asyncio
@@ -836,7 +840,7 @@ async def test_pull_message_includes_non_zero_rarity_summary() -> None:
     service = GachaService(repo, rng=FixedRandom())
     result = await service.pull(user_id=1, username="tester", banner="genshin", now=now)
 
-    assert "🟨 Легендарных карт у вас: 1" in result.message
+    assert "📊 В коллекции: 🟨 1" in result.message
     assert "Эпических карт у вас" not in result.message
 
 

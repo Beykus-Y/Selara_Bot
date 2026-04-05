@@ -326,7 +326,107 @@
         "text": "❔ геншин неизвестно",
         "caption": null
       }
+    },
+    {
+      "key": "epic_rarity",
+      "name": "эпическая",
+      "custom_emoji_id": "5197259806569676800",
+      "fallback": "🟪",
+      "line_number": 1,
+      "created_at": "2026-04-05T14:10:30.455697+00:00",
+      "entity": {
+        "offset": 0,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5197259806569676800"
+      },
+      "source_message": {
+        "message_id": 4711,
+        "date": 1775398229,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "⭐️ эпическая\n⭐️ легендарная\n⭐️ мифическая\n🌛 новая карта геншин",
+        "caption": null
+      }
+    },
+    {
+      "key": "legendary_rarity",
+      "name": "легендарная",
+      "custom_emoji_id": "5195459699876577449",
+      "fallback": "🟨",
+      "line_number": 2,
+      "created_at": "2026-04-05T14:10:30.455697+00:00",
+      "entity": {
+        "offset": 13,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5195459699876577449"
+      },
+      "source_message": {
+        "message_id": 4711,
+        "date": 1775398229,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "⭐️ эпическая\n⭐️ легендарная\n⭐️ мифическая\n🌛 новая карта геншин",
+        "caption": null
+      }
+    },
+    {
+      "key": "mythic_rarity",
+      "name": "мифическая",
+      "custom_emoji_id": "5197663559265304957",
+      "fallback": "🟥",
+      "line_number": 3,
+      "created_at": "2026-04-05T14:10:30.455697+00:00",
+      "entity": {
+        "offset": 28,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5197663559265304957"
+      },
+      "source_message": {
+        "message_id": 4711,
+        "date": 1775398229,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "⭐️ эпическая\n⭐️ легендарная\n⭐️ мифическая\n🌛 новая карта геншин",
+        "caption": null
+      }
+    },
+    {
+      "key": "new_card",
+      "name": "новая карта геншин",
+      "custom_emoji_id": "5217618471243753076",
+      "fallback": "🍀",
+      "line_number": 4,
+      "created_at": "2026-04-05T14:10:30.455697+00:00",
+      "entity": {
+        "offset": 42,
+        "length": 2,
+        "type": "custom_emoji",
+        "custom_emoji_id": "5217618471243753076"
+      },
+      "source_message": {
+        "message_id": 4711,
+        "date": 1775398229,
+        "chat_id": 905302972,
+        "chat_type": "private",
+        "from_user_id": 905302972,
+        "from_username": "BeykusY",
+        "from_first_name": "🏎️",
+        "text": "⭐️ эпическая\n⭐️ легендарная\n⭐️ мифическая\n🌛 новая карта геншин",
+        "caption": null
+      }
     }
   ],
-  "updated_at": "2026-04-05T13:55:41.202267+00:00"
+  "updated_at": "2026-04-05T14:10:30.455697+00:00"
 }

@@ -19,7 +19,6 @@ from gacha_service.domain.models import (
     format_element_icon,
     format_element_label,
     format_rarity_icon,
-    format_rarity_summary_label,
     format_region_label,
     resolve_rank,
 )
@@ -149,12 +148,15 @@ def _build_rarity_summary(*, banner: str, collection_entries) -> list[tuple[Card
     return [(rarity, counts[rarity]) for rarity in RARITY_SUMMARY_ORDER if counts[rarity] > 0]
 
 
-def _render_rarity_summary_lines(rarity_summary: list[tuple[CardRarity, int]], *, owner_label: str) -> list[str]:
-    return [
-        f"{format_rarity_icon(rarity)} {format_rarity_summary_label(rarity)} {owner_label}: {count}"
+def _render_rarity_summary_compact_line(rarity_summary: list[tuple[CardRarity, int]]) -> str | None:
+    parts = [
+        f"{format_rarity_icon(rarity)} {count}"
         for rarity, count in rarity_summary
         if count > 0
     ]
+    if not parts:
+        return None
+    return f"📊 В коллекции: {' | '.join(parts)}"
 
 
 def _render_success_message(
@@ -182,15 +184,17 @@ def _render_success_message(
     purchase_block = ""
     if purchase_price > 0:
         purchase_block = f"🛒 Платная крутка: -{purchase_price}\n"
-    collection_lines = [f"🗂 Копий у вас: {copies_owned}", *_render_rarity_summary_lines(rarity_summary, owner_label="у вас")]
+    collection_summary_line = _render_rarity_summary_compact_line(rarity_summary)
+    collection_lines = [f"🗂 Копий у вас: {copies_owned}", f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков"]
+    if collection_summary_line is not None:
+        collection_lines.append(collection_summary_line)
     collection_block = "\n".join(collection_lines)
     return (
         f"{card_line}: {card.name}\n\n"
-        f"⬜ Редкость: {rarity_label}\n"
+        f"Редкость: {rarity_label}\n"
         f"{origin_block}"
         "\n"
         f"{collection_block}\n"
-        f"👥 Такая карта есть у {_format_percentage(ownership_percent)}% игроков\n"
         f"🧭 {terms.xp_label}: +{adventure_xp_gained}\n"
         f"🌟 Очки: +{card.points} [{player.total_points}]\n"
         f"💠 {terms.currency_label}: +{card.primogems} [{player.total_primogems}]\n"
@@ -233,7 +237,7 @@ def _render_admin_grant_message(
         card_line = "🎁 Админ выдал дубликат"
     return (
         f"{card_line}: {card.name}\n\n"
-        f"⬜ Редкость: {rarity_label}\n"
+        f"Редкость: {rarity_label}\n"
         f"{origin_block}"
         "\n"
         f"🗂 Копий у пользователя: {copies_owned}\n"

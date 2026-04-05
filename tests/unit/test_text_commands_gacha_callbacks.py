@@ -192,11 +192,10 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     )
 
     assert "Монеты бота" in text
-    assert "200942" in text
-    assert "1</code> валюты = <code>10" in text
+    assert "🪙 Монеты бота: <b>200 942</b>" in text
+    assert "💱 Курс: <b>1</b> валюта = <b>10</b> монет" in text
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
-    assert "🟨 Легендарных карт: <code>10</code>" in text
-    assert "🟪 Эпических карт: <code>7</code>" in text
+    assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None
     assert len(markup.inline_keyboard) == 2
     assert len(markup.inline_keyboard[0]) == 2

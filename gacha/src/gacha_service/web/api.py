@@ -315,6 +315,45 @@ def _http_exception_for_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=message)
 
 
+def _format_profile_number(value: int | float) -> str:
+    return f"{int(value):,}".replace(",", " ")
+
+
+def _format_profile_timestamp(value: datetime) -> str:
+    return value.strftime("%d.%m в %H:%M")
+
+
+def _profile_banner_heading(banner: str, banner_title: str) -> str:
+    if banner == "genshin":
+        return "💠 Геншин"
+    if banner == "hsr":
+        return "🌌 Honkai: Star Rail"
+    return f"🎴 {banner_title}"
+
+
+def _profile_rank_label(banner: str) -> str:
+    if banner == "hsr":
+        return "Освоение"
+    return "Ранг"
+
+
+def _profile_currency_label(banner: str) -> str:
+    if banner == "hsr":
+        return "Нефрит"
+    return "Примогемы"
+
+
+def _render_profile_collection_summary(rarity_counts: list[RarityCountPayload]) -> str | None:
+    parts = [
+        f"{format_rarity_icon(CardRarity(entry.rarity))} {entry.count}"
+        for entry in rarity_counts
+        if entry.count > 0
+    ]
+    if not parts:
+        return None
+    return f"📊 В коллекции: {' | '.join(parts)}"
+
+
 def _render_profile_message(
     *,
     banner: str,
@@ -325,40 +364,23 @@ def _render_profile_message(
     rarity_counts: list[RarityCountPayload],
     recent_pulls: list[HistoryEntryPayload],
 ) -> str:
-    if banner == "hsr":
-        rank_label = "Уровень освоения"
-        currency_label = "Звездный нефрит"
-        xp_suffix = "опыта освоения"
-    else:
-        rank_label = "Ранг приключений"
-        currency_label = "Примогемы"
-        xp_suffix = "XP"
     lines = [
-        f"📒 Статистика гачи: {banner_title}",
-        "",
-        f"🧭 {rank_label}: {player_payload.adventure_rank} ({player_payload.xp_into_rank}/{player_payload.xp_for_next_rank})",
-        f"🌟 Очки: {player_payload.total_points}",
-        f"💠 {currency_label}: {player_payload.total_primogems}",
-        f"🗂 Уникальных карт: {unique_cards}",
-        f"📦 Всего копий: {total_copies}",
+        _profile_banner_heading(banner, banner_title),
+        f"🧭 {_profile_rank_label(banner)}: {player_payload.adventure_rank} ({player_payload.xp_into_rank} / {player_payload.xp_for_next_rank})",
+        f"⭐ Очки: {_format_profile_number(player_payload.total_points)} | 💠 {_profile_currency_label(banner)}: {_format_profile_number(player_payload.total_primogems)}",
+        f"🎴 Уникальных: {_format_profile_number(unique_cards)} | Копий: {_format_profile_number(total_copies)}",
     ]
-    lines.extend(
-        f"{format_rarity_icon(CardRarity(entry.rarity))} {entry.summary_label} у вас: {entry.count}"
-        for entry in rarity_counts
-        if entry.count > 0
-    )
-    lines.extend(["", "🕘 Последние крутки:"])
+    collection_summary = _render_profile_collection_summary(rarity_counts)
+    if collection_summary is not None:
+        lines.append(collection_summary)
+    lines.append("")
+    lines.append("🕘 Последние крутки:")
     if not recent_pulls:
-        lines.append("Пока пусто.")
+        lines.append("нет")
     else:
         for entry in recent_pulls:
-            details = ""
-            if entry.region_label or entry.element_label:
-                details = f" • {entry.region_label or 'Неизвестно'} • {entry.element_label or 'Неизвестно'}"
             lines.append(
-                f"{entry.rarity_label} {entry.card_name} "
-                f"{details} "
-                f"| +{entry.adventure_xp_gained} {xp_suffix} | {entry.pulled_at:%Y-%m-%d %H:%M}"
+                f"{format_rarity_icon(CardRarity(entry.rarity))} {entry.card_name} ({_format_profile_timestamp(entry.pulled_at)})"
             )
     return "\n".join(lines)
 

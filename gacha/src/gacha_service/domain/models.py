@@ -22,9 +22,9 @@ RARITY_LABELS: dict[CardRarity, str] = {
 }
 
 RARITY_SUMMARY_ORDER: tuple[CardRarity, ...] = (
+    CardRarity.mythic,
     CardRarity.legendary,
     CardRarity.epic,
-    CardRarity.mythic,
 )
 
 RARITY_SUMMARY_LABELS: dict[CardRarity, str] = {
