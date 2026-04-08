@@ -125,6 +125,7 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert "Активность и пользователи" in response.text
     assert "Экономика" in response.text
     assert "Дневная активность пользователей" in response.text
+    assert "Архив сообщений · полезное" in response.text
     assert "Использование действий отношений" in response.text
     assert "Коды входа веб-панели" in response.text
     assert 'action="/app/admin/request-backup"' in response.text
@@ -357,6 +358,78 @@ async def test_admin_table_page_renders_messages_table_with_json_payload(monkeyp
     assert "Alice" in response.text
     assert "hello world" in response.text
     assert "message_id" in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    archived_message = MessageArchiveModel(
+        id=2,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=778,
+        snapshot_kind="edited",
+        snapshot_at=datetime(2026, 4, 8, 18, 25),
+        sent_at=datetime(2026, 4, 8, 18, 24),
+        edited_at=datetime(2026, 4, 8, 18, 25),
+        message_type="text",
+        text="answer text",
+        caption=None,
+        raw_message_json={
+            "message_id": 778,
+            "text": "answer text",
+            "reply_to_message": {
+                "message_id": 777,
+                "from": {"id": 202, "username": "bob", "first_name": "Bob"},
+                "text": "original question",
+            },
+        },
+        snapshot_hash="hash-2",
+        created_at=datetime(2026, 4, 8, 18, 25),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[archived_message]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(telegram_user_id=101, username="alice", first_name="Alice", last_name=None, is_bot=False),
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[
+                    ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat"),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/messages_compact")
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 200
+    assert "Архив сообщений · полезное" in response.text
+    assert "Archive Chat" in response.text
+    assert "Alice" in response.text
+    assert "@bob" in response.text
+    assert "original question" in response.text
+    assert "raw_message_json" not in response.text
 
 
 @pytest.mark.asyncio

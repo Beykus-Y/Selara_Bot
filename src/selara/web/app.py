@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, func, select, String, Text, Integer, BigInteger, SmallInteger, Boolean, DateTime, Date
+from sqlalchemy import and_, func, or_, select, String, Text, Integer, BigInteger, SmallInteger, Boolean, DateTime, Date
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -46,6 +46,7 @@ from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
     ChatModel,
     EconomyAccountModel,
+    MessageArchiveModel,
     UserChatActivityModel,
     UserFeatureRequestModel,
     UserModel,
@@ -6595,6 +6596,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "web",
         "other",
     ]
+    ADMIN_VIRTUAL_TABLES = (
+        "messages_compact",
+    )
 
     ADMIN_TABLE_META = {
         "admin_sessions": {"title": "Админ-сессии", "group": "web"},
@@ -6625,6 +6629,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "global_metrics": {"title": "Глобальные метрики", "group": "core"},
         "inline_private_messages": {"title": "Встроенные личные сообщения", "group": "web"},
         "messages": {"title": "Архив сообщений", "group": "activity"},
+        "messages_compact": {"title": "Архив сообщений · полезное", "group": "activity"},
         "marriages": {"title": "Браки", "group": "relationship"},
         "pairs": {"title": "Пары", "group": "relationship"},
         "relationship_action_usage": {"title": "Использование действий отношений", "group": "relationship"},
@@ -6666,6 +6671,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         from selara.infrastructure.db.models import Base
 
         table_names = sorted({mapper.class_.__tablename__ for mapper in Base.registry.mappers})
+        for table_name in ADMIN_VIRTUAL_TABLES:
+            if table_name not in table_names:
+                table_names.append(table_name)
+        table_names.sort()
         return [(table_name, _admin_table_title(table_name), _admin_table_group(table_name)) for table_name in table_names]
 
     def _admin_table_sections() -> list[dict[str, object]]:
@@ -6875,6 +6884,54 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "error": error,
         }
 
+    def _compact_message_text(row: MessageArchiveModel) -> str:
+        value = (row.text or row.caption or "").strip()
+        if value:
+            return value
+        return f"[{row.message_type}]"
+
+    def _compact_reply_summary(raw_message_json: dict[str, object] | None) -> str | None:
+        if not isinstance(raw_message_json, dict):
+            return None
+        reply_to = raw_message_json.get("reply_to_message")
+        if not isinstance(reply_to, dict):
+            return None
+
+        from_user = reply_to.get("from")
+        sender_chat = reply_to.get("sender_chat")
+        author_label = "unknown"
+        if isinstance(from_user, dict):
+            username = str(from_user.get("username") or "").strip()
+            if username:
+                author_label = f"@{username}"
+            else:
+                parts = [str(from_user.get("first_name") or "").strip(), str(from_user.get("last_name") or "").strip()]
+                full_name = " ".join(part for part in parts if part).strip()
+                if full_name:
+                    author_label = full_name
+                elif from_user.get("id") is not None:
+                    author_label = f"user:{from_user['id']}"
+        elif isinstance(sender_chat, dict):
+            title = str(sender_chat.get("title") or "").strip()
+            if title:
+                author_label = title
+            elif sender_chat.get("id") is not None:
+                author_label = f"chat:{sender_chat['id']}"
+
+        message_id = reply_to.get("message_id")
+        message_text = ""
+        for key in ("text", "caption"):
+            raw_text = reply_to.get(key)
+            if isinstance(raw_text, str) and raw_text.strip():
+                message_text = raw_text.strip()
+                break
+        if not message_text:
+            message_text = f"[{str(reply_to.get('content_type') or 'message')}]"
+
+        preview = message_text if len(message_text) <= 120 else f"{message_text[:120]}..."
+        prefix = f"#{message_id} " if message_id is not None else ""
+        return f"{prefix}{author_label}: {preview}"
+
     @app.get("/app/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
         async with session_factory() as session:
@@ -7072,6 +7129,98 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
+
+        if table_name == "messages_compact":
+            page = max(1, int(request.query_params.get("page", 1)))
+            limit = 50
+            chat_id_filter_raw = (request.query_params.get("chat_id") or "").strip()
+            user_id_filter_raw = (request.query_params.get("user_id") or "").strip()
+            text_filter = (request.query_params.get("text") or "").strip()
+            snapshot_kind_filter = (request.query_params.get("snapshot_kind") or "").strip().lower()
+
+            async with session_factory() as session:
+                stmt = select(MessageArchiveModel)
+                count_stmt = select(func.count()).select_from(MessageArchiveModel)
+                filters = []
+
+                if chat_id_filter_raw:
+                    try:
+                        filters.append(MessageArchiveModel.chat_id == int(chat_id_filter_raw))
+                    except ValueError:
+                        pass
+                if user_id_filter_raw:
+                    try:
+                        filters.append(MessageArchiveModel.user_id == int(user_id_filter_raw))
+                    except ValueError:
+                        pass
+                if text_filter:
+                    filters.append(
+                        or_(
+                            MessageArchiveModel.text.ilike(f"%{text_filter}%"),
+                            MessageArchiveModel.caption.ilike(f"%{text_filter}%"),
+                        )
+                    )
+                if snapshot_kind_filter in {"created", "edited"}:
+                    filters.append(MessageArchiveModel.snapshot_kind == snapshot_kind_filter)
+
+                if filters:
+                    stmt = stmt.where(and_(*filters))
+                    count_stmt = count_stmt.where(and_(*filters))
+
+                stmt = stmt.order_by(MessageArchiveModel.snapshot_at.desc(), MessageArchiveModel.id.desc()).limit(limit).offset((page - 1) * limit)
+                rows = (await session.execute(stmt)).scalars().all()
+                total = int((await session.execute(count_stmt)).scalar() or 0)
+
+                user_ids = sorted({int(row.user_id) for row in rows})
+                chat_ids = sorted({int(row.chat_id) for row in rows})
+                user_rows = (
+                    await session.execute(select(UserModel).where(UserModel.telegram_user_id.in_(user_ids)))
+                ).scalars().all() if user_ids else []
+                chat_rows = (
+                    await session.execute(select(ChatModel).where(ChatModel.telegram_chat_id.in_(chat_ids)))
+                ).scalars().all() if chat_ids else []
+                user_labels = {int(row.telegram_user_id): _admin_user_reference_label(row) for row in user_rows}
+                chat_labels = {int(row.telegram_chat_id): _admin_chat_reference_label(row) for row in chat_rows}
+                await session.commit()
+
+            compact_rows = [
+                {
+                    "id": int(row.id),
+                    "snapshot_at": row.snapshot_at,
+                    "chat_id": int(row.chat_id),
+                    "chat_label": chat_labels.get(int(row.chat_id), f"chat:{int(row.chat_id)}"),
+                    "user_id": int(row.user_id),
+                    "user_label": user_labels.get(int(row.user_id), f"user:{int(row.user_id)}"),
+                    "snapshot_kind": row.snapshot_kind,
+                    "message_type": row.message_type,
+                    "message_preview": _compact_message_text(row),
+                    "reply_preview": _compact_reply_summary(row.raw_message_json),
+                    "raw_href": f"/app/admin/table/messages?id={int(row.id)}",
+                }
+                for row in rows
+            ]
+
+            return _render_template(
+                "admin_messages_compact.html",
+                page_title="Selara • Архив сообщений · полезное",
+                page_name="admin_messages_compact",
+                **_admin_layout_context(
+                    flash=request.query_params.get("flash"),
+                    error=request.query_params.get("error"),
+                ),
+                table_name=table_name,
+                table_title=_admin_table_title(table_name),
+                rows=compact_rows,
+                page=page,
+                total=total,
+                limit=limit,
+                filters_input={
+                    "chat_id": chat_id_filter_raw,
+                    "user_id": user_id_filter_raw,
+                    "text": text_filter,
+                    "snapshot_kind": snapshot_kind_filter,
+                },
+            )
 
         page = int(request.query_params.get("page", 1))
         limit = 50

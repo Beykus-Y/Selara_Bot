@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <nav class="breadcrumb">
+          <a href="/app/admin">Админка</a>
+          <span class="breadcrumb-sep">/</span>
+          <span>{{ table_title }}</span>
+        </nav>
+        <h2>{{ table_title }}</h2>
+        <p class="panel-subtitle">Только полезные поля без raw JSON. Записей: {{ total }}</p>
+      </div>
+    </div>
+
+    <div class="admin-table-controls">
+      <form class="admin-search-form" method="get" action="/app/admin/table/{{ table_name }}" style="flex-wrap: wrap; gap: 8px;">
+        <input
+          type="text"
+          name="chat_id"
+          placeholder="chat_id"
+          value="{{ filters_input.get('chat_id', '') }}"
+          class="admin-search-input"
+          style="min-width: 120px; flex: 1;"
+        >
+        <input
+          type="text"
+          name="user_id"
+          placeholder="user_id"
+          value="{{ filters_input.get('user_id', '') }}"
+          class="admin-search-input"
+          style="min-width: 120px; flex: 1;"
+        >
+        <input
+          type="text"
+          name="text"
+          placeholder="текст / подпись"
+          value="{{ filters_input.get('text', '') }}"
+          class="admin-search-input"
+          style="min-width: 180px; flex: 2;"
+        >
+        <select name="snapshot_kind" class="admin-search-input" style="min-width: 140px; flex: 1;">
+          <option value="" {% if not filters_input.get('snapshot_kind') %}selected{% endif %}>created / edited</option>
+          <option value="created" {% if filters_input.get('snapshot_kind') == 'created' %}selected{% endif %}>created</option>
+          <option value="edited" {% if filters_input.get('snapshot_kind') == 'edited' %}selected{% endif %}>edited</option>
+        </select>
+        <button type="submit" class="button primary">Найти</button>
+        {% if filters_input.get('chat_id') or filters_input.get('user_id') or filters_input.get('text') or filters_input.get('snapshot_kind') %}
+          <a href="/app/admin/table/{{ table_name }}" class="button ghost">Сбросить</a>
+        {% endif %}
+      </form>
+    </div>
+
+    <div class="table-wrapper">
+      <table class="admin-data-table">
+        <thead>
+          <tr>
+            <th>Когда</th>
+            <th>Чат</th>
+            <th>Автор</th>
+            <th>Тип</th>
+            <th>Сообщение</th>
+            <th>Reply</th>
+            <th class="admin-actions-col">Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>{{ row.snapshot_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC</td>
+              <td>
+                <strong>{{ row.chat_label }}</strong>
+                <div class="text-muted"><code>{{ row.chat_id }}</code></div>
+              </td>
+              <td>
+                <strong>{{ row.user_label }}</strong>
+                <div class="text-muted"><code>{{ row.user_id }}</code></div>
+              </td>
+              <td>
+                <strong>{{ row.snapshot_kind }}</strong>
+                <div class="text-muted">{{ row.message_type }}</div>
+              </td>
+              <td>
+                {% if row.message_preview|length > 180 %}
+                  <span title="{{ row.message_preview }}">{{ row.message_preview[:180] }}...</span>
+                {% else %}
+                  {{ row.message_preview }}
+                {% endif %}
+              </td>
+              <td>
+                {% if row.reply_preview %}
+                  {% if row.reply_preview|length > 180 %}
+                    <span title="{{ row.reply_preview }}">{{ row.reply_preview[:180] }}...</span>
+                  {% else %}
+                    {{ row.reply_preview }}
+                  {% endif %}
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td class="admin-actions-col">
+                <span class="admin-row-actions">
+                  <a class="button button-small ghost" href="{{ row.raw_href }}">raw</a>
+                </span>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="7" class="text-center text-muted">Нет записей</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if total > limit %}
+      <div class="admin-pagination">
+        {% set filter_params = namespace(str='') %}
+        {% for key, value in filters_input.items() %}
+          {% if value %}
+            {% set filter_params.str = filter_params.str + '&' + key + '=' + value %}
+          {% endif %}
+        {% endfor %}
+
+        {% if page > 1 %}
+          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page - 1 }}{{ filter_params.str }}">← Назад</a>
+        {% endif %}
+
+        <span class="pagination-info">
+          Страница {{ page }} из {{ ((total + limit - 1) / limit)|int }}
+        </span>
+
+        {% if page * limit < total %}
+          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page + 1 }}{{ filter_params.str }}">Вперёд →</a>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <div class="admin-back-link">
+      <a href="/app/admin" class="button ghost">← К списку таблиц</a>
+    </div>
+  </div>
+{% endblock %}
