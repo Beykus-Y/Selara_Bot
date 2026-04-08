@@ -1,6 +1,6 @@
 """add messages archive and save_message setting
 
-Revision ID: 0041_add_messages_and_save_message_setting
+Revision ID: 0041_add_messages_archive
 Revises: 0040_add_subscription_exempt
 Create Date: 2026-04-09 00:00:00
 """
@@ -12,7 +12,7 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0041_add_messages_and_save_message_setting"
+revision: str = "0041_add_messages_archive"
 down_revision: str | None = "0040_add_subscription_exempt"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
