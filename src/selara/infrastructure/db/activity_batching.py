@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,16 @@ class ActivityBatchMessage:
     is_bot: bool
     event_at: datetime
     telegram_message_id: int | None = None
+    count_as_activity: bool = True
+    snapshot_kind: str | None = None
+    snapshot_at: datetime | None = None
+    sent_at: datetime | None = None
+    edited_at: datetime | None = None
+    message_type: str | None = None
+    text: str | None = None
+    caption: str | None = None
+    raw_message_json: dict[str, Any] | None = None
+    snapshot_hash: str | None = None
 
 
 @dataclass(frozen=True)

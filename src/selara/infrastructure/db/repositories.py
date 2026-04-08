@@ -101,6 +101,7 @@ from selara.infrastructure.db.models import (
     GlobalAchievementStatsModel,
     InlinePrivateMessageModel,
     MarriageModel,
+    MessageArchiveModel,
     PairModel,
     RelationshipGraphModel,
     RelationshipActionUsageModel,
@@ -372,6 +373,9 @@ class SqlAlchemyActivityRepository:
             )
             await self._upsert_chat(chat)
             await self._upsert_user(user)
+            await self._insert_message_archive_from_batch_event(event)
+            if not event.count_as_activity:
+                continue
             inserted = await self._insert_message_event(
                 chat_id=event.chat_id,
                 user_id=event.user_id,
@@ -432,7 +436,10 @@ class SqlAlchemyActivityRepository:
             base_count = int((await self._session.execute(select(func.count()).select_from(UserModel))).scalar_one() or 0)
             await set_global_users_base_count(self._session, base_count=base_count)
 
-        inserted_rows = await self._insert_message_events_batch_postgresql(self._dedupe_activity_batch_events(events))
+        await self._insert_message_archives_batch_postgresql(self._build_message_archive_rows(events))
+        inserted_rows = await self._insert_message_events_batch_postgresql(
+            self._dedupe_activity_batch_events([event for event in events if event.count_as_activity])
+        )
         if not inserted_rows:
             return ActivityBatchFlushResult()
 
@@ -661,6 +668,85 @@ class SqlAlchemyActivityRepository:
             for chat_id, user_id, sent_at in rows
         ]
 
+    @staticmethod
+    def _build_message_archive_rows(events: Sequence[ActivityBatchMessage]) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        seen_keys: set[tuple[int, int, str]] = set()
+        for event in events:
+            if (
+                event.telegram_message_id is None
+                or event.snapshot_kind is None
+                or event.snapshot_at is None
+                or event.sent_at is None
+                or event.message_type is None
+                or event.raw_message_json is None
+                or event.snapshot_hash is None
+            ):
+                continue
+
+            dedupe_key = (event.chat_id, int(event.telegram_message_id), str(event.snapshot_hash))
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            rows.append(
+                {
+                    "chat_id": event.chat_id,
+                    "user_id": event.user_id,
+                    "telegram_message_id": event.telegram_message_id,
+                    "snapshot_kind": event.snapshot_kind,
+                    "snapshot_at": _coerce_utc_datetime(event.snapshot_at),
+                    "sent_at": _coerce_utc_datetime(event.sent_at),
+                    "edited_at": _normalize_optional_datetime(event.edited_at),
+                    "message_type": event.message_type,
+                    "text": event.text,
+                    "caption": event.caption,
+                    "raw_message_json": event.raw_message_json,
+                    "snapshot_hash": event.snapshot_hash,
+                }
+            )
+        return rows
+
+    async def _insert_message_archives_batch_postgresql(self, rows: Sequence[dict[str, object]]) -> int:
+        if not rows:
+            return 0
+
+        stmt = pg_insert(MessageArchiveModel).values(list(rows))
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=[
+                MessageArchiveModel.chat_id,
+                MessageArchiveModel.telegram_message_id,
+                MessageArchiveModel.snapshot_hash,
+            ]
+        )
+        return len((await self._session.execute(stmt.returning(MessageArchiveModel.id))).scalars().all())
+
+    async def _insert_message_archive_from_batch_event(self, event: ActivityBatchMessage) -> bool:
+        if (
+            event.telegram_message_id is None
+            or event.snapshot_kind is None
+            or event.snapshot_at is None
+            or event.sent_at is None
+            or event.message_type is None
+            or event.raw_message_json is None
+            or event.snapshot_hash is None
+        ):
+            return False
+
+        return await self._insert_message_archive(
+            chat_id=event.chat_id,
+            user_id=event.user_id,
+            telegram_message_id=event.telegram_message_id,
+            snapshot_kind=event.snapshot_kind,
+            snapshot_at=event.snapshot_at,
+            sent_at=event.sent_at,
+            edited_at=event.edited_at,
+            message_type=event.message_type,
+            text=event.text,
+            caption=event.caption,
+            raw_message_json=event.raw_message_json,
+            snapshot_hash=event.snapshot_hash,
+        )
+
     async def _get_existing_activity_state_batch_postgresql(
         self,
         pairs: Sequence[tuple[int, int]],
@@ -734,6 +820,82 @@ class SqlAlchemyActivityRepository:
             },
         )
         await self._session.execute(stmt)
+
+    async def _insert_message_archive(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        telegram_message_id: int,
+        snapshot_kind: str,
+        snapshot_at: datetime,
+        sent_at: datetime,
+        edited_at: datetime | None,
+        message_type: str,
+        text: str | None,
+        caption: str | None,
+        raw_message_json: dict[str, object],
+        snapshot_hash: str,
+    ) -> bool:
+        normalized_snapshot_at = _coerce_utc_datetime(snapshot_at)
+        normalized_sent_at = _coerce_utc_datetime(sent_at)
+        normalized_edited_at = _normalize_optional_datetime(edited_at)
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+
+        if dialect == "postgresql":
+            stmt = pg_insert(MessageArchiveModel).values(
+                chat_id=chat_id,
+                user_id=user_id,
+                telegram_message_id=telegram_message_id,
+                snapshot_kind=snapshot_kind,
+                snapshot_at=normalized_snapshot_at,
+                sent_at=normalized_sent_at,
+                edited_at=normalized_edited_at,
+                message_type=message_type,
+                text=text,
+                caption=caption,
+                raw_message_json=raw_message_json,
+                snapshot_hash=snapshot_hash,
+            )
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=[
+                    MessageArchiveModel.chat_id,
+                    MessageArchiveModel.telegram_message_id,
+                    MessageArchiveModel.snapshot_hash,
+                ]
+            )
+            result = await self._session.execute(stmt.returning(MessageArchiveModel.id))
+            return result.scalar_one_or_none() is not None
+
+        existing = (
+            await self._session.execute(
+                select(MessageArchiveModel.id).where(
+                    MessageArchiveModel.chat_id == chat_id,
+                    MessageArchiveModel.telegram_message_id == telegram_message_id,
+                    MessageArchiveModel.snapshot_hash == snapshot_hash,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return False
+
+        self._session.add(
+            MessageArchiveModel(
+                chat_id=chat_id,
+                user_id=user_id,
+                telegram_message_id=telegram_message_id,
+                snapshot_kind=snapshot_kind,
+                snapshot_at=normalized_snapshot_at,
+                sent_at=normalized_sent_at,
+                edited_at=normalized_edited_at,
+                message_type=message_type,
+                text=text,
+                caption=caption,
+                raw_message_json=raw_message_json,
+                snapshot_hash=snapshot_hash,
+            )
+        )
+        return True
 
     async def _insert_message_event(
         self,
@@ -5969,6 +6131,7 @@ class SqlAlchemyActivityRepository:
             antiraid_recent_window_minutes=int(row.antiraid_recent_window_minutes),
             chat_write_locked=bool(row.chat_write_locked),
             cleanup_economy_commands=bool(row.cleanup_economy_commands),
+            save_message=bool(row.save_message),
             leaderboard_hybrid_buttons_enabled=bool(row.leaderboard_hybrid_buttons_enabled),
             interesting_facts_enabled=bool(row.interesting_facts_enabled),
             interesting_facts_interval_minutes=int(row.interesting_facts_interval_minutes),

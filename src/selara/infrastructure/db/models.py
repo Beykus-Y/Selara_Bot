@@ -280,6 +280,38 @@ class UserChatMessageEventModel(Base):
     )
 
 
+class MessageArchiveModel(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    snapshot_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("snapshot_kind IN ('created', 'edited')", name="ck_messages_snapshot_kind"),
+        UniqueConstraint("chat_id", "telegram_message_id", "snapshot_hash", name="uq_messages_chat_message_snapshot"),
+    )
+
+
 class ChatActivityEventSyncStateModel(Base):
     __tablename__ = "chat_activity_event_sync_state"
 
@@ -344,6 +376,8 @@ Index("idx_user_chat_activity_daily_chat_date", UserChatActivityDailyModel.chat_
 Index("idx_user_chat_activity_minute_chat_minute", UserChatActivityMinuteModel.chat_id, UserChatActivityMinuteModel.activity_minute)
 Index("idx_user_chat_message_events_chat_sent", UserChatMessageEventModel.chat_id, UserChatMessageEventModel.sent_at)
 Index("idx_user_chat_message_events_chat_user_sent", UserChatMessageEventModel.chat_id, UserChatMessageEventModel.user_id, UserChatMessageEventModel.sent_at)
+Index("idx_messages_chat_snapshot", MessageArchiveModel.chat_id, MessageArchiveModel.snapshot_at)
+Index("idx_messages_chat_user_snapshot", MessageArchiveModel.chat_id, MessageArchiveModel.user_id, MessageArchiveModel.snapshot_at)
 Index("idx_user_karma_votes_chat_target_created", UserKarmaVoteModel.chat_id, UserKarmaVoteModel.target_user_id, UserKarmaVoteModel.created_at)
 Index("idx_user_karma_votes_chat_voter_created", UserKarmaVoteModel.chat_id, UserKarmaVoteModel.voter_user_id, UserKarmaVoteModel.created_at)
 
@@ -791,6 +825,7 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    save_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     titles_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     title_price: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50000, server_default="50000")
     craft_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

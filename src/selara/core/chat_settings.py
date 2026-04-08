@@ -59,6 +59,7 @@ class ChatSettings:
     antiraid_recent_window_minutes: int = 10
     chat_write_locked: bool = False
     cleanup_economy_commands: bool = False
+    save_message: bool = False
     leaderboard_hybrid_buttons_enabled: bool = False
     interesting_facts_enabled: bool = False
     interesting_facts_interval_minutes: int = 180
@@ -101,6 +102,7 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "chat_write_locked",
     "custom_rp_enabled",
     "family_tree_enabled",
+    "save_message",
     "interesting_facts_enabled",
     "interesting_facts_interval_minutes",
     "interesting_facts_target_messages",
@@ -180,6 +182,7 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         economy_negative_event_chance_percent=settings.economy_negative_event_chance_percent,
         economy_negative_event_loss_percent=settings.economy_negative_event_loss_percent,
         cleanup_economy_commands=settings.cleanup_economy_commands,
+        save_message=False,
         interesting_facts_enabled=False,
         interesting_facts_interval_minutes=180,
         interesting_facts_target_messages=150,
@@ -260,6 +263,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "chat_write_locked",
         "custom_rp_enabled",
         "family_tree_enabled",
+        "save_message",
         "interesting_facts_enabled",
         "titles_enabled",
         "craft_enabled",

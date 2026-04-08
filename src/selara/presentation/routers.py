@@ -8,6 +8,7 @@ from selara.presentation.handlers.game import router as game_router
 from selara.presentation.handlers.help import router as help_router
 from selara.presentation.handlers.aliases import router as aliases_router
 from selara.presentation.handlers.chat_assistant import router as chat_assistant_router
+from selara.presentation.handlers.message_archive import router as message_archive_router
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
 from selara.presentation.handlers.relationships import router as relationships_router
@@ -40,6 +41,11 @@ def build_router(
     root.message.outer_middleware(CommandAccessMiddleware())
     root.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
+    root.edited_message.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    root.edited_message.outer_middleware(DBSessionMiddleware(session_factory))
+    root.edited_message.outer_middleware(ChatSettingsMiddleware())
+    root.edited_message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
+
     root.callback_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.callback_query.outer_middleware(DBSessionMiddleware(session_factory))
     root.callback_query.outer_middleware(BotBanMiddleware())
@@ -54,6 +60,7 @@ def build_router(
     root.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
 
+    root.include_router(message_archive_router)
     root.include_router(help_router)
     root.include_router(stats_router)
     root.include_router(chat_assistant_router)

@@ -46,6 +46,9 @@ def _normalize_database_url(url: str) -> str:
 
 
 def _to_psycopg_url(url: str) -> str:
+    if not url.startswith("postgresql"):
+        return url
+
     sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     parts = urlsplit(sync_url)
     query_params = dict(parse_qsl(parts.query, keep_blank_values=True))

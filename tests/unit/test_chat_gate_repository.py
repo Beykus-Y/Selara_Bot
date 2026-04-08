@@ -81,7 +81,13 @@ async def test_chat_settings_roundtrip_includes_chat_gate_fields() -> None:
 
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
-        stored = replace(_BASE_CHAT_SETTINGS, antiraid_enabled=True, antiraid_recent_window_minutes=5, chat_write_locked=True)
+        stored = replace(
+            _BASE_CHAT_SETTINGS,
+            antiraid_enabled=True,
+            antiraid_recent_window_minutes=5,
+            chat_write_locked=True,
+            save_message=True,
+        )
 
         await repo.upsert_chat_settings(chat=chat, values=settings_to_dict(stored))
         loaded = await repo.get_chat_settings(chat_id=chat.telegram_chat_id)
@@ -90,6 +96,7 @@ async def test_chat_settings_roundtrip_includes_chat_gate_fields() -> None:
         assert loaded.antiraid_enabled is True
         assert loaded.antiraid_recent_window_minutes == 5
         assert loaded.chat_write_locked is True
+        assert loaded.save_message is True
 
     await engine.dispose()
 

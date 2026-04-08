@@ -60,6 +60,16 @@ class ActivityBatcher:
         is_bot: bool,
         event_at: datetime,
         telegram_message_id: int | None = None,
+        count_as_activity: bool = True,
+        snapshot_kind: str | None = None,
+        snapshot_at: datetime | None = None,
+        sent_at: datetime | None = None,
+        edited_at: datetime | None = None,
+        message_type: str | None = None,
+        text: str | None = None,
+        caption: str | None = None,
+        raw_message_json: dict[str, object] | None = None,
+        snapshot_hash: str | None = None,
     ) -> None:
         if self._closed:
             raise RuntimeError("ActivityBatcher is closed.")
@@ -77,6 +87,16 @@ class ActivityBatcher:
                     is_bot=is_bot,
                     event_at=event_at,
                     telegram_message_id=telegram_message_id,
+                    count_as_activity=count_as_activity,
+                    snapshot_kind=snapshot_kind,
+                    snapshot_at=snapshot_at,
+                    sent_at=sent_at,
+                    edited_at=edited_at,
+                    message_type=message_type,
+                    text=text,
+                    caption=caption,
+                    raw_message_json=raw_message_json,
+                    snapshot_hash=snapshot_hash,
                 )
             )
             should_wake = len(self._pending) >= self._max_events

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -50,6 +52,7 @@ def test_membership_service_message_detects_join_and_leave() -> None:
 def _event(*, text: str = "hello", chat_type: str = "group") -> Message:
     message = AsyncMock(spec=Message)
     message.text = text
+    message.caption = None
     message.chat = SimpleNamespace(id=101, type=chat_type, title="Test Chat")
     message.from_user = SimpleNamespace(
         id=501,
@@ -59,7 +62,10 @@ def _event(*, text: str = "hello", chat_type: str = "group") -> Message:
         is_bot=False,
     )
     message.date = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
+    message.edit_date = None
     message.message_id = 777
+    message.content_type = "text"
+    message.model_dump_json.return_value = json.dumps({"message_id": 777, "text": text}, ensure_ascii=False)
     message.new_chat_members = []
     message.left_chat_member = None
     return message
@@ -90,6 +96,108 @@ async def test_activity_tracker_enqueues_after_successful_handler() -> None:
         is_bot=False,
         event_at=event.date,
         telegram_message_id=777,
+        count_as_activity=True,
+        snapshot_kind=None,
+        snapshot_at=None,
+        sent_at=None,
+        edited_at=None,
+        message_type=None,
+        text=None,
+        caption=None,
+        raw_message_json=None,
+        snapshot_hash=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_enqueues_archive_payload_when_save_message_enabled() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value="handled")
+    event = _event(text="/me")
+    raw_payload = {"message_id": 777, "text": "/me", "chat": {"id": 101}}
+    event.model_dump_json.return_value = json.dumps(raw_payload, ensure_ascii=False)
+    expected_hash = hashlib.sha256(
+        json.dumps(raw_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    result = await middleware(
+        handler,
+        event,
+        {
+            "settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"}),
+            "chat_settings": SimpleNamespace(save_message=True),
+        },
+    )
+
+    assert result == "handled"
+    batcher.enqueue_message.assert_awaited_once_with(
+        chat_id=101,
+        chat_type="group",
+        chat_title="Test Chat",
+        user_id=501,
+        username="alice",
+        first_name="Alice",
+        last_name="Doe",
+        is_bot=False,
+        event_at=event.date,
+        telegram_message_id=777,
+        count_as_activity=False,
+        snapshot_kind="created",
+        snapshot_at=event.date,
+        sent_at=event.date,
+        edited_at=None,
+        message_type="text",
+        text="/me",
+        caption=None,
+        raw_message_json=raw_payload,
+        snapshot_hash=expected_hash,
+    )
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value=None)
+    event = _event(text="edited text")
+    event.edit_date = datetime(2026, 3, 13, 12, 5, tzinfo=timezone.utc)
+    raw_payload = {"message_id": 777, "text": "edited text", "edit_date": "2026-03-13T12:05:00Z"}
+    event.model_dump_json.return_value = json.dumps(raw_payload, ensure_ascii=False)
+    expected_hash = hashlib.sha256(
+        json.dumps(raw_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    await middleware(
+        handler,
+        event,
+        {
+            "settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"}),
+            "chat_settings": SimpleNamespace(save_message=True),
+        },
+    )
+
+    batcher.enqueue_message.assert_awaited_once_with(
+        chat_id=101,
+        chat_type="group",
+        chat_title="Test Chat",
+        user_id=501,
+        username="alice",
+        first_name="Alice",
+        last_name="Doe",
+        is_bot=False,
+        event_at=event.date,
+        telegram_message_id=777,
+        count_as_activity=False,
+        snapshot_kind="edited",
+        snapshot_at=event.edit_date,
+        sent_at=event.date,
+        edited_at=event.edit_date,
+        message_type="text",
+        text="edited text",
+        caption=None,
+        raw_message_json=raw_payload,
+        snapshot_hash=expected_hash,
     )
 
 

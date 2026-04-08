@@ -11,6 +11,7 @@ from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
     ChatMetricsModel,
+    MessageArchiveModel,
     UserChatActivityDailyModel,
     UserChatActivityMinuteModel,
     UserChatActivityModel,
@@ -19,6 +20,14 @@ from selara.infrastructure.db.models import (
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, reason="aiosqlite is not installed")
+
+
+def _utc_or_naive_as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @pytest.mark.asyncio
@@ -57,6 +66,198 @@ async def test_activity_event_runtime_deduplicates_message_id() -> None:
         assert int(event_count or 0) == 1
         assert legacy_row is not None
         assert int(legacy_row.message_count) == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_archives_created_message_and_counts_activity() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    event_at = datetime(2026, 3, 13, 10, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=1505,
+                    chat_type="group",
+                    chat_title="Archive",
+                    user_id=1909,
+                    username="alice",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at,
+                    telegram_message_id=77,
+                    count_as_activity=True,
+                    snapshot_kind="created",
+                    snapshot_at=event_at,
+                    sent_at=event_at,
+                    edited_at=None,
+                    message_type="text",
+                    text="hello",
+                    caption=None,
+                    raw_message_json={"message_id": 77, "text": "hello"},
+                    snapshot_hash="created-hash",
+                )
+            ]
+        )
+
+        archive_rows = (
+            await session.execute(select(MessageArchiveModel).where(MessageArchiveModel.chat_id == 1505))
+        ).scalars().all()
+        activity_row = await session.get(UserChatActivityModel, {"chat_id": 1505, "user_id": 1909})
+
+        assert len(archive_rows) == 1
+        assert archive_rows[0].snapshot_kind == "created"
+        assert archive_rows[0].message_type == "text"
+        assert archive_rows[0].text == "hello"
+        assert archive_rows[0].edited_at is None
+        assert activity_row is not None
+        assert int(activity_row.message_count) == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_archives_edited_message_without_touching_activity() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    event_at = datetime(2026, 3, 13, 10, 0, tzinfo=timezone.utc)
+    edited_at = event_at + timedelta(minutes=5)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=1606,
+                    chat_type="group",
+                    chat_title="Archive",
+                    user_id=1909,
+                    username="alice",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at,
+                    telegram_message_id=77,
+                    count_as_activity=True,
+                    snapshot_kind="created",
+                    snapshot_at=event_at,
+                    sent_at=event_at,
+                    edited_at=None,
+                    message_type="text",
+                    text="hello",
+                    caption=None,
+                    raw_message_json={"message_id": 77, "text": "hello"},
+                    snapshot_hash="created-hash",
+                )
+            ]
+        )
+        await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=1606,
+                    chat_type="group",
+                    chat_title="Archive",
+                    user_id=1909,
+                    username="alice",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at,
+                    telegram_message_id=77,
+                    count_as_activity=False,
+                    snapshot_kind="edited",
+                    snapshot_at=edited_at,
+                    sent_at=event_at,
+                    edited_at=edited_at,
+                    message_type="text",
+                    text="hello there",
+                    caption=None,
+                    raw_message_json={"message_id": 77, "text": "hello there", "edit_date": "2026-03-13T10:05:00Z"},
+                    snapshot_hash="edited-hash",
+                )
+            ]
+        )
+
+        archive_rows = (
+            await session.execute(
+                select(MessageArchiveModel)
+                .where(MessageArchiveModel.chat_id == 1606)
+                .order_by(MessageArchiveModel.snapshot_at.asc())
+            )
+        ).scalars().all()
+        activity_row = await session.get(UserChatActivityModel, {"chat_id": 1606, "user_id": 1909})
+
+        assert len(archive_rows) == 2
+        assert [row.snapshot_kind for row in archive_rows] == ["created", "edited"]
+        assert _utc_or_naive_as_utc(archive_rows[-1].edited_at) == edited_at
+        assert archive_rows[-1].text == "hello there"
+        assert activity_row is not None
+        assert int(activity_row.message_count) == 1
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_deduplicates_duplicate_archive_snapshot() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    event_at = datetime(2026, 3, 13, 10, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        batch_event = ActivityBatchMessage(
+            chat_id=1707,
+            chat_type="group",
+            chat_title="Archive",
+            user_id=1909,
+            username="alice",
+            first_name="Alice",
+            last_name=None,
+            is_bot=False,
+            event_at=event_at,
+            telegram_message_id=77,
+            count_as_activity=True,
+            snapshot_kind="created",
+            snapshot_at=event_at,
+            sent_at=event_at,
+            edited_at=None,
+            message_type="text",
+            text="hello",
+            caption=None,
+            raw_message_json={"message_id": 77, "text": "hello"},
+            snapshot_hash="duplicate-hash",
+        )
+
+        await repo.flush_activity_batch([batch_event])
+        await repo.flush_activity_batch([batch_event])
+
+        archive_count = await session.scalar(select(func.count(MessageArchiveModel.id)).where(MessageArchiveModel.chat_id == 1707))
+        event_count = await session.scalar(
+            select(func.count(UserChatMessageEventModel.id)).where(UserChatMessageEventModel.chat_id == 1707)
+        )
+        activity_row = await session.get(UserChatActivityModel, {"chat_id": 1707, "user_id": 1909})
+
+        assert int(archive_count or 0) == 1
+        assert int(event_count or 0) == 1
+        assert activity_row is not None
+        assert int(activity_row.message_count) == 1
 
     await engine.dispose()
 

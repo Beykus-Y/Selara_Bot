@@ -98,6 +98,21 @@ def test_apply_setting_update_accepts_valid_bool_change() -> None:
     assert updated["leaderboard_hybrid_buttons_enabled"] is True
 
 
+def test_apply_setting_update_accepts_save_message_toggle() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+    updated, error = apply_setting_update(
+        key="save_message",
+        raw_value="true",
+        current=current,
+        defaults=defaults,
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["save_message"] is True
+
+
 def test_apply_setting_update_rejects_week_start_hour_out_of_range() -> None:
     current = settings_to_dict(_chat_settings())
     defaults = settings_to_dict(_chat_settings())
