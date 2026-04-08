@@ -63,7 +63,11 @@
                   {% else %}
                     {{ value }}
                   {% endif %}
-                  {% set ref_label = reference_labels.get(col, {}).get(value) %}
+                  {% if value is number or value is string %}
+                    {% set ref_label = reference_labels.get(col, {}).get(value) %}
+                  {% else %}
+                    {% set ref_label = none %}
+                  {% endif %}
                   {% if ref_label %}
                     <div class="text-muted">{{ ref_label }}</div>
                   {% endif %}

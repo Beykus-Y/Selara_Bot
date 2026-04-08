@@ -6624,6 +6624,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "global_achievement_stats": {"title": "Глобальная статистика достижений", "group": "achievement"},
         "global_metrics": {"title": "Глобальные метрики", "group": "core"},
         "inline_private_messages": {"title": "Встроенные личные сообщения", "group": "web"},
+        "messages": {"title": "Архив сообщений", "group": "activity"},
         "marriages": {"title": "Браки", "group": "relationship"},
         "pairs": {"title": "Пары", "group": "relationship"},
         "relationship_action_usage": {"title": "Использование действий отношений", "group": "relationship"},

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from selara.core.config import Settings
-from selara.infrastructure.db.models import ChatModel, MarriageModel, UserChatActivityModel, UserModel
+from selara.infrastructure.db.models import ChatModel, MarriageModel, MessageArchiveModel, UserChatActivityModel, UserModel
 from selara.web import app as web_app_module
 
 
@@ -294,6 +294,69 @@ async def test_admin_table_page_builds_composite_pk_links(monkeypatch) -> None:
     assert response.status_code == 200
     assert "/app/admin/table/user_chat_activity/edit?chat_id=30&amp;user_id=10" in response.text
     assert "/app/admin/table/user_chat_activity/delete?chat_id=30&amp;user_id=10" in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_table_page_renders_messages_table_with_json_payload(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    archived_message = MessageArchiveModel(
+        id=1,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=777,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 24),
+        sent_at=datetime(2026, 4, 8, 18, 24),
+        edited_at=None,
+        message_type="text",
+        text="hello world",
+        caption=None,
+        raw_message_json={"message_id": 777, "text": "hello world"},
+        snapshot_hash="hash-1",
+        created_at=datetime(2026, 4, 8, 18, 24),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[archived_message]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(telegram_user_id=101, username="alice", first_name="Alice", last_name=None, is_bot=False),
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[
+                    ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat"),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/messages")
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 200
+    assert "Архив сообщений" in response.text
+    assert "Archive Chat" in response.text
+    assert "Alice" in response.text
+    assert "hello world" in response.text
+    assert "message_id" in response.text
 
 
 @pytest.mark.asyncio
