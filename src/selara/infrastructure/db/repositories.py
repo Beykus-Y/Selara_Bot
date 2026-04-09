@@ -168,10 +168,14 @@ def _normalize_award_title(value: str) -> str:
     return normalized[:160]
 
 
-def _coerce_utc_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+def _coerce_utc_datetime(value: datetime | int | float) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    raise TypeError(f"Unsupported datetime value: {value!r}")
 
 
 def _latest_datetime(left: datetime, right: datetime) -> datetime:
@@ -186,7 +190,7 @@ def _serialize_datetime(value: datetime | None) -> str | None:
     return _coerce_utc_datetime(value).isoformat()
 
 
-def _normalize_optional_datetime(value: datetime | None) -> datetime | None:
+def _normalize_optional_datetime(value: datetime | int | float | None) -> datetime | None:
     if value is None:
         return None
     return _coerce_utc_datetime(value)

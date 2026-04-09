@@ -211,6 +211,66 @@ async def test_activity_event_runtime_flush_batch_archives_edited_message_withou
 
 
 @pytest.mark.asyncio
+async def test_activity_event_runtime_flush_batch_accepts_unix_timestamps_for_edited_archive_fields() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    event_at = datetime(2026, 3, 13, 10, 0, tzinfo=timezone.utc)
+    edited_at = event_at + timedelta(minutes=5)
+    edited_ts = int(edited_at.timestamp())
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.flush_activity_batch(
+            [
+                ActivityBatchMessage(
+                    chat_id=1656,
+                    chat_type="group",
+                    chat_title="Archive",
+                    user_id=1909,
+                    username="alice",
+                    first_name="Alice",
+                    last_name=None,
+                    is_bot=False,
+                    event_at=event_at,
+                    telegram_message_id=77,
+                    count_as_activity=False,
+                    snapshot_kind="edited",
+                    snapshot_at=edited_ts,
+                    sent_at=event_at,
+                    edited_at=edited_ts,
+                    message_type="text",
+                    text="hello there",
+                    caption=None,
+                    raw_message_json={"message_id": 77, "text": "hello there", "edit_date": edited_ts},
+                    snapshot_hash="edited-unix-hash",
+                )
+            ]
+        )
+
+        archive_rows = (
+            await session.execute(
+                select(MessageArchiveModel)
+                .where(MessageArchiveModel.chat_id == 1656)
+                .order_by(MessageArchiveModel.snapshot_at.asc())
+            )
+        ).scalars().all()
+        activity_row = await session.get(UserChatActivityModel, {"chat_id": 1656, "user_id": 1909})
+
+        assert len(archive_rows) == 1
+        assert archive_rows[0].snapshot_kind == "edited"
+        assert _utc_or_naive_as_utc(archive_rows[0].snapshot_at) == edited_at
+        assert _utc_or_naive_as_utc(archive_rows[0].edited_at) == edited_at
+        assert archive_rows[0].text == "hello there"
+        assert activity_row is None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_activity_event_runtime_flush_batch_deduplicates_duplicate_archive_snapshot() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
