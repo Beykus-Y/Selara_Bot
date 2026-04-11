@@ -6,10 +6,12 @@ import hashlib
 from io import BytesIO
 import json
 import logging
-from html import escape
+from html import escape, unescape
 from importlib import import_module
 from pathlib import Path
+import re
 from urllib.parse import parse_qs, quote, urlencode
+import xml.etree.ElementTree as ElementTree
 
 from aiogram import Bot
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -98,6 +100,29 @@ from selara.web.user_docs import build_user_docs_context
 _UTC = timezone.utc
 _CHAT_HUB_PAGE_SIZE = 50
 _CHAT_HUB_MAX_ROWS = 500
+_ADMIN_BROADCAST_ACTIVE_DAYS = 3
+_ADMIN_BROADCAST_BODY_LIMIT = 3200
+_ADMIN_BROADCAST_ALLOWED_HTML_TAGS = frozenset(
+    {
+        "a",
+        "b",
+        "blockquote",
+        "code",
+        "del",
+        "em",
+        "i",
+        "ins",
+        "pre",
+        "s",
+        "strong",
+        "tg-spoiler",
+        "u",
+    }
+)
+_ADMIN_BROADCAST_ALLOWED_HTML_ATTRIBUTES = {
+    "a": frozenset({"href"}),
+    "code": frozenset({"class"}),
+}
 game_router_module = import_module("selara.presentation.handlers.game.router")
 logger = logging.getLogger(__name__)
 
@@ -855,6 +880,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         payload = (await request.body()).decode("utf-8")
         parsed = parse_qs(payload, keep_blank_values=True)
         return {key: values[0] for key, values in parsed.items() if values}
+
+    async def _parse_form_lists(request: Request) -> dict[str, list[str]]:
+        payload = (await request.body()).decode("utf-8")
+        parsed = parse_qs(payload, keep_blank_values=True)
+        return {key: list(values) for key, values in parsed.items() if values}
 
     async def _load_user_from_request(session: AsyncSession, request: Request, *, touch: bool) -> UserSnapshot | None:
         token = request.cookies.get(settings.web_session_cookie_name)
@@ -6601,6 +6631,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     )
 
     ADMIN_TABLE_META = {
+        "admin_broadcast_deliveries": {"title": "Доставки админ-рассылок", "group": "web"},
+        "admin_broadcast_replies": {"title": "Ответы на админ-рассылки", "group": "web"},
+        "admin_broadcasts": {"title": "Админ-рассылки", "group": "web"},
         "admin_sessions": {"title": "Админ-сессии", "group": "web"},
         "chat_achievement_stats": {"title": "Статистика достижений чата", "group": "achievement"},
         "chat_activity_event_sync_state": {"title": "Синхронизация событий активности", "group": "activity"},
@@ -6932,6 +6965,80 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         prefix = f"#{message_id} " if message_id is not None else ""
         return f"{prefix}{author_label}: {preview}"
 
+    def _admin_broadcast_body_preview(body: str, *, limit: int = 180) -> str:
+        normalized = " ".join(re.sub(r"<[^>]+>", " ", (body or "")).split()).strip()
+        normalized = unescape(normalized)
+        if not normalized:
+            return "Пустой текст"
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: max(0, limit - 3)]}..."
+
+    def _admin_broadcast_chat_label(*, chat_id: int, chat_type: str, chat_title: str | None) -> str:
+        title = (chat_title or "").strip()
+        if title:
+            return title
+        return f"{chat_type}:{chat_id}"
+
+    def _admin_broadcast_reply_preview(*, message_type: str, text: str | None, caption: str | None) -> str:
+        value = (text or caption or "").strip()
+        if value:
+            compact = " ".join(value.split())
+            if len(compact) <= 220:
+                return compact
+            return f"{compact[:217]}..."
+        return f"[{message_type}]"
+
+    def _normalize_admin_broadcast_body(raw_value: str | None) -> str:
+        value = (raw_value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        while "\n\n\n" in value:
+            value = value.replace("\n\n\n", "\n\n")
+        return value
+
+    def _validate_admin_broadcast_body(body: str) -> str | None:
+        try:
+            root = ElementTree.fromstring(f"<root>{body}</root>")
+        except ElementTree.ParseError:
+            return (
+                "Некорректный Telegram HTML. Закройте все теги и экранируйте обычные символы "
+                "<, > и & как &lt;, &gt; и &amp;."
+            )
+
+        for node in root.iter():
+            if node is root:
+                continue
+
+            tag = str(node.tag or "").strip().lower()
+            if tag not in _ADMIN_BROADCAST_ALLOWED_HTML_TAGS:
+                return (
+                    f"Тег <{tag}> не поддерживается. Используйте Telegram HTML: "
+                    "<b>, <i>, <u>, <s>, <code>, <pre>, <a href=\"...\">."
+                )
+
+            allowed_attrs = _ADMIN_BROADCAST_ALLOWED_HTML_ATTRIBUTES.get(tag, frozenset())
+            normalized_attrs = {str(name).strip().lower(): str(value or "").strip() for name, value in node.attrib.items()}
+            for attr_name, attr_value in normalized_attrs.items():
+                if attr_name not in allowed_attrs:
+                    return f"Атрибут {attr_name} нельзя использовать в теге <{tag}>."
+                if not attr_value:
+                    return f"Атрибут {attr_name} в теге <{tag}> не должен быть пустым."
+
+            if tag == "a" and "href" not in normalized_attrs:
+                return 'В теге <a> нужен href, например <a href="https://example.com">ссылка</a>.'
+
+        return None
+
+    def _render_admin_broadcast_message(body: str) -> str:
+        return body
+
+    def _admin_broadcast_status_meta(status: str) -> tuple[str, str]:
+        normalized = (status or "").strip().lower()
+        if normalized == "sent":
+            return "Доставлено", "ok"
+        if normalized == "failed":
+            return "Ошибка", "warn"
+        return "Ожидание", "muted"
+
     @app.get("/app/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
         async with session_factory() as session:
@@ -6940,6 +7047,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 return _redirect("/app/admin/login")
 
+            activity_repo = SqlAlchemyActivityRepository(session)
             feedback_requests = await _load_admin_feature_request_items(session)
             open_feedback_count = (
                 await session.execute(
@@ -6948,6 +7056,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     .where(UserFeatureRequestModel.status == "open")
                 )
             ).scalar_one()
+            active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
+            recent_active_chat_count = await activity_repo.count_recent_active_group_chats(since=active_since)
+            recent_active_chats = await activity_repo.list_recent_active_group_chats(since=active_since)
+            recent_broadcasts = await activity_repo.list_recent_admin_broadcasts(limit=8)
             await session.commit()
 
         return _render_template(
@@ -6962,6 +7074,33 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             admin_user_id=admin_user_id,
             feedback_requests=feedback_requests,
             open_feedback_count=int(open_feedback_count or 0),
+            broadcast_active_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
+            recent_active_chat_count=recent_active_chat_count,
+            recent_active_chats=[
+                {
+                    "chat_id": item.chat_id,
+                    "title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type=item.chat_type,
+                        chat_title=item.chat_title,
+                    ),
+                    "last_activity_at": format_datetime(item.last_activity_at),
+                    "checked": True,
+                }
+                for item in recent_active_chats
+            ],
+            recent_broadcasts=[
+                {
+                    "id": item.id,
+                    "created_at": format_datetime(item.created_at),
+                    "body_preview": _admin_broadcast_body_preview(item.body),
+                    "target_count": item.target_count,
+                    "sent_count": item.sent_count,
+                    "failed_count": item.failed_count,
+                    "reply_count": item.reply_count,
+                }
+                for item in recent_broadcasts
+            ],
         )
 
     @app.get("/app/admin/login", response_class=HTMLResponse)
@@ -7077,6 +7216,218 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if prefers_json:
             return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
+
+    @app.post("/app/admin/broadcasts/send")
+    async def admin_send_broadcast(request: Request):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            if prefers_json:
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+            return _redirect("/app/admin/login")
+
+        form_lists = await _parse_form_lists(request)
+        body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
+        if not body:
+            redirect_path = _with_message("/app/admin", key="error", text="Введите текст системного сообщения.")
+            if prefers_json:
+                return _json_result(ok=False, message="Введите текст системного сообщения.", status_code=400, redirect=redirect_path)
+            return _redirect(redirect_path)
+        if len(body) > _ADMIN_BROADCAST_BODY_LIMIT:
+            redirect_path = _with_message(
+                "/app/admin",
+                key="error",
+                text=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
+            )
+            if prefers_json:
+                return _json_result(
+                    ok=False,
+                    message=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
+                    status_code=400,
+                    redirect=redirect_path,
+                )
+            return _redirect(redirect_path)
+
+        html_error = _validate_admin_broadcast_body(body)
+        if html_error:
+            redirect_path = _with_message("/app/admin", key="error", text=html_error)
+            if prefers_json:
+                return _json_result(ok=False, message=html_error, status_code=400, redirect=redirect_path)
+            return _redirect(redirect_path)
+
+        active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
+        selected_chat_ids = {
+            int(raw_value)
+            for raw_value in form_lists.get("chat_ids", [])
+            if raw_value.lstrip("-").isdigit()
+        }
+        async with session_factory() as session:
+            activity_repo = SqlAlchemyActivityRepository(session)
+            targets = await activity_repo.list_recent_active_group_chats(since=active_since)
+            targets = [item for item in targets if item.chat_id in selected_chat_ids]
+            if not targets:
+                await session.commit()
+                redirect_path = _with_message(
+                    "/app/admin",
+                    key="error",
+                    text="Не выбрано ни одного чата для рассылки.",
+                )
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Не выбрано ни одного чата для рассылки.",
+                        status_code=400,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
+
+            broadcast = await activity_repo.create_admin_broadcast(
+                body=body,
+                active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
+                created_by_user_id=admin_user_id,
+            )
+            deliveries = await activity_repo.create_admin_broadcast_deliveries(
+                broadcast_id=broadcast.id,
+                targets=targets,
+            )
+            await session.commit()
+
+        bot = await _get_game_bot()
+        rendered_message = _render_admin_broadcast_message(body)
+        sent_count = 0
+        failed_count = 0
+        for delivery in deliveries:
+            try:
+                sent_message = await bot.send_message(
+                    chat_id=delivery.chat_id,
+                    text=rendered_message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                failed_count += 1
+                logger.exception(
+                    "Admin broadcast send failed",
+                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
+                )
+                async with session_factory() as session:
+                    activity_repo = SqlAlchemyActivityRepository(session)
+                    await activity_repo.mark_admin_broadcast_delivery_failed(
+                        delivery_id=delivery.id,
+                        error_text=str(exc) or exc.__class__.__name__,
+                    )
+                    await session.commit()
+                continue
+
+            sent_count += 1
+            sent_at = getattr(sent_message, "date", None) or _now_utc()
+            async with session_factory() as session:
+                activity_repo = SqlAlchemyActivityRepository(session)
+                await activity_repo.mark_admin_broadcast_delivery_sent(
+                    delivery_id=delivery.id,
+                    telegram_message_id=int(sent_message.message_id),
+                    sent_at=sent_at,
+                )
+                await session.commit()
+
+        logger.info(
+            "Admin broadcast completed",
+            extra={
+                "broadcast_id": broadcast.id,
+                "target_count": len(deliveries),
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+            },
+        )
+
+        summary_text = f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}."
+        redirect_path = _with_message(f"/app/admin/broadcasts/{broadcast.id}", key="flash", text=summary_text)
+        if prefers_json:
+            return _json_result(ok=True, message=summary_text, status_code=200, redirect=redirect_path)
+        return _redirect(redirect_path)
+
+    @app.get("/app/admin/broadcasts/{broadcast_id}", response_class=HTMLResponse)
+    async def admin_broadcast_detail(request: Request, broadcast_id: int):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _redirect("/app/admin/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            broadcast = await activity_repo.get_admin_broadcast(broadcast_id=broadcast_id)
+            if broadcast is None:
+                await session.commit()
+                return _redirect(_with_message("/app/admin", key="error", text="Рассылка не найдена."))
+
+            deliveries = await activity_repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
+            replies = await activity_repo.list_admin_broadcast_replies(broadcast_id=broadcast_id)
+            await session.commit()
+
+        sent_count = sum(1 for item in deliveries if item.status == "sent")
+        failed_count = sum(1 for item in deliveries if item.status == "failed")
+        target_count = len(deliveries)
+
+        return _render_template(
+            "admin_broadcast_detail.html",
+            page_title=f"Selara • Рассылка #{broadcast.id}",
+            page_name="admin_broadcast_detail",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"),
+                error=request.query_params.get("error"),
+            ),
+            broadcast={
+                "id": broadcast.id,
+                "created_at": format_datetime(broadcast.created_at),
+                "body": broadcast.body,
+                "message_preview_html": _render_admin_broadcast_message(broadcast.body),
+                "active_since_days": broadcast.active_since_days,
+                "target_count": target_count,
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+                "reply_count": len(replies),
+            },
+            deliveries=[
+                {
+                    "chat_id": item.chat_id,
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "last_activity_at": format_datetime(item.last_activity_at),
+                    "status_code": item.status,
+                    "status_label": _admin_broadcast_status_meta(item.status)[0],
+                    "status_tone": _admin_broadcast_status_meta(item.status)[1],
+                    "telegram_message_id": item.telegram_message_id,
+                    "reply_count": item.reply_count,
+                    "sent_at": format_datetime(item.sent_at),
+                    "error_text": item.error_text,
+                }
+                for item in deliveries
+            ],
+            replies=[
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "user_label": user_label(item.user),
+                    "sent_at": format_datetime(item.sent_at),
+                    "message_type": item.message_type,
+                    "preview": _admin_broadcast_reply_preview(
+                        message_type=item.message_type,
+                        text=item.text,
+                        caption=item.caption,
+                    ),
+                }
+                for item in replies
+            ],
+        )
 
     @app.post("/app/admin/feedback/{request_id}/status")
     async def admin_feedback_status_update(request: Request, request_id: int):

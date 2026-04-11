@@ -15,6 +15,131 @@
       <span>Открытых заявок: <code>{{ open_feedback_count }}</code></span>
     </div>
 
+    <section class="broadcast-panel">
+      <div class="panel-head" style="padding: 0; margin-bottom: 14px;">
+        <div>
+          <h3 style="margin: 0;">Системная рассылка</h3>
+          <p class="panel-subtitle" style="margin: 4px 0 0;">
+            Сообщение уйдёт только в активные чаты за последние {{ broadcast_active_days }} дня. Перед отправкой можно исключить отдельные чаты.
+          </p>
+        </div>
+      </div>
+
+      <div class="broadcast-grid">
+        <form class="broadcast-composer" method="post" action="/app/admin/broadcasts/send">
+          <label class="broadcast-label" for="broadcast-body">Текст сообщения</label>
+          <textarea
+            id="broadcast-body"
+            name="body"
+            class="admin-field-input admin-textarea broadcast-textarea"
+            maxlength="3200"
+            placeholder="Спасибо за использование Selara. Мы продолжаем развивать бота и будем рады вашей обратной связи."
+            required
+          ></textarea>
+          <p class="broadcast-note">
+            Поддерживается Telegram HTML: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>, <code>&lt;s&gt;</code>,
+            <code>&lt;code&gt;</code>, <code>&lt;pre&gt;</code>, <code>&lt;a href="..."&gt;</code>.
+            Markdown вроде <code>**жирный**</code> не работает. Если нужны символы <code>&lt;</code>, <code>&gt;</code> или <code>&amp;</code>
+            как текст, пишите <code>&amp;lt;</code>, <code>&amp;gt;</code> и <code>&amp;amp;</code>.
+          </p>
+
+          <div class="broadcast-targets-head">
+            <label class="broadcast-label">Чаты для этой отправки</label>
+            <div class="broadcast-target-actions">
+              <button type="button" class="button ghost small" data-broadcast-toggle="all">Выбрать все</button>
+              <button type="button" class="button ghost small" data-broadcast-toggle="none">Снять все</button>
+            </div>
+          </div>
+          {% if recent_active_chats %}
+            <div class="broadcast-target-list" id="broadcast-target-list">
+              {% for item in recent_active_chats %}
+                <label class="broadcast-target-item">
+                  <input
+                    type="checkbox"
+                    name="chat_ids"
+                    value="{{ item.chat_id }}"
+                    {% if item.checked %}checked{% endif %}
+                  >
+                  <span class="broadcast-target-mark" aria-hidden="true"></span>
+                  <span class="broadcast-target-copy">
+                    <strong>{{ item.title }}</strong>
+                    <small>ID {{ item.chat_id }} · активность: {{ item.last_activity_at }}</small>
+                  </span>
+                </label>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="empty-text">Пока нет чатов, подходящих под фильтр активности.</p>
+          {% endif %}
+          <button type="submit" class="button primary">Отправить в активные чаты</button>
+        </form>
+
+        <div class="broadcast-side">
+          <article class="broadcast-stat-card">
+            <span class="broadcast-stat-label">Охват прямо сейчас</span>
+            <strong>{{ recent_active_chat_count }}</strong>
+            <small>чатов подходят под фильтр активности</small>
+          </article>
+
+          <article class="broadcast-stat-card">
+            <span class="broadcast-stat-label">Фильтр охвата</span>
+            <strong>{{ broadcast_active_days }} дня</strong>
+            <small>Берутся только чаты с человеческой активностью в этот период.</small>
+          </article>
+
+          <article class="broadcast-stat-card">
+            <span class="broadcast-stat-label">Что сохранится</span>
+            <strong>Доставки и reply</strong>
+            <small>История отправок и прямые ответы реплаем останутся в админке.</small>
+          </article>
+
+          <article class="broadcast-stat-card">
+            <span class="broadcast-stat-label">Быстрый обзор</span>
+            {% if recent_active_chats %}
+              <div class="broadcast-chip-list">
+                {% for item in recent_active_chats[:8] %}
+                  <div class="broadcast-chip">
+                    <strong>{{ item.title }}</strong>
+                    <small>активность: {{ item.last_activity_at }}</small>
+                  </div>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p class="empty-text" style="margin: 0;">Пока нет чатов, подходящих под фильтр активности.</p>
+            {% endif %}
+          </article>
+        </div>
+      </div>
+
+      <div class="panel-head" style="padding: 0; margin: 18px 0 12px;">
+        <div>
+          <h4 style="margin: 0;">Последние рассылки</h4>
+          <p class="panel-subtitle" style="margin: 4px 0 0;">История доставок и ответов реплаем.</p>
+        </div>
+      </div>
+      {% if recent_broadcasts %}
+        <div class="broadcast-history">
+          {% for item in recent_broadcasts %}
+            <a class="broadcast-history-card" href="/app/admin/broadcasts/{{ item.id }}">
+              <div class="broadcast-history-head">
+                <strong>#{{ item.id }}</strong>
+                <small>{{ item.created_at }}</small>
+              </div>
+              <p class="broadcast-history-body">{{ item.body_preview }}</p>
+              <div class="broadcast-history-metrics">
+                <span>целей: <code>{{ item.target_count }}</code></span>
+                <span>доставлено: <code>{{ item.sent_count }}</code></span>
+                <span>ошибок: <code>{{ item.failed_count }}</code></span>
+                <span>ответов: <code>{{ item.reply_count }}</code></span>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Рассылок ещё не было.</p>
+      {% endif %}
+    </section>
+
     <section style="margin-top: 24px;">
       <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
         <div>
@@ -83,4 +208,22 @@
       </form>
     </div>
   </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const list = document.getElementById("broadcast-target-list");
+      if (!list) return;
+      const checkboxes = () => Array.from(list.querySelectorAll('input[type="checkbox"][name="chat_ids"]'));
+      document.querySelectorAll("[data-broadcast-toggle]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const mode = button.getAttribute("data-broadcast-toggle");
+          for (const input of checkboxes()) {
+            input.checked = mode === "all";
+          }
+        });
+      });
+    })();
+  </script>
 {% endblock %}

@@ -7,6 +7,7 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import Message
 
+from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.filters import is_trackable_message
@@ -78,6 +79,28 @@ def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> d
     }
 
 
+def _build_reply_capture_payload(
+    message: Message,
+    *,
+    archive_payload: dict[str, object] | None,
+) -> dict[str, object]:
+    if archive_payload is not None:
+        return {
+            "message_type": archive_payload["message_type"],
+            "text": archive_payload["text"],
+            "caption": archive_payload["caption"],
+            "raw_message_json": archive_payload["raw_message_json"],
+        }
+
+    raw_message_json = json.loads(message.model_dump_json(exclude_none=False, warnings=False))
+    return {
+        "message_type": _message_content_type(message),
+        "text": message.text,
+        "caption": message.caption,
+        "raw_message_json": raw_message_json,
+    }
+
+
 class ActivityTrackerMiddleware(BaseMiddleware):
     def __init__(self, activity_batcher: ActivityBatcher) -> None:
         self._activity_batcher = activity_batcher
@@ -119,6 +142,48 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                         "user_id": getattr(event.from_user, "id", None),
                         "message_id": getattr(event, "message_id", None),
                         "snapshot_kind": snapshot_kind,
+                    },
+                )
+
+        activity_repo = data.get("activity_repo")
+        if (
+            activity_repo is not None
+            and not is_edited_message
+            and _is_archivable_group_message(event)
+            and getattr(event, "reply_to_message", None) is not None
+            and getattr(event.reply_to_message, "message_id", None) is not None
+        ):
+            try:
+                reply_payload = _build_reply_capture_payload(event, archive_payload=archive_payload)
+                await activity_repo.record_admin_broadcast_reply(
+                    chat=ChatSnapshot(
+                        telegram_chat_id=event.chat.id,
+                        chat_type=event.chat.type,
+                        title=event.chat.title,
+                    ),
+                    user=UserSnapshot(
+                        telegram_user_id=event.from_user.id,
+                        username=event.from_user.username,
+                        first_name=event.from_user.first_name,
+                        last_name=event.from_user.last_name,
+                        is_bot=bool(event.from_user.is_bot),
+                    ),
+                    reply_to_message_id=int(event.reply_to_message.message_id),
+                    telegram_message_id=int(event.message_id),
+                    message_type=str(reply_payload["message_type"]),
+                    text=reply_payload["text"],
+                    caption=reply_payload["caption"],
+                    raw_message_json=reply_payload["raw_message_json"],
+                    sent_at=event.date,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to capture admin broadcast reply",
+                    extra={
+                        "chat_id": getattr(event.chat, "id", None),
+                        "user_id": getattr(event.from_user, "id", None),
+                        "message_id": getattr(event, "message_id", None),
+                        "reply_to_message_id": getattr(event.reply_to_message, "message_id", None),
                     },
                 )
 

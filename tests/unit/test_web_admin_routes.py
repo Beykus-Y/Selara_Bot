@@ -100,6 +100,9 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
         execute_results=[
             FakeExecuteResult(rows=[]),
             FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
         ]
     )
     monkeypatch.setattr(
@@ -129,6 +132,9 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert "Использование действий отношений" in response.text
     assert "Коды входа веб-панели" in response.text
     assert 'action="/app/admin/request-backup"' in response.text
+    assert "Системная рассылка" in response.text
+    assert 'action="/app/admin/broadcasts/send"' in response.text
+    assert 'name="chat_ids"' in response.text
 
 
 @pytest.mark.asyncio

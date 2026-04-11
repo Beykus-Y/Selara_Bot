@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, delete, func, or_, select, tuple_, update
+from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -22,6 +22,11 @@ from selara.core.roles import (
 )
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.domain.entities import (
+    AdminBroadcast,
+    AdminBroadcastDelivery,
+    AdminBroadcastOverview,
+    AdminBroadcastReply,
+    AdminBroadcastTarget,
     ActiveRestEntry,
     ActivityStats,
     AchievementAward,
@@ -75,6 +80,9 @@ from selara.domain.economy_entities import (
 )
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.models import (
+    AdminBroadcastDeliveryModel,
+    AdminBroadcastModel,
+    AdminBroadcastReplyModel,
     ChatActivityEventSyncStateModel,
     ChatAuditLogModel,
     ChatAchievementStatsModel,
@@ -4776,6 +4784,318 @@ class SqlAlchemyActivityRepository:
         )
         return values[:normalized_limit]
 
+    async def count_recent_active_group_chats(self, *, since: datetime) -> int:
+        normalized_since = _coerce_utc_datetime(since)
+        chat_ids_sq = (
+            select(ChatModel.telegram_chat_id)
+            .join(UserChatActivityModel, UserChatActivityModel.chat_id == ChatModel.telegram_chat_id)
+            .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .where(
+                ChatModel.type.in_(("group", "supergroup")),
+                UserModel.is_bot.is_(False),
+                UserChatActivityModel.last_seen_at >= normalized_since,
+            )
+            .group_by(ChatModel.telegram_chat_id)
+            .subquery()
+        )
+        return int((await self._session.execute(select(func.count()).select_from(chat_ids_sq))).scalar_one() or 0)
+
+    async def list_recent_active_group_chats(
+        self,
+        *,
+        since: datetime,
+        limit: int | None = None,
+    ) -> list[AdminBroadcastTarget]:
+        normalized_since = _coerce_utc_datetime(since)
+        stmt = (
+            select(
+                ChatModel.telegram_chat_id,
+                ChatModel.type,
+                ChatModel.title,
+                func.max(UserChatActivityModel.last_seen_at).label("last_activity_at"),
+            )
+            .join(UserChatActivityModel, UserChatActivityModel.chat_id == ChatModel.telegram_chat_id)
+            .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
+            .where(
+                ChatModel.type.in_(("group", "supergroup")),
+                UserModel.is_bot.is_(False),
+                UserChatActivityModel.last_seen_at >= normalized_since,
+            )
+            .group_by(ChatModel.telegram_chat_id, ChatModel.type, ChatModel.title)
+            .order_by(
+                func.max(UserChatActivityModel.last_seen_at).desc(),
+                ChatModel.telegram_chat_id.asc(),
+            )
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(1, int(limit)))
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            AdminBroadcastTarget(
+                chat_id=int(chat_id),
+                chat_type=str(chat_type),
+                chat_title=chat_title,
+                last_activity_at=_normalize_optional_datetime(last_activity_at),
+            )
+            for chat_id, chat_type, chat_title, last_activity_at in rows
+        ]
+
+    async def create_admin_broadcast(
+        self,
+        *,
+        body: str,
+        active_since_days: int,
+        created_by_user_id: int | None,
+    ) -> AdminBroadcast:
+        row = AdminBroadcastModel(
+            body=body,
+            active_since_days=max(1, int(active_since_days)),
+            created_by_user_id=int(created_by_user_id) if created_by_user_id is not None else None,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return self._to_admin_broadcast(row)
+
+    async def create_admin_broadcast_deliveries(
+        self,
+        *,
+        broadcast_id: int,
+        targets: Sequence[AdminBroadcastTarget],
+    ) -> list[AdminBroadcastDelivery]:
+        rows: list[AdminBroadcastDeliveryModel] = []
+        for target in targets:
+            rows.append(
+                AdminBroadcastDeliveryModel(
+                    broadcast_id=int(broadcast_id),
+                    chat_id=int(target.chat_id),
+                    chat_title_snapshot=target.chat_title,
+                    last_activity_at=_normalize_optional_datetime(target.last_activity_at),
+                    status="pending",
+                )
+            )
+        self._session.add_all(rows)
+        await self._session.flush()
+        return [self._to_admin_broadcast_delivery(row) for row in rows]
+
+    async def mark_admin_broadcast_delivery_sent(
+        self,
+        *,
+        delivery_id: int,
+        telegram_message_id: int,
+        sent_at: datetime,
+    ) -> bool:
+        row = await self._session.get(AdminBroadcastDeliveryModel, int(delivery_id))
+        if row is None:
+            return False
+        row.status = "sent"
+        row.telegram_message_id = int(telegram_message_id)
+        row.error_text = None
+        row.sent_at = _coerce_utc_datetime(sent_at)
+        row.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return True
+
+    async def mark_admin_broadcast_delivery_failed(
+        self,
+        *,
+        delivery_id: int,
+        error_text: str,
+    ) -> bool:
+        row = await self._session.get(AdminBroadcastDeliveryModel, int(delivery_id))
+        if row is None:
+            return False
+        row.status = "failed"
+        row.error_text = " ".join((error_text or "").split())[:1000] or "send_failed"
+        row.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return True
+
+    async def get_admin_broadcast(self, *, broadcast_id: int) -> AdminBroadcast | None:
+        row = await self._session.get(AdminBroadcastModel, int(broadcast_id))
+        if row is None:
+            return None
+        return self._to_admin_broadcast(row)
+
+    async def list_recent_admin_broadcasts(self, *, limit: int = 10) -> list[AdminBroadcastOverview]:
+        normalized_limit = max(1, min(int(limit), 50))
+        delivery_stats_sq = (
+            select(
+                AdminBroadcastDeliveryModel.broadcast_id.label("broadcast_id"),
+                func.count(AdminBroadcastDeliveryModel.id).label("target_count"),
+                func.coalesce(
+                    func.sum(case((AdminBroadcastDeliveryModel.status == "sent", 1), else_=0)),
+                    0,
+                ).label("sent_count"),
+                func.coalesce(
+                    func.sum(case((AdminBroadcastDeliveryModel.status == "failed", 1), else_=0)),
+                    0,
+                ).label("failed_count"),
+            )
+            .group_by(AdminBroadcastDeliveryModel.broadcast_id)
+            .subquery()
+        )
+        reply_stats_sq = (
+            select(
+                AdminBroadcastDeliveryModel.broadcast_id.label("broadcast_id"),
+                func.count(AdminBroadcastReplyModel.id).label("reply_count"),
+            )
+            .select_from(AdminBroadcastDeliveryModel)
+            .outerjoin(AdminBroadcastReplyModel, AdminBroadcastReplyModel.delivery_id == AdminBroadcastDeliveryModel.id)
+            .group_by(AdminBroadcastDeliveryModel.broadcast_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                AdminBroadcastModel,
+                func.coalesce(delivery_stats_sq.c.target_count, 0),
+                func.coalesce(delivery_stats_sq.c.sent_count, 0),
+                func.coalesce(delivery_stats_sq.c.failed_count, 0),
+                func.coalesce(reply_stats_sq.c.reply_count, 0),
+            )
+            .outerjoin(delivery_stats_sq, delivery_stats_sq.c.broadcast_id == AdminBroadcastModel.id)
+            .outerjoin(reply_stats_sq, reply_stats_sq.c.broadcast_id == AdminBroadcastModel.id)
+            .order_by(AdminBroadcastModel.created_at.desc(), AdminBroadcastModel.id.desc())
+            .limit(normalized_limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            AdminBroadcastOverview(
+                id=int(row.id),
+                body=row.body,
+                active_since_days=int(row.active_since_days),
+                created_by_user_id=int(row.created_by_user_id) if row.created_by_user_id is not None else None,
+                created_at=_coerce_utc_datetime(row.created_at),
+                target_count=int(target_count or 0),
+                sent_count=int(sent_count or 0),
+                failed_count=int(failed_count or 0),
+                reply_count=int(reply_count or 0),
+            )
+            for row, target_count, sent_count, failed_count, reply_count in rows
+        ]
+
+    async def list_admin_broadcast_deliveries(
+        self,
+        *,
+        broadcast_id: int,
+    ) -> list[AdminBroadcastDelivery]:
+        reply_counts_sq = (
+            select(
+                AdminBroadcastReplyModel.delivery_id.label("delivery_id"),
+                func.count(AdminBroadcastReplyModel.id).label("reply_count"),
+            )
+            .group_by(AdminBroadcastReplyModel.delivery_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                AdminBroadcastDeliveryModel,
+                func.coalesce(reply_counts_sq.c.reply_count, 0),
+            )
+            .outerjoin(reply_counts_sq, reply_counts_sq.c.delivery_id == AdminBroadcastDeliveryModel.id)
+            .where(AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id))
+            .order_by(
+                case(
+                    (AdminBroadcastDeliveryModel.status == "failed", 0),
+                    (AdminBroadcastDeliveryModel.status == "sent", 1),
+                    else_=2,
+                ),
+                AdminBroadcastDeliveryModel.last_activity_at.desc(),
+                AdminBroadcastDeliveryModel.id.asc(),
+            )
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            self._to_admin_broadcast_delivery(row, reply_count=int(reply_count or 0))
+            for row, reply_count in rows
+        ]
+
+    async def list_admin_broadcast_replies(
+        self,
+        *,
+        broadcast_id: int,
+        limit: int = 200,
+    ) -> list[AdminBroadcastReply]:
+        normalized_limit = max(1, min(int(limit), 500))
+        stmt = (
+            select(AdminBroadcastReplyModel, AdminBroadcastDeliveryModel, UserModel)
+            .join(AdminBroadcastDeliveryModel, AdminBroadcastDeliveryModel.id == AdminBroadcastReplyModel.delivery_id)
+            .join(UserModel, UserModel.telegram_user_id == AdminBroadcastReplyModel.reply_user_id)
+            .where(AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id))
+            .order_by(AdminBroadcastReplyModel.sent_at.desc(), AdminBroadcastReplyModel.id.desc())
+            .limit(normalized_limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            AdminBroadcastReply(
+                id=int(reply.id),
+                broadcast_id=int(delivery.broadcast_id),
+                delivery_id=int(delivery.id),
+                chat_id=int(delivery.chat_id),
+                chat_title=delivery.chat_title_snapshot,
+                user=self._to_user_snapshot(user),
+                telegram_message_id=int(reply.telegram_message_id),
+                message_type=reply.message_type,
+                text=reply.text,
+                caption=reply.caption,
+                sent_at=_coerce_utc_datetime(reply.sent_at),
+            )
+            for reply, delivery, user in rows
+        ]
+
+    async def record_admin_broadcast_reply(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot,
+        reply_to_message_id: int,
+        telegram_message_id: int,
+        message_type: str,
+        text: str | None,
+        caption: str | None,
+        raw_message_json: dict[str, object],
+        sent_at: datetime,
+    ) -> bool:
+        await self._upsert_chat(chat)
+        await self._upsert_user(user)
+
+        delivery = (
+            await self._session.execute(
+                select(AdminBroadcastDeliveryModel).where(
+                    AdminBroadcastDeliveryModel.chat_id == chat.telegram_chat_id,
+                    AdminBroadcastDeliveryModel.telegram_message_id == int(reply_to_message_id),
+                    AdminBroadcastDeliveryModel.status == "sent",
+                )
+            )
+        ).scalar_one_or_none()
+        if delivery is None:
+            return False
+
+        existing = (
+            await self._session.execute(
+                select(AdminBroadcastReplyModel.id).where(
+                    AdminBroadcastReplyModel.delivery_id == delivery.id,
+                    AdminBroadcastReplyModel.telegram_message_id == int(telegram_message_id),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return False
+
+        self._session.add(
+            AdminBroadcastReplyModel(
+                delivery_id=int(delivery.id),
+                reply_user_id=int(user.telegram_user_id),
+                telegram_message_id=int(telegram_message_id),
+                message_type=message_type,
+                text=text,
+                caption=caption,
+                raw_message_json=raw_message_json,
+                sent_at=_coerce_utc_datetime(sent_at),
+            )
+        )
+        await self._session.flush()
+        return True
+
     async def find_chat_user_by_username(self, *, chat_id: int, username: str) -> UserSnapshot | None:
         lowered = username.lstrip("@").strip().lower()
         if not lowered:
@@ -5888,6 +6208,35 @@ class SqlAlchemyActivityRepository:
             last_name=user.last_name,
             is_bot=bool(user.is_bot),
             chat_display_name=normalized,
+        )
+
+    @staticmethod
+    def _to_admin_broadcast(row: AdminBroadcastModel) -> AdminBroadcast:
+        return AdminBroadcast(
+            id=int(row.id),
+            body=row.body,
+            active_since_days=int(row.active_since_days),
+            created_by_user_id=int(row.created_by_user_id) if row.created_by_user_id is not None else None,
+            created_at=_coerce_utc_datetime(row.created_at),
+        )
+
+    @staticmethod
+    def _to_admin_broadcast_delivery(
+        row: AdminBroadcastDeliveryModel,
+        *,
+        reply_count: int = 0,
+    ) -> AdminBroadcastDelivery:
+        return AdminBroadcastDelivery(
+            id=int(row.id),
+            broadcast_id=int(row.broadcast_id),
+            chat_id=int(row.chat_id),
+            chat_title=row.chat_title_snapshot,
+            last_activity_at=_normalize_optional_datetime(row.last_activity_at),
+            status=row.status,
+            telegram_message_id=int(row.telegram_message_id) if row.telegram_message_id is not None else None,
+            error_text=row.error_text,
+            sent_at=_normalize_optional_datetime(row.sent_at),
+            reply_count=max(0, int(reply_count)),
         )
 
     @staticmethod

@@ -1512,6 +1512,88 @@ Index("idx_admin_sessions_user_created", AdminSessionModel.admin_user_id, AdminS
 Index("idx_admin_sessions_expires", AdminSessionModel.expires_at, AdminSessionModel.revoked_at)
 
 
+class AdminBroadcastModel(Base):
+    __tablename__ = "admin_broadcasts"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    active_since_days: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3, server_default="3")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_admin_broadcasts_created", AdminBroadcastModel.created_at)
+
+
+class AdminBroadcastDeliveryModel(Base):
+    __tablename__ = "admin_broadcast_deliveries"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("admin_broadcasts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chat_title_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'sent', 'failed')", name="ck_admin_broadcast_deliveries_status"),
+        UniqueConstraint("broadcast_id", "chat_id", name="uq_admin_broadcast_deliveries_broadcast_chat"),
+    )
+
+
+Index("idx_admin_broadcast_deliveries_broadcast_status", AdminBroadcastDeliveryModel.broadcast_id, AdminBroadcastDeliveryModel.status)
+Index("idx_admin_broadcast_deliveries_chat_message", AdminBroadcastDeliveryModel.chat_id, AdminBroadcastDeliveryModel.telegram_message_id)
+
+
+class AdminBroadcastReplyModel(Base):
+    __tablename__ = "admin_broadcast_replies"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    delivery_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("admin_broadcast_deliveries.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reply_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("delivery_id", "telegram_message_id", name="uq_admin_broadcast_replies_delivery_message"),
+    )
+
+
+Index("idx_admin_broadcast_replies_delivery_sent", AdminBroadcastReplyModel.delivery_id, AdminBroadcastReplyModel.sent_at)
+Index("idx_admin_broadcast_replies_user_sent", AdminBroadcastReplyModel.reply_user_id, AdminBroadcastReplyModel.sent_at)
+
+
 class UserFeatureRequestModel(Base):
     __tablename__ = "user_feature_requests"
 

@@ -94,6 +94,65 @@ class UserChatOverview:
 
 
 @dataclass(frozen=True)
+class AdminBroadcastTarget:
+    chat_id: int
+    chat_type: str
+    chat_title: str | None
+    last_activity_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AdminBroadcast:
+    id: int
+    body: str
+    active_since_days: int
+    created_by_user_id: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class AdminBroadcastOverview:
+    id: int
+    body: str
+    active_since_days: int
+    created_by_user_id: int | None
+    created_at: datetime
+    target_count: int
+    sent_count: int
+    failed_count: int
+    reply_count: int
+
+
+@dataclass(frozen=True)
+class AdminBroadcastDelivery:
+    id: int
+    broadcast_id: int
+    chat_id: int
+    chat_title: str | None
+    last_activity_at: datetime | None
+    status: str
+    telegram_message_id: int | None
+    error_text: str | None
+    sent_at: datetime | None
+    reply_count: int = 0
+
+
+@dataclass(frozen=True)
+class AdminBroadcastReply:
+    id: int
+    broadcast_id: int
+    delivery_id: int
+    chat_id: int
+    chat_title: str | None
+    user: UserSnapshot
+    telegram_message_id: int
+    message_type: str
+    text: str | None
+    caption: str | None
+    sent_at: datetime
+
+
+@dataclass(frozen=True)
 class UserChatProfile:
     chat_id: int
     user_id: int

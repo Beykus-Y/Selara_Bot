@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.types import Message
 
+from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.presentation.middlewares.activity_tracker import (
     ActivityTrackerMiddleware,
     _is_membership_service_message,
@@ -249,3 +250,41 @@ async def test_activity_tracker_does_not_enqueue_when_handler_raises() -> None:
         )
 
     batcher.enqueue_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_records_reply_to_admin_broadcast() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    activity_repo = SimpleNamespace(record_admin_broadcast_reply=AsyncMock(return_value=True))
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value="handled")
+    event = _event(text="Спасибо вам тоже")
+    event.reply_to_message = SimpleNamespace(message_id=333)
+
+    result = await middleware(
+        handler,
+        event,
+        {
+            "settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"}),
+            "activity_repo": activity_repo,
+        },
+    )
+
+    assert result == "handled"
+    activity_repo.record_admin_broadcast_reply.assert_awaited_once_with(
+        chat=ChatSnapshot(telegram_chat_id=101, chat_type="group", title="Test Chat"),
+        user=UserSnapshot(
+            telegram_user_id=501,
+            username="alice",
+            first_name="Alice",
+            last_name="Doe",
+            is_bot=False,
+        ),
+        reply_to_message_id=333,
+        telegram_message_id=777,
+        message_type="text",
+        text="Спасибо вам тоже",
+        caption=None,
+        raw_message_json={"message_id": 777, "text": "Спасибо вам тоже"},
+        sent_at=event.date,
+    )
