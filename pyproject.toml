@@ -36,6 +36,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+"selara" = ["images/*.png"]
 "selara.presentation" = ["*.json"]
 "selara.web" = ["templates/*.html", "static/*.css"]
 
