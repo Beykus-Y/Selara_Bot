@@ -59,6 +59,7 @@ class ChatSettings:
     antiraid_recent_window_minutes: int = 10
     chat_write_locked: bool = False
     cleanup_economy_commands: bool = False
+    iris_view: bool = False
     save_message: bool = False
     leaderboard_hybrid_buttons_enabled: bool = False
     interesting_facts_enabled: bool = False
@@ -85,6 +86,7 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "mafia_reveal_eliminated_role",
     "text_commands_enabled",
     "text_commands_locale",
+    "iris_view",
     "actions_18_enabled",
     "smart_triggers_enabled",
     "welcome_enabled",
@@ -252,6 +254,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "text_commands_enabled",
         "leaderboard_hybrid_buttons_enabled",
         "mafia_reveal_eliminated_role",
+        "iris_view",
         "actions_18_enabled",
         "smart_triggers_enabled",
         "welcome_enabled",

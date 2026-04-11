@@ -799,6 +799,7 @@ class ChatSettingsModel(Base):
     mafia_reveal_eliminated_role: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     text_commands_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     text_commands_locale: Mapped[str] = mapped_column(String(8), nullable=False, default="ru", server_default="ru")
+    iris_view: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     actions_18_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     smart_triggers_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     welcome_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

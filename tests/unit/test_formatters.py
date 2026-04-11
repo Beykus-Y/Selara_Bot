@@ -19,6 +19,11 @@ def test_format_activity_pulse_line_empty_values() -> None:
     assert line == "1д 0 • 7д 0 • 30д 0 • всё 0"
 
 
+def test_format_activity_pulse_line_has_iris_shape() -> None:
+    line = format_activity_pulse_line(day=1, week=3, month=5, all_time=7, iris_view=True)
+    assert line == "1 | 3 | 5 | 7"
+
+
 def test_format_me_includes_first_seen_when_available() -> None:
     text = format_me(
         ActivityStats(
@@ -58,6 +63,25 @@ def test_format_me_uses_whole_activity_label() -> None:
 
     assert "<b>Вся активность:</b> 1д 1 • 7д 2 • 30д 3 • всё 4" in text
     assert "<b>Сообщений:</b>" not in text
+
+
+def test_format_me_supports_iris_activity_label() -> None:
+    text = format_me(
+        ActivityStats(
+            chat_id=1,
+            user_id=42,
+            message_count=12,
+            last_seen_at=datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc),
+            username="cheburek",
+        ),
+        timezone_name="UTC",
+        fallback_user_id=42,
+        activity_pulse="917 | 917 | 917 | 917",
+        activity_pulse_label="Актив (д|н|м|весь)",
+    )
+
+    assert "<b>Актив (д|н|м|весь):</b> 917 | 917 | 917 | 917" in text
+    assert "<b>Вся активность:</b>" not in text
 
 
 def test_format_me_prefers_telegram_name_over_username_for_tag_label() -> None:

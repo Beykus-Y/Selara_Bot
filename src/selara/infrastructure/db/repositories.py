@@ -6099,6 +6099,7 @@ class SqlAlchemyActivityRepository:
             mafia_reveal_eliminated_role=bool(row.mafia_reveal_eliminated_role),
             text_commands_enabled=bool(row.text_commands_enabled),
             text_commands_locale=row.text_commands_locale,
+            iris_view=bool(row.iris_view),
             actions_18_enabled=bool(row.actions_18_enabled),
             smart_triggers_enabled=bool(row.smart_triggers_enabled),
             welcome_enabled=bool(row.welcome_enabled),

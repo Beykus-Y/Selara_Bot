@@ -130,6 +130,30 @@ def test_resolver_maps_relationship_proposal_phrases_with_args() -> None:
     assert marry_intent.args["raw_args"] == "@alice"
 
 
+def test_resolver_maps_relationship_shortcuts_to_actions() -> None:
+    pair_intent = resolve_text_command("отношения", top_default=10, top_max=50)
+    marry_intent = resolve_text_command("брак", top_default=10, top_max=50)
+
+    assert pair_intent is not None
+    assert pair_intent.name == "pair"
+
+    assert marry_intent is not None
+    assert marry_intent.name == "marry"
+
+
+def test_resolver_maps_relationship_shortcuts_with_user_refs() -> None:
+    pair_intent = resolve_text_command("отношения @alice", top_default=10, top_max=50)
+    marry_intent = resolve_text_command("брак @alice", top_default=10, top_max=50)
+
+    assert pair_intent is not None
+    assert pair_intent.name == "pair"
+    assert pair_intent.args["raw_args"] == "@alice"
+
+    assert marry_intent is not None
+    assert marry_intent.name == "marry"
+    assert marry_intent.args["raw_args"] == "@alice"
+
+
 def test_resolver_maps_announce_subscribe_aliases() -> None:
     intent_reg = resolve_text_command("рег", top_default=10, top_max=50)
     assert intent_reg is not None
@@ -152,12 +176,15 @@ def test_resolver_maps_economy_aliases() -> None:
         "лотерея": "lottery",
         "рынок": "market",
         "жмых": "zhmyh",
+        "цитировать": "quote",
         "шипперим": "shipperim",
         "рост": "growth",
         "профиль": "growth",
         "дрочка": "growth_action",
         "подрочить": "growth_action",
+        "отношения": "pair",
         "мои отношения": "relation",
+        "брак": "marry",
         "мой брак": "marriage",
         "браки": "marriages",
         "пара": "pair",

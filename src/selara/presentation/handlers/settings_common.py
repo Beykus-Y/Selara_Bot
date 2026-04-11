@@ -9,6 +9,7 @@ CFG_BOOL_KEYS: set[str] = {
     "text_commands_enabled",
     "leaderboard_hybrid_buttons_enabled",
     "mafia_reveal_eliminated_role",
+    "iris_view",
     "actions_18_enabled",
     "smart_triggers_enabled",
     "welcome_enabled",
@@ -138,6 +139,12 @@ SETTING_META: dict[str, SettingMeta] = {
         short_ru="Язык команд",
         description_ru="Язык распознавания текстовых команд.",
         value_hint_ru="ru/en.",
+    ),
+    "iris_view": SettingMeta(
+        title_ru="Стиль активности Iris в профиле",
+        short_ru="Iris-вид профиля",
+        description_ru="В Telegram-профиле «кто я / кто ты / /me» показывает строку активности в стиле Iris: д | н | м | весь.",
+        value_hint_ru="true/false.",
     ),
     "actions_18_enabled": SettingMeta(
         title_ru="Разрешить 18+ действия",
@@ -417,6 +424,7 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "text_commands_enabled",
             "text_commands_locale",
+            "iris_view",
             "actions_18_enabled",
             "smart_triggers_enabled",
             "welcome_enabled",
@@ -522,6 +530,7 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "mafia_reveal_eliminated_role": value.mafia_reveal_eliminated_role,
         "text_commands_enabled": value.text_commands_enabled,
         "text_commands_locale": value.text_commands_locale,
+        "iris_view": value.iris_view,
         "actions_18_enabled": value.actions_18_enabled,
         "smart_triggers_enabled": value.smart_triggers_enabled,
         "welcome_enabled": value.welcome_enabled,

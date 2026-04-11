@@ -105,7 +105,9 @@ def _format_first_seen(value: datetime, timezone_name: str) -> str:
     return f"{localized.strftime('%d.%m.%Y')} ({format_elapsed_compact(value, timezone_name)})"
 
 
-def format_activity_pulse_line(*, day: int, week: int, month: int, all_time: int) -> str:
+def format_activity_pulse_line(*, day: int, week: int, month: int, all_time: int, iris_view: bool = False) -> str:
+    if iris_view:
+        return f"{day} | {week} | {month} | {all_time}"
     return f"1д {day} • 7д {week} • 30д {month} • всё {all_time}"
 
 
@@ -115,6 +117,7 @@ def format_me(
     timezone_name: str,
     fallback_user_id: int,
     activity_pulse: str | None = None,
+    activity_pulse_label: str = "Вся активность",
     user_label_html: str | None = None,
 ) -> str:
     if stats is None:
@@ -124,7 +127,7 @@ def format_me(
             "<b>Последний актив:</b> нет данных"
         )
         if activity_pulse:
-            text += f"\n<b>Вся активность:</b> {activity_pulse}"
+            text += f"\n<b>{escape(activity_pulse_label)}:</b> {activity_pulse}"
         return text
 
     user_html = user_label_html or format_user_mention_html(
@@ -144,7 +147,7 @@ def format_me(
         + f"<b>Последний актив:</b> {_format_dt(stats.last_seen_at, timezone_name)}"
     )
     if activity_pulse:
-        text += f"\n<b>Вся активность:</b> {activity_pulse}"
+        text += f"\n<b>{escape(activity_pulse_label)}:</b> {activity_pulse}"
     return text
 
 

@@ -212,3 +212,67 @@ async def test_me_command_with_username_routes_to_target_profile(monkeypatch: py
 
     assert called == {"user_id": 20}
     message.answer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_user_stats_uses_iris_activity_view_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = SimpleNamespace(chat=SimpleNamespace(id=777))
+    send_output = AsyncMock()
+
+    monkeypatch.setattr(
+        stats_module,
+        "get_my_stats",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                chat_id=777,
+                user_id=10,
+                message_count=12,
+                last_seen_at=datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc),
+                first_seen_at=None,
+                username="actor",
+                first_name="Actor",
+                last_name=None,
+                chat_display_name=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        stats_module,
+        "get_rep_stats",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                activity_1d=917,
+                activity_7d=917,
+                activity_30d=917,
+                activity_all=917,
+                rank_all=1,
+                rank_7d=2,
+                karma_all=5,
+                karma_7d=3,
+            )
+        ),
+    )
+    monkeypatch.setattr(stats_module, "_resolve_profile_mention", AsyncMock(return_value='<a href="tg://user?id=10">Actor</a>'))
+    monkeypatch.setattr(stats_module, "_build_profile_social_lines", AsyncMock(return_value=[]))
+    monkeypatch.setattr(stats_module, "_build_profile_meta_lines", AsyncMock(return_value=["<b>Meta:</b> ok"]))
+    monkeypatch.setattr(stats_module, "_build_chart_async", AsyncMock(return_value=None))
+    monkeypatch.setattr(stats_module, "_send_text_or_photo", send_output)
+
+    await stats_module.send_user_stats(
+        message,
+        activity_repo=SimpleNamespace(get_user_activity_daily_series=AsyncMock(return_value=[])),
+        bot=SimpleNamespace(),
+        settings=SimpleNamespace(bot_timezone="UTC"),
+        chat_settings=SimpleNamespace(
+            top_limit_max=50,
+            leaderboard_hybrid_karma_weight=0.7,
+            leaderboard_hybrid_activity_weight=0.3,
+            leaderboard_7d_days=7,
+            iris_view=True,
+        ),
+        user_id=10,
+    )
+
+    html_text = send_output.await_args.kwargs["html_text"]
+    assert "<b>Актив (д|н|м|весь):</b> 917 | 917 | 917 | 917" in html_text
+    assert "<b>Вся активность:</b>" not in html_text

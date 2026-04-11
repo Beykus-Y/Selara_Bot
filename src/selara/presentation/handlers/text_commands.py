@@ -48,6 +48,7 @@ from selara.application.use_cases.gacha import (
 from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
+from selara.core.timezone import to_timezone
 from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import get_role_label_ru, has_command_access, has_permission
@@ -127,6 +128,7 @@ from selara.presentation.handlers.stats import (
     should_include_hybrid_top_keyboard,
 )
 from selara.presentation.formatters import format_user_link, preferred_mention_label_from_parts
+from selara.presentation.quote_card import build_quote_card
 from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.db_recovery import safe_rollback
 
@@ -144,6 +146,7 @@ _ZHMYH_PATTERN = re.compile(r"^жмых(?:\s+(?P<level>\d+))?$")
 _MAX_MESSAGE_LEN_SAFE = 3900
 _ANNOUNCE_MENTION_CHUNK_SIZE = 5
 _ZHMYH_FILENAME = "zhmyh.jpg"
+_QUOTE_FILENAME = "quote.png"
 _ZHMYH_MAX_SIDE = 1600
 _ZHMYH_MIN_LEVEL = 1
 _ZHMYH_MAX_LEVEL = 6
@@ -206,32 +209,38 @@ _SOCIAL_ACTION_ALIASES: dict[str, str] = {
 }
 _SOCIAL_ACTION_CANONICAL: dict[str, str] = {
     "slap": "шлепнуть",
+    "burn": "сжечь",
     "kill": "убить",
     "fuck": "трахнуть",
     "seduce": "соблазнить",
     "makeout": "засосать",
     "night": "провести ночь с",
+    "siton": "сесть на",
     "hit": "ударить",
     "hug": "обнять",
     "kiss": "поцеловать",
     "handshake": "пожать руку",
     "highfive": "дать пять",
     "pat": "погладить",
+    "step": "наступить",
     "tickle": "пощекотать",
     "poke": "ткнуть",
+    "push": "оттолкнуть",
     "wink": "подмигнуть",
     "dance": "потанцевать",
     "bow": "поклониться",
     "cheer": "подбодрить",
     "treat": "угостить",
     "praise": "похвалить",
+    "scold": "наругать",
     "fistbump": "дать кулак",
+    "suck": "отсосать",
 }
 _INLINE_RP_QUERY_ACTIONS: dict[str, str] = {
     **_SOCIAL_ACTION_ALIASES,
     **{action_key: action_key for action_key in _SOCIAL_ACTION_CANONICAL},
 }
-_SOCIAL_ACTION_18_PLUS: set[str] = {"fuck", "seduce", "makeout", "night"}
+_SOCIAL_ACTION_18_PLUS: set[str] = {"fuck", "seduce", "makeout", "night", "suck"}
 _SOCIAL_ACTION_REPLICA_TEMPLATES: tuple[str, ...] = (
     "💬 С репликой: «{replica}»",
     "🗣 И добавил(а): «{replica}»",
@@ -244,6 +253,12 @@ _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
         "👏 | {actor} влепил(а) сочный шлепок {target}.",
         "👏 | {actor} оставил(а) звонкий шлепок {target}.",
         "👏 | {actor} шлёпнул(а) {target} и сделал(а) вид, что так и было надо.",
+    ),
+    "burn": (
+        "🔥 | {actor} сжёг(сожгла) {target}.",
+        "🔥 | {actor} устроил(а) для {target} локальный пожар уровня мемов.",
+        "🔥 | {actor} так прожёг(ла) {target}, что запахло гарью.",
+        "🔥 | {actor} эффектно сжёг(сожгла) {target} в чатовом пламени.",
     ),
     "kill": (
         "💀 | {actor} виртуально убил(а) {target}. Без последствий, только рофл.",
@@ -274,6 +289,12 @@ _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
         "🌙 | {actor} исчез(ла) с {target} до утра, а детали оставил(а) за кадром.",
         "🌙 | {actor} организовал(а) с {target} ночной эпизод уровня «лучше не спрашивать».",
         "🌙 | {actor} и {target} решили, что ночь создана для взрослых приключений.",
+    ),
+    "siton": (
+        "🪑 | {actor} бесцеремонно сел(а) на {target}.",
+        "🪑 | {actor} использовал(а) {target} как очень сомнительный стул.",
+        "🪑 | {actor} устроился(ась) на {target} с максимальной наглостью.",
+        "🪑 | {actor} сел(а) на {target}, будто так и было задумано.",
     ),
     "hit": (
         "👊 | {actor} ударил(а) {target}.",
@@ -311,6 +332,12 @@ _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
         "🫳 | {actor} ласково провёл(вела) рукой по волосам {target}.",
         "🫳 | {actor} подарил(а) {target} минутку заботы и поглаживаний.",
     ),
+    "step": (
+        "🦶 | {actor} наступил(а) {target} на ногу.",
+        "🦶 | {actor} неосторожно, но очень выразительно наступил(а) на {target}.",
+        "🦶 | {actor} демонстративно наступил(а) {target} на ногу.",
+        "🦶 | {actor} проверил(а) терпение {target} и наступил(а) ему(ей) на ногу.",
+    ),
     "tickle": (
         "😄 | {actor} пощекотал(а) {target}.",
         "😄 | {actor} устроил(а) щекотную атаку на {target}.",
@@ -322,6 +349,12 @@ _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
         "👉 | {actor} аккуратно потыкал(а) {target}.",
         "👉 | {actor} привлёк(ла) внимание {target} лёгким тычком.",
         "👉 | {actor} проверил(а), на месте ли {target}, и ткнул(а) его(её).",
+    ),
+    "push": (
+        "↩️ | {actor} оттолкнул(а) {target}.",
+        "↩️ | {actor} резко отстранил(а) {target} от себя.",
+        "↩️ | {actor} оттолкнул(а) {target} и обозначил(а) дистанцию.",
+        "↩️ | {actor} оттолкнул(а) {target} с очень понятным намёком.",
     ),
     "wink": (
         "😉 | {actor} подмигнул(а) {target}.",
@@ -359,11 +392,23 @@ _SOCIAL_ACTION_TEMPLATES: dict[str, tuple[str, ...]] = {
         "🏅 | {actor} сказал(а) {target} заслуженные тёплые слова.",
         "🏅 | {actor} выдал(а) {target} честную и приятную похвалу.",
     ),
+    "scold": (
+        "🗯️ | {actor} наругал(а) {target}.",
+        "🗯️ | {actor} устроил(а) {target} строгий разбор полётов.",
+        "🗯️ | {actor} отчитал(а) {target} за всё хорошее и не очень.",
+        "🗯️ | {actor} высказал(а) {target} всё, что накопилось.",
+    ),
     "fistbump": (
         "👊🤜🤛 | {actor} отбил(а) кулачок с {target}.",
         "👊🤜🤛 | {actor} дал(а) кулак {target}.",
         "👊🤜🤛 | {actor} и {target} сошлись на крепком кулачке.",
         "👊🤜🤛 | {actor} обменялся(ась) с {target} бодрым фистбампом.",
+    ),
+    "suck": (
+        "🍓 | {actor} отсосал(а) {target}.",
+        "🍓 | {actor} устроил(а) {target} очень взрослый эпизод.",
+        "🍓 | {actor} сделал(а) {target} такой минет, что чат застыл.",
+        "🍓 | {actor} слишком старательно занялся(ась) {target}.",
     ),
 }
 
@@ -2804,6 +2849,84 @@ async def _social_action_user_snapshot(message: Message, activity_repo, *, user)
     )
 
 
+def _quote_date_label(value: datetime | None, *, timezone_name: str) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).strftime("%d.%m.%Y")
+    return to_timezone(value, timezone_name).strftime("%d.%m.%Y")
+
+
+async def _download_telegram_avatar(bot: Bot, *, user_id: int) -> bytes | None:
+    try:
+        profile_photos = await bot.get_user_profile_photos(user_id, limit=1)
+        if not profile_photos.photos:
+            return None
+        source = BytesIO()
+        await bot.download(profile_photos.photos[0][-1], destination=source)
+    except Exception:
+        logger.exception("Failed to load Telegram avatar for quote card", extra={"user_id": user_id})
+        return None
+
+    avatar_bytes = source.getvalue()
+    return avatar_bytes or None
+
+
+async def _send_quote_card(message: Message, bot: Bot, settings: Settings) -> None:
+    reply = message.reply_to_message
+    if reply is None or reply.from_user is None:
+        await _answer_quiet(message, "Ответьте на сообщение и напишите <code>цитировать</code>.", parse_mode="HTML")
+        return
+
+    quote_text = (reply.text or reply.caption or "").strip()
+    if not quote_text:
+        await _answer_quiet(message, "В сообщении нет текста или подписи для цитаты.")
+        return
+
+    author = reply.from_user
+    author_name = preferred_mention_label_from_parts(
+        user_id=author.id,
+        username=author.username,
+        first_name=author.first_name,
+        last_name=author.last_name,
+    )
+    avatar_bytes = await _download_telegram_avatar(bot, user_id=author.id)
+
+    try:
+        rendered = build_quote_card(
+            author_name=author_name,
+            quote_text=quote_text,
+            date_label=_quote_date_label(reply.date, timezone_name=settings.bot_timezone),
+            avatar_bytes=avatar_bytes,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "PIL":
+            raise
+        await _answer_quiet(
+            message,
+            (
+                "Цитата недоступна: в окружении не установлен <code>Pillow</code>.\n"
+                "Установи зависимости проекта заново: <code>pip install -e .[dev]</code> "
+                "или минимум <code>pip install Pillow</code>, затем перезапусти бота."
+            ),
+            parse_mode="HTML",
+        )
+        return
+    except Exception:
+        logger.exception(
+            "Quote card render failed",
+            extra={
+                "chat_id": getattr(message.chat, "id", None),
+                "user_id": getattr(author, "id", None),
+            },
+        )
+        await _answer_quiet(message, "Не смог оформить цитату.")
+        return
+
+    await message.answer_photo(
+        photo=BufferedInputFile(rendered, filename=_QUOTE_FILENAME),
+        disable_notification=message.chat.type in {"group", "supergroup"},
+    )
+
+
 async def _send_social_action(message: Message, activity_repo, chat_settings: ChatSettings, *, action_key: str) -> None:
     canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, "действие")
     _, mass_target, username_arg, replica = _extract_social_action_target_request(message.text or message.caption or "")
@@ -4170,6 +4293,10 @@ async def text_commands_handler(
 
     if intent.name == "alive":
         await message.answer("<b>Я на связи и работаю.</b>", parse_mode="HTML")
+        return
+
+    if intent.name == "quote":
+        await _send_quote_card(message, bot, settings)
         return
 
     if intent.name in {"gacha_pull", "gacha_profile", "gacha_info"}:

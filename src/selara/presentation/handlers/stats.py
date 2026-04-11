@@ -1510,12 +1510,15 @@ async def send_user_stats(
         week=rep.activity_7d,
         month=rep.activity_30d,
         all_time=rep.activity_all,
+        iris_view=chat_settings.iris_view,
     )
+    pulse_label = "Актив (д|н|м|весь)" if chat_settings.iris_view else "Вся активность"
     text = format_me(
         stats,
         timezone_name=settings.bot_timezone,
         fallback_user_id=user_id,
         activity_pulse=pulse,
+        activity_pulse_label=pulse_label,
         user_label_html=await _resolve_profile_mention(activity_repo, chat_id=message.chat.id, user_id=user_id, cache={}),
     )
 

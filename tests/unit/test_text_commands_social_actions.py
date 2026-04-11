@@ -10,6 +10,7 @@ from selara.presentation.handlers.text_commands import (
 
 def test_extract_social_action_basic_commands() -> None:
     assert _extract_social_action("шлепнуть") == "slap"
+    assert _extract_social_action("сожги") == "burn"
     assert _extract_social_action("обнять") == "hug"
     assert _extract_social_action("поцеловать!") == "kiss"
 
@@ -24,14 +25,19 @@ def test_extract_social_action_supports_imperative_aliases() -> None:
 
 def test_extract_social_action_supports_new_single_word_actions() -> None:
     assert _extract_social_action("погладь") == "pat"
+    assert _extract_social_action("наступи") == "step"
     assert _extract_social_action("пощекочи") == "tickle"
     assert _extract_social_action("ткни") == "poke"
+    assert _extract_social_action("оттолкни") == "push"
     assert _extract_social_action("подмигни") == "wink"
     assert _extract_social_action("потанцуй") == "dance"
     assert _extract_social_action("поклонись") == "bow"
     assert _extract_social_action("подбодри") == "cheer"
     assert _extract_social_action("угости") == "treat"
     assert _extract_social_action("похвали") == "praise"
+    assert _extract_social_action("наругай") == "scold"
+    assert _extract_social_action("отсоси") == "suck"
+    assert _extract_social_action("минет") == "suck"
 
 
 def test_extract_social_action_supports_new_multiword_actions() -> None:
@@ -39,6 +45,7 @@ def test_extract_social_action_supports_new_multiword_actions() -> None:
     assert _extract_social_action("дай пять!") == "highfive"
     assert _extract_social_action("дай кулак") == "fistbump"
     assert _extract_social_action("проведи ночь с") == "night"
+    assert _extract_social_action("сядь на") == "siton"
 
 
 def test_extract_social_action_ignores_unknown_or_slash() -> None:
