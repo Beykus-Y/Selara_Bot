@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { adminTableDelete } from '@/pages/admin-table/api/admin-table-api'
@@ -16,7 +16,6 @@ type AdminTablePageViewProps = {
 }
 
 function renderCellValue(
-  col: string,
   value: unknown,
   refLabel?: string,
 ): React.ReactNode {
@@ -40,7 +39,6 @@ function renderCellValue(
 }
 
 export function AdminTablePageView({ tableName, data, filters, onFilter }: AdminTablePageViewProps) {
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const [pendingDelete, setPendingDelete] = useState<TableRow | null>(null)
@@ -70,11 +68,6 @@ export function AdminTablePageView({ tableName, data, filters, onFilter }: Admin
 
   const totalPages = Math.ceil(data.total / data.limit)
   const currentPage = data.page
-
-  function buildPageLink(page: number) {
-    const params = new URLSearchParams({ ...filters, page: String(page) })
-    return `?${params.toString()}`
-  }
 
   function handleSubmitFilter(e: React.FormEvent) {
     e.preventDefault()
@@ -135,7 +128,6 @@ export function AdminTablePageView({ tableName, data, filters, onFilter }: Admin
                     {data.columns.map((col) => (
                       <td key={col}>
                         {renderCellValue(
-                          col,
                           entry.row[col],
                           data.reference_labels?.[col]?.[String(entry.row[col])],
                         )}
