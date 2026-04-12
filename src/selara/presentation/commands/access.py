@@ -108,6 +108,9 @@ KNOWN_COMMAND_KEYS.update(
         "announce",
         "announce_reg",
         "announce_unreg",
+        "persona_grant",
+        "persona_clear",
+        "persona_list",
         "gacha_pull",
         "gacha_profile",
         "gacha_info",
@@ -135,6 +138,9 @@ TEXT_TRIGGER_TO_COMMAND_KEY: dict[str, str] = {
     "повысить": "roleadd",
     "понизить": "roleremove",
     "объява": "announce",
+    "выдать образ": "persona_grant",
+    "снять образ": "persona_clear",
+    "образы": "persona_list",
 }
 
 

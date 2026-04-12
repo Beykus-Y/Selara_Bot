@@ -168,3 +168,32 @@ def test_apply_setting_update_rejects_antiraid_window_outside_allowed_values() -
 
     assert updated is None
     assert error == "antiraid_recent_window_minutes должен быть равен 5 или 10"
+
+
+def test_apply_setting_update_accepts_persona_display_mode() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+    updated, error = apply_setting_update(
+        key="persona_display_mode",
+        raw_value="title_image_name",
+        current=current,
+        defaults=defaults,
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["persona_display_mode"] == "title_image_name"
+
+
+def test_apply_setting_update_rejects_invalid_persona_display_mode() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+    updated, error = apply_setting_update(
+        key="persona_display_mode",
+        raw_value="broken",
+        current=current,
+        defaults=defaults,
+    )
+
+    assert updated is None
+    assert error == "Поддерживаются только режимы образа: image_only, image_name, title_image_name"

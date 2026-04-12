@@ -7200,7 +7200,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_auth_required(admin_user_id):
             if prefers_json:
-                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
             return _redirect("/app/admin/login")
 
         try:
@@ -7226,7 +7226,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_auth_required(admin_user_id):
             if prefers_json:
-                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
             return _redirect("/app/admin/login")
 
         form_lists = await _parse_form_lists(request)
@@ -7437,7 +7437,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if not _admin_auth_required(admin_user_id):
                 await session.commit()
                 if prefers_json:
-                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
                 return _redirect("/app/admin/login")
 
             form = await _parse_form(request)
@@ -7812,6 +7812,666 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
 
         return _redirect(_with_message(f"/app/admin/table/{table_name}", key="flash", text="Запись удалена."))
+
+    # ── JSON API для React-фронтенда ──────────────────────────────────────
+
+    @app.get("/api/app/feedback")
+    async def feedback_page_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            rows = (
+                await session.execute(
+                    select(UserFeatureRequestModel)
+                    .where(UserFeatureRequestModel.user_id == user.telegram_user_id)
+                    .order_by(UserFeatureRequestModel.created_at.desc(), UserFeatureRequestModel.id.desc())
+                )
+            ).scalars().all()
+            await session.commit()
+
+        feedback_items = [_build_feature_request_item(row=row) for row in rows]
+        open_count = sum(1 for item in feedback_items if not bool(item["is_done"]))
+        done_count = len(feedback_items) - open_count
+        page: dict[str, object] = {
+            "feedback_metrics": [
+                {"label": "Всего заявок", "value": str(len(feedback_items)), "note": "из этого аккаунта", "tone": "indigo"},
+                {"label": "Не сделано", "value": str(open_count), "note": "ещё в работе", "tone": "magenta"},
+                {"label": "Сделано", "value": str(done_count), "note": "отмечено в админке", "tone": "cyan"},
+            ],
+            "feedback_items": feedback_items,
+        }
+        return JSONResponse(content={"ok": True, "page": page}, status_code=200)
+
+    @app.post("/api/app/feedback")
+    async def feedback_submit_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/login")
+
+            form = await _parse_form(request)
+            title = " ".join(str(form.get("title", "")).split()).strip()
+            details = str(form.get("details", "")).strip()
+
+            if not title:
+                await session.commit()
+                return _json_result(ok=False, message="Нужно коротко назвать идею.", status_code=400)
+            if len(title) > 160:
+                await session.commit()
+                return _json_result(ok=False, message="Заголовок должен быть до 160 символов.", status_code=400)
+            if not details:
+                await session.commit()
+                return _json_result(ok=False, message="Опишите, что именно нужно добавить.", status_code=400)
+
+            feature_request = UserFeatureRequestModel(
+                user_id=user.telegram_user_id,
+                title=title,
+                details=details,
+                status="open",
+            )
+            session.add(feature_request)
+            await session.flush()
+            request_id = int(feature_request.id)
+            await session.commit()
+
+        return _json_result(ok=True, message="Предложение отправлено.", status_code=200, request_id=request_id)
+
+    @app.get("/api/admin")
+    async def admin_page_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            feedback_requests = await _load_admin_feature_request_items(session)
+            open_feedback_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(UserFeatureRequestModel)
+                    .where(UserFeatureRequestModel.status == "open")
+                )
+            ).scalar_one()
+            active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
+            recent_active_chat_count = await activity_repo.count_recent_active_group_chats(since=active_since)
+            recent_active_chats = await activity_repo.list_recent_active_group_chats(since=active_since)
+            recent_broadcasts = await activity_repo.list_recent_admin_broadcasts(limit=8)
+            await session.commit()
+
+        page: dict[str, object] = {
+            "admin_user_id": admin_user_id,
+            "open_feedback_count": int(open_feedback_count or 0),
+            "feedback_requests": feedback_requests,
+            "broadcast_active_days": _ADMIN_BROADCAST_ACTIVE_DAYS,
+            "recent_active_chat_count": recent_active_chat_count,
+            "recent_active_chats": [
+                {
+                    "chat_id": item.chat_id,
+                    "title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type=item.chat_type,
+                        chat_title=item.chat_title,
+                    ),
+                    "last_activity_at": format_datetime(item.last_activity_at),
+                    "checked": True,
+                }
+                for item in recent_active_chats
+            ],
+            "recent_broadcasts": [
+                {
+                    "id": item.id,
+                    "created_at": format_datetime(item.created_at),
+                    "body_preview": _admin_broadcast_body_preview(item.body),
+                    "target_count": item.target_count,
+                    "sent_count": item.sent_count,
+                    "failed_count": item.failed_count,
+                    "reply_count": item.reply_count,
+                }
+                for item in recent_broadcasts
+            ],
+            "table_sections": _admin_table_sections(),
+        }
+        return JSONResponse(content={"ok": True, "page": page}, status_code=200)
+
+    @app.post("/api/admin/login")
+    async def admin_login_api(request: Request):
+        now = _now_utc()
+        form = await _parse_form(request)
+        password = form.get("password", "")
+
+        if not settings.admin_password or password != settings.admin_password:
+            return _json_result(ok=False, message="Неверный пароль.", status_code=401)
+
+        if settings.admin_user_id is None:
+            return _json_result(ok=False, message="ADMIN_USER_ID не настроен.", status_code=500)
+
+        async with session_factory() as session:
+            auth_repo = SqlAlchemyAdminAuthRepository(session)
+            await auth_repo.purge_expired_state(now=now)
+
+            token = generate_session_token()
+            await auth_repo.create_session(
+                admin_user_id=settings.admin_user_id,
+                session_token=token,
+                expires_at=now + timedelta(hours=settings.admin_session_ttl_hours),
+                now=now,
+            )
+            await session.commit()
+
+        response = _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect="/app/admin")
+        response.set_cookie(
+            settings.admin_session_cookie_name,
+            token,
+            httponly=True,
+            secure=settings.admin_session_cookie_secure,
+            samesite="lax",
+            max_age=settings.admin_session_ttl_hours * 3600,
+        )
+        return response
+
+    @app.post("/api/admin/logout")
+    async def admin_logout_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=False)
+            if admin_user_id is not None:
+                auth_repo = SqlAlchemyAdminAuthRepository(session)
+                session_token = request.cookies.get(settings.admin_session_cookie_name)
+                if session_token:
+                    await auth_repo.revoke_session(session_token=session_token, now=_now_utc())
+            await session.commit()
+
+        response = _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect="/admin/login")
+        response.delete_cookie(settings.admin_session_cookie_name)
+        return response
+
+    @app.post("/api/admin/request-backup")
+    async def admin_request_backup_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        try:
+            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+        except Exception:
+            logger.exception("Admin backup request failed")
+            return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500)
+
+        return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200)
+
+    @app.post("/api/admin/broadcasts/send")
+    async def admin_send_broadcast_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        form_lists = await _parse_form_lists(request)
+        body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
+        if not body:
+            return _json_result(ok=False, message="Введите текст системного сообщения.", status_code=400)
+        if len(body) > _ADMIN_BROADCAST_BODY_LIMIT:
+            return _json_result(
+                ok=False,
+                message=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
+                status_code=400,
+            )
+
+        html_error = _validate_admin_broadcast_body(body)
+        if html_error:
+            return _json_result(ok=False, message=html_error, status_code=400)
+
+        active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
+        selected_chat_ids = {
+            int(raw_value)
+            for raw_value in form_lists.get("chat_ids", [])
+            if raw_value.lstrip("-").isdigit()
+        }
+        async with session_factory() as session:
+            activity_repo = SqlAlchemyActivityRepository(session)
+            targets = await activity_repo.list_recent_active_group_chats(since=active_since)
+            targets = [item for item in targets if item.chat_id in selected_chat_ids]
+            if not targets:
+                await session.commit()
+                return _json_result(ok=False, message="Не выбрано ни одного чата для рассылки.", status_code=400)
+
+            broadcast = await activity_repo.create_admin_broadcast(
+                body=body,
+                active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
+                created_by_user_id=admin_user_id,
+            )
+            deliveries = await activity_repo.create_admin_broadcast_deliveries(
+                broadcast_id=broadcast.id,
+                targets=targets,
+            )
+            await session.commit()
+
+        bot = await _get_game_bot()
+        rendered_message = _render_admin_broadcast_message(body)
+        sent_count = 0
+        failed_count = 0
+        for delivery in deliveries:
+            try:
+                sent_message = await bot.send_message(
+                    chat_id=delivery.chat_id,
+                    text=rendered_message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                failed_count += 1
+                logger.exception(
+                    "Admin broadcast send failed",
+                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
+                )
+                async with session_factory() as session:
+                    activity_repo2 = SqlAlchemyActivityRepository(session)
+                    await activity_repo2.mark_admin_broadcast_delivery_failed(
+                        delivery_id=delivery.id,
+                        error_text=str(exc) or exc.__class__.__name__,
+                    )
+                    await session.commit()
+                continue
+
+            sent_count += 1
+            sent_at = getattr(sent_message, "date", None) or _now_utc()
+            async with session_factory() as session:
+                activity_repo2 = SqlAlchemyActivityRepository(session)
+                await activity_repo2.mark_admin_broadcast_delivery_sent(
+                    delivery_id=delivery.id,
+                    telegram_message_id=int(sent_message.message_id),
+                    sent_at=sent_at,
+                )
+                await session.commit()
+
+        summary_text = f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}."
+        return _json_result(ok=True, message=summary_text, status_code=200, broadcast_id=broadcast.id)
+
+    @app.get("/api/admin/broadcasts/{broadcast_id}")
+    async def admin_broadcast_detail_api(request: Request, broadcast_id: int):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            broadcast = await activity_repo.get_admin_broadcast(broadcast_id=broadcast_id)
+            if broadcast is None:
+                await session.commit()
+                return _json_result(ok=False, message="Рассылка не найдена.", status_code=404)
+
+            deliveries = await activity_repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
+            replies = await activity_repo.list_admin_broadcast_replies(broadcast_id=broadcast_id)
+            await session.commit()
+
+        sent_count = sum(1 for item in deliveries if item.status == "sent")
+        failed_count = sum(1 for item in deliveries if item.status == "failed")
+        target_count = len(deliveries)
+
+        page: dict[str, object] = {
+            "broadcast": {
+                "id": broadcast.id,
+                "created_at": format_datetime(broadcast.created_at),
+                "body": broadcast.body,
+                "message_preview_html": _render_admin_broadcast_message(broadcast.body),
+                "active_since_days": broadcast.active_since_days,
+                "target_count": target_count,
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+                "reply_count": len(replies),
+            },
+            "deliveries": [
+                {
+                    "chat_id": item.chat_id,
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "last_activity_at": format_datetime(item.last_activity_at),
+                    "status_code": item.status,
+                    "status_label": _admin_broadcast_status_meta(item.status)[0],
+                    "status_tone": _admin_broadcast_status_meta(item.status)[1],
+                    "telegram_message_id": item.telegram_message_id,
+                    "reply_count": item.reply_count,
+                    "sent_at": format_datetime(item.sent_at),
+                    "error_text": item.error_text,
+                }
+                for item in deliveries
+            ],
+            "replies": [
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "user_label": user_label(item.user),
+                    "sent_at": format_datetime(item.sent_at),
+                    "message_type": item.message_type,
+                    "preview": _admin_broadcast_reply_preview(
+                        message_type=item.message_type,
+                        text=item.text,
+                        caption=item.caption,
+                    ),
+                }
+                for item in replies
+            ],
+        }
+        return JSONResponse(content={"ok": True, "page": page}, status_code=200)
+
+    @app.post("/api/admin/feedback/{request_id}/status")
+    async def admin_feedback_status_api(request: Request, request_id: int):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+            form = await _parse_form(request)
+            new_status = str(form.get("status", "")).strip()
+            if new_status not in ("open", "done"):
+                await session.commit()
+                return _json_result(ok=False, message="Неизвестный статус заявки.", status_code=400)
+
+            row = (await session.execute(
+                select(UserFeatureRequestModel).where(UserFeatureRequestModel.id == request_id)
+            )).scalar_one_or_none()
+            if row is None:
+                await session.commit()
+                return _json_result(ok=False, message="Заявка не найдена.", status_code=404)
+
+            row.status = new_status
+            if new_status == "done":
+                row.done_at = _now_utc()
+                message = "Заявка отмечена как сделанная."
+            else:
+                row.done_at = None
+                message = "Заявка возвращена в открытые."
+            await session.commit()
+
+        return _json_result(ok=True, message=message, status_code=200)
+
+    @app.get("/api/admin/table/{table_name}")
+    async def admin_table_api(request: Request, table_name: str):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
+
+        page = int(request.query_params.get("page", 1))
+        limit = 50
+        filters_input: dict[str, str] = {}
+        for key, value in request.query_params.items():
+            if key not in ("page", "limit") and value:
+                filters_input[key] = value
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _json_result(ok=False, message="Таблица не найдена.", status_code=404)
+
+            columns = [col.name for col in model_class.__table__.columns]
+            filters = []
+            for col_name, col_value in filters_input.items():
+                if col_name not in columns:
+                    continue
+                col = model_class.__table__.columns[col_name]
+                if isinstance(col.type, (String, Text)):
+                    filters.append(col.ilike(f"%{col_value}%"))
+                elif isinstance(col.type, (Integer, BigInteger, SmallInteger)):
+                    try:
+                        filters.append(col == int(col_value))
+                    except ValueError:
+                        pass
+                elif isinstance(col.type, DateTime):
+                    try:
+                        search_dt = datetime.fromisoformat(col_value.replace("Z", "+00:00"))
+                        filters.append(col == search_dt)
+                    except ValueError:
+                        pass
+                elif isinstance(col.type, Boolean):
+                    if col_value.lower() in ("true", "1", "yes"):
+                        filters.append(col == True)
+                    elif col_value.lower() in ("false", "0", "no"):
+                        filters.append(col == False)
+
+            if filters:
+                stmt = select(model_class).where(and_(*filters)).limit(limit).offset((page - 1) * limit)
+            else:
+                stmt = select(model_class).limit(limit).offset((page - 1) * limit)
+
+            rows = (await session.execute(stmt)).scalars().all()
+            count_stmt = select(func.count()).select_from(model_class)
+            if filters:
+                count_stmt = count_stmt.where(and_(*filters))
+            total = int((await session.execute(count_stmt)).scalar() or 0)
+            reference_labels = await _admin_reference_labels(
+                session,
+                column_values=[
+                    (col.name, getattr(row, col.name, None))
+                    for row in rows
+                    for col in model_class.__table__.columns
+                ],
+            )
+            pk_cols = [c.name for c in _admin_primary_key_columns(model_class)]
+            row_entries = []
+            for row in rows:
+                row_data: dict[str, object] = {}
+                for col in model_class.__table__.columns:
+                    val = getattr(row, col.name, None)
+                    if isinstance(val, datetime):
+                        row_data[col.name] = val.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+                    elif val is None:
+                        row_data[col.name] = None
+                    else:
+                        row_data[col.name] = val
+                pk_values_row = _admin_primary_key_values_from_row(model_class, row)
+                row_entries.append({
+                    "row": row_data,
+                    "pk_query": _admin_primary_key_query(pk_values_row),
+                    "pk_values": pk_values_row,
+                })
+            await session.commit()
+
+        page_data: dict[str, object] = {
+            "table_name": table_name,
+            "table_title": _admin_table_title(table_name),
+            "columns": columns,
+            "pk_columns": pk_cols,
+            "rows": row_entries,
+            "total": int(total),
+            "page": page,
+            "limit": limit,
+            "filters_input": filters_input,
+            "reference_labels": reference_labels,
+        }
+        return JSONResponse(content={"ok": True, "page": page_data}, status_code=200)
+
+    @app.get("/api/admin/table/{table_name}/edit")
+    async def admin_table_edit_api(request: Request, table_name: str):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _json_result(ok=False, message="Таблица не найдена.", status_code=404)
+
+            pk_values, error = _admin_primary_key_values_from_input(model_class, request.query_params)
+            if pk_values is None:
+                return _json_result(ok=False, message=error or "Некорректный ключ записи.", status_code=400)
+
+            row = await _admin_get_record(session, model_class, pk_values)
+            if row is None:
+                return _json_result(ok=False, message="Запись не найдена.", status_code=404)
+
+            col_defs: list[dict[str, object]] = []
+            for col in model_class.__table__.columns:
+                val = getattr(row, col.name, None)
+                if isinstance(val, datetime):
+                    serialized = val.strftime("%Y-%m-%dT%H:%M:%S")
+                    field_type = "datetime"
+                elif isinstance(val, bool):
+                    serialized = val
+                    field_type = "bool"
+                elif val is None:
+                    serialized = None
+                    field_type = "text"
+                elif isinstance(val, str) and len(val) > 100:
+                    serialized = val
+                    field_type = "textarea"
+                else:
+                    serialized = val
+                    field_type = "text"
+                col_defs.append({
+                    "name": col.name,
+                    "value": serialized,
+                    "type": field_type,
+                    "is_pk": col.primary_key,
+                    "ref_label": (reference_labels := {}).get(col.name, {}).get(val),
+                })
+
+            reference_labels2 = await _admin_reference_labels(
+                session,
+                column_values=[(col.name, getattr(row, col.name, None)) for col in model_class.__table__.columns],
+            )
+            for entry in col_defs:
+                col_name = str(entry["name"])
+                entry["ref_label"] = reference_labels2.get(col_name, {}).get(entry["value"])
+
+            pk_cols = [c.name for c in _admin_primary_key_columns(model_class)]
+            record_id = _admin_primary_key_display(pk_values)
+            await session.commit()
+
+        page_data: dict[str, object] = {
+            "table_name": table_name,
+            "table_title": _admin_table_title(table_name),
+            "record_id": record_id,
+            "pk_fields": list(pk_values.items()),
+            "pk_columns": pk_cols,
+            "columns": col_defs,
+        }
+        return JSONResponse(content={"ok": True, "page": page_data}, status_code=200)
+
+    @app.post("/api/admin/table/{table_name}/update")
+    async def admin_table_update_api(request: Request, table_name: str):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
+
+        form = await _parse_form(request)
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _json_result(ok=False, message="Таблица не найдена.", status_code=404)
+
+            pk_values, error = _admin_primary_key_values_from_input(model_class, form)
+            if pk_values is None:
+                return _json_result(ok=False, message=error or "Некорректный ключ записи.", status_code=400)
+
+            row = await _admin_get_record(session, model_class, pk_values)
+            if row is None:
+                return _json_result(ok=False, message="Запись не найдена.", status_code=404)
+
+            updated_fields = []
+            for col in model_class.__table__.columns:
+                if col.primary_key:
+                    continue
+                if col.name in form:
+                    value = _coerce_admin_form_value(col, form[col.name])
+                    if value is _admin_invalid_form_value:
+                        continue
+                    setattr(row, col.name, value)
+                    updated_fields.append(col.name)
+
+            await session.commit()
+
+            await log_chat_action(
+                SqlAlchemyActivityRepository(session),
+                chat_id=0,
+                chat_type="private",
+                chat_title="Admin Panel",
+                action_code="admin_record_updated",
+                description=(
+                    f"Admin {admin_user_id} updated record {_admin_primary_key_display(pk_values)} "
+                    f"in {table_name}: {', '.join(updated_fields)}"
+                ),
+                actor_user_id=admin_user_id,
+            )
+
+        return _json_result(ok=True, message=f"Запись обновлена. Изменены поля: {', '.join(updated_fields)}", status_code=200)
+
+    @app.post("/api/admin/table/{table_name}/delete")
+    async def admin_table_delete_api(request: Request, table_name: str):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
+
+        form = await _parse_form(request)
+
+        async with session_factory() as session:
+            model_class = _load_admin_model_class(table_name)
+            if model_class is None:
+                return _json_result(ok=False, message="Таблица не найдена.", status_code=404)
+
+            pk_values, error = _admin_primary_key_values_from_input(model_class, form)
+            if pk_values is None:
+                return _json_result(ok=False, message=error or "Некорректный ключ записи.", status_code=400)
+
+            row = await _admin_get_record(session, model_class, pk_values)
+            if row is None:
+                return _json_result(ok=False, message="Запись не найдена.", status_code=404)
+
+            await session.delete(row)
+            await session.commit()
+
+            await log_chat_action(
+                SqlAlchemyActivityRepository(session),
+                chat_id=0,
+                chat_type="private",
+                chat_title="Admin Panel",
+                action_code="admin_record_deleted",
+                description=f"Admin {admin_user_id} deleted record {_admin_primary_key_display(pk_values)} from {table_name}",
+                actor_user_id=admin_user_id,
+            )
+
+        return _json_result(ok=True, message="Запись удалена.", status_code=200)
 
     return app
 

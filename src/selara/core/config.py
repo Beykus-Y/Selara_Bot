@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     entry_captcha_kick_on_fail: bool = Field(default=True, validation_alias="ENTRY_CAPTCHA_KICK_ON_FAIL")
     custom_rp_enabled: bool = Field(default=True, validation_alias="CUSTOM_RP_ENABLED")
     family_tree_enabled: bool = Field(default=True, validation_alias="FAMILY_TREE_ENABLED")
+    persona_enabled: bool = Field(default=True, validation_alias="PERSONA_ENABLED")
+    persona_display_mode: str = Field(default="image_name", validation_alias="PERSONA_DISPLAY_MODE")
     titles_enabled: bool = Field(default=True, validation_alias="TITLES_ENABLED")
     title_price: int = Field(default=50000, validation_alias="TITLE_PRICE")
     craft_enabled: bool = Field(default=True, validation_alias="CRAFT_ENABLED")

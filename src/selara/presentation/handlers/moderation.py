@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import timezone
+import secrets
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import re
 import shlex
 from html import escape
@@ -8,7 +10,8 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy.exc import IntegrityError
 
 from selara.core.roles import (
     BOT_PERMISSIONS,
@@ -18,6 +21,7 @@ from selara.core.roles import (
 )
 from selara.domain.entities import BotRole, ModerationAction, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
+from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import (
     build_chat_snapshot,
     build_user_snapshot,
@@ -58,6 +62,20 @@ _REST_GRANT_PATTERN = re.compile(r"^\s*выдать\s+рест\s+(?P<days>\d+)(?
 _REST_LIST_PATTERN = re.compile(r"^\s*ресты\s*$", re.IGNORECASE)
 _REST_REVOKE_PATTERN = re.compile(r"^\s*забрать\s+рест(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
 _REPLY_ROLE_STEP_PATTERN = re.compile(r"^\s*(?:повысить|понизить)\b", re.IGNORECASE)
+_PERSONA_GRANT_PATTERN = re.compile(
+    r"^\s*выдать\s+образ"
+    r"(?:\s+(?P<target>@\S+|-?\d+))?"
+    r"(?:\s+(?:"
+    r'"(?P<label_dq>[^"]+)"'
+    r"|«(?P<label_ruq>[^»]+)»"
+    r"|“(?P<label_lcq>[^”]+)”"
+    r"|(?P<label_plain>.+?)"
+    r"))\s*$",
+    re.IGNORECASE,
+)
+_PERSONA_CLEAR_PATTERN = re.compile(r"^\s*снять\s+образ(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
+_PERSONA_LIST_PATTERN = re.compile(r"^\s*образы\s*$", re.IGNORECASE)
+_PERSONA_CONFLICT_TTL = timedelta(minutes=15)
 _PERMISSION_LABELS_RU: dict[str, str] = {
     "manage_roles": "управление ролями",
     "manage_settings": "управление настройками",
@@ -71,6 +89,20 @@ _ROLE_ACTION_TO_COMMAND_KEY: dict[str, str] = {
     "promote": "roleadd",
     "demote": "roleremove",
 }
+
+
+@dataclass(frozen=True)
+class PendingPersonaConflict:
+    request_id: str
+    chat_id: int
+    actor_user_id: int
+    target_user_id: int
+    current_owner_user_id: int
+    persona_label: str
+    created_at: datetime
+
+
+_PENDING_PERSONA_CONFLICTS: dict[str, PendingPersonaConflict] = {}
 
 
 def _target_label(target: UserSnapshot) -> str:
@@ -91,6 +123,14 @@ def _split_first_token(raw: str) -> tuple[str | None, str]:
     if len(parts) == 1:
         return parts[0], ""
     return parts[0], parts[1].strip()
+
+
+def _extract_persona_label(match: re.Match[str]) -> str | None:
+    for group_name in ("label_dq", "label_ruq", "label_lcq", "label_plain"):
+        value = (match.group(group_name) or "").strip()
+        if value:
+            return value
+    return None
 
 
 async def _resolve_target_user(message: Message, activity_repo, explicit_token: str | None) -> UserSnapshot | None:
@@ -145,6 +185,59 @@ async def _resolve_target_user(message: Message, activity_repo, explicit_token: 
         )
 
     return None
+
+
+def _cleanup_pending_persona_conflicts() -> None:
+    now = datetime.now(timezone.utc)
+    for request_id, pending in list(_PENDING_PERSONA_CONFLICTS.items()):
+        if pending.created_at + _PERSONA_CONFLICT_TTL <= now:
+            _PENDING_PERSONA_CONFLICTS.pop(request_id, None)
+
+
+def _persona_conflict_markup(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Заменить", callback_data=f"persona:confirm:{request_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"persona:cancel:{request_id}"),
+            ]
+        ]
+    )
+
+
+async def _ensure_text_command_access(message: Message, activity_repo, *, command_key: str) -> bool:
+    command_allowed, actor_role_code, required_role_code, _ = await has_command_access(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        command_key=command_key,
+        bootstrap_if_missing_owner=True,
+        bot=getattr(message, "bot", None),
+    )
+    if command_allowed:
+        return True
+
+    actor_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=actor_role_code)
+    required_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=required_role_code)
+    await message.answer(
+        (
+            f"Недостаточно прав для команды <code>{escape(command_key)}</code>.\n"
+            f"Ваш ранг: <code>{escape(actor_label)}</code>\n"
+            f"Нужный ранг: <code>{escape(required_label)}</code>"
+        ),
+        parse_mode="HTML",
+    )
+    return False
+
+
+async def _ensure_rest_command_access(message: Message, activity_repo, *, command_key: str) -> bool:
+    return await _ensure_text_command_access(message, activity_repo, command_key=command_key)
 
 
 def _resolve_system_role_rank(role_code: BotRole | None) -> int | None:
@@ -516,39 +609,6 @@ async def _apply_moderation_action(
         lines.append("<i>Telegram-бан/разбан не применён (нет прав у бота), но внутренний статус обновлён.</i>")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
-
-
-async def _ensure_rest_command_access(message: Message, activity_repo, *, command_key: str) -> bool:
-    command_allowed, actor_role_code, required_role_code, _ = await has_command_access(
-        activity_repo,
-        chat_id=message.chat.id,
-        chat_type=message.chat.type,
-        chat_title=message.chat.title,
-        user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_bot=bool(message.from_user.is_bot),
-        command_key=command_key,
-        bootstrap_if_missing_owner=True,
-        bot=getattr(message, "bot", None),
-    )
-    if command_allowed:
-        return True
-
-    actor_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=actor_role_code)
-    required_label = await get_role_label_ru(activity_repo, chat_id=message.chat.id, role_code=required_role_code)
-    await message.answer(
-        (
-            f"Недостаточно прав для команды <code>{escape(command_key)}</code>.\n"
-            f"Ваш ранг: <code>{escape(actor_label)}</code>\n"
-            f"Нужный ранг: <code>{escape(required_label)}</code>"
-        ),
-        parse_mode="HTML",
-    )
-    return False
-
-
 async def _apply_rest_command(
     *,
     message: Message,
@@ -639,6 +699,185 @@ async def rest_list_text_command(message: Message, activity_repo) -> None:
     entries = await activity_repo.list_active_rest_entries(chat_id=message.chat.id)
     for chunk in _build_rest_list_messages(entries):
         await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def _apply_persona_grant(
+    *,
+    message: Message,
+    activity_repo,
+    persona_label: str,
+    target_token: str | None,
+) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.from_user is None:
+        return
+
+    if not await _ensure_text_command_access(message, activity_repo, command_key="persona_grant"):
+        return
+
+    target = await _resolve_target_user(message, activity_repo, target_token)
+    if target is None:
+        await message.answer(
+            'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> или <code>выдать образ @username "Аль-Хайтам"</code>.',
+            parse_mode="HTML",
+        )
+        return
+    if target.is_bot:
+        await message.answer("Нельзя выдать образ боту.")
+        return
+
+    try:
+        existing_label = await activity_repo.get_chat_persona_label(chat_id=message.chat.id, user_id=target.telegram_user_id)
+        owner = await activity_repo.find_chat_persona_owner(chat_id=message.chat.id, persona_label=persona_label)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    if owner is not None and owner.user.telegram_user_id == target.telegram_user_id:
+        await message.answer(
+            f"<b>{escape(_target_label(target))}</b> уже носит образ <code>[{escape(owner.persona_label)}]</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    if owner is not None:
+        _cleanup_pending_persona_conflicts()
+        request_id = secrets.token_hex(8)
+        _PENDING_PERSONA_CONFLICTS[request_id] = PendingPersonaConflict(
+            request_id=request_id,
+            chat_id=message.chat.id,
+            actor_user_id=message.from_user.id,
+            target_user_id=target.telegram_user_id,
+            current_owner_user_id=owner.user.telegram_user_id,
+            persona_label=persona_label,
+            created_at=datetime.now(timezone.utc),
+        )
+        await message.answer(
+            (
+                f'Образ <code>[{escape(owner.persona_label)}]</code> уже занят пользователем '
+                f"<b>{escape(_target_label(owner.user))}</b>.\n"
+                f"Заменить владельца на <b>{escape(_target_label(target))}</b>?"
+            ),
+            parse_mode="HTML",
+            reply_markup=_persona_conflict_markup(request_id),
+        )
+        return
+
+    chat = build_chat_snapshot(chat_id=message.chat.id, chat_type=message.chat.type, chat_title=message.chat.title)
+    target_user = build_user_snapshot(
+        user_id=target.telegram_user_id,
+        username=target.username,
+        first_name=target.first_name,
+        last_name=target.last_name,
+        is_bot=target.is_bot,
+        chat_display_name=target.chat_display_name,
+    )
+    try:
+        stored_label = await activity_repo.set_chat_persona_label(
+            chat=chat,
+            user=target_user,
+            persona_label=persona_label,
+            granted_by_user_id=message.from_user.id,
+        )
+    except (ValueError, IntegrityError) as exc:
+        await message.answer(str(exc))
+        return
+
+    action_code = "persona_replaced" if existing_label and existing_label != stored_label else "persona_granted"
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code=action_code,
+        description=f"Назначен образ [{stored_label}] пользователю {target.telegram_user_id}.",
+        actor_user_id=message.from_user.id,
+        target_user_id=target.telegram_user_id,
+        meta_json={"persona_label": stored_label},
+    )
+    verb = "Образ обновлён" if existing_label and existing_label != stored_label else "Образ выдан"
+    await message.answer(
+        f"{verb}: <b>{escape(_target_label(target))}</b> -> <code>[{escape(stored_label or persona_label)}]</code>",
+        parse_mode="HTML",
+    )
+
+
+async def _apply_persona_clear(
+    *,
+    message: Message,
+    activity_repo,
+    target_token: str | None,
+) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.from_user is None:
+        return
+
+    if not await _ensure_text_command_access(message, activity_repo, command_key="persona_clear"):
+        return
+
+    target = await _resolve_target_user(message, activity_repo, target_token)
+    if target is None:
+        await message.answer(
+            "Формат: reply + <code>снять образ</code> или <code>снять образ @username</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if target.is_bot:
+        await message.answer("У бота нет чатовского образа.")
+        return
+
+    current_label = await activity_repo.get_chat_persona_label(chat_id=message.chat.id, user_id=target.telegram_user_id)
+    if current_label is None:
+        await message.answer(f"У <b>{escape(_target_label(target))}</b> нет выданного образа.", parse_mode="HTML")
+        return
+
+    removed = await activity_repo.clear_chat_persona_label(chat_id=message.chat.id, user_id=target.telegram_user_id)
+    if not removed:
+        await message.answer(f"У <b>{escape(_target_label(target))}</b> нет выданного образа.", parse_mode="HTML")
+        return
+
+    await log_chat_action(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="persona_cleared",
+        description=f"Снят образ [{current_label}] у пользователя {target.telegram_user_id}.",
+        actor_user_id=message.from_user.id,
+        target_user_id=target.telegram_user_id,
+        meta_json={"persona_label": current_label},
+    )
+    await message.answer(
+        f"Образ снят: <b>{escape(_target_label(target))}</b> <- <code>[{escape(current_label)}]</code>",
+        parse_mode="HTML",
+    )
+
+
+async def _send_persona_list(message: Message, activity_repo) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+    if message.from_user is None:
+        return
+
+    if not await _ensure_text_command_access(message, activity_repo, command_key="persona_list"):
+        return
+
+    assignments = await activity_repo.list_chat_persona_assignments(chat_id=message.chat.id)
+    if not assignments:
+        await message.answer("В этом чате пока нет выданных образов.")
+        return
+
+    lines = ["<b>Образы чата</b>"]
+    for assignment in assignments:
+        lines.append(
+            f"• <code>[{escape(assignment.persona_label)}]</code> — <b>{escape(_target_label(assignment.user))}</b>"
+        )
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 async def _apply_role_step_action(*, message: Message, activity_repo, action: str) -> None:
@@ -1425,6 +1664,150 @@ async def rest_revoke_text_command(message: Message, activity_repo) -> None:
         duration_days=None,
         target_token=(match.group("target") or "").strip() or None,
     )
+
+
+@router.message(F.text.regexp(_PERSONA_GRANT_PATTERN))
+async def persona_grant_text_command(message: Message, activity_repo, chat_settings) -> None:
+    if not chat_settings.persona_enabled:
+        await message.answer("Образы отключены в этом чате.")
+        return
+    match = _PERSONA_GRANT_PATTERN.match(message.text or "")
+    if match is None:
+        return
+    persona_label = _extract_persona_label(match)
+    if persona_label is None:
+        await message.answer(
+            'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> или <code>выдать образ @username "Аль-Хайтам"</code>.',
+            parse_mode="HTML",
+        )
+        return
+    await _apply_persona_grant(
+        message=message,
+        activity_repo=activity_repo,
+        persona_label=persona_label,
+        target_token=(match.group("target") or "").strip() or None,
+    )
+
+
+@router.message(F.text.regexp(_PERSONA_CLEAR_PATTERN))
+async def persona_clear_text_command(message: Message, activity_repo, chat_settings) -> None:
+    if not chat_settings.persona_enabled:
+        await message.answer("Образы отключены в этом чате.")
+        return
+    match = _PERSONA_CLEAR_PATTERN.match(message.text or "")
+    if match is None:
+        return
+    await _apply_persona_clear(
+        message=message,
+        activity_repo=activity_repo,
+        target_token=(match.group("target") or "").strip() or None,
+    )
+
+
+@router.message(F.text.regexp(_PERSONA_LIST_PATTERN))
+async def persona_list_text_command(message: Message, activity_repo, chat_settings) -> None:
+    if not chat_settings.persona_enabled:
+        await message.answer("Образы отключены в этом чате.")
+        return
+    await _send_persona_list(message, activity_repo)
+
+
+@router.callback_query(F.data.startswith("persona:"))
+async def persona_conflict_callback(query: CallbackQuery, activity_repo) -> None:
+    if query.data is None or query.from_user is None or query.message is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    _cleanup_pending_persona_conflicts()
+    _, action, request_id = parts
+    pending = _PENDING_PERSONA_CONFLICTS.get(request_id)
+    if pending is None:
+        await query.answer("Запрос уже не активен.", show_alert=True)
+        return
+    if query.from_user.id != pending.actor_user_id:
+        await query.answer("Подтвердить замену может только инициатор.", show_alert=True)
+        return
+    if query.message.chat.id != pending.chat_id:
+        await query.answer("Чат запроса больше не совпадает.", show_alert=True)
+        return
+
+    _PENDING_PERSONA_CONFLICTS.pop(request_id, None)
+    if action != "confirm":
+        await query.message.edit_text("Замена образа отменена.")
+        await query.answer("Отменено")
+        return
+
+    current_owner = await activity_repo.find_chat_persona_owner(chat_id=pending.chat_id, persona_label=pending.persona_label)
+    if current_owner is not None and current_owner.user.telegram_user_id == pending.target_user_id:
+        await query.message.edit_text(
+            f'Образ <code>[{escape(current_owner.persona_label)}]</code> уже назначен этому пользователю.',
+            parse_mode="HTML",
+        )
+        await query.answer("Без изменений")
+        return
+    if current_owner is not None and current_owner.user.telegram_user_id != pending.current_owner_user_id:
+        await query.message.edit_text("Образ уже занят другим пользователем. Запустите команду заново.")
+        await query.answer("Конфликт изменился", show_alert=True)
+        return
+
+    chat = build_chat_snapshot(
+        chat_id=query.message.chat.id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+    )
+    target_snapshot = await activity_repo.get_user_snapshot(user_id=pending.target_user_id)
+    if target_snapshot is None:
+        target_snapshot = build_user_snapshot(
+            user_id=pending.target_user_id,
+            username=None,
+            first_name=None,
+            last_name=None,
+            is_bot=False,
+        )
+
+    previous_label = await activity_repo.get_chat_persona_label(chat_id=pending.chat_id, user_id=pending.target_user_id)
+    if current_owner is not None and current_owner.user.telegram_user_id == pending.current_owner_user_id:
+        await activity_repo.clear_chat_persona_label(chat_id=pending.chat_id, user_id=current_owner.user.telegram_user_id)
+
+    try:
+        stored_label = await activity_repo.set_chat_persona_label(
+            chat=chat,
+            user=target_snapshot,
+            persona_label=pending.persona_label,
+            granted_by_user_id=query.from_user.id,
+        )
+    except (ValueError, IntegrityError) as exc:
+        await query.message.edit_text(str(exc))
+        await query.answer("Ошибка", show_alert=True)
+        return
+
+    await log_chat_action(
+        activity_repo,
+        chat_id=query.message.chat.id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+        action_code="persona_replaced",
+        description=f"Образ [{stored_label}] переназначен пользователю {pending.target_user_id}.",
+        actor_user_id=query.from_user.id,
+        target_user_id=pending.target_user_id,
+        meta_json={
+            "persona_label": stored_label,
+            "previous_owner_user_id": pending.current_owner_user_id,
+            "previous_target_label": previous_label,
+        },
+    )
+    await query.message.edit_text(
+        (
+            f'Образ <code>[{escape(stored_label or pending.persona_label)}]</code> '
+            f"теперь закреплён за пользователем <b>{escape(_target_label(target_snapshot))}</b>."
+        ),
+        parse_mode="HTML",
+    )
+    await query.answer("Готово")
 
 
 @router.message(Command(*_SLASH_MODERATION_COMMANDS))

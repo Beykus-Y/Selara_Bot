@@ -9,6 +9,7 @@ from selara.domain.entities import (
     ChatAuditLogEntry,
     ChatActivitySummary,
     ChatInterestingFactState,
+    ChatPersonaAssignment,
     ChatTrigger,
     CustomSocialAction,
     ChatTextAlias,
@@ -154,6 +155,18 @@ class ActivityRepository(Protocol):
         user: UserSnapshot,
         title_prefix: str | None,
     ) -> str | None: ...
+    async def get_chat_persona_label(self, *, chat_id: int, user_id: int) -> str | None: ...
+    async def set_chat_persona_label(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot,
+        persona_label: str,
+        granted_by_user_id: int | None,
+    ) -> str | None: ...
+    async def clear_chat_persona_label(self, *, chat_id: int, user_id: int) -> bool: ...
+    async def find_chat_persona_owner(self, *, chat_id: int, persona_label: str) -> ChatPersonaAssignment | None: ...
+    async def list_chat_persona_assignments(self, *, chat_id: int) -> list[ChatPersonaAssignment]: ...
     async def get_user_chat_profile(self, *, chat_id: int, user_id: int) -> UserChatProfile | None: ...
     async def set_user_chat_profile_description(
         self,

@@ -32,7 +32,13 @@ export const routes = {
   economy: (chatId: string | number) => `/app/chat/${chatId}/economy`,
   family: (chatId: string | number) => `/app/family/${chatId}`,
   audit: (chatId: string | number) => `/app/chat/${chatId}/audit`,
-} as const
+  feedback: '/app/feedback',
+  adminLogin: '/admin/login',
+  admin: '/admin',
+  adminBroadcast: (broadcastId: string | number) => `/admin/broadcasts/${broadcastId}`,
+  adminTable: (tableName: string) => `/admin/table/${tableName}`,
+  adminTableEdit: (tableName: string, pkQuery: string) => `/admin/table/${tableName}/edit?${pkQuery}`,
+}
 
 export const appNavigation = [
   {

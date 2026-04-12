@@ -74,6 +74,14 @@ class UserChatActivityModel(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     display_name_override: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_prefix: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    persona_label: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    persona_label_norm: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    persona_granted_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    persona_granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -86,6 +94,7 @@ class UserChatActivityModel(Base):
 Index("idx_user_chat_activity_chat_count", UserChatActivityModel.chat_id, UserChatActivityModel.message_count)
 Index("idx_user_chat_activity_chat_last_seen", UserChatActivityModel.chat_id, UserChatActivityModel.last_seen_at)
 Index("idx_user_chat_activity_chat_active", UserChatActivityModel.chat_id, UserChatActivityModel.is_active_member)
+Index("uq_user_chat_activity_chat_persona_norm", UserChatActivityModel.chat_id, UserChatActivityModel.persona_label_norm, unique=True)
 
 
 class UserChatProfileModel(Base):
@@ -826,6 +835,8 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    persona_display_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="image_name", server_default="image_name")
     save_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     titles_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     title_price: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50000, server_default="50000")

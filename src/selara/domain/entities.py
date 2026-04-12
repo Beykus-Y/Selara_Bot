@@ -173,6 +173,16 @@ class UserChatAward:
 
 
 @dataclass(frozen=True)
+class ChatPersonaAssignment:
+    chat_id: int
+    user: UserSnapshot
+    persona_label: str
+    persona_label_norm: str
+    granted_by_user_id: int | None
+    granted_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class IrisImportState:
     chat_id: int
     user_id: int

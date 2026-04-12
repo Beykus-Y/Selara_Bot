@@ -9,7 +9,13 @@ from sqlalchemy.orm import aliased
 
 from selara.application.use_cases.iris_import import strip_iris_award_prefix
 from selara.application.use_cases.leaderboard_scoring import compute_hybrid_score, sort_leaderboard_items
-from selara.core.chat_settings import ChatSettings
+from selara.core.chat_settings import (
+    DEFAULT_PERSONA_DISPLAY_MODE,
+    PERSONA_DISPLAY_MODE_IMAGE_NAME,
+    PERSONA_DISPLAY_MODE_IMAGE_ONLY,
+    PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME,
+    ChatSettings,
+)
 from selara.core.trigger_templates import validate_template_variables
 from selara.core.roles import (
     BOT_PERMISSIONS,
@@ -35,6 +41,7 @@ from selara.domain.entities import (
     ChatActivitySummary,
     ChatCommandAccessRule,
     ChatInterestingFactState,
+    ChatPersonaAssignment,
     ChatRoleDefinition,
     UserChatAward,
     UserChatProfile,
@@ -162,6 +169,22 @@ def _normalize_title_prefix(value: str | None) -> str | None:
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1].strip()
     return normalized[:72] or None
+
+
+def _normalize_persona_label(value: str | None) -> str | None:
+    normalized = " ".join((value or "").strip().split())
+    if not normalized:
+        return None
+    if len(normalized) > 48:
+        raise ValueError("Образ слишком длинный. Оставьте до 48 символов.")
+    return normalized
+
+
+def _normalize_persona_label_norm(value: str | None) -> str | None:
+    normalized = _normalize_persona_label(value)
+    if normalized is None:
+        return None
+    return normalized.casefold()
 
 
 def _normalize_profile_description(value: str | None) -> str | None:
@@ -1256,6 +1279,7 @@ class SqlAlchemyActivityRepository:
         return await self._get_user_stats_legacy(chat_id=chat_id, user_id=user_id)
 
     async def _get_user_stats_legacy(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stmt = (
             select(UserChatActivityModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == UserChatActivityModel.user_id)
@@ -1266,7 +1290,12 @@ class SqlAlchemyActivityRepository:
             return None
 
         activity, user = row
-        return self._to_stats(activity, user)
+        return self._to_stats(
+            activity,
+            user,
+            persona_enabled=persona_enabled,
+            persona_display_mode=persona_display_mode,
+        )
 
     async def get_user_message_streak_days(self, *, chat_id: int, user_id: int) -> int:
         if await self._is_chat_event_synced(chat_id=chat_id):
@@ -1314,6 +1343,7 @@ class SqlAlchemyActivityRepository:
         return int((await self._session.execute(stmt)).scalar_one_or_none() or 0)
 
     async def _get_user_stats_from_events(self, *, chat_id: int, user_id: int) -> ActivityStats | None:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stats_stmt = select(
             func.count(UserChatMessageEventModel.id),
             func.min(UserChatMessageEventModel.sent_at),
@@ -1347,6 +1377,9 @@ class SqlAlchemyActivityRepository:
                 last_name=user.last_name,
                 chat_display_name=activity.display_name_override if activity is not None else None,
                 title_prefix=activity.title_prefix if activity is not None else None,
+                persona_label=activity.persona_label if activity is not None else None,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
             ),
         )
 
@@ -1725,6 +1758,7 @@ class SqlAlchemyActivityRepository:
         return await self._get_top_legacy(chat_id=chat_id, limit=limit)
 
     async def _get_top_legacy(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(UserChatActivityModel, UserModel)
@@ -1750,9 +1784,18 @@ class SqlAlchemyActivityRepository:
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).all()
-        return [self._to_stats(activity, user) for activity, user in rows]
+        return [
+            self._to_stats(
+                activity,
+                user,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
+            )
+            for activity, user in rows
+        ]
 
     async def _get_top_from_events(self, *, chat_id: int, limit: int) -> list[ActivityStats]:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(
@@ -1817,6 +1860,9 @@ class SqlAlchemyActivityRepository:
                         last_name=user.last_name,
                         chat_display_name=activity.display_name_override if activity is not None else None,
                         title_prefix=activity.title_prefix if activity is not None else None,
+                        persona_label=activity.persona_label if activity is not None else None,
+                        persona_enabled=persona_enabled,
+                        persona_display_mode=persona_display_mode,
                     ),
                 )
             )
@@ -1844,6 +1890,7 @@ class SqlAlchemyActivityRepository:
         inactive_since: datetime,
         limit: int | None = None,
     ) -> list[ActivityStats]:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         rest_cutoff = datetime.now(timezone.utc)
         stmt = (
             select(UserChatActivityModel, UserModel)
@@ -1871,7 +1918,15 @@ class SqlAlchemyActivityRepository:
         if limit is not None and limit > 0:
             stmt = stmt.limit(limit)
         rows = (await self._session.execute(stmt)).all()
-        return [self._to_stats(activity, user) for activity, user in rows]
+        return [
+            self._to_stats(
+                activity,
+                user,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
+            )
+            for activity, user in rows
+        ]
 
     async def get_last_seen(self, *, chat_id: int, user_id: int) -> datetime | None:
         if await self._is_chat_event_synced(chat_id=chat_id):
@@ -1974,6 +2029,7 @@ class SqlAlchemyActivityRepository:
         )
         last_seen_rows = (await self._session.execute(last_seen_stmt)).all()
         last_seen_by_user = {int(user_id): last_seen_at for user_id, last_seen_at in last_seen_rows}
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
 
         values: list[ActivityStats] = []
         for activity, user in rows:
@@ -1998,6 +2054,9 @@ class SqlAlchemyActivityRepository:
                         last_name=user.last_name,
                         chat_display_name=activity.display_name_override,
                         title_prefix=activity.title_prefix,
+                        persona_label=activity.persona_label,
+                        persona_enabled=persona_enabled,
+                        persona_display_mode=persona_display_mode,
                     ),
                 )
             )
@@ -3049,13 +3108,14 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
 
     async def get_announcement_recipients(self, *, chat_id: int) -> list[UserSnapshot]:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         prefs = UserChatAnnouncementSubscriptionModel
         activity = UserChatActivityModel
         moderation = UserChatModerationStateModel
         users = UserModel
 
         stmt = (
-            select(users, activity.display_name_override, activity.title_prefix)
+            select(users, activity.display_name_override, activity.title_prefix, activity.persona_label)
             .join(activity, activity.user_id == users.telegram_user_id)
             .outerjoin(
                 prefs,
@@ -3090,8 +3150,11 @@ class SqlAlchemyActivityRepository:
                 user,
                 chat_display_name=display_name_override,
                 title_prefix=title_prefix,
+                persona_label=persona_label,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
             )
-            for user, display_name_override, title_prefix in rows
+            for user, display_name_override, title_prefix, persona_label in rows
         ]
 
     async def set_chat_display_name(
@@ -3126,7 +3189,18 @@ class SqlAlchemyActivityRepository:
 
         await self._session.flush()
 
+    async def _get_persona_render_config(self, *, chat_id: int) -> tuple[bool, str]:
+        stmt = select(ChatSettingsModel.persona_enabled, ChatSettingsModel.persona_display_mode).where(
+            ChatSettingsModel.chat_id == chat_id
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return True, DEFAULT_PERSONA_DISPLAY_MODE
+        persona_enabled, persona_display_mode = row
+        return bool(persona_enabled), str(persona_display_mode or DEFAULT_PERSONA_DISPLAY_MODE)
+
     async def get_chat_display_name(self, *, chat_id: int, user_id: int) -> str | None:
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stmt = (
             select(
                 UserModel.telegram_user_id,
@@ -3135,6 +3209,7 @@ class SqlAlchemyActivityRepository:
                 UserModel.last_name,
                 UserChatActivityModel.display_name_override,
                 UserChatActivityModel.title_prefix,
+                UserChatActivityModel.persona_label,
             )
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
             .where(
@@ -3145,7 +3220,7 @@ class SqlAlchemyActivityRepository:
         row = (await self._session.execute(stmt)).one_or_none()
         if row is None:
             return None
-        resolved_user_id, username, first_name, last_name, display_name_override, title_prefix = row
+        resolved_user_id, username, first_name, last_name, display_name_override, title_prefix, persona_label = row
         return self._compose_chat_display_name(
             user_id=int(resolved_user_id),
             username=username,
@@ -3153,6 +3228,9 @@ class SqlAlchemyActivityRepository:
             last_name=last_name,
             chat_display_name=display_name_override,
             title_prefix=title_prefix,
+            persona_label=persona_label,
+            persona_enabled=persona_enabled,
+            persona_display_mode=persona_display_mode,
         )
 
     async def get_chat_title_prefix(self, *, chat_id: int, user_id: int) -> str | None:
@@ -3195,6 +3273,144 @@ class SqlAlchemyActivityRepository:
 
         await self._session.flush()
         return normalized
+
+    async def get_chat_persona_label(self, *, chat_id: int, user_id: int) -> str | None:
+        stmt = select(UserChatActivityModel.persona_label).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.user_id == user_id,
+        )
+        value = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _normalize_persona_label(value)
+
+    async def set_chat_persona_label(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot,
+        persona_label: str,
+        granted_by_user_id: int | None,
+    ) -> str | None:
+        await self._upsert_chat(chat)
+        await self._upsert_user(user)
+
+        normalized = _normalize_persona_label(persona_label)
+        normalized_norm = _normalize_persona_label_norm(persona_label)
+        now = datetime.now(timezone.utc)
+        row = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
+        )
+        if row is None:
+            row = UserChatActivityModel(
+                chat_id=chat.telegram_chat_id,
+                user_id=user.telegram_user_id,
+                message_count=0,
+                last_seen_at=now,
+                display_name_override=None,
+                title_prefix=None,
+                persona_label=normalized,
+                persona_label_norm=normalized_norm,
+                persona_granted_by_user_id=granted_by_user_id,
+                persona_granted_at=now,
+            )
+            self._session.add(row)
+        else:
+            row.persona_label = normalized
+            row.persona_label_norm = normalized_norm
+            row.persona_granted_by_user_id = granted_by_user_id
+            row.persona_granted_at = now
+            row.updated_at = now
+
+        await self._session.flush()
+        return normalized
+
+    async def clear_chat_persona_label(self, *, chat_id: int, user_id: int) -> bool:
+        row = await self._session.get(
+            UserChatActivityModel,
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+        if row is None or row.persona_label is None:
+            return False
+        row.persona_label = None
+        row.persona_label_norm = None
+        row.persona_granted_by_user_id = None
+        row.persona_granted_at = None
+        row.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return True
+
+    async def find_chat_persona_owner(self, *, chat_id: int, persona_label: str) -> ChatPersonaAssignment | None:
+        normalized_norm = _normalize_persona_label_norm(persona_label)
+        if normalized_norm is None:
+            return None
+        stmt = (
+            select(
+                UserModel,
+                UserChatActivityModel.display_name_override,
+                UserChatActivityModel.persona_label,
+                UserChatActivityModel.persona_label_norm,
+                UserChatActivityModel.persona_granted_by_user_id,
+                UserChatActivityModel.persona_granted_at,
+            )
+            .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.persona_label_norm == normalized_norm,
+            )
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        (
+            user,
+            display_name_override,
+            stored_persona_label,
+            stored_persona_label_norm,
+            granted_by_user_id,
+            granted_at,
+        ) = row
+        return ChatPersonaAssignment(
+            chat_id=chat_id,
+            user=self._compose_persona_owner_snapshot(user, chat_display_name=display_name_override),
+            persona_label=stored_persona_label,
+            persona_label_norm=stored_persona_label_norm,
+            granted_by_user_id=int(granted_by_user_id) if granted_by_user_id is not None else None,
+            granted_at=_normalize_optional_datetime(granted_at),
+        )
+
+    async def list_chat_persona_assignments(self, *, chat_id: int) -> list[ChatPersonaAssignment]:
+        stmt = (
+            select(
+                UserModel,
+                UserChatActivityModel.display_name_override,
+                UserChatActivityModel.persona_label,
+                UserChatActivityModel.persona_label_norm,
+                UserChatActivityModel.persona_granted_by_user_id,
+                UserChatActivityModel.persona_granted_at,
+            )
+            .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
+            .where(
+                UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.persona_label.is_not(None),
+            )
+            .order_by(
+                UserChatActivityModel.persona_label_norm.asc(),
+                UserChatActivityModel.user_id.asc(),
+            )
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ChatPersonaAssignment(
+                chat_id=chat_id,
+                user=self._compose_persona_owner_snapshot(user, chat_display_name=display_name_override),
+                persona_label=stored_persona_label,
+                persona_label_norm=stored_persona_label_norm,
+                granted_by_user_id=int(granted_by_user_id) if granted_by_user_id is not None else None,
+                granted_at=_normalize_optional_datetime(granted_at),
+            )
+            for user, display_name_override, stored_persona_label, stored_persona_label_norm, granted_by_user_id, granted_at in rows
+        ]
 
     async def get_user_chat_profile(self, *, chat_id: int, user_id: int) -> UserChatProfile | None:
         row = await self._session.get(UserChatProfileModel, {"chat_id": chat_id, "user_id": user_id})
@@ -3293,6 +3509,7 @@ class SqlAlchemyActivityRepository:
                 UserModel,
                 UserChatActivityModel.display_name_override,
                 UserChatActivityModel.title_prefix,
+                UserChatActivityModel.persona_label,
             )
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
             .outerjoin(
@@ -3316,13 +3533,17 @@ class SqlAlchemyActivityRepository:
             .limit(max(1, int(limit)))
         )
         rows = (await self._session.execute(stmt)).all()
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         return [
             self._to_user_snapshot(
                 user,
                 chat_display_name=display_name_override,
                 title_prefix=title_prefix,
+                persona_label=persona_label,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
             )
-            for user, display_name_override, title_prefix in rows
+            for user, display_name_override, title_prefix, persona_label in rows
         ]
 
     async def get_user_chat_iris_import_state(self, *, chat_id: int, user_id: int) -> IrisImportState | None:
@@ -5101,8 +5322,14 @@ class SqlAlchemyActivityRepository:
         if not lowered:
             return None
 
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stmt = (
-            select(UserModel, UserChatActivityModel.display_name_override, UserChatActivityModel.title_prefix)
+            select(
+                UserModel,
+                UserChatActivityModel.display_name_override,
+                UserChatActivityModel.title_prefix,
+                UserChatActivityModel.persona_label,
+            )
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
             .where(
                 UserChatActivityModel.chat_id == chat_id,
@@ -5114,8 +5341,15 @@ class SqlAlchemyActivityRepository:
         row = (await self._session.execute(stmt)).one_or_none()
         if row is None:
             return None
-        user, display_name_override, title_prefix = row
-        return self._to_user_snapshot(user, chat_display_name=display_name_override, title_prefix=title_prefix)
+        user, display_name_override, title_prefix, persona_label = row
+        return self._to_user_snapshot(
+            user,
+            chat_display_name=display_name_override,
+            title_prefix=title_prefix,
+            persona_label=persona_label,
+            persona_enabled=persona_enabled,
+            persona_display_mode=persona_display_mode,
+        )
 
     async def find_shared_group_user_by_username(self, *, sender_user_id: int, username: str) -> UserSnapshot | None:
         lowered = username.lstrip("@").strip().lower()
@@ -5483,12 +5717,14 @@ class SqlAlchemyActivityRepository:
 
     async def list_active_rest_entries(self, *, chat_id: int) -> list[ActiveRestEntry]:
         now = datetime.now(timezone.utc)
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stmt = (
             select(
                 UserChatRestStateModel,
                 UserModel,
                 UserChatActivityModel.display_name_override,
                 UserChatActivityModel.title_prefix,
+                UserChatActivityModel.persona_label,
             )
             .join(UserModel, UserModel.telegram_user_id == UserChatRestStateModel.user_id)
             .outerjoin(
@@ -5515,10 +5751,13 @@ class SqlAlchemyActivityRepository:
                     user,
                     chat_display_name=display_name_override,
                     title_prefix=title_prefix,
+                    persona_label=persona_label,
+                    persona_enabled=persona_enabled,
+                    persona_display_mode=persona_display_mode,
                 ),
                 expires_at=_coerce_utc_datetime(rest_state.expires_at),
             )
-            for rest_state, user, display_name_override, title_prefix in rows
+            for rest_state, user, display_name_override, title_prefix, persona_label in rows
         ]
 
     async def grant_rest(
@@ -6084,6 +6323,7 @@ class SqlAlchemyActivityRepository:
         if not user_ids:
             return {}
 
+        persona_enabled, persona_display_mode = await self._get_persona_render_config(chat_id=chat_id)
         stmt = (
             select(
                 UserModel.telegram_user_id,
@@ -6092,6 +6332,7 @@ class SqlAlchemyActivityRepository:
                 UserModel.last_name,
                 UserChatActivityModel.display_name_override,
                 UserChatActivityModel.title_prefix,
+                UserChatActivityModel.persona_label,
             )
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
             .where(
@@ -6100,12 +6341,13 @@ class SqlAlchemyActivityRepository:
                 or_(
                     UserChatActivityModel.display_name_override.is_not(None),
                     UserChatActivityModel.title_prefix.is_not(None),
+                    UserChatActivityModel.persona_label.is_not(None),
                 ),
             )
         )
         rows = (await self._session.execute(stmt)).all()
         values: dict[int, str] = {}
-        for user_id, username, first_name, last_name, display_name_override, title_prefix in rows:
+        for user_id, username, first_name, last_name, display_name_override, title_prefix, persona_label in rows:
             normalized = self._compose_chat_display_name(
                 user_id=int(user_id),
                 username=username,
@@ -6113,6 +6355,9 @@ class SqlAlchemyActivityRepository:
                 last_name=last_name,
                 chat_display_name=display_name_override,
                 title_prefix=title_prefix,
+                persona_label=persona_label,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
             )
             if normalized:
                 values[int(user_id)] = normalized
@@ -6166,7 +6411,13 @@ class SqlAlchemyActivityRepository:
         return values
 
     @staticmethod
-    def _to_stats(activity: UserChatActivityModel, user: UserModel) -> ActivityStats:
+    def _to_stats(
+        activity: UserChatActivityModel,
+        user: UserModel,
+        *,
+        persona_enabled: bool = True,
+        persona_display_mode: str = DEFAULT_PERSONA_DISPLAY_MODE,
+    ) -> ActivityStats:
         return ActivityStats(
             chat_id=activity.chat_id,
             user_id=activity.user_id,
@@ -6183,6 +6434,9 @@ class SqlAlchemyActivityRepository:
                 last_name=user.last_name,
                 chat_display_name=activity.display_name_override,
                 title_prefix=activity.title_prefix,
+                persona_label=activity.persona_label,
+                persona_enabled=persona_enabled,
+                persona_display_mode=persona_display_mode,
             ),
         )
 
@@ -6192,6 +6446,9 @@ class SqlAlchemyActivityRepository:
         *,
         chat_display_name: str | None = None,
         title_prefix: str | None = None,
+        persona_label: str | None = None,
+        persona_enabled: bool = True,
+        persona_display_mode: str = DEFAULT_PERSONA_DISPLAY_MODE,
     ) -> UserSnapshot:
         normalized = SqlAlchemyActivityRepository._compose_chat_display_name(
             user_id=int(user.telegram_user_id),
@@ -6200,6 +6457,9 @@ class SqlAlchemyActivityRepository:
             last_name=user.last_name,
             chat_display_name=chat_display_name,
             title_prefix=title_prefix,
+            persona_label=persona_label,
+            persona_enabled=persona_enabled,
+            persona_display_mode=persona_display_mode,
         )
         return UserSnapshot(
             telegram_user_id=int(user.telegram_user_id),
@@ -6240,6 +6500,26 @@ class SqlAlchemyActivityRepository:
         )
 
     @staticmethod
+    def _compose_chat_display_base(
+        *,
+        user_id: int,
+        username: str | None,
+        first_name: str | None,
+        last_name: str | None,
+        chat_display_name: str | None,
+    ) -> str | None:
+        alias = (chat_display_name or "").strip() or None
+        if alias:
+            return alias
+        return display_name_from_parts(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            chat_display_name=None,
+        )
+
+    @staticmethod
     def _compose_chat_display_name(
         *,
         user_id: int,
@@ -6248,25 +6528,56 @@ class SqlAlchemyActivityRepository:
         last_name: str | None,
         chat_display_name: str | None,
         title_prefix: str | None,
+        persona_label: str | None = None,
+        persona_enabled: bool = True,
+        persona_display_mode: str = DEFAULT_PERSONA_DISPLAY_MODE,
     ) -> str | None:
         alias = (chat_display_name or "").strip() or None
         title = _normalize_title_prefix(title_prefix)
-        if alias is None and title is None:
+        persona = _normalize_persona_label(persona_label) if persona_enabled else None
+        if alias is None and title is None and persona is None:
             return None
 
-        base = alias
-        if not base:
-            base = display_name_from_parts(
-                user_id=user_id,
-                username=username,
-                first_name=first_name,
-                last_name=last_name,
-                chat_display_name=None,
-            )
-
-        if title:
+        base = SqlAlchemyActivityRepository._compose_chat_display_base(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            chat_display_name=chat_display_name,
+        )
+        if persona:
+            if persona_display_mode == PERSONA_DISPLAY_MODE_IMAGE_ONLY:
+                return f"[{persona}]"
+            if persona_display_mode == PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME and title and base:
+                return f"[{title}] [{persona}] {base}"
+            if base:
+                return f"[{persona}] {base}"
+            return f"[{persona}]"
+        if title and base:
             return f"[{title}] {base}"
         return base
+
+    @staticmethod
+    def _compose_persona_owner_snapshot(
+        user: UserModel,
+        *,
+        chat_display_name: str | None,
+    ) -> UserSnapshot:
+        normalized = SqlAlchemyActivityRepository._compose_chat_display_base(
+            user_id=int(user.telegram_user_id),
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            chat_display_name=chat_display_name,
+        )
+        return UserSnapshot(
+            telegram_user_id=int(user.telegram_user_id),
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_bot=bool(user.is_bot),
+            chat_display_name=normalized,
+        )
 
     @staticmethod
     def _to_chat_trigger(row: ChatTriggerModel) -> ChatTrigger:
@@ -6463,6 +6774,8 @@ class SqlAlchemyActivityRepository:
             entry_captcha_kick_on_fail=bool(row.entry_captcha_kick_on_fail),
             custom_rp_enabled=bool(row.custom_rp_enabled),
             family_tree_enabled=bool(row.family_tree_enabled),
+            persona_enabled=bool(row.persona_enabled),
+            persona_display_mode=row.persona_display_mode,
             titles_enabled=bool(row.titles_enabled),
             title_price=int(row.title_price),
             craft_enabled=bool(row.craft_enabled),

@@ -21,6 +21,7 @@ CFG_BOOL_KEYS: set[str] = {
     "chat_write_locked",
     "custom_rp_enabled",
     "family_tree_enabled",
+    "persona_enabled",
     "save_message",
     "interesting_facts_enabled",
     "titles_enabled",
@@ -33,6 +34,7 @@ CFG_BOOL_KEYS: set[str] = {
 CFG_ENUM_VALUES: dict[str, tuple[str, ...]] = {
     "text_commands_locale": ("ru", "en"),
     "economy_mode": ("global", "local"),
+    "persona_display_mode": ("image_only", "image_name", "title_image_name"),
 }
 
 CFG_TEXTAREA_KEYS: set[str] = {
@@ -248,6 +250,18 @@ SETTING_META: dict[str, SettingMeta] = {
         description_ru="Включает команды усыновления, питомцев и генерацию древа.",
         value_hint_ru="true/false.",
     ),
+    "persona_enabled": SettingMeta(
+        title_ru="Образы включены",
+        short_ru="Образы",
+        description_ru="Админы могут выдавать чатовые декоративные образы участникам.",
+        value_hint_ru="true/false.",
+    ),
+    "persona_display_mode": SettingMeta(
+        title_ru="Режим отображения образа",
+        short_ru="Режим образа",
+        description_ru="Определяет, показывать ли только образ, образ с ником или титул + образ + ник.",
+        value_hint_ru="image_only/image_name/title_image_name.",
+    ),
     "save_message": SettingMeta(
         title_ru="Сохранять сообщения",
         short_ru="Архив сообщений",
@@ -452,6 +466,8 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Социальные и статусные механики",
         (
+            "persona_enabled",
+            "persona_display_mode",
             "titles_enabled",
             "title_price",
         ),
@@ -548,6 +564,8 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "chat_write_locked": value.chat_write_locked,
         "custom_rp_enabled": value.custom_rp_enabled,
         "family_tree_enabled": value.family_tree_enabled,
+        "persona_enabled": value.persona_enabled,
+        "persona_display_mode": value.persona_display_mode,
         "save_message": value.save_message,
         "interesting_facts_enabled": value.interesting_facts_enabled,
         "interesting_facts_interval_minutes": value.interesting_facts_interval_minutes,

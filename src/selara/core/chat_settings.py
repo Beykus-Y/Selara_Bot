@@ -66,8 +66,21 @@ class ChatSettings:
     interesting_facts_interval_minutes: int = 180
     interesting_facts_target_messages: int = 150
     interesting_facts_sleep_cap_minutes: int = 1440
+    persona_enabled: bool = True
+    persona_display_mode: str = "image_name"
     gacha_enabled: bool = True
     gacha_restore_at: datetime | None = None
+
+
+PERSONA_DISPLAY_MODE_IMAGE_ONLY = "image_only"
+PERSONA_DISPLAY_MODE_IMAGE_NAME = "image_name"
+PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME = "title_image_name"
+PERSONA_DISPLAY_MODE_VALUES: tuple[str, ...] = (
+    PERSONA_DISPLAY_MODE_IMAGE_ONLY,
+    PERSONA_DISPLAY_MODE_IMAGE_NAME,
+    PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME,
+)
+DEFAULT_PERSONA_DISPLAY_MODE = PERSONA_DISPLAY_MODE_IMAGE_NAME
 
 
 CHAT_SETTINGS_KEYS: tuple[str, ...] = (
@@ -109,6 +122,8 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "interesting_facts_interval_minutes",
     "interesting_facts_target_messages",
     "interesting_facts_sleep_cap_minutes",
+    "persona_enabled",
+    "persona_display_mode",
     "titles_enabled",
     "title_price",
     "craft_enabled",
@@ -189,6 +204,8 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         interesting_facts_interval_minutes=180,
         interesting_facts_target_messages=150,
         interesting_facts_sleep_cap_minutes=1440,
+        persona_enabled=settings.persona_enabled,
+        persona_display_mode=settings.persona_display_mode,
     )
 
 
@@ -266,6 +283,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "chat_write_locked",
         "custom_rp_enabled",
         "family_tree_enabled",
+        "persona_enabled",
         "save_message",
         "interesting_facts_enabled",
         "titles_enabled",
@@ -309,6 +327,12 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         lowered = value.lower()
         if lowered not in {"global", "local"}:
             raise ValueError("Поддерживаются только режимы экономики: global, local")
+        return lowered
+
+    if key == "persona_display_mode":
+        lowered = value.lower()
+        if lowered not in PERSONA_DISPLAY_MODE_VALUES:
+            raise ValueError("Поддерживаются только режимы образа: image_only, image_name, title_image_name")
         return lowered
 
     if key in {

@@ -408,6 +408,71 @@ async def test_repository_get_announcement_recipients_excludes_inactive_and_bann
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_repository_persona_assignment_and_display_modes() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-10081, chat_type="group", title="Persona Group")
+    actor = UserSnapshot(telegram_user_id=1200, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    target = UserSnapshot(telegram_user_id=1201, username="target", first_name="Target", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=target, event_at=now)
+        await repo.set_chat_title_prefix(chat=chat, user=target, title_prefix="Лорд")
+
+        stored_label = await repo.set_chat_persona_label(
+            chat=chat,
+            user=target,
+            persona_label="Венти",
+            granted_by_user_id=actor.telegram_user_id,
+        )
+        owner = await repo.find_chat_persona_owner(chat_id=chat.telegram_chat_id, persona_label="венти")
+        assignments = await repo.list_chat_persona_assignments(chat_id=chat.telegram_chat_id)
+
+        assert stored_label == "Венти"
+        assert owner is not None
+        assert owner.user.telegram_user_id == target.telegram_user_id
+        assert owner.persona_label == "Венти"
+        assert len(assignments) == 1
+        assert assignments[0].persona_label == "Венти"
+        assert await repo.get_chat_display_name(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id) == "[Венти] Target"
+
+        await repo.upsert_chat_settings(
+            chat=chat,
+            values={"persona_display_mode": "title_image_name"},
+        )
+        assert (
+            await repo.get_chat_display_name(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id)
+            == "[Лорд] [Венти] Target"
+        )
+
+        await repo.upsert_chat_settings(
+            chat=chat,
+            values={"persona_display_mode": "image_only"},
+        )
+        assert await repo.get_chat_display_name(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id) == "[Венти]"
+
+        assert await repo.clear_chat_persona_label(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id) is True
+        assert await repo.get_chat_display_name(chat_id=chat.telegram_chat_id, user_id=target.telegram_user_id) == "[Лорд] Target"
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repository_backfill_syncs_event_reads_for_chat() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
