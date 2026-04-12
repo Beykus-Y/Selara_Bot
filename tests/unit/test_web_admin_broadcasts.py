@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -31,6 +32,10 @@ def _settings() -> Settings:
             "ADMIN_USER_ID": 77,
         }
     )
+
+
+def _location_query_value(location: str, key: str) -> str | None:
+    return parse_qs(urlsplit(location).query).get(key, [None])[0]
 
 
 class FakeBot:
@@ -248,7 +253,8 @@ async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?error=")
-    assert "Некорректный%20Telegram%20HTML" in response.headers["location"]
+    assert _location_query_value(response.headers["location"], "error") is not None
+    assert "Некорректный Telegram HTML" in (_location_query_value(response.headers["location"], "error") or "")
     assert FakeBot.instances == []
 
     async with session_factory() as session:
@@ -302,7 +308,7 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
         await app.router.shutdown()
 
     assert response.status_code == 303
-    assert "Не%20выбрано%20ни%20одного%20чата" in response.headers["location"]
+    assert _location_query_value(response.headers["location"], "error") == "Не выбрано ни одного чата для рассылки."
     assert FakeBot.instances == []
 
     await engine.dispose()

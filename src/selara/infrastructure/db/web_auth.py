@@ -11,11 +11,18 @@ from selara.infrastructure.db.achievement_metrics import increment_global_users_
 from selara.infrastructure.db.models import UserModel, WebLoginCodeModel, WebSessionModel
 
 
+def _coerce_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class SqlAlchemyWebAuthRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def invalidate_user_login_codes(self, *, user_id: int, now: datetime) -> None:
+        normalized_now = _coerce_utc_datetime(now)
         stmt = (
             select(WebLoginCodeModel)
             .where(
@@ -25,16 +32,17 @@ class SqlAlchemyWebAuthRepository:
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         for row in rows:
-            row.used_at = now
+            row.used_at = normalized_now
         await self._session.flush()
 
     async def has_active_login_code_digest(self, *, code_digest: str, now: datetime) -> bool:
+        normalized_now = _coerce_utc_datetime(now)
         stmt = (
             select(WebLoginCodeModel.id)
             .where(
                 WebLoginCodeModel.code_digest == code_digest,
                 WebLoginCodeModel.used_at.is_(None),
-                WebLoginCodeModel.expires_at > now,
+                WebLoginCodeModel.expires_at > normalized_now,
             )
             .limit(1)
         )
@@ -52,19 +60,20 @@ class SqlAlchemyWebAuthRepository:
             WebLoginCodeModel(
                 user_id=user.telegram_user_id,
                 code_digest=code_digest,
-                expires_at=expires_at,
+                expires_at=_coerce_utc_datetime(expires_at),
             )
         )
         await self._session.flush()
 
     async def consume_login_code(self, *, code_digest: str, now: datetime) -> UserSnapshot | None:
+        normalized_now = _coerce_utc_datetime(now)
         stmt = (
             select(WebLoginCodeModel, UserModel)
             .join(UserModel, UserModel.telegram_user_id == WebLoginCodeModel.user_id)
             .where(
                 WebLoginCodeModel.code_digest == code_digest,
                 WebLoginCodeModel.used_at.is_(None),
-                WebLoginCodeModel.expires_at > now,
+                WebLoginCodeModel.expires_at > normalized_now,
             )
             .order_by(WebLoginCodeModel.created_at.desc(), WebLoginCodeModel.id.desc())
             .limit(1)
@@ -74,7 +83,7 @@ class SqlAlchemyWebAuthRepository:
             return None
 
         code_row, user_row = row
-        code_row.used_at = now
+        code_row.used_at = normalized_now
         await self._session.flush()
         return self._to_user_snapshot(user_row)
 
@@ -86,25 +95,27 @@ class SqlAlchemyWebAuthRepository:
         expires_at: datetime,
         now: datetime,
     ) -> None:
+        normalized_now = _coerce_utc_datetime(now)
         self._session.add(
             WebSessionModel(
                 session_digest=session_digest,
                 user_id=user_id,
-                expires_at=expires_at,
-                last_seen_at=now,
+                expires_at=_coerce_utc_datetime(expires_at),
+                last_seen_at=normalized_now,
             )
         )
         await self._session.flush()
 
     async def get_user_by_session(self, *, session_digest: str, now: datetime, touch: bool) -> UserSnapshot | None:
+        normalized_now = _coerce_utc_datetime(now)
         session_row = await self._session.get(WebSessionModel, session_digest)
         if session_row is None:
             return None
-        if session_row.revoked_at is not None or session_row.expires_at <= now:
+        if session_row.revoked_at is not None or _coerce_utc_datetime(session_row.expires_at) <= normalized_now:
             return None
 
         if touch:
-            session_row.last_seen_at = now
+            session_row.last_seen_at = normalized_now
 
         user_row = await self._session.get(UserModel, int(session_row.user_id))
         if user_row is None:
@@ -113,29 +124,31 @@ class SqlAlchemyWebAuthRepository:
         return self._to_user_snapshot(user_row)
 
     async def revoke_session(self, *, session_digest: str, now: datetime) -> None:
+        normalized_now = _coerce_utc_datetime(now)
         row = await self._session.get(WebSessionModel, session_digest)
         if row is None or row.revoked_at is not None:
             return
-        row.revoked_at = now
-        row.last_seen_at = now
+        row.revoked_at = normalized_now
+        row.last_seen_at = normalized_now
         await self._session.flush()
 
     async def purge_expired_state(self, *, now: datetime) -> None:
+        normalized_now = _coerce_utc_datetime(now)
         await self._session.execute(
             delete(WebLoginCodeModel).where(
-                (WebLoginCodeModel.expires_at <= now)
+                (WebLoginCodeModel.expires_at <= normalized_now)
                 | (
                     WebLoginCodeModel.used_at.is_not(None)
-                    & (WebLoginCodeModel.used_at <= now - timedelta(days=1))
+                    & (WebLoginCodeModel.used_at <= normalized_now - timedelta(days=1))
                 )
             )
         )
         await self._session.execute(
             delete(WebSessionModel).where(
-                (WebSessionModel.expires_at <= now)
+                (WebSessionModel.expires_at <= normalized_now)
                 | (
                     WebSessionModel.revoked_at.is_not(None)
-                    & (WebSessionModel.revoked_at <= now - timedelta(days=1))
+                    & (WebSessionModel.revoked_at <= normalized_now - timedelta(days=1))
                 )
             )
         )

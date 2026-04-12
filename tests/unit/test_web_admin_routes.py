@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -23,6 +24,10 @@ def _settings() -> Settings:
             "ADMIN_USER_ID": 77,
         }
     )
+
+
+def _location_query_value(location: str, key: str) -> str | None:
+    return parse_qs(urlsplit(location).query).get(key, [None])[0]
 
 
 class FakeAdminAuthRepo:
@@ -135,6 +140,31 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert "Системная рассылка" in response.text
     assert 'action="/app/admin/broadcasts/send"' in response.text
     assert 'name="chat_ids"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_login_invalid_password_redirect_keeps_readable_query_text() -> None:
+    settings = _settings()
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.post(
+            "/app/admin/login",
+            data={"password": "wrong-password"},
+            follow_redirects=False,
+        )
+    finally:
+        await client.aclose()
+        await app.router.shutdown()
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/app/admin/login?error=")
+    assert _location_query_value(response.headers["location"], "error") == "Неверный пароль."
 
 
 @pytest.mark.asyncio

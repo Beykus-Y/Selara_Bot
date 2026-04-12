@@ -25,17 +25,29 @@ def test_extract_social_action_supports_imperative_aliases() -> None:
 
 def test_extract_social_action_supports_new_single_word_actions() -> None:
     assert _extract_social_action("погладь") == "pat"
+    assert _extract_social_action("кусни") == "bite"
+    assert _extract_social_action("пни") == "kick"
+    assert _extract_social_action("ущипни") == "pinch"
+    assert _extract_social_action("потискай") == "squeeze"
     assert _extract_social_action("наступи") == "step"
     assert _extract_social_action("пощекочи") == "tickle"
     assert _extract_social_action("ткни") == "poke"
     assert _extract_social_action("оттолкни") == "push"
+    assert _extract_social_action("утешь") == "comfort"
+    assert _extract_social_action("успокой") == "calm"
+    assert _extract_social_action("защити") == "protect"
+    assert _extract_social_action("утащи") == "drag"
+    assert _extract_social_action("выпроводи") == "shoo"
     assert _extract_social_action("подмигни") == "wink"
     assert _extract_social_action("потанцуй") == "dance"
     assert _extract_social_action("поклонись") == "bow"
     assert _extract_social_action("подбодри") == "cheer"
     assert _extract_social_action("угости") == "treat"
     assert _extract_social_action("похвали") == "praise"
+    assert _extract_social_action("поздравь") == "congrats"
+    assert _extract_social_action("укрой") == "wrap"
     assert _extract_social_action("наругай") == "scold"
+    assert _extract_social_action("нагни") == "bend"
     assert _extract_social_action("отсоси") == "suck"
     assert _extract_social_action("минет") == "suck"
 
@@ -46,6 +58,9 @@ def test_extract_social_action_supports_new_multiword_actions() -> None:
     assert _extract_social_action("дай кулак") == "fistbump"
     assert _extract_social_action("проведи ночь с") == "night"
     assert _extract_social_action("сядь на") == "siton"
+    assert _extract_social_action("подними на руки") == "carry"
+    assert _extract_social_action("возьми на руки") == "carry"
+    assert _extract_social_action("выстави за дверь") == "shoo"
 
 
 def test_extract_social_action_ignores_unknown_or_slash() -> None:
