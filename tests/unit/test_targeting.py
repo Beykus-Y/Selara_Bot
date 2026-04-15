@@ -18,6 +18,8 @@ class _FakeActivityRepo:
         self._assignments = assignments
 
     async def get_chat_display_name(self, *, chat_id: int, user_id: int) -> str | None:
+        if chat_id == -100 and user_id == 77:
+            return "[Навия] Navia"
         return None
 
     async def get_user_snapshot(self, *, user_id: int):
@@ -69,4 +71,11 @@ async def test_resolve_chat_target_user_supports_persona_label() -> None:
         prefer_reply=False,
     )
 
-    assert resolved == target
+    assert resolved == UserSnapshot(
+        telegram_user_id=77,
+        username="navia_main",
+        first_name="Navia",
+        last_name=None,
+        is_bot=False,
+        chat_display_name="[Навия] Navia",
+    )

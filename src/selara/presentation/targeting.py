@@ -198,4 +198,18 @@ async def resolve_chat_target_user(
     )
     if persona_owner is None:
         return None
-    return persona_owner.user
+    full_chat_display_name = None
+    get_chat_display_name = getattr(activity_repo, "get_chat_display_name", None)
+    if callable(get_chat_display_name):
+        full_chat_display_name = await get_chat_display_name(
+            chat_id=message.chat.id,
+            user_id=persona_owner.user.telegram_user_id,
+        )
+    return UserSnapshot(
+        telegram_user_id=persona_owner.user.telegram_user_id,
+        username=persona_owner.user.username,
+        first_name=persona_owner.user.first_name,
+        last_name=persona_owner.user.last_name,
+        is_bot=persona_owner.user.is_bot,
+        chat_display_name=full_chat_display_name or persona_owner.user.chat_display_name,
+    )

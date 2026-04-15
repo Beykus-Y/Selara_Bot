@@ -65,7 +65,9 @@ def _chat_settings(*, actions_18_enabled: bool) -> ChatSettings:
 
 
 class _FakeActivityRepo:
-    async def get_chat_display_name(self, *, chat_id: int, user_id: int) -> None:
+    async def get_chat_display_name(self, *, chat_id: int, user_id: int) -> str | None:
+        if user_id == 4:
+            return "[Коломбина] Columbina"
         return None
 
     async def get_announcement_recipients(self, *, chat_id: int) -> list[UserSnapshot]:
@@ -231,6 +233,7 @@ async def test_send_social_action_supports_single_line_persona_target(monkeypatc
     assert len(message.answers) == 1
     assert "обнял" in message.answers[0][0]
     assert "tg://user?id=4" in message.answers[0][0]
+    assert "[Коломбина] Columbina" in message.answers[0][0]
 
 
 @pytest.mark.asyncio
