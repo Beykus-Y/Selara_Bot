@@ -32,6 +32,7 @@ from selara.domain.entities import ChatSnapshot, ChatTrigger, CustomSocialAction
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission
+from selara.presentation.targeting import resolve_chat_target_user
 from selara.presentation.family_tree import build_family_tree_image
 from selara.presentation.handlers.settings_common import settings_to_dict
 
@@ -542,34 +543,12 @@ def _build_trigger_variables_help_text() -> str:
 
 
 async def _build_target_snapshot(message: Message, activity_repo, *, raw_args: str | None) -> UserSnapshot | None:
-    if message.reply_to_message and message.reply_to_message.from_user is not None:
-        user = message.reply_to_message.from_user
-        return UserSnapshot(
-            telegram_user_id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            is_bot=bool(user.is_bot),
-            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user.id),
-        )
-
-    token = (raw_args or "").strip().split(maxsplit=1)[0] if raw_args else ""
-    if not token:
-        return None
-    if token.startswith("@"):
-        return await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=token)
-    if token.lstrip("-").isdigit():
-        user_id = int(token)
-        existing = await activity_repo.get_user_snapshot(user_id=user_id)
-        return UserSnapshot(
-            telegram_user_id=user_id,
-            username=getattr(existing, "username", None),
-            first_name=getattr(existing, "first_name", None),
-            last_name=getattr(existing, "last_name", None),
-            is_bot=bool(getattr(existing, "is_bot", False)),
-            chat_display_name=await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id),
-        )
-    return None
+    return await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=(raw_args or "").strip() or None,
+        prefer_reply=True,
+    )
 
 
 async def _require_manage_settings(message: Message, activity_repo) -> bool:

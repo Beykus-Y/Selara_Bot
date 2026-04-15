@@ -63,6 +63,15 @@ def test_extract_award_request_supports_username_target_on_new_line() -> None:
     assert error is None
 
 
+def test_extract_award_request_supports_persona_target_on_new_line() -> None:
+    matched, target_token, value, error = _extract_award_request("наградить Ху Тао\nМесть подаётся выпечкой")
+
+    assert matched is True
+    assert target_token == "Ху Тао"
+    assert value == "Месть подаётся выпечкой"
+    assert error is None
+
+
 def test_extract_award_remove_index_reads_positive_number() -> None:
     matched, award_index, error = _extract_award_remove_index("снять награду 6")
 

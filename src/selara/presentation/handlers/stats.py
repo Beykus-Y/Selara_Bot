@@ -55,6 +55,7 @@ from selara.presentation.formatters import (
     preferred_mention_label_from_parts,
 )
 from selara.presentation.handlers.activity import format_user_label, resolve_last_seen_target
+from selara.presentation.targeting import resolve_chat_target_user
 
 router = Router(name="stats")
 
@@ -843,6 +844,15 @@ async def _resolve_stats_target_user(
             None,
         )
 
+    user = await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=raw,
+        prefer_reply=True,
+    )
+    if user is not None:
+        return user, None
+
     return None, "Формат: reply или /команда @username или /команда user_id."
 
 async def _ensure_chat_admin(message: Message, bot: Bot) -> bool:
@@ -1023,6 +1033,15 @@ async def _resolve_award_target(
                 ),
                 None,
             )
+
+        user = await resolve_chat_target_user(
+            message,
+            activity_repo,
+            explicit_target=normalized_token,
+            prefer_reply=False,
+        )
+        if user is not None:
+            return user, None
 
         return None, 'Формат: reply на сообщение или <code>наградить @username текст награды</code>.'
 
@@ -1724,6 +1743,21 @@ async def _resolve_last_seen_command_target(
                 )
             return user_id, label, None
         return user_id, f"user:{user_id}", None
+
+    user = await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=raw,
+        prefer_reply=False,
+    )
+    if user is not None:
+        label = (
+            user.chat_display_name
+            or " ".join(filter(None, [user.first_name, user.last_name])).strip()
+            or (f"@{user.username}" if user.username else None)
+            or f"user:{user.telegram_user_id}"
+        )
+        return user.telegram_user_id, label, None
 
     return None, None, "Формат: /lastseen [@username|user_id] или reply на сообщение пользователя."
 

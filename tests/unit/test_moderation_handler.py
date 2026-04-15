@@ -45,7 +45,7 @@ async def test_apply_moderation_action_silent_without_moderation_permission(monk
 
 
 @pytest.mark.asyncio
-async def test_apply_moderation_action_ignores_telegram_admin_target(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_moderation_action_ignores_telegram_admin_target_for_ban(monkeypatch: pytest.MonkeyPatch) -> None:
     message = _message()
     target = UserSnapshot(
         telegram_user_id=2,
@@ -81,6 +81,87 @@ async def test_apply_moderation_action_ignores_telegram_admin_target(monkeypatch
     activity_repo.apply_moderation_action.assert_not_awaited()
     message.answer.assert_not_awaited()
     bot.get_chat_member.assert_awaited_once_with(chat_id=message.chat.id, user_id=target.telegram_user_id)
+
+
+@pytest.mark.asyncio
+async def test_apply_moderation_action_allows_warn_for_telegram_admin_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _message()
+    target = UserSnapshot(
+        telegram_user_id=2,
+        username="target",
+        first_name="Target",
+        last_name=None,
+        is_bot=False,
+    )
+    activity_repo = SimpleNamespace(
+        get_effective_role_definition=AsyncMock(
+            side_effect=[
+                SimpleNamespace(role_code="owner", rank=100),
+                None,
+            ]
+        ),
+        apply_moderation_action=AsyncMock(
+            return_value=SimpleNamespace(
+                state=SimpleNamespace(pending_preds=0, warn_count=1, total_bans=0),
+                auto_warns_added=0,
+                auto_ban_triggered=False,
+            )
+        ),
+    )
+    bot = SimpleNamespace(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")))
+
+    monkeypatch.setattr(moderation, "has_command_access", AsyncMock(return_value=(True, "owner", "admin", False)))
+    monkeypatch.setattr(moderation, "has_permission", AsyncMock(return_value=(True, "owner", False)))
+    monkeypatch.setattr(moderation, "_resolve_target_user", AsyncMock(return_value=target))
+
+    await moderation._apply_moderation_action(
+        message=message,
+        activity_repo=activity_repo,
+        bot=bot,
+        command_name="warn",
+        raw_tail="причина",
+        use_reply_target=False,
+    )
+
+    activity_repo.apply_moderation_action.assert_awaited_once()
+    assert activity_repo.apply_moderation_action.await_args.kwargs["action"] == "warn"
+    assert activity_repo.apply_moderation_action.await_args.kwargs["target"] == target
+    message.answer.assert_awaited_once()
+    bot.get_chat_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_user_supports_persona_label() -> None:
+    message = _message()
+    target = UserSnapshot(
+        telegram_user_id=3,
+        username="navia_main",
+        first_name="Navia",
+        last_name=None,
+        is_bot=False,
+        chat_display_name="Навия",
+    )
+    activity_repo = SimpleNamespace(
+        find_chat_persona_owner=AsyncMock(return_value=None),
+        list_chat_persona_assignments=AsyncMock(
+            return_value=[
+                ChatPersonaAssignment(
+                    chat_id=message.chat.id,
+                    user=target,
+                    persona_label="Навия",
+                    persona_label_norm="навия",
+                    granted_by_user_id=1,
+                    granted_at=datetime.now(timezone.utc),
+                )
+            ]
+        ),
+    )
+
+    resolved = await moderation._resolve_target_user(message, activity_repo, "Навию")
+
+    assert resolved == target
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ from selara.domain.economy_entities import ChatAuction
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission
+from selara.presentation.targeting import resolve_chat_target_user
 
 router = Router(name="economy")
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
@@ -1447,24 +1448,33 @@ async def pay_command(message: Message, command: CommandObject, bot: Bot, econom
             await _answer_message(message, "Формат: /pay @username 100 | /pay user_id 100 | reply + /pay 100")
             return
 
-        target_raw = tokens[0]
-        if tokens[1].isdigit():
-            amount = int(tokens[1])
-        else:
+        amount_raw = tokens[-1]
+        if not amount_raw.isdigit():
             await _answer_message(message, "Сумма перевода должна быть числом")
             return
+        amount = int(amount_raw)
 
-        if target_raw.startswith("@"):
+        target_raw = " ".join(tokens[:-1]).strip()
+        if not target_raw:
+            await _answer_message(message, "Не удалось определить получателя/сумму")
+            return
+
+        if target_raw.isdigit():
+            target_user_id = int(target_raw)
+        else:
             if chat_id is None:
-                await _answer_message(message, "В личке перевод по @username недоступен")
+                await _answer_message(message, "В личке перевод по @username или образу недоступен")
                 return
-            user = await activity_repo.find_chat_user_by_username(chat_id=chat_id, username=target_raw)
+            user = await resolve_chat_target_user(
+                message,
+                activity_repo,
+                explicit_target=target_raw,
+                prefer_reply=False,
+            )
             if user is None:
-                await _answer_message(message, "Пользователь с таким username не найден в этом чате")
+                await _answer_message(message, "Пользователь с таким username или образом не найден в этом чате")
                 return
             target_user_id = user.telegram_user_id
-        elif target_raw.isdigit():
-            target_user_id = int(target_raw)
 
     if target_user_id is None or amount is None:
         await _answer_message(message, "Не удалось определить получателя/сумму")

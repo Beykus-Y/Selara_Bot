@@ -114,6 +114,7 @@ from selara.presentation.handlers.relationships import (
     vow_command as relationship_vow_command,
 )
 from selara.presentation.handlers.stats import (
+    _resolve_last_seen_command_target,
     _resolve_stats_target_user,
     achievements_command,
     send_inactive_members,
@@ -131,6 +132,7 @@ from selara.presentation.formatters import format_user_link, preferred_mention_l
 from selara.presentation.quote_card import build_quote_card
 from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.db_recovery import safe_rollback
+from selara.presentation.targeting import resolve_chat_target_user, split_explicit_target_and_tail
 
 router = Router(name="text_commands")
 logger = logging.getLogger(__name__)
@@ -2126,7 +2128,7 @@ def _extract_zhmyh_level(text: str) -> tuple[bool, int | None, str | None]:
 
 
 def _extract_social_action(text: str) -> str | None:
-    action_key, _mass_target, _username_arg, _replica = _extract_social_action_target_request(text)
+    action_key, _mass_target, _target_arg, _replica = _extract_social_action_target_request(text)
     return action_key
 
 
@@ -2151,27 +2153,47 @@ def _extract_social_action_request(text: str) -> tuple[str | None, str | None]:
 
 
 def _extract_social_action_target_request(text: str) -> tuple[str | None, bool, str | None, str | None]:
-    action_key, tail = _extract_social_action_request(text)
-    if action_key is None:
+    raw_text = (text or "").strip()
+    normalized = normalize_text_command(text)
+    if not normalized or normalized.startswith("/"):
         return None, False, None, None
-    if not tail:
-        return action_key, False, None, None
 
-    match = re.match(r"^(?P<marker>\S+)(?:[?!.,:;…]+)?(?:\s+(?P<rest>[\s\S]*))?\s*$", tail)
-    if match is None:
-        return action_key, False, None, tail
+    for trigger in sorted(_SOCIAL_ACTION_ALIASES, key=len, reverse=True):
+        pattern = (
+            r"^\s*"
+            + r"\s+".join(re.escape(part) for part in trigger.split())
+            + r"(?:[?!.,:;…]+)?(?:(?P<sep>\s+)(?P<tail>[\s\S]*))?\s*$"
+        )
+        match = re.match(pattern, raw_text, flags=re.IGNORECASE)
+        if match is None:
+            continue
 
-    marker_raw = match.group("marker") or ""
-    rest = " ".join(((match.group("rest") or "")).split()).strip() or None
-    marker_norm = normalize_text_command(marker_raw)
+        action_key = _SOCIAL_ACTION_ALIASES[trigger]
+        separator = match.group("sep") or ""
+        tail_raw = match.group("tail") or ""
+        if not tail_raw.strip():
+            return action_key, False, None, None
 
-    if marker_norm in {"всех", "всем"}:
-        return action_key, True, None, rest
+        if "\n" in separator or "\r" in separator:
+            return action_key, False, None, " ".join(tail_raw.split()).strip() or None
 
-    if marker_raw.startswith("@") or marker_raw.lstrip("-").isdigit():
-        return action_key, False, marker_raw, rest
+        first_line = tail_raw.splitlines()[0].strip()
+        first_line_norm = normalize_text_command(first_line)
+        if first_line_norm in {"всех", "всем"}:
+            remainder = tail_raw.split("\n", 1)[1] if "\n" in tail_raw else ""
+            return action_key, True, None, " ".join(remainder.split()).strip() or None
 
-    return action_key, False, None, tail
+        if first_line.startswith("@") or first_line.lstrip("-").isdigit():
+            explicit_target, replica = split_explicit_target_and_tail(tail_raw)
+            return action_key, False, explicit_target, replica
+
+        if "\n" in tail_raw or tail_raw.lstrip().startswith(('"', "'", "«", "“")):
+            explicit_target, replica = split_explicit_target_and_tail(tail_raw)
+            return action_key, False, explicit_target, replica
+
+        return action_key, False, None, " ".join(tail_raw.split()).strip() or None
+
+    return None, False, None, None
 
 
 def _build_social_action_replica_line(replica: str) -> str:
@@ -2773,7 +2795,15 @@ def _extract_award_request(text: str) -> tuple[bool, str | None, str | None, str
     body = (match.group("body") or "").strip()
     target_token = None
     title_body = body
-    if body:
+    if body and "\n" in body:
+        target_token, title_body = split_explicit_target_and_tail(body)
+        title_body = title_body or ""
+    elif body and body.lstrip().startswith(('"', "'", "«", "“")):
+        quoted_target, quoted_tail = split_explicit_target_and_tail(body)
+        if quoted_tail and quoted_target and not quoted_target.startswith(('"', "'", "«", "“")):
+            target_token = quoted_target
+            title_body = quoted_tail
+    elif body:
         parts = body.split(maxsplit=1)
         first_token = parts[0]
         if first_token.startswith("@") or first_token.lstrip("-").isdigit():
@@ -3020,7 +3050,7 @@ async def _send_quote_card(message: Message, bot: Bot, settings: Settings) -> No
 
 async def _send_social_action(message: Message, activity_repo, chat_settings: ChatSettings, *, action_key: str) -> None:
     canonical = _SOCIAL_ACTION_CANONICAL.get(action_key, "действие")
-    _, mass_target, username_arg, replica = _extract_social_action_target_request(message.text or message.caption or "")
+    _, mass_target, target_arg, replica = _extract_social_action_target_request(message.text or message.caption or "")
     if message.chat.type not in {"group", "supergroup"}:
         await _answer_quiet(message, "Эта команда работает только в группе.")
         return
@@ -3069,29 +3099,17 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
             )
         return
 
-    target: UserSnapshot | None = None
-    if message.reply_to_message and message.reply_to_message.from_user is not None:
-        target = await _social_action_user_snapshot(message, activity_repo, user=message.reply_to_message.from_user)
-    elif username_arg:
-        if username_arg.startswith("@"):
-            target = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=username_arg)
-        elif username_arg.lstrip("-").isdigit():
-            user_id = int(username_arg)
-            existing = await activity_repo.get_user_snapshot(user_id=user_id)
-            chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
-            target = UserSnapshot(
-                telegram_user_id=user_id,
-                username=existing.username if existing else None,
-                first_name=existing.first_name if existing else None,
-                last_name=existing.last_name if existing else None,
-                is_bot=existing.is_bot if existing else False,
-                chat_display_name=chat_display_name,
-            )
+    target = await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=target_arg,
+        prefer_reply=True,
+    )
 
     if target is None:
         await _answer_quiet(
             message,
-            f"Сделайте reply на сообщение участника или укажите @username и напишите <code>{canonical}</code>.",
+            f"Сделайте reply на сообщение участника или укажите @username/образ и напишите <code>{canonical}</code>.",
             parse_mode="HTML",
         )
         return
@@ -4543,19 +4561,15 @@ async def text_commands_handler(
         return
 
     if intent.name == "lastseen":
+        target_user_id, target_label, error = await _resolve_last_seen_command_target(
+            message,
+            command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            activity_repo=activity_repo,
+        )
         raw_arg = (intent.args.get("raw_args") or "").strip()
-        target_user_id: int | None = None
-        target_label: str | None = None
-        if raw_arg.startswith("@"):
-            snap = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=raw_arg)
-            if snap is not None:
-                target_user_id = snap.telegram_user_id
-                target_label = snap.chat_display_name or snap.first_name or raw_arg
-            else:
-                await _answer_quiet(message, f"Пользователь {raw_arg} не найден в этом чате.")
-                return
-        elif raw_arg.lstrip("-").isdigit():
-            target_user_id = int(raw_arg)
+        if raw_arg and error is not None:
+            await _answer_quiet(message, error)
+            return
         await send_last_seen(message, activity_repo, settings, target_user_id=target_user_id, target_label=target_label)
         return
 

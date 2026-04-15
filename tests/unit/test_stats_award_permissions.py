@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from selara.domain.entities import ChatRoleDefinition, UserChatAward, UserSnapshot
+from selara.domain.entities import ChatPersonaAssignment, ChatRoleDefinition, UserChatAward, UserSnapshot
 from selara.presentation.handlers import stats as stats_module
 
 
@@ -130,6 +130,52 @@ async def test_award_text_command_allows_username_target(monkeypatch) -> None:
     activity_repo.find_chat_user_by_username.assert_awaited_once_with(chat_id=-100, username="@target")
     assert activity_repo.add_user_chat_award.await_count == 1
     assert message.answers == [("Награда выдана <b>Target</b>: Лучшая шутка", {"parse_mode": "HTML"})]
+
+
+@pytest.mark.asyncio
+async def test_award_text_command_allows_persona_target(monkeypatch) -> None:
+    message = _message()
+    message.reply_to_message = None
+    target = UserSnapshot(
+        telegram_user_id=21,
+        username="hutao_main",
+        first_name="Hu",
+        last_name="Tao",
+        is_bot=False,
+        chat_display_name="Ху Тао",
+    )
+    activity_repo = SimpleNamespace(
+        find_chat_persona_owner=AsyncMock(return_value=None),
+        list_chat_persona_assignments=AsyncMock(
+            return_value=[
+                ChatPersonaAssignment(
+                    chat_id=-100,
+                    user=target,
+                    persona_label="Ху Тао",
+                    persona_label_norm="ху тао",
+                    granted_by_user_id=10,
+                )
+            ]
+        ),
+        add_user_chat_award=AsyncMock(return_value=SimpleNamespace(id=78)),
+    )
+
+    monkeypatch.setattr(stats_module, "_ensure_chat_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(stats_module, "get_actor_role_definition", AsyncMock(return_value=_junior_admin_role()))
+    monkeypatch.setattr(stats_module, "_resolve_profile_mention", AsyncMock(return_value="Ху Тао"))
+    monkeypatch.setattr(stats_module, "log_chat_action", AsyncMock())
+
+    await stats_module.award_text_command(
+        message,
+        activity_repo,
+        bot=SimpleNamespace(),
+        title="Лучшая шутка",
+        target_token="Ху Тао",
+    )
+
+    activity_repo.list_chat_persona_assignments.assert_awaited_once_with(chat_id=-100)
+    assert activity_repo.add_user_chat_award.await_count == 1
+    assert message.answers == [("Награда выдана <b>Ху Тао</b>: Лучшая шутка", {"parse_mode": "HTML"})]
 
 
 @pytest.mark.asyncio

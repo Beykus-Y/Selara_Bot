@@ -30,6 +30,7 @@ from selara.presentation.auth import (
     has_command_access,
     has_permission,
 )
+from selara.presentation.targeting import resolve_chat_target_user, split_explicit_target_and_tail, strip_wrapping_quotes
 
 router = Router(name="moderation")
 
@@ -58,22 +59,12 @@ _REPLY_MODERATION_PATTERN = re.compile(
     r"^\s*(?:снять\s+пред|разпред|анпред|снять\s+варн|разварн|анварн|снять\s+бан|разбан|анбан|pred|warn|ban|unban|unwarn|пред|варн|бан)\b",
     re.IGNORECASE,
 )
-_REST_GRANT_PATTERN = re.compile(r"^\s*выдать\s+рест\s+(?P<days>\d+)(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
+_REST_GRANT_PATTERN = re.compile(r"^\s*выдать\s+рест\s+(?P<days>\d+)(?:\s+(?P<target>[\s\S]+))?\s*$", re.IGNORECASE)
 _REST_LIST_PATTERN = re.compile(r"^\s*ресты\s*$", re.IGNORECASE)
-_REST_REVOKE_PATTERN = re.compile(r"^\s*забрать\s+рест(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
+_REST_REVOKE_PATTERN = re.compile(r"^\s*забрать\s+рест(?:\s+(?P<target>[\s\S]+))?\s*$", re.IGNORECASE)
 _REPLY_ROLE_STEP_PATTERN = re.compile(r"^\s*(?:повысить|понизить)\b", re.IGNORECASE)
-_PERSONA_GRANT_PATTERN = re.compile(
-    r"^\s*выдать\s+образ"
-    r"(?:\s+(?P<target>@\S+|-?\d+))?"
-    r"(?:\s+(?:"
-    r'"(?P<label_dq>[^"]+)"'
-    r"|«(?P<label_ruq>[^»]+)»"
-    r"|“(?P<label_lcq>[^”]+)”"
-    r"|(?P<label_plain>.+?)"
-    r"))\s*$",
-    re.IGNORECASE,
-)
-_PERSONA_CLEAR_PATTERN = re.compile(r"^\s*снять\s+образ(?:\s+(?P<target>@\S+|-?\d+))?\s*$", re.IGNORECASE)
+_PERSONA_GRANT_PATTERN = re.compile(r"^\s*выдать\s+образ\b(?P<body>[\s\S]*)$", re.IGNORECASE)
+_PERSONA_CLEAR_PATTERN = re.compile(r"^\s*снять\s+образ(?:\s+(?P<target>[\s\S]+))?\s*$", re.IGNORECASE)
 _PERSONA_LIST_PATTERN = re.compile(r"^\s*образы\s*$", re.IGNORECASE)
 _PERSONA_CONFLICT_TTL = timedelta(minutes=15)
 _PERMISSION_LABELS_RU: dict[str, str] = {
@@ -134,57 +125,60 @@ def _extract_persona_label(match: re.Match[str]) -> str | None:
 
 
 async def _resolve_target_user(message: Message, activity_repo, explicit_token: str | None) -> UserSnapshot | None:
-    if message.reply_to_message and message.reply_to_message.from_user is not None:
-        reply_user = message.reply_to_message.from_user
-        chat_display_name = await activity_repo.get_chat_display_name(
-            chat_id=message.chat.id,
-            user_id=reply_user.id,
-        )
-        return build_user_snapshot(
-            user_id=reply_user.id,
-            username=reply_user.username,
-            first_name=reply_user.first_name,
-            last_name=reply_user.last_name,
-            is_bot=bool(reply_user.is_bot),
-            chat_display_name=chat_display_name,
-        )
+    return await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=explicit_token,
+        prefer_reply=True,
+    )
 
-    if explicit_token is None:
-        return None
 
-    token = explicit_token.strip()
-    if not token:
-        return None
+def _extract_persona_grant_request(text: str) -> tuple[bool, str | None, str | None, str | None]:
+    match = _PERSONA_GRANT_PATTERN.match(text)
+    if match is None:
+        return False, None, None, None
 
-    if token.startswith("@"):
-        snap = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=token)
-        return snap
-
-    if token.lstrip("-").isdigit():
-        user_id = int(token)
-        chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
-        existing = await activity_repo.get_user_snapshot(user_id=user_id)
-        if existing is not None:
-            if chat_display_name:
-                return UserSnapshot(
-                    telegram_user_id=existing.telegram_user_id,
-                    username=existing.username,
-                    first_name=existing.first_name,
-                    last_name=existing.last_name,
-                    is_bot=existing.is_bot,
-                    chat_display_name=chat_display_name,
-                )
-            return existing
-        return UserSnapshot(
-            telegram_user_id=user_id,
-            username=None,
-            first_name=None,
-            last_name=None,
-            is_bot=False,
-            chat_display_name=chat_display_name,
+    body = (match.group("body") or "").strip()
+    if not body:
+        return True, None, None, (
+            'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> '
+            'или <code>выдать образ @username "Аль-Хайтам"</code>.'
         )
 
-    return None
+    quoted_label_match = re.match(
+        r'^(?P<before>[\s\S]*?)\s+(?:"(?P<label_dq>[^"]+)"|«(?P<label_ruq>[^»]+)»|“(?P<label_lcq>[^”]+)”)\s*$',
+        body,
+    )
+    if quoted_label_match is not None:
+        return (
+            True,
+            (quoted_label_match.group("before") or "").strip() or None,
+            _extract_persona_label(quoted_label_match),
+            None,
+        )
+
+    if "\n" in body:
+        target_text, _, label_text = body.partition("\n")
+        persona_label = strip_wrapping_quotes(label_text)
+        if not persona_label.strip():
+            return True, None, None, (
+                'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> '
+                'или <code>выдать образ @username "Аль-Хайтам"</code>.'
+            )
+        return True, target_text.strip() or None, persona_label, None
+
+    parts = body.split(maxsplit=1)
+    first_token = parts[0]
+    if first_token.startswith("@") or first_token.lstrip("-").isdigit():
+        persona_label = strip_wrapping_quotes(parts[1] if len(parts) > 1 else "")
+        if not persona_label.strip():
+            return True, None, None, (
+                'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> '
+                'или <code>выдать образ @username "Аль-Хайтам"</code>.'
+            )
+        return True, first_token, persona_label, None
+
+    return True, None, strip_wrapping_quotes(body), None
 
 
 def _cleanup_pending_persona_conflicts() -> None:
@@ -519,11 +513,11 @@ async def _apply_moderation_action(
         target_token = None
         reason = raw_tail.strip()
     else:
-        target_token, reason = _split_first_token(raw_tail)
+        target_token, reason = split_explicit_target_and_tail(raw_tail)
 
     target = await _resolve_target_user(message, activity_repo, target_token)
     if target is None:
-        await message.answer("Укажите пользователя через reply или @username/id.")
+        await message.answer("Укажите пользователя через reply, @username, id или текущий образ.")
         return
 
     if target.telegram_user_id == message.from_user.id:
@@ -545,7 +539,7 @@ async def _apply_moderation_action(
     ):
         return
 
-    if command_name in {"pred", "warn", "ban"} and await _target_is_telegram_admin(
+    if command_name == "ban" and await _target_is_telegram_admin(
         bot,
         chat_id=message.chat.id,
         user_id=target.telegram_user_id,
@@ -633,7 +627,7 @@ async def _apply_rest_command(
 
     target = await _resolve_target_user(message, activity_repo, target_token)
     if target is None:
-        await message.answer("Укажите пользователя через reply или @username/id.")
+        await message.answer("Укажите пользователя через reply, @username, id или текущий образ.")
         return
     if target.is_bot:
         await message.answer("Нельзя управлять рестом у бота.")
@@ -1185,10 +1179,9 @@ async def role_remove_command(message: Message, command: CommandObject, activity
         await message.answer("Недостаточно прав для управления ролями.")
         return
 
-    target_token, _ = _split_first_token(command.args or "")
-    target = await _resolve_target_user(message, activity_repo, target_token)
+    target = await _resolve_target_user(message, activity_repo, (command.args or "").strip() or None)
     if target is None:
-        await message.answer("Укажите пользователя через reply или @username/id.")
+        await message.answer("Укажите пользователя через reply, @username, id или текущий образ.")
         return
 
     actor_role_definition = await activity_repo.get_effective_role_definition(
@@ -1605,8 +1598,7 @@ async def modstat_command(message: Message, command: CommandObject, activity_rep
     if message.from_user is None:
         return
 
-    target_token, _ = _split_first_token(command.args or "")
-    target = await _resolve_target_user(message, activity_repo, target_token)
+    target = await _resolve_target_user(message, activity_repo, (command.args or "").strip() or None)
     if target is None:
         target = build_user_snapshot(
             user_id=message.from_user.id,
@@ -1671,21 +1663,17 @@ async def persona_grant_text_command(message: Message, activity_repo, chat_setti
     if not chat_settings.persona_enabled:
         await message.answer("Образы отключены в этом чате.")
         return
-    match = _PERSONA_GRANT_PATTERN.match(message.text or "")
-    if match is None:
+    matched, target_token, persona_label, error = _extract_persona_grant_request(message.text or "")
+    if not matched:
         return
-    persona_label = _extract_persona_label(match)
     if persona_label is None:
-        await message.answer(
-            'Формат: reply + <code>выдать образ "Аль-Хайтам"</code> или <code>выдать образ @username "Аль-Хайтам"</code>.',
-            parse_mode="HTML",
-        )
+        await message.answer(error or "Не удалось определить образ.", parse_mode="HTML")
         return
     await _apply_persona_grant(
         message=message,
         activity_repo=activity_repo,
         persona_label=persona_label,
-        target_token=(match.group("target") or "").strip() or None,
+        target_token=target_token,
     )
 
 

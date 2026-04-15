@@ -100,6 +100,15 @@ def test_extract_social_action_target_request_supports_all_targets_with_replica(
     assert replica == "вы лучшие"
 
 
+def test_extract_social_action_target_request_supports_persona_target_with_replica() -> None:
+    action_key, mass_target, target_arg, replica = _extract_social_action_target_request("Обнять Ху Тао\nслушаю")
+
+    assert action_key == "hug"
+    assert mass_target is False
+    assert target_arg == "Ху Тао"
+    assert replica == "слушаю"
+
+
 def test_build_social_action_replica_line_uses_alternative_template(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "selara.presentation.handlers.text_commands.random.choice",

@@ -22,6 +22,7 @@ from selara.domain.entities import (
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
+from selara.presentation.targeting import resolve_chat_target_user
 
 router = Router(name="relationships")
 
@@ -273,49 +274,12 @@ async def _build_actor_snapshot(
 
 
 async def _resolve_target_user(message: Message, activity_repo, *, args: str | None) -> UserSnapshot | None:
-    if message.reply_to_message and message.reply_to_message.from_user is not None:
-        reply_user = message.reply_to_message.from_user
-        chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=reply_user.id)
-        return UserSnapshot(
-            telegram_user_id=reply_user.id,
-            username=reply_user.username,
-            first_name=reply_user.first_name,
-            last_name=reply_user.last_name,
-            is_bot=bool(reply_user.is_bot),
-            chat_display_name=chat_display_name,
-        )
-
-    raw = (args or "").strip()
-    if not raw:
-        return None
-    token = raw.split(maxsplit=1)[0]
-
-    if token.startswith("@"):
-        return await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=token)
-
-    if token.lstrip("-").isdigit():
-        user_id = int(token)
-        existing = await activity_repo.get_user_snapshot(user_id=user_id)
-        chat_display_name = await activity_repo.get_chat_display_name(chat_id=message.chat.id, user_id=user_id)
-        if existing is not None:
-            return UserSnapshot(
-                telegram_user_id=existing.telegram_user_id,
-                username=existing.username,
-                first_name=existing.first_name,
-                last_name=existing.last_name,
-                is_bot=existing.is_bot,
-                chat_display_name=chat_display_name,
-            )
-        return UserSnapshot(
-            telegram_user_id=user_id,
-            username=None,
-            first_name=None,
-            last_name=None,
-            is_bot=False,
-            chat_display_name=chat_display_name,
-        )
-
-    return None
+    return await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=(args or "").strip() or None,
+        prefer_reply=True,
+    )
 
 
 def _partner_id(relationship: RelationshipState, *, user_id: int) -> int:
