@@ -177,7 +177,12 @@ async def resolve_chat_target_user(
         return None
 
     if normalized_target.startswith("@"):
-        return await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=normalized_target)
+        username_target = await activity_repo.find_chat_user_by_username(chat_id=message.chat.id, username=normalized_target)
+        if username_target is not None:
+            return username_target
+        normalized_target = normalized_target[1:].strip()
+        if not normalized_target:
+            return None
 
     if normalized_target.lstrip("-").isdigit():
         return await build_user_snapshot_from_id(

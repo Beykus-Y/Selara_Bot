@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from selara.core.chat_settings import ChatSettings
-from selara.domain.entities import UserSnapshot
+from selara.domain.entities import ChatPersonaAssignment, UserSnapshot
 from selara.presentation.handlers.text_commands import _send_social_action
 
 
@@ -86,6 +86,30 @@ class _FakeActivityRepo:
                 is_bot=False,
                 chat_display_name=None,
             ),
+        ]
+
+    async def find_chat_user_by_username(self, *, chat_id: int, username: str):
+        return None
+
+    async def find_chat_persona_owner(self, *, chat_id: int, persona_label: str):
+        return None
+
+    async def list_chat_persona_assignments(self, *, chat_id: int) -> list[ChatPersonaAssignment]:
+        return [
+            ChatPersonaAssignment(
+                chat_id=chat_id,
+                user=UserSnapshot(
+                    telegram_user_id=4,
+                    username="columbina_main",
+                    first_name="Columbina",
+                    last_name=None,
+                    is_bot=False,
+                    chat_display_name="Коломбина",
+                ),
+                persona_label="Коломбина",
+                persona_label_norm="коломбина",
+                granted_by_user_id=1,
+            )
         ]
 
 
@@ -189,3 +213,39 @@ async def test_send_social_action_supports_all_targets_without_reply(monkeypatch
     assert "tg://user?id=3" in message.answers[0][0]
     assert "С репликой: «вы лучшие»" in message.answers[0][0]
     assert message.answers[0][1]["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_send_social_action_supports_single_line_persona_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage(text="обнять Коломбина")
+    message.reply_to_message = None
+    monkeypatch.setattr("selara.presentation.handlers.text_commands.random.choice", lambda seq: seq[0])
+
+    await _send_social_action(
+        message,
+        _FakeActivityRepo(),
+        _chat_settings(actions_18_enabled=True),
+        action_key="hug",
+    )
+
+    assert len(message.answers) == 1
+    assert "обнял" in message.answers[0][0]
+    assert "tg://user?id=4" in message.answers[0][0]
+
+
+@pytest.mark.asyncio
+async def test_send_social_action_supports_at_persona_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage(text="обнять @коломбина")
+    message.reply_to_message = None
+    monkeypatch.setattr("selara.presentation.handlers.text_commands.random.choice", lambda seq: seq[0])
+
+    await _send_social_action(
+        message,
+        _FakeActivityRepo(),
+        _chat_settings(actions_18_enabled=True),
+        action_key="hug",
+    )
+
+    assert len(message.answers) == 1
+    assert "обнял" in message.answers[0][0]
+    assert "tg://user?id=4" in message.answers[0][0]

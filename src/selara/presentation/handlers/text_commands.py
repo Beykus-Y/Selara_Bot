@@ -3105,6 +3105,16 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
         explicit_target=target_arg,
         prefer_reply=True,
     )
+    if target is None and target_arg is None and replica:
+        persona_target = await resolve_chat_target_user(
+            message,
+            activity_repo,
+            explicit_target=replica,
+            prefer_reply=False,
+        )
+        if persona_target is not None:
+            target = persona_target
+            replica = None
 
     if target is None:
         await _answer_quiet(
