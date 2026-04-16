@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
+    stt_enabled: bool = Field(default=False, validation_alias="STT_ENABLED")
+    stt_api_key: str = Field(default="", validation_alias="STT_API_KEY")
+    stt_base_url: str = Field(default="https://api.groq.com/openai/v1", validation_alias="STT_BASE_URL")
+    stt_model: str = Field(default="whisper-large-v3", validation_alias="STT_MODEL")
+    stt_language: str = Field(default="ru", validation_alias="STT_LANGUAGE")
+    stt_timeout_seconds: float = Field(default=30.0, validation_alias="STT_TIMEOUT_SECONDS")
+
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")

@@ -8,6 +8,7 @@ from selara.application.achievements import get_achievement_catalog_from_setting
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
+from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
@@ -102,6 +103,26 @@ def build_bot_commands() -> list[BotCommand]:
     ]
 
 
+def _build_stt_client(settings) -> SttClient | None:
+    if not settings.stt_enabled:
+        return None
+    if not settings.stt_api_key.strip():
+        logger.warning("STT включён (STT_ENABLED=true), но STT_API_KEY не задан — распознавание отключено.")
+        return None
+    try:
+        config = SttConfig(
+            api_key=settings.stt_api_key,
+            model=settings.stt_model,
+            base_url=settings.stt_base_url or None,
+            timeout_seconds=settings.stt_timeout_seconds,
+            language=settings.stt_language,
+        )
+        return SttClient(config)
+    except ValueError as exc:
+        logger.warning("STT: неверная конфигурация (%s) — распознавание отключено.", exc)
+        return None
+
+
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
     achievement_catalog = get_achievement_catalog_from_settings(settings)
@@ -112,8 +133,9 @@ async def _run_bot(settings, session_factory) -> None:
         max_events=settings.activity_batch_max_events,
         live_event_publisher=GAME_STORE.publish_event,
     )
+    stt_client = _build_stt_client(settings)
     dispatcher = Dispatcher()
-    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher))
+    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client))
 
     await bot.set_my_commands(build_bot_commands())
     await activity_batcher.start()
@@ -128,8 +150,12 @@ async def _run_bot(settings, session_factory) -> None:
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
 
+    polling_kwargs: dict = {"settings": settings}
+    if stt_client is not None:
+        polling_kwargs["stt_client"] = stt_client
+
     try:
-        await dispatcher.start_polling(bot, settings=settings)
+        await dispatcher.start_polling(bot, **polling_kwargs)
     finally:
         interesting_facts_task.cancel()
         await asyncio.gather(interesting_facts_task, return_exceptions=True)

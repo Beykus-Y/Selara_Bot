@@ -2,6 +2,7 @@ from aiogram import Router
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.stt import SttClient
 from selara.presentation.handlers.engagement import router as engagement_router
 from selara.presentation.handlers.economy import router as economy_router
 from selara.presentation.handlers.game import router as game_router
@@ -15,6 +16,7 @@ from selara.presentation.handlers.relationships import router as relationships_r
 from selara.presentation.handlers.settings import router as settings_router
 from selara.presentation.handlers.stats import router as stats_router
 from selara.presentation.handlers.text_commands import router as text_commands_router
+from selara.presentation.handlers.voice import router as voice_router
 from selara.presentation.middlewares.activity_tracker import ActivityTrackerMiddleware
 from selara.presentation.middlewares.bot_ban import BotBanMiddleware
 from selara.presentation.middlewares.chat_migration import ChatMigrationMiddleware
@@ -30,6 +32,7 @@ def build_router(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     activity_batcher: ActivityBatcher,
+    stt_client: SttClient | None = None,
 ) -> Router:
     root = Router(name="root")
 
@@ -75,5 +78,7 @@ def build_router(
     root.include_router(engagement_router)
     root.include_router(private_panel_router)
     root.include_router(text_commands_router)
+    if stt_client is not None:
+        root.include_router(voice_router)
 
     return root
