@@ -17,7 +17,14 @@ def test_extract_social_action_basic_commands() -> None:
 
 def test_extract_social_action_supports_imperative_aliases() -> None:
     assert _extract_social_action("ударь") == "hit"
+    assert _extract_social_action("отпизди") == "beatup"
+    assert _extract_social_action("запинай") == "stomp"
+    assert _extract_social_action("наваляй") == "wallop"
+    assert _extract_social_action("вломи") == "smash"
+    assert _extract_social_action("помурлыкай") == "purr"
     assert _extract_social_action("трахни") == "fuck"
+    assert _extract_social_action("раздень") == "undress"
+    assert _extract_social_action("выеби") == "ravage"
     assert _extract_social_action("соблазни") == "seduce"
     assert _extract_social_action("засоси") == "makeout"
     assert _extract_social_action("убей") == "kill"
@@ -38,6 +45,9 @@ def test_extract_social_action_supports_new_single_word_actions() -> None:
     assert _extract_social_action("защити") == "protect"
     assert _extract_social_action("утащи") == "drag"
     assert _extract_social_action("выпроводи") == "shoo"
+    assert _extract_social_action("вышверни") == "hurlout"
+    assert _extract_social_action("вышвырни") == "hurlout"
+    assert _extract_social_action("помурлыкай") == "purr"
     assert _extract_social_action("подмигни") == "wink"
     assert _extract_social_action("потанцуй") == "dance"
     assert _extract_social_action("поклонись") == "bow"
@@ -58,9 +68,67 @@ def test_extract_social_action_supports_new_multiword_actions() -> None:
     assert _extract_social_action("дай кулак") == "fistbump"
     assert _extract_social_action("проведи ночь с") == "night"
     assert _extract_social_action("сядь на") == "siton"
+    assert _extract_social_action("поставь на колени") == "kneel"
+    assert _extract_social_action("настучи по голове") == "headknock"
     assert _extract_social_action("подними на руки") == "carry"
     assert _extract_social_action("возьми на руки") == "carry"
     assert _extract_social_action("выстави за дверь") == "shoo"
+
+
+def test_extract_social_action_supports_expanded_action_set() -> None:
+    alias_map = {
+        "вмажь": "whack",
+        "въеби": "crack",
+        "отмудохать": "maul",
+        "оттаскай": "manhandle",
+        "скрути": "restrain",
+        "швырни": "throw",
+        "приложи": "clobber",
+        "припечатай": "stamp",
+        "впечатай": "stamp",
+        "протащи": "manhandle",
+        "прижми к стене": "wallpin",
+        "схвати за шкирку": "scruff",
+        "выкинь в окно": "windowthrow",
+        "спусти с лестницы": "stairdump",
+        "отправь в нокаут": "knockout",
+        "дай подзатыльник": "headknock",
+        "дай леща": "faceslap",
+        "размажь": "smear",
+        "разъеби": "wreck",
+        "разнеси": "wreck",
+        "унизь": "humiliate",
+        "засмей": "ridicule",
+        "захуесосить": "flame",
+        "забуллить": "bully",
+        "задоминируй": "dominate",
+        "застрой": "bossaround",
+        "осади": "shutdown",
+        "заткни": "shutup",
+        "пошли нахуй": "fuckoff",
+        "выгони": "evict",
+        "потрись": "nuzzle",
+        "поняшиться": "cutesy",
+        "похныкай в плечо": "sobshoulder",
+        "свернись рядом": "curlup",
+        "засопи": "snuffle",
+        "поурчи": "rumble",
+        "уткнись": "nestle",
+        "подлезь": "sneakclose",
+        "приласкай": "caress",
+        "залипни на": "stareat",
+        "возьми": "take",
+        "поимей": "have",
+        "насади": "impale",
+        "зажми": "trap",
+        "завали": "floor",
+        "разложи": "spread",
+        "пусти по кругу": "gang",
+        "оттрахай": "banghard",
+        "засади": "shovein",
+    }
+    for trigger, expected in alias_map.items():
+        assert _extract_social_action(trigger) == expected
 
 
 def test_extract_social_action_ignores_unknown_or_slash() -> None:

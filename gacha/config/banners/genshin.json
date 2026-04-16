@@ -28,6 +28,18 @@
       "element_code": "dendro"
     },
     {
+      "code": "lohen",
+      "name": "Лоэн",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/lohen.jpg",
+      "weight": 2.0,
+      "region_code": "mondstadt",
+      "element_code": "dendro"
+    },
+    {
       "code": "albedo",
       "name": "Альбедо",
       "rarity": "legendary",
@@ -37,6 +49,18 @@
       "image_url": "/images/genshin/albedo.jpg",
       "weight": 2.0,
       "region_code": "mondstadt",
+      "element_code": "geo"
+    },
+    {
+      "code": "linnei",
+      "name": "Линнея",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/linneya.jpg",
+      "weight": 2.0,
+      "region_code": "nod_krai",
       "element_code": "geo"
     },
     {

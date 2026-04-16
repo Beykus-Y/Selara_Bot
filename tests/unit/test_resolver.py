@@ -164,6 +164,119 @@ def test_resolver_maps_announce_subscribe_aliases() -> None:
     assert intent_unreg.name == "announce_unreg"
 
 
+def test_resolver_maps_new_social_action_aliases_with_targets() -> None:
+    beatup_intent = resolve_text_command("отпиздить @alice", top_default=10, top_max=50)
+    hurlout_intent = resolve_text_command("вышвернуть @alice", top_default=10, top_max=50)
+    hurlout_alt_intent = resolve_text_command("вышвырнуть @alice", top_default=10, top_max=50)
+    stomp_intent = resolve_text_command("запинать @alice", top_default=10, top_max=50)
+    headknock_intent = resolve_text_command("настучать по голове @alice", top_default=10, top_max=50)
+    wallop_intent = resolve_text_command("навалять @alice", top_default=10, top_max=50)
+    smash_intent = resolve_text_command("вломить @alice", top_default=10, top_max=50)
+    purr_intent = resolve_text_command("помурлыкать @alice", top_default=10, top_max=50)
+    kneel_intent = resolve_text_command("поставить на колени @alice", top_default=10, top_max=50)
+    undress_intent = resolve_text_command("раздеть @alice", top_default=10, top_max=50)
+    ravage_intent = resolve_text_command("выебать @alice", top_default=10, top_max=50)
+
+    assert beatup_intent is not None
+    assert beatup_intent.name == "social_beatup"
+    assert beatup_intent.args["raw_args"] == "@alice"
+
+    assert hurlout_intent is not None
+    assert hurlout_intent.name == "social_hurlout"
+    assert hurlout_intent.args["raw_args"] == "@alice"
+
+    assert hurlout_alt_intent is not None
+    assert hurlout_alt_intent.name == "social_hurlout"
+    assert hurlout_alt_intent.args["raw_args"] == "@alice"
+
+    assert stomp_intent is not None
+    assert stomp_intent.name == "social_stomp"
+    assert stomp_intent.args["raw_args"] == "@alice"
+
+    assert headknock_intent is not None
+    assert headknock_intent.name == "social_headknock"
+    assert headknock_intent.args["raw_args"] == "@alice"
+
+    assert wallop_intent is not None
+    assert wallop_intent.name == "social_wallop"
+    assert wallop_intent.args["raw_args"] == "@alice"
+
+    assert smash_intent is not None
+    assert smash_intent.name == "social_smash"
+    assert smash_intent.args["raw_args"] == "@alice"
+
+    assert purr_intent is not None
+    assert purr_intent.name == "social_purr"
+    assert purr_intent.args["raw_args"] == "@alice"
+
+    assert kneel_intent is not None
+    assert kneel_intent.name == "social_kneel"
+    assert kneel_intent.args["raw_args"] == "@alice"
+
+    assert undress_intent is not None
+    assert undress_intent.name == "social_undress"
+    assert undress_intent.args["raw_args"] == "@alice"
+
+    assert ravage_intent is not None
+    assert ravage_intent.name == "social_ravage"
+    assert ravage_intent.args["raw_args"] == "@alice"
+
+
+def test_resolver_maps_expanded_social_action_aliases_with_targets() -> None:
+    alias_map = {
+        "вмазать @alice": "social_whack",
+        "въебать @alice": "social_crack",
+        "отмудохать @alice": "social_maul",
+        "оттаскать @alice": "social_manhandle",
+        "скрутить @alice": "social_restrain",
+        "швырнуть @alice": "social_throw",
+        "приложить @alice": "social_clobber",
+        "припечатать @alice": "social_stamp",
+        "прижать к стене @alice": "social_wallpin",
+        "схватить за шкирку @alice": "social_scruff",
+        "выкинуть в окно @alice": "social_windowthrow",
+        "спустить с лестницы @alice": "social_stairdump",
+        "отправить в нокаут @alice": "social_knockout",
+        "дать леща @alice": "social_faceslap",
+        "размазать @alice": "social_smear",
+        "разъебать @alice": "social_wreck",
+        "унизить @alice": "social_humiliate",
+        "засмеять @alice": "social_ridicule",
+        "захуесосить @alice": "social_flame",
+        "забуллить @alice": "social_bully",
+        "задоминировать @alice": "social_dominate",
+        "застроить @alice": "social_bossaround",
+        "осадить @alice": "social_shutdown",
+        "заткнуть @alice": "social_shutup",
+        "послать нахуй @alice": "social_fuckoff",
+        "выгнать @alice": "social_evict",
+        "потереться @alice": "social_nuzzle",
+        "поняшиться @alice": "social_cutesy",
+        "похныкать в плечо @alice": "social_sobshoulder",
+        "свернуться рядом @alice": "social_curlup",
+        "засопеть @alice": "social_snuffle",
+        "поурчать @alice": "social_rumble",
+        "уткнуться @alice": "social_nestle",
+        "подлезть @alice": "social_sneakclose",
+        "приласкать @alice": "social_caress",
+        "залипнуть на @alice": "social_stareat",
+        "взять @alice": "social_take",
+        "поиметь @alice": "social_have",
+        "насадить @alice": "social_impale",
+        "зажать @alice": "social_trap",
+        "завалить @alice": "social_floor",
+        "разложить @alice": "social_spread",
+        "пустить по кругу @alice": "social_gang",
+        "оттрахать @alice": "social_banghard",
+        "засадить @alice": "social_shovein",
+    }
+    for text, expected in alias_map.items():
+        intent = resolve_text_command(text, top_default=10, top_max=50)
+        assert intent is not None
+        assert intent.name == expected
+        assert intent.args["raw_args"] == "@alice"
+
+
 def test_resolver_maps_economy_aliases() -> None:
     alias_map = {
         "роль": "role",

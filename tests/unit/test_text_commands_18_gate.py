@@ -131,7 +131,10 @@ class _DummyMessage:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action_key", ["fuck", "seduce", "makeout", "night", "bend", "suck"])
+@pytest.mark.parametrize(
+    "action_key",
+    ["fuck", "seduce", "makeout", "night", "bend", "kneel", "undress", "ravage", "take", "have", "impale", "trap", "floor", "spread", "gang", "banghard", "shovein", "suck"],
+)
 async def test_send_social_action_blocks_explicit_actions_when_18_disabled(action_key: str) -> None:
     message = _DummyMessage()
 
@@ -148,7 +151,10 @@ async def test_send_social_action_blocks_explicit_actions_when_18_disabled(actio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action_key", ["fuck", "seduce", "makeout", "night", "bend", "suck"])
+@pytest.mark.parametrize(
+    "action_key",
+    ["fuck", "seduce", "makeout", "night", "bend", "kneel", "undress", "ravage", "take", "have", "impale", "trap", "floor", "spread", "gang", "banghard", "shovein", "suck"],
+)
 async def test_send_social_action_allows_explicit_actions_when_18_enabled(action_key: str) -> None:
     message = _DummyMessage()
 
