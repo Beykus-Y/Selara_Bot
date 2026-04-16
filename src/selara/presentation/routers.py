@@ -20,6 +20,7 @@ from selara.presentation.middlewares.bot_ban import BotBanMiddleware
 from selara.presentation.middlewares.chat_migration import ChatMigrationMiddleware
 from selara.presentation.middlewares.command_cleanup import CommandCleanupMiddleware
 from selara.presentation.middlewares.chat_settings import ChatSettingsMiddleware
+from selara.presentation.middlewares.chat_write_lock import ChatWriteLockMiddleware
 from selara.presentation.middlewares.command_access import CommandAccessMiddleware
 from selara.presentation.middlewares.db_session import DBSessionMiddleware
 from selara.presentation.middlewares.error_handler import ErrorHandlerMiddleware
@@ -37,6 +38,7 @@ def build_router(
     root.message.outer_middleware(ChatMigrationMiddleware())
     root.message.outer_middleware(BotBanMiddleware())
     root.message.outer_middleware(ChatSettingsMiddleware())
+    root.message.outer_middleware(ChatWriteLockMiddleware())
     root.message.outer_middleware(CommandCleanupMiddleware())
     root.message.outer_middleware(CommandAccessMiddleware())
     root.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))

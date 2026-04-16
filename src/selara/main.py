@@ -12,6 +12,7 @@ from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.presentation.game_state import GAME_STORE
+from selara.presentation.handlers.game.router import restore_phase_timers
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
 
@@ -116,6 +117,7 @@ async def _run_bot(settings, session_factory) -> None:
 
     await bot.set_my_commands(build_bot_commands())
     await activity_batcher.start()
+    await restore_phase_timers(bot, session_factory)
     backup_task = None
     interesting_facts_task = asyncio.create_task(
         run_interesting_facts_scheduler(bot=bot, session_factory=session_factory),

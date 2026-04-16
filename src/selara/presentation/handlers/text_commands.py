@@ -205,6 +205,135 @@ _DAILY_ARTICLE_OUTROS: tuple[str, ...] = (
     "Завтра будет новое заседание судьбы.",
 )
 
+_HOROSCOPE_COMMAND_RE = re.compile(
+    r"^\s*/horoscope(?:@[A-Za-z0-9_]+)?\s*$",
+    re.IGNORECASE,
+)
+_HOROSCOPE_SIGNS: tuple[str, ...] = (
+    "Овен", "Телец", "Близнецы", "Рак", "Лев", "Дева",
+    "Весы", "Скорпион", "Стрелец", "Козерог", "Водолей", "Рыбы",
+)
+_HOROSCOPE_SIGN_EMOJIS: dict[str, str] = {
+    "Овен": "♈", "Телец": "♉", "Близнецы": "♊", "Рак": "♋",
+    "Лев": "♌", "Дева": "♍", "Весы": "♎", "Скорпион": "♏",
+    "Стрелец": "♐", "Козерог": "♑", "Водолей": "♒", "Рыбы": "♓",
+}
+_HOROSCOPE_INTROS: tuple[str, ...] = (
+    "Звёзды говорят: {text}",
+    "Вселенная шепчет: {text}",
+    "Космос решил: {text}",
+    "Астрологи предупреждают: {text}",
+    "Карты открылись: {text}",
+    "Планеты выстроились и сообщают: {text}",
+)
+_HOROSCOPE_PREDICTIONS: tuple[str, ...] = (
+    "сегодня тебе лучше молчать и улыбаться.",
+    "удача придёт неожиданно. Возможно, это будет мем.",
+    "не открывай холодильник — там только разочарование.",
+    "кто-то в чате думает о тебе. Может, даже хорошее.",
+    "сегодня ты особенно загадочная личность. Даже для себя.",
+    "энергия дня требует срочно выпить чай и лечь.",
+    "твои планы и реальность наконец договорятся. Кто победит — неизвестно.",
+    "сегодня лучший день для того, чтобы ничего не делать и не корить себя за это.",
+    "ретроградный Меркурий снова что-то натворил. Ты узнаешь позже.",
+    "сегодня ты в ударе. Правда, никто ещё не знает об этом.",
+    "будь осторожен с незнакомцами в интернете. И знакомыми тоже.",
+    "Юпитер советует не спорить с теми, кто явно неправ — береги нервы.",
+    "твоя интуиция сегодня работает лучше логики. Доверяй ей.",
+    "фортуна на твоей стороне, но не злоупотребляй.",
+    "сатурн смотрит на тебя с одобрением. Это редкость, наслаждайся.",
+    "сегодня хороший день начать что-то новое. Или доделать старое.",
+    "не принимай важных решений натощак.",
+    "всё идёт по плану. Чьему — уточняется.",
+    "день обещает быть насыщенным. Возможно, только мемами.",
+    "Венера делает тебя особенно обаятельным. Используй wisely.",
+    "неожиданный поворот событий сделает день интереснее.",
+    "лучший момент поговорить о том, о чём давно молчал.",
+    "сегодня ты — тихая сила. Или просто тихо сидишь.",
+    "не трать время на споры — трать его на что-то вкусное.",
+    "звёзды рекомендуют быть добрее к себе. И к WiFi-роутеру.",
+)
+_HOROSCOPE_OUTROS: tuple[str, ...] = (
+    "Завтра прогноз обновится.",
+    "Это не финансовый совет. И не медицинский.",
+    "Точность прогноза: примерно как у погоды.",
+    "Астрологи ответственности не несут.",
+    "Звёзды не гарантируют доставку.",
+)
+_HOROSCOPE_TEMPLATES: tuple[str, ...] = (
+    "{sign_emoji} <b>Гороскоп {user} на сегодня:</b>\n{sign} — {prediction}\n<i>{outro}</i>",
+    "{sign_emoji} <b>Сегодняшний гороскоп для {user}:</b>\n{sign} — {prediction}\n<i>{outro}</i>",
+    "{sign_emoji} <b>Звёзды для {user}:</b>\n{sign} — {prediction}\n<i>{outro}</i>",
+)
+
+_CHARACTERISTIC_COMMAND_RE = re.compile(
+    r"^\s*/characteristic(?:@[A-Za-z0-9_]+)?\s*$",
+    re.IGNORECASE,
+)
+_CHARACTERISTIC_TRIGGER_RE = re.compile(
+    r"^\s*охарактеризуй\b(?P<tail>[\s\S]*)$",
+    re.IGNORECASE,
+)
+_CHARACTERISTIC_TRAITS: tuple[str, ...] = (
+    "загадочная личность с тайным потенциалом",
+    "человек, который слишком много знает, но молчит",
+    "тот, кто читает чужие сообщения и ничего не пишет в ответ",
+    "харизматичный тип с нестабильным графиком сна",
+    "философ на минималках, мем-знаток на максималках",
+    "классический интроверт с неожиданными вспышками активности",
+    "человек, чьи планы и действия живут в параллельных вселенных",
+    "душа чата, которая периодически исчезает без предупреждения",
+    "загадка, завёрнутая в мем, внутри которой ещё загадка",
+    "тот, кто отвечает «понял» но всё делает по-своему",
+    "непробиваемый оптимист с реалистичной резервной позицией",
+    "человек с планом на всё, кроме конкретного текущего момента",
+    "тихий хаос, упакованный в спокойный вид",
+    "лидер по духу, аутсайдер по желанию",
+    "тот, кто пишет длинный ответ и потом стирает всё до «ок»",
+    "мастер молчаливого сарказма и точных реплик",
+    "уникальная личность в стиле «я не для всех»",
+    "ходячая энциклопедия с ленивым интерфейсом",
+    "человек с репутацией, которую никто не может точно описать",
+    "спокойный снаружи, турбулентный внутри",
+    "тот, кто знает правильный ответ, но предпочитает вопрос",
+    "надёжный в критический момент и недоступный в обычный",
+    "творческий тип с хаотичной системой хранения идей",
+    "человек, который «просто посмотрит» и остаётся на три часа",
+    "стратег, притворяющийся случайным участником",
+)
+_CHARACTERISTIC_TEMPLATES: tuple[str, ...] = (
+    "🔍 <b>Психологический портрет {user}:</b>\n<i>{trait}.</i>",
+    "🧠 <b>Характеристика {user}:</b>\n<i>{trait}.</i>",
+    "📋 <b>Экспертная оценка {user}:</b>\n<i>{trait}.</i>",
+    "🪬 <b>Вселенная о {user}:</b>\n<i>{trait}.</i>",
+)
+
+_MEM_COMMAND_RE = re.compile(
+    r"^\s*мем(?:\s+(?P<placement>верх|низ))?\s*(?P<text>.+)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_MEM_TEXT_MAX_LEN = 120
+_MEM_FILENAME = "mem.jpg"
+_MEM_RANDOM_FALLBACK: tuple[str, ...] = ("МЕМ", "ВОТ")
+
+
+def _load_mem_lines() -> tuple[str, ...]:
+    path = Path(__file__).resolve().parents[1] / "mem_lines.json"
+    if not path.exists():
+        return _MEM_RANDOM_FALLBACK
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Failed to load mem lines from %s", path)
+        return _MEM_RANDOM_FALLBACK
+    if not isinstance(raw, list):
+        return _MEM_RANDOM_FALLBACK
+    result = [str(item).strip() for item in raw if isinstance(item, str) and str(item).strip()]
+    return tuple(result) if result else _MEM_RANDOM_FALLBACK
+
+
+MEM_LINES: tuple[str, ...] = _load_mem_lines()
+
 _SOCIAL_ACTION_ALIASES: dict[str, str] = {
     trigger: SOCIAL_COMMAND_KEY_TO_ACTION[command_key]
     for trigger, command_key in SOCIAL_TRIGGER_TO_COMMAND_KEY.items()
@@ -3229,6 +3358,163 @@ async def _send_daily_article(message: Message, activity_repo) -> None:
     )
 
 
+def _is_horoscope_command(text: str) -> bool:
+    normalized = normalize_text_command(text)
+    if normalized in {"мой гороскоп", "гороскоп"}:
+        return True
+    return _HOROSCOPE_COMMAND_RE.fullmatch(text) is not None
+
+
+async def _send_daily_horoscope(message: Message, activity_repo) -> None:
+    if message.from_user is None:
+        return
+    actor = await _social_action_user_snapshot(message, activity_repo, user=message.from_user)
+    actor_mention = _social_action_mention(actor)
+    today_key = datetime.now().astimezone().date().isoformat()
+    rng = _stable_rng("horoscope", message.from_user.id, today_key)
+    sign = rng.choice(_HOROSCOPE_SIGNS)
+    sign_emoji = _HOROSCOPE_SIGN_EMOJIS[sign]
+    prediction = rng.choice(_HOROSCOPE_PREDICTIONS)
+    intro = rng.choice(_HOROSCOPE_INTROS)
+    outro = rng.choice(_HOROSCOPE_OUTROS)
+    full_prediction = intro.format(text=prediction)
+    template = rng.choice(_HOROSCOPE_TEMPLATES)
+    await _answer_quiet(
+        message,
+        template.format(
+            sign_emoji=sign_emoji,
+            user=actor_mention,
+            sign=escape(sign),
+            prediction=escape(full_prediction),
+            outro=escape(outro),
+        ),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+def _extract_characteristic_target(text: str) -> tuple[bool, str | None]:
+    """Returns (matched, tail_text_or_None)."""
+    normalized = normalize_text_command(text)
+    if normalized in {"охарактеризуй", "характеристика"}:
+        return True, None
+    if _CHARACTERISTIC_COMMAND_RE.fullmatch(text):
+        return True, None
+    m = _CHARACTERISTIC_TRIGGER_RE.fullmatch(text)
+    if m:
+        tail = (m.group("tail") or "").strip()
+        return True, tail if tail else None
+    return False, None
+
+
+async def _send_characteristic(message: Message, activity_repo, bot: Bot, *, tail: str | None) -> None:
+    if message.from_user is None:
+        return
+
+    # Resolve target: reply > explicit mention in tail > self
+    target_user = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif tail:
+        # Try to resolve by username mention
+        mention_match = re.match(r"^@([A-Za-z0-9_]{3,32})$", tail.strip())
+        if mention_match:
+            # Try to find in chat members via activity repo
+            try:
+                candidates = await activity_repo.get_announcement_recipients(chat_id=message.chat.id)
+                uname = mention_match.group(1).lower()
+                found = next(
+                    (u for u in candidates if u.username and u.username.lower() == uname),
+                    None,
+                )
+                if found:
+                    from types import SimpleNamespace as _SN
+                    target_user = _SN(
+                        id=found.telegram_user_id,
+                        username=found.username,
+                        first_name=found.first_name,
+                        last_name=found.last_name,
+                        is_bot=found.is_bot,
+                    )
+            except Exception:
+                pass
+
+    if target_user is None:
+        target_user = message.from_user
+
+    target = await _social_action_user_snapshot(message, activity_repo, user=target_user)
+    target_mention = _social_action_mention(target)
+    today_key = datetime.now().astimezone().date().isoformat()
+    rng = _stable_rng("characteristic", target_user.id, today_key)
+    trait = rng.choice(_CHARACTERISTIC_TRAITS)
+    template = rng.choice(_CHARACTERISTIC_TEMPLATES)
+    await _answer_quiet(
+        message,
+        template.format(user=target_mention, trait=escape(trait)),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+def _parse_mem_command(text: str) -> tuple[bool, str | None, str | None, str | None]:
+    """Returns (matched, placement, mem_text, error).
+    placement: 'верх' | 'низ' | None (случайно).
+    mem_text: None означает случайный текст из MEM_LINES.
+    """
+    m = _MEM_COMMAND_RE.fullmatch(text.strip())
+    if m is None:
+        return False, None, None, None
+    placement = (m.group("placement") or "").strip().lower() or None
+    mem_text = (m.group("text") or "").strip() or None
+    if mem_text and len(mem_text) > _MEM_TEXT_MAX_LEN:
+        return True, placement, None, f"Текст слишком длинный. Максимум {_MEM_TEXT_MAX_LEN} символов."
+    return True, placement, mem_text, None
+
+
+def _make_mem_image(image_bytes: bytes, text: str, placement: str) -> bytes:
+    """placement: 'верх' | 'низ'"""
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    width, height = img.size
+
+    max_side = 1600
+    if max(width, height) > max_side:
+        ratio = max_side / max(width, height)
+        img = img.resize((int(width * ratio), int(height * ratio)), Image.LANCZOS)
+        width, height = img.size
+
+    draw = ImageDraw.Draw(img)
+    font_size = max(20, int(height * 0.07))
+
+    try:
+        font = ImageFont.truetype("impact.ttf", font_size)
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+
+    def draw_outlined_text(x: int, y: int, t: str, anchor: str) -> None:
+        for dx in (-2, -1, 0, 1, 2):
+            for dy in (-2, -1, 0, 1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((x + dx, y + dy), t, font=font, fill=(0, 0, 0), anchor=anchor)
+        draw.text((x, y), t, font=font, fill=(255, 255, 255), anchor=anchor)
+
+    margin_y = int(height * 0.05)
+    label = text.upper()
+    if placement == "верх":
+        draw_outlined_text(width // 2, margin_y, label, "mt")
+    else:
+        draw_outlined_text(width // 2, height - margin_y, label, "mb")
+
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=88)
+    return out.getvalue()
+
+
 async def _enforce_command_access(message: Message, activity_repo, *, command_key: str) -> bool:
     if message.chat.type not in {"group", "supergroup"}:
         return True
@@ -4079,7 +4365,7 @@ async def menu_callback(query: CallbackQuery, settings: Settings, chat_settings:
 
 
 @router.message(F.photo)
-async def zhmyh_photo_handler(message: Message, bot: Bot, settings: Settings, chat_settings: ChatSettings, activity_repo) -> None:
+async def photo_commands_handler(message: Message, bot: Bot, settings: Settings, chat_settings: ChatSettings, activity_repo) -> None:
     caption = message.caption or ""
     if not caption:
         return
@@ -4091,6 +4377,40 @@ async def zhmyh_photo_handler(message: Message, bot: Bot, settings: Settings, ch
         return
 
     if message.chat.type not in settings.supported_chat_types:
+        return
+
+    # Мем-генератор (подпись к фото: "мем Текст" / "мем верх Текст" / "мем низ Текст")
+    mem_matched, mem_placement, mem_text, mem_error = _parse_mem_command(caption)
+    if mem_matched:
+        if not await _enforce_command_access(message, activity_repo, command_key="mem"):
+            return
+        if mem_error is not None:
+            await _answer_quiet(message, mem_error, parse_mode="HTML")
+            return
+        photo_sizes = message.photo or []
+        if not photo_sizes:
+            return
+        placement = mem_placement or random.choice(["верх", "низ"])
+        source = BytesIO()
+        try:
+            await bot.download(photo_sizes[-1], destination=source)
+            rendered = _make_mem_image(source.getvalue(), text=mem_text or random.choice(MEM_LINES), placement=placement)
+        except ModuleNotFoundError as exc:
+            module_name = getattr(exc, "name", "") or ""
+            if module_name.startswith("PIL"):
+                await _answer_quiet(message, "Мем недоступен: не установлен <code>Pillow</code>.", parse_mode="HTML")
+                return
+            await _answer_quiet(message, "Не смог создать мем.", parse_mode="HTML")
+            return
+        except Exception:
+            logger.exception("Mem photo handler failed")
+            await _answer_quiet(message, "Не смог создать мем.", parse_mode="HTML")
+            return
+        await message.answer_photo(
+            photo=BufferedInputFile(rendered, filename=_MEM_FILENAME),
+            caption="Мем готов.",
+            disable_notification=message.chat.type in {"group", "supergroup"},
+        )
         return
 
     zhmyh_matched, zhmyh_level, zhmyh_error = _extract_zhmyh_level(caption)
@@ -4367,6 +4687,59 @@ async def text_commands_handler(
 
     if _is_daily_article_command(text):
         await _send_daily_article(message, activity_repo)
+        return
+
+    if _is_horoscope_command(text):
+        if not await _enforce_command_access(message, activity_repo, command_key="horoscope"):
+            return
+        await _send_daily_horoscope(message, activity_repo)
+        return
+
+    char_matched, char_tail = _extract_characteristic_target(text)
+    if char_matched:
+        if not await _enforce_command_access(message, activity_repo, command_key="characteristic"):
+            return
+        await _send_characteristic(message, activity_repo, bot, tail=char_tail)
+        return
+
+    # Мем-генератор через реплай на фото
+    mem_matched, mem_placement, mem_text, mem_error = _parse_mem_command(text)
+    if mem_matched:
+        if not await _enforce_command_access(message, activity_repo, command_key="mem"):
+            return
+        if mem_error is not None:
+            await _answer_quiet(message, mem_error, parse_mode="HTML")
+            return
+        reply = message.reply_to_message
+        photo_sizes = (reply.photo or []) if reply else []
+        if not photo_sizes:
+            await _answer_quiet(
+                message,
+                "Ответь командой на фото: <code>мем Текст</code>, <code>мем верх Текст</code> или <code>мем низ Текст</code>.",
+                parse_mode="HTML",
+            )
+            return
+        placement = mem_placement or random.choice(["верх", "низ"])
+        source = BytesIO()
+        try:
+            await bot.download(photo_sizes[-1], destination=source)
+            rendered = _make_mem_image(source.getvalue(), text=mem_text or random.choice(MEM_LINES), placement=placement)
+        except ModuleNotFoundError as exc:
+            module_name = getattr(exc, "name", "") or ""
+            if module_name.startswith("PIL"):
+                await _answer_quiet(message, "Мем недоступен: не установлен <code>Pillow</code>.", parse_mode="HTML")
+                return
+            await _answer_quiet(message, "Не смог создать мем.", parse_mode="HTML")
+            return
+        except Exception:
+            logger.exception("Mem text-reply handler failed")
+            await _answer_quiet(message, "Не смог создать мем.", parse_mode="HTML")
+            return
+        await message.answer_photo(
+            photo=BufferedInputFile(rendered, filename=_MEM_FILENAME),
+            caption="Мем готов.",
+            disable_notification=message.chat.type in {"group", "supergroup"},
+        )
         return
 
     try:

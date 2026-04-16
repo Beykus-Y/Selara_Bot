@@ -5,6 +5,7 @@ import logging
 import random
 import re
 from html import escape
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -1011,6 +1012,9 @@ def _render_bunker_vote_status(game: GroupGame) -> str:
             lines.append(f"<b>Лидер:</b> ничья по {leader_votes} голос(ам)")
     else:
         lines.append("<b>Лидер:</b> пока нет.")
+    waiting_ids = [uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.bunker_votes]
+    if waiting_ids:
+        lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
     return "\n".join(lines)
 
 
@@ -1275,6 +1279,9 @@ def _render_quiz_question(game: GroupGame) -> str:
 
     answered_count = len({user_id for user_id in game.quiz_answers if user_id in game.players})
     lines.append(f"<b>Ответили:</b> {answered_count}/{len(game.players)}")
+    waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.quiz_answers]
+    if waiting_ids:
+        lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
     return "\n".join(lines)
 
 
@@ -1408,6 +1415,9 @@ def _render_bred_question(game: GroupGame) -> str:
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
+        waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.bred_votes]
+        if waiting_ids:
+            lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
         return "\n".join(lines)
 
     return "\n".join(lines)
@@ -1456,6 +1466,9 @@ def _render_zlob_round_status(game: GroupGame) -> str:
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
+        waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.zlob_votes]
+        if waiting_ids:
+            lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
         return "\n".join(lines)
 
     return "\n".join(lines)
@@ -1702,6 +1715,9 @@ def _render_game_text(
             )
             lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.alive_player_ids)}")
             lines.append(f"<b>Под ударом:</b> {_render_vote_leaders(game, _mafia_day_vote_counts(game))}")
+            waiting_ids = [uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.day_votes]
+            if waiting_ids:
+                lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
         elif game.phase == "day_execution_confirm":
             candidate_label = "-"
             if game.mafia_execution_candidate_user_id is not None:
@@ -1721,13 +1737,12 @@ def _render_game_text(
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append(f"<b>Тема:</b> {escape(_spy_category_label(game))}")
         lines.append("<b>Сейчас:</b> задавайте вопросы по кругу и ловите того, кто не знает локацию.")
-        lines.append("<i>Мирные получили локацию в ЛС. Шпион знает только свою роль и пытается раствориться в разговоре.</i>")
         lines.append("")
         lines.append(_render_spy_vote_status(game))
 
     if game.kind == "whoami" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
-        lines.append("<i>Свою карточку вы не видите. Угадавший игрок больше не ходит, но продолжает отвечать столу.</i>")
+        lines.append("<i>Свою карточку вы не видите. Угадавший игрок продолжает отвечать на вопросы.</i>")
         lines.append("")
         lines.append(_render_whoami_status(game))
 
@@ -2177,8 +2192,7 @@ async def _send_bred_question_to_user(bot: Bot, game: GroupGame, user_id: int) -
         f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
         "<b>Факт с пропуском:</b>",
         escape(game.bred_question_prompt),
-        "<i>Отправьте в ответ правдоподобную ложь одним сообщением.</i>",
-        "<i>Нельзя отправлять правильный ответ или дублировать вариант другого игрока.</i>",
+        "<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>",
     ]
     try:
         await bot.send_message(user_id, "\n".join(lines), parse_mode="HTML")
@@ -2307,6 +2321,10 @@ def _render_private_bunker_status_text(game: GroupGame, *, actor_user_id: int) -
         voted_count = len({voter for voter in game.bunker_votes if voter in game.alive_player_ids})
         lines.append("")
         lines.append(f"<i>Идёт голосование. Прогресс: {voted_count}/{len(game.alive_player_ids)}.</i>")
+        current_target = game.bunker_votes.get(actor_user_id)
+        if current_target is not None:
+            target_label = game.players.get(current_target, f"user:{current_target}")
+            lines.append(f"<b>Ваш голос:</b> {escape(target_label)}")
     return "\n".join(lines)
 
 
@@ -2526,6 +2544,187 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 logger.exception("Failed to advance mafia execution confirm timer", extra={"game_id": game.game_id})
 
         _GAME_PHASE_TASKS[game.game_id] = asyncio.create_task(_confirm_job())
+
+
+async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
+    """Восстанавливает таймеры фаз для всех активных игр после перезапуска бота.
+
+    Для каждой запущенной игры вычисляет сколько времени уже прошло с начала фазы
+    и запускает таймер с оставшейся задержкой (минимум 5 секунд).
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from selara.core.chat_settings import default_chat_settings
+    from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+
+    active_games = await GAME_STORE.list_active_games()
+    timer_games = [g for g in active_games if g.status == "started" and g.kind in {"mafia", "zlobcards"}]
+
+    if not timer_games:
+        return
+
+    logger.info("Restoring phase timers for %d active game(s) after restart", len(timer_games))
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        settings_obj = None
+        try:
+            from selara.core.config import get_settings
+            settings_obj = get_settings()
+        except Exception:
+            pass
+
+        for game in timer_games:
+            try:
+                chat_settings = await repo.get_chat_settings(chat_id=game.chat_id)
+                if chat_settings is None:
+                    if settings_obj is not None:
+                        chat_settings = default_chat_settings(settings_obj)
+                    else:
+                        continue
+
+                now = datetime.now(timezone.utc)
+                elapsed = 0.0
+                if game.phase_started_at is not None:
+                    elapsed = max(0.0, (now - game.phase_started_at).total_seconds())
+
+                if game.kind == "zlobcards":
+                    if game.phase == "private_answers":
+                        full_delay = max(5, _ZLOBCARDS_PRIVATE_SECONDS)
+                    elif game.phase == "public_vote":
+                        full_delay = max(5, _ZLOBCARDS_VOTE_SECONDS)
+                    else:
+                        continue
+                elif game.kind == "mafia":
+                    if game.phase == "night":
+                        full_delay = max(5, chat_settings.mafia_night_seconds)
+                    elif game.phase == "day_discussion":
+                        full_delay = max(5, chat_settings.mafia_day_seconds)
+                    elif game.phase == "day_vote":
+                        full_delay = max(5, chat_settings.mafia_vote_seconds)
+                    elif game.phase == "day_execution_confirm":
+                        full_delay = max(5, chat_settings.mafia_vote_seconds)
+                    else:
+                        continue
+                else:
+                    continue
+
+                remaining = max(5.0, full_delay - elapsed)
+                logger.info(
+                    "Restoring timer for game %s (kind=%s phase=%s elapsed=%.0fs remaining=%.0fs)",
+                    game.game_id,
+                    game.kind,
+                    game.phase,
+                    elapsed,
+                    remaining,
+                )
+
+                # Создаём временную версию игры с уменьшенной задержкой через патч настроек
+                # Проще всего — вызвать _schedule_phase_timer с модифицированными settings
+                _cancel_phase_timer(game.game_id)
+                _schedule_phase_timer_with_remaining(bot, game, chat_settings, remaining)
+            except Exception:
+                logger.exception("Failed to restore timer for game %s", game.game_id)
+
+
+def _schedule_phase_timer_with_remaining(
+    bot: Bot, game: GroupGame, chat_settings: ChatSettings, remaining_seconds: float
+) -> None:
+    """Запускает таймер фазы с конкретной оставшейся задержкой (используется при восстановлении)."""
+    _cancel_phase_timer(game.game_id)
+
+    if game.status != "started":
+        return
+
+    expected_kind = game.kind
+    expected_phase = game.phase
+    expected_round_no = game.round_no
+    expected_phase_started_at = game.phase_started_at
+
+    async def _is_stale_timer() -> bool:
+        current_game = await GAME_STORE.get_game(game.game_id)
+        if current_game is None:
+            return True
+        return not (
+            current_game.kind == expected_kind
+            and current_game.status == "started"
+            and current_game.phase == expected_phase
+            and current_game.round_no == expected_round_no
+            and current_game.phase_started_at == expected_phase_started_at
+        )
+
+    delay = remaining_seconds
+
+    if game.kind == "zlobcards" and game.phase == "private_answers":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                _, error = await _open_zlob_vote_phase(bot, game.game_id, chat_settings, force=True, triggered_by_auto=True)
+                if error is not None:
+                    logger.debug("Restored zlobcards private timer skipped", extra={"game_id": game.game_id, "error": error})
+            except Exception:
+                logger.exception("Restored zlobcards private timer failed", extra={"game_id": game.game_id})
+
+    elif game.kind == "zlobcards" and game.phase == "public_vote":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                _, error = await _resolve_zlob_round(bot, game.game_id, chat_settings, force=True, triggered_by_auto=True)
+                if error is not None:
+                    logger.debug("Restored zlobcards vote timer skipped", extra={"game_id": game.game_id, "error": error})
+            except Exception:
+                logger.exception("Restored zlobcards vote timer failed", extra={"game_id": game.game_id})
+
+    elif game.kind == "mafia" and game.phase == "night":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True)
+            except Exception:
+                logger.exception("Restored mafia night timer failed", extra={"game_id": game.game_id})
+
+    elif game.kind == "mafia" and game.phase == "day_discussion":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+            except Exception:
+                logger.exception("Restored mafia day discussion timer failed", extra={"game_id": game.game_id})
+
+    elif game.kind == "mafia" and game.phase == "day_vote":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+            except Exception:
+                logger.exception("Restored mafia day vote timer failed", extra={"game_id": game.game_id})
+
+    elif game.kind == "mafia" and game.phase == "day_execution_confirm":
+        async def _job() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if await _is_stale_timer():
+                    return
+                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True)
+            except Exception:
+                logger.exception("Restored mafia execution confirm timer failed", extra={"game_id": game.game_id})
+
+    else:
+        return
+
+    _GAME_PHASE_TASKS[game.game_id] = asyncio.create_task(_job())
 
 
 async def _send_role_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:

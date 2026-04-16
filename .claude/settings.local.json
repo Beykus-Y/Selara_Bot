@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /c/Selara/src/selara/presentation/handlers/game/modes/*.py)"
+    ]
+  }
+}

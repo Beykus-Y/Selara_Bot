@@ -1438,26 +1438,15 @@ async def pay_command(message: Message, command: CommandObject, bot: Bot, econom
     target_user_id: int | None = None
     amount: int | None = None
 
-    if message.reply_to_message is not None and message.reply_to_message.from_user is not None:
-        target_user_id = int(message.reply_to_message.from_user.id)
-        if tokens and tokens[-1].isdigit():
-            amount = int(tokens[-1])
+    # Если в аргументах указаны и получатель, и сумма (>= 2 токенов, последний — число),
+    # явный получатель имеет приоритет над reply.
+    # Reply используется только когда передана только сумма (1 токен-число).
+    has_explicit_target_and_amount = len(tokens) >= 2 and tokens[-1].isdigit()
 
-    if target_user_id is None:
-        if len(tokens) < 2:
-            await _answer_message(message, "Формат: /pay @username 100 | /pay user_id 100 | reply + /pay 100")
-            return
-
-        amount_raw = tokens[-1]
-        if not amount_raw.isdigit():
-            await _answer_message(message, "Сумма перевода должна быть числом")
-            return
-        amount = int(amount_raw)
-
+    if has_explicit_target_and_amount:
+        # Режим: /pay @username 100 или /pay user_id 100
+        amount = int(tokens[-1])
         target_raw = " ".join(tokens[:-1]).strip()
-        if not target_raw:
-            await _answer_message(message, "Не удалось определить получателя/сумму")
-            return
 
         if target_raw.isdigit():
             target_user_id = int(target_raw)
@@ -1475,6 +1464,14 @@ async def pay_command(message: Message, command: CommandObject, bot: Bot, econom
                 await _answer_message(message, "Пользователь с таким username или образом не найден в этом чате")
                 return
             target_user_id = user.telegram_user_id
+    elif message.reply_to_message is not None and message.reply_to_message.from_user is not None:
+        # Режим: reply + /pay 100 (только сумма в аргументах)
+        target_user_id = int(message.reply_to_message.from_user.id)
+        if tokens and tokens[-1].isdigit():
+            amount = int(tokens[-1])
+    else:
+        await _answer_message(message, "Формат: /pay @username 100 | /pay user_id 100 | reply + /pay 100")
+        return
 
     if target_user_id is None or amount is None:
         await _answer_message(message, "Не удалось определить получателя/сумму")
