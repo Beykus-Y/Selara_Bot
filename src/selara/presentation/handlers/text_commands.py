@@ -3487,13 +3487,24 @@ def _make_mem_image(image_bytes: bytes, text: str, placement: str) -> bytes:
     draw = ImageDraw.Draw(img)
     font_size = max(20, int(height * 0.07))
 
-    try:
-        font = ImageFont.truetype("impact.ttf", font_size)
-    except (OSError, IOError):
+    from selara.presentation.font_support import resolve_matplotlib_font_path
+
+    font = None
+    for candidate in ("impact.ttf", "Impact.ttf"):
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            font = ImageFont.truetype(candidate, font_size)
+            break
         except (OSError, IOError):
-            font = ImageFont.load_default()
+            pass
+    if font is None:
+        resolved = resolve_matplotlib_font_path(bold=True)
+        if resolved:
+            try:
+                font = ImageFont.truetype(resolved, font_size)
+            except (OSError, IOError):
+                pass
+    if font is None:
+        font = ImageFont.load_default()
 
     def draw_outlined_text(x: int, y: int, t: str, anchor: str) -> None:
         for dx in (-2, -1, 0, 1, 2):

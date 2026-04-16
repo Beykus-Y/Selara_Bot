@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential fonts-noto fonts-noto-color-emoji fonts-symbola postgresql-client \
+    && apt-get install -y --no-install-recommends build-essential fonts-dejavu-core fonts-noto fonts-noto-color-emoji fonts-symbola postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md alembic.ini /app/
