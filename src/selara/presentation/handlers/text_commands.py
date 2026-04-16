@@ -3506,6 +3506,23 @@ def _make_mem_image(image_bytes: bytes, text: str, placement: str) -> bytes:
     if font is None:
         font = ImageFont.load_default()
 
+    def _wrap_text(t: str, max_width: int) -> list[str]:
+        words = t.split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip() if current else word
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines or [t]
+
     def draw_outlined_text(x: int, y: int, t: str, anchor: str) -> None:
         for dx in (-2, -1, 0, 1, 2):
             for dy in (-2, -1, 0, 1, 2):
@@ -3516,10 +3533,22 @@ def _make_mem_image(image_bytes: bytes, text: str, placement: str) -> bytes:
 
     margin_y = int(height * 0.05)
     label = text.upper()
+    max_text_width = int(width * 0.9)
+    lines = _wrap_text(label, max_text_width)
+    line_bbox = draw.textbbox((0, 0), "Ag", font=font)
+    line_height = (line_bbox[3] - line_bbox[1]) + int(font_size * 0.15)
+
     if placement == "верх":
-        draw_outlined_text(width // 2, margin_y, label, "mt")
+        y = margin_y
+        for line in lines:
+            draw_outlined_text(width // 2, y, line, "mt")
+            y += line_height
     else:
-        draw_outlined_text(width // 2, height - margin_y, label, "mb")
+        block_height = line_height * len(lines)
+        y = height - margin_y - block_height
+        for line in lines:
+            draw_outlined_text(width // 2, y, line, "mt")
+            y += line_height
 
     out = BytesIO()
     img.save(out, format="JPEG", quality=88)
