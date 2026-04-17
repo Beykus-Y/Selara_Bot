@@ -44,7 +44,7 @@ function resolveLaunchUrl(botHref: string | undefined): string {
     if (!botUsername) {
       return botHref
     }
-    return `https://t.me/${botUsername}?startapp`
+    return `https://t.me/${botUsername}`
   } catch {
     return botHref
   }

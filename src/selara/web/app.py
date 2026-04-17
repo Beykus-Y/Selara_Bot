@@ -984,9 +984,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
 
     def _miniapp_launch_url(*, start_param: str | None = None) -> str:
-        if start_param:
-            return f"https://t.me/{bot_username}?startapp={quote(start_param, safe='')}"
-        return f"https://t.me/{bot_username}?startapp"
+        _ = start_param
+        return f"https://t.me/{bot_username}"
 
     def _miniapp_group_payload(group: UserChatOverview, *, is_admin: bool) -> dict[str, object]:
         payload = build_group_link(group, is_admin=is_admin)

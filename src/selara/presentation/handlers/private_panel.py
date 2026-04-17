@@ -9,7 +9,7 @@ import shlex
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, Filter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from selara.application.use_cases.economy.catalog import FARM_LEVEL_PLOTS
@@ -219,6 +219,7 @@ def _build_home_keyboard(
     has_admin_groups: bool,
     has_user_groups: bool,
     miniapp_url: str | None = None,
+    miniapp_webapp_url: str | None = None,
     desktop_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -226,7 +227,9 @@ def _build_home_keyboard(
         builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
     if has_user_groups:
         builder.button(text="👤 Мои группы", callback_data=encode_pm_callback("ul", 0))
-    if miniapp_url:
+    if miniapp_webapp_url:
+        builder.button(text="📱 Mini App", web_app=WebAppInfo(url=miniapp_webapp_url))
+    elif miniapp_url:
         builder.button(text="📱 Mini App", url=miniapp_url)
     if desktop_url:
         builder.button(text="🖥 ПК-панель", url=desktop_url)
@@ -378,7 +381,13 @@ def _build_miniapp_url(settings: Settings) -> str | None:
     bot_username = (settings.bot_username or settings.bot_name or "").strip().lstrip("@")
     if not bot_username:
         return None
-    return f"https://t.me/{bot_username}?startapp"
+    return f"https://t.me/{bot_username}"
+
+
+def _build_miniapp_webapp_url(settings: Settings) -> str | None:
+    if not settings.web_enabled:
+        return None
+    return f"{settings.resolved_web_base_url}/miniapp/"
 
 
 def _build_web_panel_url(settings: Settings) -> str | None:
@@ -394,8 +403,8 @@ def _append_web_panel_info(text: str, *, miniapp_url: str | None, desktop_url: s
     if miniapp_url:
         lines.extend(
             [
-                f'📱 <b>Mini App:</b> <a href="{escape(miniapp_url)}">открыть в Telegram</a>',
-                "Это основной вход с телефона: гача, группы, игры и профиль доступны без кода.",
+                f'📱 <b>Mini App:</b> <a href="{escape(miniapp_url)}">открыть бота в Telegram</a>',
+                "Это основной вход с телефона: откройте бота и нажмите кнопку Mini App в меню или в сообщении.",
             ]
         )
     if desktop_url:
@@ -416,6 +425,7 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
     user_groups = await activity_repo.list_user_activity_chats(user_id=message.from_user.id, limit=100)
     text = await _render_home_text(user=message.from_user, admin_groups=admin_groups, user_groups=user_groups)
     miniapp_url = _build_miniapp_url(settings)
+    miniapp_webapp_url = _build_miniapp_webapp_url(settings)
     desktop_url = _build_web_panel_url(settings)
     text = _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url)
 
@@ -426,6 +436,7 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
             has_admin_groups=bool(admin_groups),
             has_user_groups=bool(user_groups),
             miniapp_url=miniapp_url,
+            miniapp_webapp_url=miniapp_webapp_url,
             desktop_url=desktop_url,
         ),
     )
@@ -838,6 +849,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         text = await _render_home_text(user=query.from_user, admin_groups=admin_groups, user_groups=user_groups)
         miniapp_url = _build_miniapp_url(settings)
+        miniapp_webapp_url = _build_miniapp_webapp_url(settings)
         desktop_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
@@ -846,6 +858,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
                 miniapp_url=miniapp_url,
+                miniapp_webapp_url=miniapp_webapp_url,
                 desktop_url=desktop_url,
             ),
         )
@@ -857,6 +870,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if not groups:
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
             miniapp_url = _build_miniapp_url(settings)
+            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
             desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
@@ -865,6 +879,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     has_admin_groups=False,
                     has_user_groups=bool(user_groups),
                     miniapp_url=miniapp_url,
+                    miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
                 ),
             )
@@ -948,6 +963,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
             miniapp_url = _build_miniapp_url(settings)
+            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
             desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
@@ -956,6 +972,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
                     miniapp_url=miniapp_url,
+                    miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
                 ),
             )
@@ -1006,6 +1023,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
             miniapp_url = _build_miniapp_url(settings)
+            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
             desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
@@ -1014,6 +1032,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
                     miniapp_url=miniapp_url,
+                    miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
                 ),
             )
@@ -1151,6 +1170,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         miniapp_url = _build_miniapp_url(settings)
+        miniapp_webapp_url = _build_miniapp_webapp_url(settings)
         desktop_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
@@ -1159,6 +1179,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
                 miniapp_url=miniapp_url,
+                miniapp_webapp_url=miniapp_webapp_url,
                 desktop_url=desktop_url,
             ),
         )
@@ -1170,6 +1191,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if not groups:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             miniapp_url = _build_miniapp_url(settings)
+            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
             desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
@@ -1178,6 +1200,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=False,
                     miniapp_url=miniapp_url,
+                    miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
                 ),
             )
