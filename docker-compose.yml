@@ -59,7 +59,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_APP_BASE_PATH: ${SELARA_WEB_BASE_PATH:-/new/}
+        VITE_APP_BASE_PATH: ${SELARA_WEB_BASE_PATH:-/miniapp/}
     container_name: selara-web
     restart: unless-stopped
     depends_on:

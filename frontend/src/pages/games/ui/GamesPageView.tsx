@@ -928,6 +928,11 @@ export function GamesPageView({
   const effectiveZlobCategory = visibleZlobOptions.some((option) => option.value === createDraft.zlob_category)
     ? createDraft.zlob_category
     : visibleZlobOptions[0]?.value ?? ''
+  const showCreateLobby =
+    data.game_catalog.length > 0 ||
+    data.create_chat_options.length > 0 ||
+    data.busy_create_chat_options.length > 0 ||
+    data.has_manageable_chats
 
   return (
     <div className="games-page">
@@ -964,160 +969,162 @@ export function GamesPageView({
         ))}
       </section>
 
-      <section className="games-panel">
-        <div className="games-panel__head">
-          <div>
-            <h2>Создание игры</h2>
-            <p>Лобби открывается прямо в браузере через текущий серверный сценарий.</p>
+      {showCreateLobby ? (
+        <section className="games-panel">
+          <div className="games-panel__head">
+            <div>
+              <h2>Создание игры</h2>
+              <p>Лобби открывается прямо в браузере через текущий серверный сценарий.</p>
+            </div>
           </div>
-        </div>
-        {selectedGame ? (
-          <div className={`games-stage-note games-stage-note--${selectedGame.tone}`}>
-            <strong>{selectedGame.title}</strong>
-            <p>{selectedGame.note}</p>
-          </div>
-        ) : null}
-        <form
-          className="games-create-layout"
-          onSubmit={(event) => {
-            event.preventDefault()
-            void onCreateGame({
-              ...createDraft,
-              spy_category: effectiveSpyCategory,
-              whoami_category: effectiveWhoamiCategory,
-              zlob_category: effectiveZlobCategory,
-            })
-          }}
-        >
-          <div className="games-create-fields">
-            <label className="games-create-field">
-              <span>Чат для запуска</span>
-              <select
-                value={createDraft.chat_id}
-                onChange={(event) => setCreateDraft((current) => ({ ...current, chat_id: event.target.value }))}
-              >
-                {data.create_chat_options.map((chat) => (
-                  <option key={chat.chat_id} value={chat.chat_id}>
-                    {chat.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="games-create-field">
-              <span>Режим игры</span>
-              <select
-                value={createDraft.kind}
-                onChange={(event) => setCreateDraft((current) => ({ ...current, kind: event.target.value }))}
-              >
-                {data.game_catalog.map((item) => (
-                  <option key={item.key} value={item.key}>
-                    {item.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {createDraft.kind === 'spy' ? (
+          {selectedGame ? (
+            <div className={`games-stage-note games-stage-note--${selectedGame.tone}`}>
+              <strong>{selectedGame.title}</strong>
+              <p>{selectedGame.note}</p>
+            </div>
+          ) : null}
+          <form
+            className="games-create-layout"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void onCreateGame({
+                ...createDraft,
+                spy_category: effectiveSpyCategory,
+                whoami_category: effectiveWhoamiCategory,
+                zlob_category: effectiveZlobCategory,
+              })
+            }}
+          >
+            <div className="games-create-fields">
               <label className="games-create-field">
-                <span>Тема Spyfall</span>
+                <span>Чат для запуска</span>
                 <select
-                  value={effectiveSpyCategory}
-                  onChange={(event) => setCreateDraft((current) => ({ ...current, spy_category: event.target.value }))}
+                  value={createDraft.chat_id}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, chat_id: event.target.value }))}
                 >
-                  {visibleSpyOptions.map((option) => (
-                    <option key={`spy-${option.value}`} value={option.value}>
-                      {renderOptionLabel(option)}
+                  {data.create_chat_options.map((chat) => (
+                    <option key={chat.chat_id} value={chat.chat_id}>
+                      {chat.title}
                     </option>
                   ))}
                 </select>
               </label>
-            ) : null}
 
-            {createDraft.kind === 'whoami' ? (
               <label className="games-create-field">
-                <span>Тема «Кто я?»</span>
+                <span>Режим игры</span>
                 <select
-                  value={effectiveWhoamiCategory}
-                  onChange={(event) => setCreateDraft((current) => ({ ...current, whoami_category: event.target.value }))}
+                  value={createDraft.kind}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, kind: event.target.value }))}
                 >
-                  {visibleWhoamiOptions.map((option) => (
-                    <option key={`whoami-${option.value}`} value={option.value}>
-                      {renderOptionLabel(option)}
+                  {data.game_catalog.map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.title}
                     </option>
                   ))}
                 </select>
               </label>
-            ) : null}
 
-            {createDraft.kind === 'zlobcards' ? (
-              <label className="games-create-field">
-                <span>Тема злобокарт</span>
-                <select
-                  value={effectiveZlobCategory}
-                  onChange={(event) => setCreateDraft((current) => ({ ...current, zlob_category: event.target.value }))}
-                >
-                  {visibleZlobOptions.map((option) => (
-                    <option key={`zlob-${option.value}`} value={option.value}>
-                      {renderOptionLabel(option)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-          </div>
+              {createDraft.kind === 'spy' ? (
+                <label className="games-create-field">
+                  <span>Тема Spyfall</span>
+                  <select
+                    value={effectiveSpyCategory}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, spy_category: event.target.value }))}
+                  >
+                    {visibleSpyOptions.map((option) => (
+                      <option key={`spy-${option.value}`} value={option.value}>
+                        {renderOptionLabel(option)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
 
-          <aside className={`games-create-preview games-create-preview--${selectedGame?.tone ?? 'violet'}`}>
-            <span className="page-card__eyebrow">Предпросмотр</span>
-            <h3>{selectedGame?.title ?? 'Выберите режим'}</h3>
-            <p>{selectedGame?.description ?? 'После выбора режима и чата карточка лобби откроется здесь же, в веб-интерфейсе.'}</p>
+              {createDraft.kind === 'whoami' ? (
+                <label className="games-create-field">
+                  <span>Тема «Кто я?»</span>
+                  <select
+                    value={effectiveWhoamiCategory}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, whoami_category: event.target.value }))}
+                  >
+                    {visibleWhoamiOptions.map((option) => (
+                      <option key={`whoami-${option.value}`} value={option.value}>
+                        {renderOptionLabel(option)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
 
-            <div className="games-create-preview__meta">
-              <div className="games-create-preview__meta-card">
-                <span>Чат</span>
-                <strong>{selectedChat?.title ?? '—'}</strong>
-              </div>
-              <div className="games-create-preview__meta-card">
-                <span>Игроки</span>
-                <strong>{selectedGame?.min_players_label ?? '—'}</strong>
-              </div>
-              <div className="games-create-preview__meta-card">
-                <span>Режим</span>
-                <strong>{selectedGame?.mode_label ?? '—'}</strong>
-              </div>
+              {createDraft.kind === 'zlobcards' ? (
+                <label className="games-create-field">
+                  <span>Тема злобокарт</span>
+                  <select
+                    value={effectiveZlobCategory}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, zlob_category: event.target.value }))}
+                  >
+                    {visibleZlobOptions.map((option) => (
+                      <option key={`zlob-${option.value}`} value={option.value}>
+                        {renderOptionLabel(option)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </div>
 
-            {selectedGame ? (
-              <div className="games-stage-note games-stage-note--compact">
-                <strong>Что важно</strong>
-                <p>{selectedGame.note}</p>
-              </div>
-            ) : null}
+            <aside className={`games-create-preview games-create-preview--${selectedGame?.tone ?? 'violet'}`}>
+              <span className="page-card__eyebrow">Предпросмотр</span>
+              <h3>{selectedGame?.title ?? 'Выберите режим'}</h3>
+              <p>{selectedGame?.description ?? 'После выбора режима и чата карточка лобби откроется здесь же, в веб-интерфейсе.'}</p>
 
-            <button className="button button--primary" type="submit" disabled={isMutating || !createDraft.chat_id || !createDraft.kind}>
-              Открыть лобби
-            </button>
-          </aside>
-        </form>
-        {data.busy_create_chat_options.length > 0 ? (
-          <div className="games-stage-note">
-            <strong>Занятые чаты</strong>
-            <p>{data.busy_create_chat_options.map((item) => item.title).join(' • ')}</p>
-          </div>
-        ) : null}
-        {!data.has_manageable_chats ? (
-          <div className="games-stage-note">
-            <strong>Нет доступных чатов для запуска</strong>
-            <p>Создание новых игр откроется, когда у аккаунта появится хотя бы один чат с правом на запуск партий.</p>
-          </div>
-        ) : null}
-        {!chatAllows18 ? (
-          <div className="games-stage-note">
-            <strong>Безопасный режим тем</strong>
-            <p>Для выбранного чата 18+ темы скрыты, поэтому доступны только безопасные наборы.</p>
-          </div>
-        ) : null}
-      </section>
+              <div className="games-create-preview__meta">
+                <div className="games-create-preview__meta-card">
+                  <span>Чат</span>
+                  <strong>{selectedChat?.title ?? '—'}</strong>
+                </div>
+                <div className="games-create-preview__meta-card">
+                  <span>Игроки</span>
+                  <strong>{selectedGame?.min_players_label ?? '—'}</strong>
+                </div>
+                <div className="games-create-preview__meta-card">
+                  <span>Режим</span>
+                  <strong>{selectedGame?.mode_label ?? '—'}</strong>
+                </div>
+              </div>
+
+              {selectedGame ? (
+                <div className="games-stage-note games-stage-note--compact">
+                  <strong>Что важно</strong>
+                  <p>{selectedGame.note}</p>
+                </div>
+              ) : null}
+
+              <button className="button button--primary" type="submit" disabled={isMutating || !createDraft.chat_id || !createDraft.kind}>
+                Открыть лобби
+              </button>
+            </aside>
+          </form>
+          {data.busy_create_chat_options.length > 0 ? (
+            <div className="games-stage-note">
+              <strong>Занятые чаты</strong>
+              <p>{data.busy_create_chat_options.map((item) => item.title).join(' • ')}</p>
+            </div>
+          ) : null}
+          {!data.has_manageable_chats ? (
+            <div className="games-stage-note">
+              <strong>Нет доступных чатов для запуска</strong>
+              <p>Создание новых игр откроется, когда у аккаунта появится хотя бы один чат с правом на запуск партий.</p>
+            </div>
+          ) : null}
+          {!chatAllows18 ? (
+            <div className="games-stage-note">
+              <strong>Безопасный режим тем</strong>
+              <p>Для выбранного чата 18+ темы скрыты, поэтому доступны только безопасные наборы.</p>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section id="games-active" className="games-list">
         <div className="games-panel__head">

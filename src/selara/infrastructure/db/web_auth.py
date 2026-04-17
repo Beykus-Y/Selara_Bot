@@ -21,6 +21,10 @@ class SqlAlchemyWebAuthRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def upsert_user(self, *, user: UserSnapshot) -> None:
+        await self._upsert_user(user)
+        await self._session.flush()
+
     async def invalidate_user_login_codes(self, *, user_id: int, now: datetime) -> None:
         normalized_now = _coerce_utc_datetime(now)
         stmt = (

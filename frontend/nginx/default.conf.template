@@ -6,12 +6,12 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    location = /new {
-        return 308 /new/;
+    location = /miniapp {
+        return 308 /miniapp/;
     }
 
-    location /new/api/ {
-        rewrite ^/new(/.*)$ $1 break;
+    location /miniapp/api/ {
+        rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -19,12 +19,12 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
-        proxy_redirect ~^(/.*)$ /new$1;
+        proxy_redirect ~^(/.*)$ /miniapp$1;
         proxy_buffering off;
     }
 
-    location /new/backend/ {
-        rewrite ^/new(/.*)$ $1 break;
+    location /miniapp/backend/ {
+        rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -32,45 +32,45 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
-        proxy_redirect ~^(/.*)$ /new$1;
+        proxy_redirect ~^(/.*)$ /miniapp$1;
         proxy_buffering off;
     }
 
-    location = /new/logout {
-        rewrite ^/new(/.*)$ $1 break;
+    location = /miniapp/logout {
+        rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect ~^(/.*)$ /new$1;
+        proxy_redirect ~^(/.*)$ /miniapp$1;
     }
 
-    location = /new/healthz {
-        rewrite ^/new(/.*)$ $1 break;
+    location = /miniapp/healthz {
+        rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect ~^(/.*)$ /new$1;
+        proxy_redirect ~^(/.*)$ /miniapp$1;
     }
 
-    location /new/static/ {
-        rewrite ^/new(/.*)$ $1 break;
+    location /miniapp/static/ {
+        rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect ~^(/.*)$ /new$1;
+        proxy_redirect ~^(/.*)$ /miniapp$1;
     }
 
-    location /new/gacha/ {
-        rewrite ^/new/gacha(/.*)$ $1 break;
+    location /miniapp/gacha/ {
+        rewrite ^/miniapp/gacha(/.*)$ $1 break;
         proxy_pass ${GACHA_BASE_URL};
         proxy_http_version 1.1;
         proxy_set_header Host $proxy_host;
@@ -82,8 +82,8 @@ server {
         proxy_buffering off;
     }
 
-    location /new/ {
-        rewrite ^/new(/.*)$ $1 break;
+    location /miniapp/ {
+        rewrite ^/miniapp(/.*)$ $1 break;
         try_files $uri $uri/ /index.html;
     }
 }

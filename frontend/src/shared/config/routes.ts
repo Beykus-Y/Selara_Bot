@@ -15,24 +15,36 @@ export const routes = {
   login: '/login',
   userDocs: '/docs/user',
   adminDocs: '/docs/admin',
+
   app: '/app',
-  home: '/app',
-  settings: '/app/settings',
-  games: '/app/games',
-  achievements: '/app/achievements',
-  gachaCollection: (userId: string | number) => `/app/gacha/collection/${userId}`,
+  desktop: '/app',
+  desktopGames: '/app/games',
+  desktopUserDocs: '/app/docs/user',
+  desktopAdminDocs: '/app/docs/admin',
+  desktopChat: (chatId: string | number) => `/app/chat/${chatId}`,
+
+  home: '/',
+  groups: '/groups',
+  games: '/games',
+  gacha: '/gacha',
+  more: '/more',
+
+  settings: '/more',
+  achievements: '/more',
+  gachaCollection: (_userId: string | number) => '/gacha',
   appUserDocs: '/app/docs/user',
   appAdminDocs: '/app/docs/admin',
   publicDocs: (variant: DocsVariant, chatId?: string | number | null) =>
     withChatId(variant === 'admin' ? '/docs/admin' : '/docs/user', chatId),
   appDocs: (variant: DocsVariant, chatId?: string | number | null) =>
     withChatId(variant === 'admin' ? '/app/docs/admin' : '/app/docs/user', chatId),
-  chat: (chatId: string | number) => `/app/chat/${chatId}`,
-  chatTab: (chatId: string | number, tab: ChatTab) => `/app/chat/${chatId}?tab=${tab}`,
-  economy: (chatId: string | number) => `/app/chat/${chatId}/economy`,
-  family: (chatId: string | number) => `/app/family/${chatId}`,
-  audit: (chatId: string | number) => `/app/chat/${chatId}/audit`,
-  feedback: '/app/feedback',
+  chat: (chatId: string | number) => `/chat/${chatId}`,
+  chatTab: (chatId: string | number, tab: ChatTab) => `/chat/${chatId}?tab=${tab}`,
+  economy: (chatId: string | number) => `/chat/${chatId}/economy`,
+  family: (chatId: string | number) => `/family/${chatId}`,
+  audit: (chatId: string | number) => `/chat/${chatId}/audit`,
+  feedback: '/feedback',
+
   adminLogin: '/admin/login',
   admin: '/admin',
   adminBroadcast: (broadcastId: string | number) => `/admin/broadcasts/${broadcastId}`,
@@ -40,32 +52,40 @@ export const routes = {
   adminTableEdit: (tableName: string, pkQuery: string) => `/admin/table/${tableName}/edit?${pkQuery}`,
 }
 
-export const appNavigation = [
+export const miniappNavigation = [
   {
-    label: 'Главная',
-    description: 'Группы, права и обзор аккаунта',
-    shortLabel: 'Домой',
+    label: 'Home',
+    description: 'Сводка аккаунта и быстрые входы',
+    shortLabel: 'Home',
     to: routes.home,
   },
   {
-    label: 'Игры',
-    description: 'Лобби, live-сцены и архив партий',
-    shortLabel: 'Игры',
+    label: 'Groups',
+    description: 'Группы с доступом и активностью',
+    shortLabel: 'Groups',
+    to: routes.groups,
+  },
+  {
+    label: 'Games',
+    description: 'Live-игры и архив партий',
+    shortLabel: 'Games',
     to: routes.games,
   },
   {
-    label: 'Достижения',
-    description: 'Глобальный каталог и прогресс аккаунта',
-    shortLabel: 'Ачивки',
-    to: routes.achievements,
+    label: 'Gacha',
+    description: 'Коллекция, профиль и recent pulls',
+    shortLabel: 'Gacha',
+    to: routes.gacha,
   },
   {
-    label: 'Справка',
-    description: 'Пользовательская документация и сценарии',
-    shortLabel: 'Справка',
-    to: routes.appUserDocs,
+    label: 'More',
+    description: 'Профиль, help, desktop и logout',
+    shortLabel: 'More',
+    to: routes.more,
   },
 ] as const
+
+export const appNavigation = miniappNavigation
 
 export function buildChatSectionLinks(
   chatId: string | number,

@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.config import get_settings
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 def build_bot_commands() -> list[BotCommand]:
     return [
-        BotCommand(command="start", description="Открыть ЛС-панель"),
-        BotCommand(command="login", description="Код для входа в веб-панель"),
+        BotCommand(command="start", description="Открыть ЛС-панель и Mini App"),
+        BotCommand(command="login", description="Код для входа в ПК-панель"),
         BotCommand(command="me", description="Моя статистика в чате"),
         BotCommand(command="iris_perenos", description="Перенос профиля из Iris в текущем чате"),
         BotCommand(command="iriskto_perenos", description="Кто в чате ещё не перенесён из Iris"),
@@ -138,6 +138,17 @@ async def _run_bot(settings, session_factory) -> None:
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client))
 
     await bot.set_my_commands(build_bot_commands())
+    if settings.web_enabled:
+        miniapp_url = f"{settings.resolved_web_base_url}/miniapp/"
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Mini App",
+                    web_app=WebAppInfo(url=miniapp_url),
+                )
+            )
+        except Exception:
+            logger.exception("Failed to configure Mini App menu button", extra={"miniapp_url": miniapp_url})
     await activity_batcher.start()
     await restore_phase_timers(bot, session_factory)
     backup_task = None

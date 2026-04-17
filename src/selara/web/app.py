@@ -42,6 +42,7 @@ from selara.core.web_auth import (
     digest_session_token,
     generate_session_token,
     normalize_login_code,
+    validate_telegram_webapp_init_data,
 )
 from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
@@ -84,6 +85,7 @@ from selara.web.presenters import (
     build_alias_mode_setting,
     build_audit_rows,
     build_chat_context,
+    build_group_link,
     build_home_context,
     build_landing_context,
     build_settings_overview,
@@ -100,6 +102,7 @@ from selara.web.user_docs import build_user_docs_context
 _UTC = timezone.utc
 _CHAT_HUB_PAGE_SIZE = 50
 _CHAT_HUB_MAX_ROWS = 500
+_MINIAPP_INIT_DATA_TTL_SECONDS = 3600
 _ADMIN_BROADCAST_ACTIVE_DAYS = 3
 _ADMIN_BROADCAST_BODY_LIMIT = 3200
 _ADMIN_BROADCAST_ALLOWED_HTML_TAGS = frozenset(
@@ -942,6 +945,77 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if user.username:
             return user.username[:2].upper()
         return "S"
+
+    def _viewer_payload(user: UserSnapshot, *, avatar_url: str) -> dict[str, object]:
+        return {
+            "telegram_user_id": user.telegram_user_id,
+            "display_name": user_label(user),
+            "username": f"@{user.username}" if user.username else "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "initials": _viewer_initials(user),
+            "avatar_url": avatar_url,
+        }
+
+    async def _create_user_session(
+        auth_repo: SqlAlchemyWebAuthRepository,
+        *,
+        user: UserSnapshot,
+        now: datetime,
+    ) -> str:
+        await auth_repo.upsert_user(user=user)
+        token = generate_session_token()
+        await auth_repo.create_session(
+            user_id=user.telegram_user_id,
+            session_digest=digest_session_token(secret=settings.resolved_web_auth_secret, token=token),
+            expires_at=now + timedelta(hours=max(1, settings.web_session_ttl_hours)),
+            now=now,
+        )
+        return token
+
+    def _set_user_session_cookie(response: Response, *, token: str) -> None:
+        response.set_cookie(
+            settings.web_session_cookie_name,
+            token,
+            httponly=True,
+            secure=settings.web_session_cookie_secure,
+            samesite="lax",
+            max_age=max(3600, settings.web_session_ttl_hours * 3600),
+        )
+
+    def _miniapp_launch_url(*, start_param: str | None = None) -> str:
+        if start_param:
+            return f"https://t.me/{bot_username}?startapp={quote(start_param, safe='')}"
+        return f"https://t.me/{bot_username}?startapp"
+
+    def _miniapp_group_payload(group: UserChatOverview, *, is_admin: bool) -> dict[str, object]:
+        payload = build_group_link(group, is_admin=is_admin)
+        payload["chat_id"] = group.chat_id
+        payload["is_admin"] = is_admin
+        payload["last_seen_at"] = format_datetime(group.last_seen_at)
+        payload["message_count"] = int(group.message_count or 0)
+        return payload
+
+    def _miniapp_recent_game_payload(game: GroupGame) -> dict[str, object]:
+        return {
+            "game_id": game.game_id,
+            "chat_id": game.chat_id,
+            "chat_title": game.chat_title or f"chat:{game.chat_id}",
+            "title": GAME_DEFINITIONS[game.kind].title,
+            "kind": game.kind,
+            "started_at": format_datetime(game.started_at),
+            "result_text": game.winner_text or "Партия завершена.",
+        }
+
+    def _miniapp_game_card_payload(card: dict[str, object]) -> dict[str, object]:
+        return {
+            **card,
+            "can_manage_games": False,
+            "manage_buttons": [],
+            "spy_theme_picker": None,
+            "whoami_theme_picker": None,
+            "zlob_theme_picker": None,
+        }
 
     async def _collect_visible_groups(activity_repo: SqlAlchemyActivityRepository, *, user_id: int) -> tuple[list[UserChatOverview], list[UserChatOverview]]:
         admin_groups = await activity_repo.list_user_admin_chats(user_id=user_id)
@@ -4144,13 +4218,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
                 return _redirect(redirect_path)
 
-            token = generate_session_token()
-            await auth_repo.create_session(
-                user_id=user.telegram_user_id,
-                session_digest=digest_session_token(secret=settings.resolved_web_auth_secret, token=token),
-                expires_at=now + timedelta(hours=max(1, settings.web_session_ttl_hours)),
-                now=now,
-            )
+            token = await _create_user_session(auth_repo, user=user, now=now)
             await session.commit()
             failed_attempts.pop(host, None)
 
@@ -4160,14 +4228,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if prefers_json
             else _redirect(redirect_path)
         )
-        response.set_cookie(
-            settings.web_session_cookie_name,
-            token,
-            httponly=True,
-            secure=settings.web_session_cookie_secure,
-            samesite="lax",
-            max_age=max(3600, settings.web_session_ttl_hours * 3600),
-        )
+        _set_user_session_cookie(response, token=token)
         return response
 
     @app.post("/logout")
@@ -4192,6 +4253,68 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         response.delete_cookie(settings.web_session_cookie_name)
         return response
 
+    @app.post("/api/miniapp/session")
+    async def miniapp_session_api(request: Request):
+        now = _now_utc()
+        form = await _parse_form(request)
+        init_data = (form.get("init_data") or "").strip()
+        validation_result = validate_telegram_webapp_init_data(
+            init_data=init_data,
+            bot_token=settings.bot_token,
+            max_age_seconds=_MINIAPP_INIT_DATA_TTL_SECONDS,
+            now_timestamp=int(now.timestamp()),
+        )
+        if validation_result is None:
+            return _json_result(ok=False, message="Не удалось подтвердить Mini App сессию Telegram.", status_code=401)
+
+        user_payload = validation_result.get("user")
+        if not isinstance(user_payload, dict):
+            return _json_result(ok=False, message="Mini App не передал данные пользователя.", status_code=401)
+
+        user_id = user_payload.get("id")
+        if not isinstance(user_id, int):
+            return _json_result(ok=False, message="Mini App передал некорректный Telegram ID.", status_code=401)
+
+        user = UserSnapshot(
+            telegram_user_id=user_id,
+            username=user_payload.get("username") if isinstance(user_payload.get("username"), str) else None,
+            first_name=user_payload.get("first_name") if isinstance(user_payload.get("first_name"), str) else None,
+            last_name=user_payload.get("last_name") if isinstance(user_payload.get("last_name"), str) else None,
+            is_bot=bool(user_payload.get("is_bot")),
+        )
+        async with session_factory() as session:
+            auth_repo = SqlAlchemyWebAuthRepository(session)
+            await auth_repo.purge_expired_state(now=now)
+            token = await _create_user_session(auth_repo, user=user, now=now)
+            await session.commit()
+
+        response = JSONResponse(
+            content={
+                "ok": True,
+                "viewer": _viewer_payload(user, avatar_url="/api/miniapp/me/avatar"),
+                "miniapp_url": _miniapp_launch_url(),
+            },
+            status_code=200,
+        )
+        _set_user_session_cookie(response, token=token)
+        return response
+
+    @app.post("/api/miniapp/logout")
+    async def miniapp_logout_api(request: Request):
+        token = request.cookies.get(settings.web_session_cookie_name)
+        if token:
+            async with session_factory() as session:
+                auth_repo = SqlAlchemyWebAuthRepository(session)
+                await auth_repo.revoke_session(
+                    session_digest=digest_session_token(secret=settings.resolved_web_auth_secret, token=token),
+                    now=_now_utc(),
+                )
+                await session.commit()
+
+        response = _json_result(ok=True, message="Сессия завершена.", status_code=200)
+        response.delete_cookie(settings.web_session_cookie_name)
+        return response
+
     @app.get("/api/app/me")
     async def app_me_api(request: Request):
         async with session_factory() as session:
@@ -4204,15 +4327,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return JSONResponse(
             content={
                 "ok": True,
-                "viewer": {
-                    "telegram_user_id": user.telegram_user_id,
-                    "display_name": user_label(user),
-                    "username": f"@{user.username}" if user.username else "",
-                    "first_name": user.first_name or "",
-                    "last_name": user.last_name or "",
-                    "initials": _viewer_initials(user),
-                    "avatar_url": "/api/app/me/avatar",
-                },
+                "viewer": _viewer_payload(user, avatar_url="/api/app/me/avatar"),
             },
             status_code=200,
         )
@@ -4242,6 +4357,397 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         except Exception:
             logger.exception("Failed to load Telegram avatar for web viewer", extra={"user_id": user.telegram_user_id})
             return Response(status_code=404)
+
+    @app.get("/api/miniapp/me")
+    async def miniapp_me_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "viewer": _viewer_payload(user, avatar_url="/api/miniapp/me/avatar"),
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/me/avatar")
+    async def miniapp_me_avatar(request: Request):
+        return await app_me_avatar(request)
+
+    @app.get("/api/miniapp/home")
+    async def miniapp_home_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
+            admin_ids = {group.chat_id for group in admin_groups}
+
+            merged: dict[int, UserChatOverview] = {group.chat_id: group for group in admin_groups}
+            for group in activity_groups:
+                merged.setdefault(group.chat_id, group)
+            ordered_groups = sorted(
+                merged.values(),
+                key=lambda item: item.last_seen_at or datetime.min.replace(tzinfo=_UTC),
+                reverse=True,
+            )
+
+            global_dashboard, _ = await _load_dashboard_if_exists(
+                economy_repo,
+                mode="global",
+                chat_id=None,
+                user_id=user.telegram_user_id,
+            )
+            _visible_groups, _manageable_chats, _manageable_chat_ids, active_games, recent_games = await _collect_game_groups(
+                activity_repo,
+                user=user,
+                recent_limit=4,
+            )
+            await session.commit()
+
+        home_context = build_home_context(
+            user=user,
+            admin_groups=admin_groups,
+            activity_groups=ordered_groups,
+            global_dashboard=global_dashboard,
+            flash=None,
+            error=None,
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    "hero_title": user.first_name or user_label(user),
+                    "hero_subtitle": "Группы, live-игры и коллекция собраны в одном мобильном входе Telegram.",
+                    "metrics": [
+                        *home_context["metrics"][:3],
+                        {
+                            "label": "Live-игры",
+                            "value": str(len(active_games)),
+                            "note": "активные партии, доступные вашему аккаунту",
+                            "tone": "indigo",
+                        },
+                    ],
+                    "recent_groups": [
+                        _miniapp_group_payload(group, is_admin=group.chat_id in admin_ids)
+                        for group in ordered_groups[:6]
+                    ],
+                    "admin_groups": [
+                        _miniapp_group_payload(group, is_admin=True)
+                        for group in admin_groups[:4]
+                    ],
+                    "recent_games": [_miniapp_recent_game_payload(game) for game in recent_games[:3]],
+                    "global_dashboard": home_context["global_dashboard"],
+                    "desktop_url": "/app",
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/groups")
+    async def miniapp_groups_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
+            admin_ids = {group.chat_id for group in admin_groups}
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    "hero_title": "Группы",
+                    "hero_subtitle": "Отдельно показаны группы, где у вас есть доступ к управлению, и группы из текущей активности.",
+                    "admin_groups": [
+                        _miniapp_group_payload(group, is_admin=True)
+                        for group in admin_groups
+                    ],
+                    "activity_groups": [
+                        _miniapp_group_payload(group, is_admin=group.chat_id in admin_ids)
+                        for group in activity_groups
+                    ],
+                    "desktop_url": "/app",
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/chat/{chat_id}")
+    async def miniapp_chat_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
+            summary = await activity_repo.get_chat_activity_summary(chat_id=chat_id)
+            stats = await get_my_stats(activity_repo, chat_id=chat_id, user_id=user.telegram_user_id)
+            rep_stats = await get_rep_stats(
+                activity_repo,
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+                limit=max(current_settings.top_limit_max, 50),
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+                days=current_settings.leaderboard_7d_days,
+            )
+            activity_series = await _build_chat_daily_activity_series(session, chat_id=chat_id, days=7)
+            top_activity = await activity_repo.get_top(chat_id=chat_id, limit=8)
+            top_mix = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="mix",
+                period="all",
+                since=None,
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            top_karma = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="karma",
+                period="all",
+                since=None,
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            top_mix_7d = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="mix",
+                period="7d",
+                since=_now_utc() - timedelta(days=current_settings.leaderboard_7d_days),
+                limit=8,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            hero_candidates = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode="activity",
+                period="day",
+                since=_now_utc() - timedelta(days=1),
+                limit=1,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+
+            richest_payload: dict[str, object] | None = None
+            if current_settings.economy_enabled:
+                scope, _ = await economy_repo.resolve_scope(
+                    mode=current_settings.economy_mode,
+                    chat_id=chat_id,
+                    user_id=user.telegram_user_id,
+                )
+                if scope is not None:
+                    richest_payload = await _build_richest_user_payload(session, scope_id=scope.scope_id, chat_id=chat_id)
+
+            global_dashboard, _ = await _load_dashboard_if_exists(
+                economy_repo,
+                mode="global",
+                chat_id=None,
+                user_id=user.telegram_user_id,
+            )
+            local_dashboard, _ = await _load_dashboard_if_exists(
+                economy_repo,
+                mode="local",
+                chat_id=chat_id,
+                user_id=user.telegram_user_id,
+            )
+            await session.commit()
+
+        hero = hero_candidates[0] if hero_candidates else None
+        chat_context = build_chat_context(
+            user=user,
+            chat=chat,
+            summary=summary,
+            stats=stats,
+            rep_stats=rep_stats,
+            role_definition=role_definition,
+            current_settings=current_settings,
+            defaults=chat_settings_defaults,
+            can_manage_settings=False,
+            roles=[],
+            command_rules=[],
+            aliases=[],
+            alias_source_options=[],
+            triggers=[],
+            audit_entries=[],
+            global_dashboard=global_dashboard,
+            local_dashboard=local_dashboard,
+            top_activity=top_activity,
+            top_mix=top_mix,
+            top_karma=top_karma,
+            top_mix_7d=top_mix_7d,
+            local_achievement_sections=[],
+            flash=None,
+            error=None,
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    "chat_id": chat_id,
+                    "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
+                    "hero_subtitle": chat_context["hero_subtitle"],
+                    "metrics": chat_context["metrics"],
+                    "summary": {
+                        "participants_count": summary.participants_count,
+                        "total_messages": summary.total_messages,
+                        "last_activity_at": format_datetime(summary.last_activity_at),
+                    },
+                    "daily_activity": activity_series,
+                    "hero_of_day": (
+                        {
+                            "label": user_label(hero),
+                            "messages": hero.activity_value,
+                            "karma": hero.karma_value,
+                        }
+                        if hero is not None
+                        else None
+                    ),
+                    "richest_of_day": richest_payload,
+                    "dashboard_panels": chat_context["dashboard_panels"],
+                    "leaderboards": chat_context["leaderboards"],
+                    "desktop_url": f"/app/chat/{chat_id}",
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/chat/{chat_id}/leaderboard")
+    async def miniapp_chat_leaderboard_api(chat_id: int, request: Request):
+        mode = _chat_hub_mode(request.query_params.get("mode"))
+        page_raw = (request.query_params.get("page") or "1").strip()
+        query = (request.query_params.get("q") or "").strip()
+        find_me = (request.query_params.get("find_me") or "").strip().lower() in {"1", "true", "yes", "on"}
+        page = int(page_raw) if page_raw.isdigit() else 1
+        page = max(1, page)
+
+        async with session_factory() as session:
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            leaderboard_items = await activity_repo.get_leaderboard(
+                chat_id=chat_id,
+                mode=mode,
+                period="all",
+                since=None,
+                limit=_CHAT_HUB_MAX_ROWS,
+                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
+                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
+            )
+            await session.commit()
+
+        ranked_items = list(enumerate(leaderboard_items, start=1))
+        if query:
+            query_norm = normalize_text_command(query)
+            ranked_items = [
+                (position, item)
+                for position, item in ranked_items
+                if query_norm in _leaderboard_item_search_text(item)
+            ]
+
+        if find_me and ranked_items:
+            for index, (_, item) in enumerate(ranked_items):
+                if item.user_id == user.telegram_user_id:
+                    page = (index // _CHAT_HUB_PAGE_SIZE) + 1
+                    break
+
+        total_rows = len(ranked_items)
+        total_pages = max(1, (total_rows + _CHAT_HUB_PAGE_SIZE - 1) // _CHAT_HUB_PAGE_SIZE)
+        page = min(page, total_pages)
+        start_index = (page - 1) * _CHAT_HUB_PAGE_SIZE
+        page_rows = ranked_items[start_index:start_index + _CHAT_HUB_PAGE_SIZE]
+        my_rank = next(
+            (position for position, item in ranked_items if item.user_id == user.telegram_user_id),
+            None,
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "mode": mode,
+                "query": query,
+                "page": page,
+                "page_size": _CHAT_HUB_PAGE_SIZE,
+                "total_rows": total_rows,
+                "total_pages": total_pages,
+                "my_rank": my_rank,
+                "truncated": len(leaderboard_items) >= _CHAT_HUB_MAX_ROWS,
+                "rows": [
+                    _leaderboard_row_payload(
+                        position=position,
+                        item=item,
+                        viewer_user_id=user.telegram_user_id,
+                    )
+                    for position, item in page_rows
+                ],
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/games")
+    async def miniapp_games_page_api(request: Request):
+        async with session_factory() as session:
+            user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+
+            activity_repo = SqlAlchemyActivityRepository(session)
+            dashboard_context = await _build_games_dashboard_context(activity_repo, user=user)
+            await session.commit()
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "page": {
+                    "hero_title": "Игры",
+                    "hero_subtitle": "Здесь остаются только live-карточки, просмотр партий и доступные личные действия без desktop-управления.",
+                    "metrics": dashboard_context["metrics"][:3],
+                    "game_cards": [
+                        _miniapp_game_card_payload(card)
+                        for card in dashboard_context["game_cards"]
+                    ],
+                    "recent_game_cards": dashboard_context["recent_game_cards"],
+                    "game_catalog": [],
+                    "spy_category_options": [],
+                    "whoami_category_options": [],
+                    "zlob_category_options": [],
+                    "default_create_kind": "",
+                    "default_create_game": None,
+                    "create_chat_options": [],
+                    "busy_create_chat_options": [],
+                    "has_manageable_chats": False,
+                    "desktop_url": "/app/games",
+                },
+            },
+            status_code=200,
+        )
 
     async def _build_home_page_context(request: Request) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
@@ -4666,15 +5172,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _json_result(ok=True, message=message, status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
 
-    @app.post("/app/games/action")
-    async def game_action_submit(request: Request):
-        prefers_json = _prefers_json(request)
+    async def _handle_game_action(
+        request: Request,
+        *,
+        prefers_json: bool,
+        redirect_base_path: str,
+        login_redirect_path: str | None,
+    ):
         form = await _parse_form(request)
         callback_data = (form.get("callback_data") or "").strip()
         form_action = (form.get("action") or "").strip()
         game_id = _game_id_from_callback_data(callback_data) or (form.get("game_id") or "").strip()
         if not game_id:
-            redirect_path = _with_message("/app/games", key="error", text="Не удалось определить игру.")
+            redirect_path = _with_message(redirect_base_path, key="error", text="Не удалось определить игру.")
             if prefers_json:
                 return _json_result(ok=False, message="Не удалось определить игру.", status_code=400, redirect=redirect_path)
             return _redirect(redirect_path)
@@ -4683,9 +5193,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
                 await session.commit()
-                redirect_path = _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
+                redirect_path = (
+                    _with_message(login_redirect_path, key="error", text="Сессия истекла. Войдите снова.")
+                    if login_redirect_path is not None
+                    else None
+                )
                 if prefers_json:
                     return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect=redirect_path)
+                if redirect_path is None:
+                    return Response(status_code=401)
                 return _redirect(redirect_path)
 
             activity_repo = SqlAlchemyActivityRepository(session)
@@ -4694,7 +5210,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             game = await GAME_STORE.get_game(game_id)
             if game is None or game.status == "finished":
                 await session.commit()
-                redirect_path = _with_message("/app/games", key="error", text="Игра не найдена или уже завершена.")
+                redirect_path = _with_message(redirect_base_path, key="error", text="Игра не найдена или уже завершена.")
                 if prefers_json:
                     return _json_result(ok=False, message="Игра не найдена или уже завершена.", status_code=404, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -4711,7 +5227,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             is_member = user.telegram_user_id in game.players or game.owner_user_id == user.telegram_user_id
             if not (can_view_game or is_member or can_manage_games):
                 await session.commit()
-                redirect_path = _with_message("/app/games", key="error", text="Эта игра недоступна вашему аккаунту.")
+                redirect_path = _with_message(redirect_base_path, key="error", text="Эта игра недоступна вашему аккаунту.")
                 if prefers_json:
                     return _json_result(ok=False, message="Эта игра недоступна вашему аккаунту.", status_code=403, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -4999,7 +5515,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         key = "flash" if success else "error"
-        redirect_path = _with_message("/app/games", key=key, text=message)
+        redirect_path = _with_message(redirect_base_path, key=key, text=message)
         if prefers_json:
             return _json_result(
                 ok=success,
@@ -5008,6 +5524,24 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 redirect=redirect_path,
             )
         return _redirect(redirect_path)
+
+    @app.post("/app/games/action")
+    async def game_action_submit(request: Request):
+        return await _handle_game_action(
+            request,
+            prefers_json=_prefers_json(request),
+            redirect_base_path="/app/games",
+            login_redirect_path="/login",
+        )
+
+    @app.post("/api/miniapp/games/action")
+    async def miniapp_game_action_submit(request: Request):
+        return await _handle_game_action(
+            request,
+            prefers_json=True,
+            redirect_base_path="/miniapp/games",
+            login_redirect_path=None,
+        )
 
     @app.get("/app/chat/{chat_id}", response_class=HTMLResponse)
     async def chat_page(chat_id: int, request: Request):

@@ -96,7 +96,8 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• <code>/settrigger</code>, <code>/triggers</code>, <code>/deltrigger</code>, <code>/triggervars</code>\n"
         "• <code>/rpadd</code>, <code>/rps</code>, <code>/rpdel</code> — кастомные reply-действия с шаблонами\n"
         "• ЛС-панель: <code>/start</code> в личке\n"
-        "• Веб-панель: <code>/login</code> в личке выдаёт одноразовый код"
+        "• С телефона: Mini App из <code>/start</code> в личке\n"
+        "• С ПК: <code>/login</code> в личке выдаёт одноразовый код для /app"
     ),
 }
 

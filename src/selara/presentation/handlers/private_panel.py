@@ -218,15 +218,18 @@ def _build_home_keyboard(
     *,
     has_admin_groups: bool,
     has_user_groups: bool,
-    web_url: str | None = None,
+    miniapp_url: str | None = None,
+    desktop_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if has_admin_groups:
         builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
     if has_user_groups:
         builder.button(text="👤 Мои группы", callback_data=encode_pm_callback("ul", 0))
-    if web_url:
-        builder.button(text="🌐 Веб-панель", url=web_url)
+    if miniapp_url:
+        builder.button(text="📱 Mini App", url=miniapp_url)
+    if desktop_url:
+        builder.button(text="🖥 ПК-панель", url=desktop_url)
     builder.button(text="🔄 Обновить", callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
@@ -369,23 +372,40 @@ async def _render_home_text(*, user, admin_groups: list[UserChatOverview], user_
     return "\n".join(lines)
 
 
+def _build_miniapp_url(settings: Settings) -> str | None:
+    if not settings.web_enabled:
+        return None
+    bot_username = (settings.bot_username or settings.bot_name or "").strip().lstrip("@")
+    if not bot_username:
+        return None
+    return f"https://t.me/{bot_username}?startapp"
+
+
 def _build_web_panel_url(settings: Settings) -> str | None:
     if not settings.web_enabled:
         return None
     return f"{settings.resolved_web_base_url}/login"
 
 
-def _append_web_panel_info(text: str, web_url: str | None) -> str:
-    if not web_url:
+def _append_web_panel_info(text: str, *, miniapp_url: str | None, desktop_url: str | None) -> str:
+    if not miniapp_url and not desktop_url:
         return text
-    return "\n".join(
-        [
-            text,
-            "",
-            f'🌐 <b>Веб-панель:</b> <a href="{escape(web_url)}">открыть</a>',
-            "Для входа получите одноразовый код командой <code>/login</code> в этом чате.",
-        ]
-    )
+    lines = [text, ""]
+    if miniapp_url:
+        lines.extend(
+            [
+                f'📱 <b>Mini App:</b> <a href="{escape(miniapp_url)}">открыть в Telegram</a>',
+                "Это основной вход с телефона: гача, группы, игры и профиль доступны без кода.",
+            ]
+        )
+    if desktop_url:
+        lines.extend(
+            [
+                f'🖥 <b>ПК-панель:</b> <a href="{escape(desktop_url)}">открыть</a>',
+                "Для входа на ПК получите одноразовый код командой <code>/login</code> в этом чате.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 async def send_private_start_panel(message: Message, activity_repo, economy_repo, settings: Settings) -> None:
@@ -395,8 +415,9 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
     admin_groups = await activity_repo.list_user_admin_chats(user_id=message.from_user.id)
     user_groups = await activity_repo.list_user_activity_chats(user_id=message.from_user.id, limit=100)
     text = await _render_home_text(user=message.from_user, admin_groups=admin_groups, user_groups=user_groups)
-    web_url = _build_web_panel_url(settings)
-    text = _append_web_panel_info(text, web_url)
+    miniapp_url = _build_miniapp_url(settings)
+    desktop_url = _build_web_panel_url(settings)
+    text = _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url)
 
     await message.answer(
         text,
@@ -404,7 +425,8 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
         reply_markup=_build_home_keyboard(
             has_admin_groups=bool(admin_groups),
             has_user_groups=bool(user_groups),
-            web_url=web_url,
+            miniapp_url=miniapp_url,
+            desktop_url=desktop_url,
         ),
     )
 
@@ -450,11 +472,12 @@ async def web_login_command(message: Message, web_auth_repo, settings: Settings)
     await message.answer(
         "\n".join(
             [
-                "<b>Код для входа в веб-панель</b>",
+                "<b>Код для входа в ПК-панель</b>",
                 f"Код: <code>{code}</code>",
                 f"Действует: <code>{max(1, settings.web_login_code_ttl_minutes)}</code> мин.",
-                f'Открыть: <a href="{escape(web_url)}">{escape(web_url)}</a>',
+                f'Открыть на ПК: <a href="{escape(web_url)}">{escape(web_url)}</a>',
                 "",
+                "С телефона используйте кнопку <b>Mini App</b> из <code>/start</code>.",
                 "<i>Никому не пересылайте этот код. Он одноразовый.</i>",
             ]
         ),
@@ -814,14 +837,16 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         text = await _render_home_text(user=query.from_user, admin_groups=admin_groups, user_groups=user_groups)
-        web_url = _build_web_panel_url(settings)
+        miniapp_url = _build_miniapp_url(settings)
+        desktop_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
-            _append_web_panel_info(text, web_url),
+            _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url),
             _build_home_keyboard(
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
-                web_url=web_url,
+                miniapp_url=miniapp_url,
+                desktop_url=desktop_url,
             ),
         )
         return
@@ -831,11 +856,17 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         if not groups:
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            web_url = _build_web_panel_url(settings)
+            miniapp_url = _build_miniapp_url(settings)
+            desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Нет групп, где у вас есть админ-права бота.",
-                _build_home_keyboard(has_admin_groups=False, has_user_groups=bool(user_groups), web_url=web_url),
+                _build_home_keyboard(
+                    has_admin_groups=False,
+                    has_user_groups=bool(user_groups),
+                    miniapp_url=miniapp_url,
+                    desktop_url=desktop_url,
+                ),
             )
             return
         await _edit_or_answer(
@@ -916,14 +947,16 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if chat_id is None:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            web_url = _build_web_panel_url(settings)
+            miniapp_url = _build_miniapp_url(settings)
+            desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Ввод отменён.",
                 _build_home_keyboard(
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
-                    web_url=web_url,
+                    miniapp_url=miniapp_url,
+                    desktop_url=desktop_url,
                 ),
             )
             return
@@ -972,14 +1005,16 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         if chat_id is None:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
             user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            web_url = _build_web_panel_url(settings)
+            miniapp_url = _build_miniapp_url(settings)
+            desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Ввод отменён.",
                 _build_home_keyboard(
                     has_admin_groups=bool(admin_groups),
                     has_user_groups=bool(user_groups),
-                    web_url=web_url,
+                    miniapp_url=miniapp_url,
+                    desktop_url=desktop_url,
                 ),
             )
             return
@@ -1115,14 +1150,16 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         _clear_pending_cfg_input(query.from_user.id)
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-        web_url = _build_web_panel_url(settings)
+        miniapp_url = _build_miniapp_url(settings)
+        desktop_url = _build_web_panel_url(settings)
         await _edit_or_answer(
             query,
             "Ввод значения отменён.",
             _build_home_keyboard(
                 has_admin_groups=bool(admin_groups),
                 has_user_groups=bool(user_groups),
-                web_url=web_url,
+                miniapp_url=miniapp_url,
+                desktop_url=desktop_url,
             ),
         )
         return
@@ -1132,11 +1169,17 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         if not groups:
             admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-            web_url = _build_web_panel_url(settings)
+            miniapp_url = _build_miniapp_url(settings)
+            desktop_url = _build_web_panel_url(settings)
             await _edit_or_answer(
                 query,
                 "Нет групп в истории активности. Напишите что-нибудь в группе с ботом.",
-                _build_home_keyboard(has_admin_groups=bool(admin_groups), has_user_groups=False, web_url=web_url),
+                _build_home_keyboard(
+                    has_admin_groups=bool(admin_groups),
+                    has_user_groups=False,
+                    miniapp_url=miniapp_url,
+                    desktop_url=desktop_url,
+                ),
             )
             return
         await _edit_or_answer(

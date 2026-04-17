@@ -41,6 +41,10 @@ class FakeWebAuthRepo:
         _ = code_digest, now
         return self._state.user_from_code
 
+    async def upsert_user(self, *, user: UserSnapshot):
+        _ = user
+        return None
+
     async def create_session(self, *, user_id: int, session_digest: str, expires_at, now):
         _ = session_digest, expires_at, now
         self._state.created_session_for = user_id
