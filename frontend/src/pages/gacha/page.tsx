@@ -46,11 +46,11 @@ export function GachaCollectionPage() {
   return (
     <div className="miniapp-page-stack">
       <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">Gacha</span>
+        <span className="miniapp-hero-card__eyebrow">Гача</span>
         <div className="miniapp-hero-card__headline">
           <div>
-            <h1>Коллекция и профиль</h1>
-            <p>Только viewer-контур: без выбора произвольного `userId` и без interactive gacha actions в v1.</p>
+            <h1>Коллекция</h1>
+            <p>Ваши карточки, профиль и история круток по выбранному баннеру.</p>
           </div>
         </div>
 
@@ -78,34 +78,32 @@ export function GachaCollectionPage() {
 
       <section className="miniapp-metric-grid">
         <article className="miniapp-metric-card miniapp-metric-card--violet">
-          <span>Adventure rank</span>
+          <span>Уровень приключений</span>
           <strong>{profile.adventure_rank}</strong>
-          <p>
-            XP {profile.xp_into_rank} / {profile.xp_for_next_rank}
-          </p>
+          <p>Опыт {profile.xp_into_rank} / {profile.xp_for_next_rank}</p>
         </article>
         <article className="miniapp-metric-card miniapp-metric-card--cyan">
-          <span>Total points</span>
+          <span>Всего очков</span>
           <strong>{profile.total_points}</strong>
-          <p>Primogems {profile.total_primogems}</p>
+          <p>Примогемы: {profile.total_primogems}</p>
         </article>
         <article className="miniapp-metric-card miniapp-metric-card--magenta">
-          <span>Unique cards</span>
+          <span>Уникальных карточек</span>
           <strong>{profileQuery.data.unique_cards}</strong>
-          <p>Total copies {profileQuery.data.total_copies}</p>
+          <p>Всего копий: {profileQuery.data.total_copies}</p>
         </article>
         <article className="miniapp-metric-card miniapp-metric-card--indigo">
-          <span>Collection grid</span>
+          <span>В коллекции</span>
           <strong>{collectionQuery.data.total_unique}</strong>
-          <p>Всего копий {collectionQuery.data.total_copies}</p>
+          <p>Всего копий: {collectionQuery.data.total_copies}</p>
         </article>
       </section>
 
       <section className="miniapp-section-card">
         <div className="miniapp-section-head">
           <div>
-            <h2>Recent pulls</h2>
-            <p>Последние дропы текущего viewer по выбранному баннеру.</p>
+            <h2>Последние крутки</h2>
+            <p>Последние дропы по выбранному баннеру.</p>
           </div>
         </div>
         {profileQuery.data.recent_pulls.length > 0 ? (
@@ -126,7 +124,7 @@ export function GachaCollectionPage() {
           </div>
         ) : (
           <div className="miniapp-empty-card">
-            <strong>Пока нет recent pulls</strong>
+            <strong>Пока нет круток</strong>
             <p>История появится после первых круток на этом баннере.</p>
           </div>
         )}
@@ -135,8 +133,8 @@ export function GachaCollectionPage() {
       <section className="miniapp-section-card">
         <div className="miniapp-section-head">
           <div>
-            <h2>Collection grid</h2>
-            <p>Просмотр всей коллекции без pull/buy/currency действий.</p>
+            <h2>Все карточки</h2>
+            <p>Полная коллекция по выбранному баннеру.</p>
           </div>
         </div>
         <CollectionGrid cards={collectionQuery.data.cards} banner={collectionQuery.data.banner} />

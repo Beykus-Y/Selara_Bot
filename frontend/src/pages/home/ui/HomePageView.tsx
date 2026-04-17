@@ -12,7 +12,6 @@ type HomePageViewProps = {
 
 type GroupMetaToken = {
   value: string
-  dimmed?: boolean
 }
 
 function badgeLabel(value: string) {
@@ -50,11 +49,8 @@ function splitGroupMeta(meta: string): GroupMetaToken[] {
   return cleanMeta
     .split(/\s*(?:•|·|\|)\s*/u)
     .map((token) => token.trim())
-    .filter(Boolean)
-    .map((value) => ({
-      value,
-      dimmed: /\bID\b/i.test(value) || /-?\d{7,}/.test(value),
-    }))
+    .filter((value) => value && !/\bID\b/i.test(value) && !/-?\d{7,}/.test(value))
+    .map((value) => ({ value }))
 }
 
 function GroupSection({ title, groups }: { title: string; groups: HomeGroupLink[] }) {
@@ -84,7 +80,7 @@ function GroupSection({ title, groups }: { title: string; groups: HomeGroupLink[
                         {metaTokens.map((token) => (
                           <span
                             key={`${group.href}-${token.value}`}
-                            className={token.dimmed ? 'home-list-card__meta-item home-list-card__meta-item--dim' : 'home-list-card__meta-item'}
+                            className="home-list-card__meta-item"
                           >
                             {token.value}
                           </span>

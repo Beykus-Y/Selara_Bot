@@ -487,9 +487,21 @@
     border-radius: 24px;
   }
 
-  .home-hero,
+  .home-hero {
+    padding: 20px;
+    grid-template-columns: 1fr;
+  }
+
+  .home-hero__aside {
+    display: none;
+  }
+
   .home-panel {
-    padding: 24px;
+    padding: 20px;
+  }
+
+  .home-hero h1 {
+    font-size: clamp(1.6rem, 5vw, 2.4rem);
   }
 
   .home-hero__main::after,
@@ -511,5 +523,13 @@
 
   .home-hero__support {
     padding-right: 20px;
+  }
+
+  .home-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-metric {
+    min-height: 140px;
   }
 }

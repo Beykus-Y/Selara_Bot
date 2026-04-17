@@ -16,10 +16,10 @@ export function HomePage() {
     queryFn: () => getMiniAppPage<MiniAppHomePageData>('/miniapp/home', 'Не удалось загрузить главный экран.'),
   })
 
-  usePageTitle('Home')
+  usePageTitle('Главная')
 
   if (homeQuery.isLoading) {
-    return <LoadingShell eyebrow="Home" title="Собираю мобильный кабинет" cards={3} />
+    return <LoadingShell eyebrow="Главная" title="Собираю личный кабинет" cards={3} />
   }
 
   if (homeQuery.isError) {
@@ -27,13 +27,13 @@ export function HomePage() {
   }
 
   if (!homeQuery.data) {
-    return <LoadingShell eyebrow="Home" title="Готовлю быстрые входы" cards={3} />
+    return <LoadingShell eyebrow="Главная" title="Загружаю данные" cards={3} />
   }
 
   return (
     <div className="miniapp-page-stack">
       <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">Home</span>
+        <span className="miniapp-hero-card__eyebrow">Личный кабинет</span>
         <div className="miniapp-hero-card__headline">
           <div>
             <h1>{homeQuery.data.hero_title}</h1>
@@ -47,26 +47,26 @@ export function HomePage() {
             ПК-панель
           </a>
           <Link className="button button--primary" to={routes.games}>
-            Live games
+            Игровой центр
           </Link>
         </div>
 
         <div className="miniapp-quick-grid">
           <Link className="miniapp-quick-action" to={routes.groups}>
-            <strong>Groups</strong>
-            <span>Список групп, overview и leaderboard.</span>
+            <strong>Группы</strong>
+            <span>Список групп, статистика и лидерборд.</span>
           </Link>
           <Link className="miniapp-quick-action" to={routes.games}>
-            <strong>Games</strong>
-            <span>Play/watch сценарии и личные действия.</span>
+            <strong>Игры</strong>
+            <span>Активные партии и личные действия.</span>
           </Link>
           <Link className="miniapp-quick-action" to={routes.gacha}>
-            <strong>Gacha</strong>
-            <span>Коллекция viewer и recent pulls.</span>
+            <strong>Коллекция</strong>
+            <span>Ваши карточки и история круток.</span>
           </Link>
           <Link className="miniapp-quick-action" to={routes.more}>
-            <strong>More</strong>
-            <span>Docs, desktop, профиль и logout.</span>
+            <strong>Ещё</strong>
+            <span>Профиль, справка и выход.</span>
           </Link>
         </div>
       </section>
@@ -74,17 +74,17 @@ export function HomePage() {
       <MiniMetricGrid items={homeQuery.data.metrics} />
 
       <MiniGroupSection
-        title="Recent groups"
-        text="Чаты, которые реально видны текущему аккаунту в miniapp."
+        title="Последние группы"
+        text="Чаты, доступные вашему аккаунту в мини-приложении."
         items={homeQuery.data.recent_groups}
         emptyText="Список появится после первой активности в группах."
       />
 
       <MiniRecentGamesSection
-        title="Recent games"
-        text="Короткая история последних завершённых партий."
+        title="Последние партии"
+        text="Краткая история завершённых игр."
         items={homeQuery.data.recent_games}
-        emptyText="После первых завершённых игр тут появится история."
+        emptyText="История появится после первых завершённых игр."
       />
 
       <MiniDashboardPanel panel={homeQuery.data.global_dashboard} />

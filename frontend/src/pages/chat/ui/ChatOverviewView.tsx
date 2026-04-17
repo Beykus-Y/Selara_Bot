@@ -24,6 +24,13 @@ type ChatOverviewViewProps = {
   onFindMe: () => void
 }
 
+function formatDate(raw: string): string {
+  if (!raw) return '—'
+  const d = new Date(raw)
+  if (isNaN(d.getTime())) return raw
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
 function activityBarHeight(point: ChatDailyActivityPoint, maxMessages: number) {
   if (maxMessages <= 0) {
     return 12
@@ -59,9 +66,8 @@ export function ChatOverviewView({
           <p>{overview.hero_subtitle}</p>
         </div>
         <div className="chat-hero__chips">
-          <span className="chat-chip">ID чата {chatId}</span>
           <span className="chat-chip">Живая статистика</span>
-          <span className="chat-chip">{overview.can_manage_settings ? 'Есть доступ к управлению' : 'Просмотр без прав изменения'}</span>
+          <span className="chat-chip">{overview.can_manage_settings ? 'Управление доступно' : 'Только просмотр'}</span>
         </div>
       </section>
 
@@ -210,7 +216,7 @@ export function ChatOverviewView({
                   <td>{row.activity}</td>
                   <td>{row.karma}</td>
                   <td>{row.hybrid_score}</td>
-                  <td className="chat-table__desktop">{row.last_seen_at}</td>
+                  <td className="chat-table__desktop">{formatDate(row.last_seen_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -370,7 +376,7 @@ export function ChatOverviewView({
                   <strong>{row.action}</strong>
                   <p>{row.description}</p>
                 </div>
-                <span>{row.when}</span>
+                <span>{formatDate(row.when)}</span>
               </div>
             ))}
           </div>

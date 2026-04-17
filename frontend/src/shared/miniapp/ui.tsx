@@ -4,6 +4,14 @@ import type { HomeDashboardPanel, HomeMetric } from '@/pages/home/model/types'
 import { routes } from '@/shared/config/routes'
 import type { MiniAppGroup, MiniAppRecentGameSummary } from '@/shared/miniapp/model'
 
+function filterMeta(meta: string): string {
+  return meta
+    .split(/\s*(?:•|·|\|)\s*/u)
+    .map((t) => t.trim())
+    .filter((t) => t && !/\bID\b/i.test(t) && !/-?\d{7,}/.test(t))
+    .join(' · ')
+}
+
 export function MiniMetricGrid({ items }: { items: HomeMetric[] }) {
   return (
     <section className="miniapp-metric-grid">
@@ -44,9 +52,9 @@ export function MiniGroupSection({
             <Link key={group.chat_id} className="miniapp-group-card" to={routes.chat(group.chat_id)}>
               <div className="miniapp-group-card__head">
                 <strong>{group.title}</strong>
-                <span className={`miniapp-badge miniapp-badge--${group.badge}`}>{group.is_admin ? 'admin' : 'group'}</span>
+                <span className={`miniapp-badge miniapp-badge--${group.badge}`}>{group.is_admin ? 'Админ' : 'Участник'}</span>
               </div>
-              <p>{group.meta}</p>
+              <p>{filterMeta(group.meta)}</p>
             </Link>
           ))}
         </div>

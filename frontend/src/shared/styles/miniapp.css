@@ -65,6 +65,8 @@ body.miniapp-mode::after {
 
 .miniapp-shell {
   min-height: 100vh;
+  max-width: 100%;
+  overflow-x: hidden;
   padding:
     calc(env(safe-area-inset-top, 0px) + 10px)
     16px

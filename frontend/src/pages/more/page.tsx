@@ -9,16 +9,16 @@ export function MorePage() {
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
-  usePageTitle('More')
+  usePageTitle('Ещё')
 
   return (
     <div className="miniapp-page-stack">
       <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">More</span>
+        <span className="miniapp-hero-card__eyebrow">Профиль</span>
         <div className="miniapp-hero-card__headline">
           <div>
             <h1>{viewer.display_name}</h1>
-            <p>{viewer.username || `Telegram ID ${viewer.telegram_user_id}`}</p>
+            <p>{viewer.username ? `@${viewer.username}` : 'Telegram-аккаунт'}</p>
           </div>
           {viewer.avatar_url ? <img className="miniapp-profile-avatar" src={viewer.avatar_url} alt={viewer.display_name} /> : null}
         </div>
@@ -26,36 +26,36 @@ export function MorePage() {
 
       <div className="miniapp-more-grid">
         <article className="miniapp-more-card">
-          <strong>Viewer profile</strong>
-          <p>Miniapp использует обычную web-session, но создаёт её строго из Telegram initData.</p>
+          <strong>Профиль</strong>
+          <p>Сессия создаётся из Telegram initData и привязана к вашему аккаунту.</p>
         </article>
 
         <article className="miniapp-more-card">
-          <strong>Help and docs</strong>
-          <p>Расширенная справка и продвинутые сценарии остаются в desktop `/app`.</p>
+          <strong>Справка</strong>
+          <p>Расширенная документация и продвинутые сценарии доступны в полной панели.</p>
           <div className="miniapp-more-card__actions">
             <a className="button button--secondary" href={routes.desktopUserDocs} target="_blank" rel="noreferrer">
-              Docs
+              Открыть справку
             </a>
             <a className="button button--secondary" href={miniappUrl}>
-              Telegram link
+              Открыть в Telegram
             </a>
           </div>
         </article>
 
         <article className="miniapp-more-card">
-          <strong>Desktop panel</strong>
-          <p>Settings, audit, achievements, economy и админка остаются в Python/Jinja-панели.</p>
+          <strong>Полная панель</strong>
+          <p>Настройки, журнал, достижения, экономика и администрирование — в веб-панели.</p>
           <div className="miniapp-more-card__actions">
             <a className="button button--primary" href={routes.desktop} target="_blank" rel="noreferrer">
-              Открыть `/app`
+              Перейти в панель
             </a>
           </div>
         </article>
 
         <article className="miniapp-more-card">
-          <strong>Logout</strong>
-          <p>Остановить текущую miniapp-сессию на этом устройстве.</p>
+          <strong>Выход</strong>
+          <p>Завершить текущую сессию мини-приложения на этом устройстве.</p>
           <div className="miniapp-more-card__actions">
             <button
               className="button button--secondary"
@@ -73,7 +73,7 @@ export function MorePage() {
                 }
               }}
             >
-              {isLoggingOut ? 'Завершаю…' : 'Выйти'}
+              {isLoggingOut ? 'Выхожу…' : 'Выйти'}
             </button>
           </div>
           {logoutError ? <p>{logoutError}</p> : null}
