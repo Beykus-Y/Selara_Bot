@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import secrets
@@ -60,35 +61,44 @@ def validate_telegram_webapp_init_data(
 
     raw_values = dict(parse_qsl(normalized_init_data, keep_blank_values=True))
     expected_hash = raw_values.pop("hash", "")
-    raw_values.pop("signature", None)
-    if not expected_hash:
+    signature_b64 = raw_values.pop("signature", None)
+    if not expected_hash and not signature_b64:
         return None
 
-    data_check_string = "\n".join(
+    bot_id = normalized_bot_token.split(":")[0]
+    sorted_fields = "\n".join(
         f"{key}={value}"
         for key, value in sorted(raw_values.items(), key=lambda item: item[0])
     )
-    import logging as _logging
-    _wlog = _logging.getLogger("miniapp.debug")
-    _wlog.warning("MINIAPP_DEBUG data_check_string=%r", data_check_string)
-    secret_key = hmac.new(b"WebAppData", normalized_bot_token.encode("utf-8"), sha256).digest()
-    actual_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), sha256).hexdigest()
-    if not hmac.compare_digest(actual_hash, expected_hash):
-        _wlog.warning("MINIAPP_DEBUG hash mismatch actual=%r expected=%r", actual_hash[:16], expected_hash[:16])
-        return None
+
+    if signature_b64:
+        # New Ed25519 format — verify using Telegram's production public key
+        _TELEGRAM_PUBLIC_KEY = bytes.fromhex(
+            "e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d"
+        )
+        data_check_string = f"{bot_id}:WebAppData\n{sorted_fields}"
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            signature_bytes = base64.urlsafe_b64decode(signature_b64 + "==")
+            pub_key = Ed25519PublicKey.from_public_bytes(_TELEGRAM_PUBLIC_KEY)
+            pub_key.verify(signature_bytes, data_check_string.encode("utf-8"))
+        except Exception:
+            return None
+    else:
+        # Legacy HMAC-SHA256 format
+        secret_key = hmac.new(b"WebAppData", normalized_bot_token.encode("utf-8"), sha256).digest()
+        actual_hash = hmac.new(secret_key, sorted_fields.encode("utf-8"), sha256).hexdigest()
+        if not hmac.compare_digest(actual_hash, expected_hash):
+            return None
 
     auth_date_raw = raw_values.get("auth_date", "")
     if not auth_date_raw.isdigit():
-        _wlog.warning("MINIAPP_DEBUG auth_date not digit: %r", auth_date_raw)
         return None
     auth_date = int(auth_date_raw)
     current_timestamp = int(time()) if now_timestamp is None else int(now_timestamp)
-    _wlog.warning("MINIAPP_DEBUG auth_date=%d now=%d diff=%d max_age=%d", auth_date, current_timestamp, current_timestamp - auth_date, max_age_seconds)
     if auth_date > current_timestamp + 60:
-        _wlog.warning("MINIAPP_DEBUG auth_date from future")
         return None
     if current_timestamp - auth_date > max(60, int(max_age_seconds)):
-        _wlog.warning("MINIAPP_DEBUG auth_date expired")
         return None
 
     parsed_values: dict[str, object] = dict(raw_values)

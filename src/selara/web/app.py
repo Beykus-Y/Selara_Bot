@@ -4254,12 +4254,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.post("/api/miniapp/session")
     async def miniapp_session_api(request: Request):
-        import logging as _logging
-        _log = _logging.getLogger("miniapp.debug")
         now = _now_utc()
         form = await _parse_form(request)
         init_data = (form.get("init_data") or "").strip()
-        _log.warning("MINIAPP_DEBUG init_data_full=%r bot_token_prefix=%r", init_data, settings.bot_token[:10])
         validation_result = validate_telegram_webapp_init_data(
             init_data=init_data,
             bot_token=settings.bot_token,
@@ -4267,7 +4264,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             now_timestamp=int(now.timestamp()),
         )
         if validation_result is None:
-            _log.warning("MINIAPP_DEBUG validation failed now_ts=%d", int(now.timestamp()))
             return _json_result(ok=False, message="Не удалось подтвердить Mini App сессию Telegram.", status_code=401)
 
         user_payload = validation_result.get("user")
