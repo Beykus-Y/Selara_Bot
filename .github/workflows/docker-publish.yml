@@ -63,7 +63,7 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           build-args: |
-            VITE_APP_BASE_PATH=/new/
+            VITE_APP_BASE_PATH=/miniapp/
           push: true
           tags: ${{ steps.meta_web.outputs.tags }}
           labels: ${{ steps.meta_web.outputs.labels }}
