@@ -68,10 +68,11 @@ def validate_telegram_webapp_init_data(
         f"{key}={value}"
         for key, value in sorted(raw_values.items(), key=lambda item: item[0])
     )
-    secret_key = hmac.new(b"WebAppData", normalized_bot_token.encode("utf-8"), sha256).digest()
-    actual_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), sha256).hexdigest()
     import logging as _logging
     _wlog = _logging.getLogger("miniapp.debug")
+    _wlog.warning("MINIAPP_DEBUG data_check_string=%r", data_check_string)
+    secret_key = hmac.new(b"WebAppData", normalized_bot_token.encode("utf-8"), sha256).digest()
+    actual_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), sha256).hexdigest()
     if not hmac.compare_digest(actual_hash, expected_hash):
         _wlog.warning("MINIAPP_DEBUG hash mismatch actual=%r expected=%r", actual_hash[:16], expected_hash[:16])
         return None
