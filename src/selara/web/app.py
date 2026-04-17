@@ -4259,7 +4259,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         now = _now_utc()
         form = await _parse_form(request)
         init_data = (form.get("init_data") or "").strip()
-        _log.warning("MINIAPP_DEBUG init_data=%r bot_token_prefix=%r", init_data[:80] if init_data else "", settings.bot_token[:10])
+        _log.warning("MINIAPP_DEBUG init_data=%r bot_token_prefix=%r", init_data[:200] if init_data else "", settings.bot_token[:10])
         validation_result = validate_telegram_webapp_init_data(
             init_data=init_data,
             bot_token=settings.bot_token,

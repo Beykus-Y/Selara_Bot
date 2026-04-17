@@ -70,17 +70,24 @@ def validate_telegram_webapp_init_data(
     )
     secret_key = hmac.new(b"WebAppData", normalized_bot_token.encode("utf-8"), sha256).digest()
     actual_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), sha256).hexdigest()
+    import logging as _logging
+    _wlog = _logging.getLogger("miniapp.debug")
     if not hmac.compare_digest(actual_hash, expected_hash):
+        _wlog.warning("MINIAPP_DEBUG hash mismatch actual=%r expected=%r", actual_hash[:16], expected_hash[:16])
         return None
 
     auth_date_raw = raw_values.get("auth_date", "")
     if not auth_date_raw.isdigit():
+        _wlog.warning("MINIAPP_DEBUG auth_date not digit: %r", auth_date_raw)
         return None
     auth_date = int(auth_date_raw)
     current_timestamp = int(time()) if now_timestamp is None else int(now_timestamp)
+    _wlog.warning("MINIAPP_DEBUG auth_date=%d now=%d diff=%d max_age=%d", auth_date, current_timestamp, current_timestamp - auth_date, max_age_seconds)
     if auth_date > current_timestamp + 60:
+        _wlog.warning("MINIAPP_DEBUG auth_date from future")
         return None
     if current_timestamp - auth_date > max(60, int(max_age_seconds)):
+        _wlog.warning("MINIAPP_DEBUG auth_date expired")
         return None
 
     parsed_values: dict[str, object] = dict(raw_values)
