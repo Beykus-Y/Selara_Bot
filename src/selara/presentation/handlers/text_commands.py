@@ -5376,6 +5376,7 @@ async def text_commands_handler(
         if period not in {"all", "7d", "hour", "day", "week", "month"}:
             period = "all"
         limit = int(intent.args.get("limit", chat_settings.top_limit_default))
+        activity_less_than = intent.args.get("activity_less_than")
         await send_top_stats(
             message,
             activity_repo,
@@ -5384,7 +5385,8 @@ async def text_commands_handler(
             limit,
             mode=mode,  # type: ignore[arg-type]
             period=period,  # type: ignore[arg-type]
-            include_chart=True,
+            include_chart=activity_less_than is None,
+            activity_less_than=int(activity_less_than) if activity_less_than is not None else None,
             include_keyboard=should_include_hybrid_top_keyboard(
                 chat_settings=chat_settings,
                 mode=mode,  # type: ignore[arg-type]

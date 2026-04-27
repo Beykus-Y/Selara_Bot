@@ -128,6 +128,7 @@ class ActivityRepository(Protocol):
         limit: int,
         karma_weight: float,
         activity_weight: float,
+        activity_less_than: int | None = None,
     ) -> list[LeaderboardItem]: ...
 
     async def set_announcement_subscription(

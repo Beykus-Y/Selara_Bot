@@ -56,6 +56,7 @@ async def execute(
     week_start_hour: int,
     karma_weight: float,
     activity_weight: float,
+    activity_less_than: int | None = None,
 ) -> list[LeaderboardItem]:
     since = resolve_period_since(
         period=period,
@@ -71,4 +72,5 @@ async def execute(
         limit=limit,
         karma_weight=karma_weight,
         activity_weight=activity_weight,
+        activity_less_than=activity_less_than,
     )

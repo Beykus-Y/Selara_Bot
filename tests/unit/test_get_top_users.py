@@ -15,6 +15,7 @@ class FakeRepo:
         assert kwargs["since"] is None
         assert kwargs["karma_weight"] == 0.7
         assert kwargs["activity_weight"] == 0.3
+        assert kwargs["activity_less_than"] is None
         return [
             LeaderboardItem(
                 user_id=1,

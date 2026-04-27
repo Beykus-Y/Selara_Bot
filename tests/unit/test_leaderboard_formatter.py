@@ -66,6 +66,20 @@ def test_week_period_title_is_rendered() -> None:
     assert "16.02.2026 в 12:00" not in text
 
 
+def test_activity_less_than_filter_title_is_rendered() -> None:
+    text = format_leaderboard(
+        [_item()],
+        mode="activity",
+        period="week",
+        limit=50,
+        timezone_name="UTC",
+        activity_less_than=100,
+    )
+    assert "Пользователи за текущую неделю с активностью меньше" in text
+    assert "<code>100</code>" in text
+    assert "User Hundred" in text
+
+
 def test_activity_mode_does_not_render_last_seen_suffix() -> None:
     text = format_leaderboard(
         [_item()],

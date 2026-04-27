@@ -65,9 +65,16 @@ _PROFILE_DESCRIPTION_MAX_LEN = 280
 _AWARD_TITLE_MAX_LEN = 160
 _PROFILE_AWARDS_LIMIT = 20
 _PROFILE_CALLBACK_PREFIX = "profile"
-_ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N]"
+_ACTIVITY_TOP_PERIOD_HELP = "Формат: /top <неделя|сутки|час|месяц> [N|<N]"
 _IRIS_IMPORT_TTL = timedelta(minutes=15)
-_IRIS_SOURCE_BOT_USERNAME = "iris_moon_bot"
+_IRIS_SOURCE_BOT_USERNAMES = (
+    "iris_black_bot",
+    "iris_dp_bot",
+    "iris_cm_bot",
+    "iris_bs_bot",
+    "iris_moon_bot",
+)
+_IRIS_SOURCE_BOT_USERNAME_SET = frozenset(_IRIS_SOURCE_BOT_USERNAMES)
 _AWARD_MIN_ACTOR_RANK = SYSTEM_ROLE_BY_CODE["junior_admin"].rank
 _IRIS_IMPORT_ALLOWED_ROLES = {"owner", "co_owner", "senior_admin"}
 _IRIS_MISSING_EMPTY_TEXT = "✅ <b>Все активные участники уже перенесены из Iris.</b>"
@@ -116,6 +123,7 @@ class _PendingIrisImportSession:
     actor_user_id: int
     step: str
     expires_at: datetime
+    source_bot_username: str | None = None
     profile_data: IrisProfileImportData | None = None
     profile_text: str | None = None
 
@@ -163,6 +171,11 @@ def _is_iris_import_manager_role(role_code: str | None) -> bool:
     return (role_code or "").strip().lower() in _IRIS_IMPORT_ALLOWED_ROLES
 
 
+def _format_iris_source_bot_usernames() -> str:
+    mentions = [f"@{username}" for username in _IRIS_SOURCE_BOT_USERNAMES]
+    return ", ".join(mentions[:-1]) + f" или {mentions[-1]}"
+
+
 def _can_start_iris_import(*, actor_user_id: int, target_user_id: int, role_code: str | None) -> bool:
     if int(actor_user_id) == int(target_user_id):
         return True
@@ -197,13 +210,25 @@ def _resolve_forwarded_bot_username(message: Message) -> str | None:
     return None
 
 
+def _resolve_supported_iris_forward_source_username(message: Message) -> str | None:
+    forwarded_username = _resolve_forwarded_bot_username(message)
+    if forwarded_username in _IRIS_SOURCE_BOT_USERNAME_SET:
+        return forwarded_username
+    return None
+
+
 def _validate_iris_forward_source(message: Message) -> str | None:
     if not _is_forwarded_message(message):
-        return f"Нужно переслать сюда именно ответ от @{_IRIS_SOURCE_BOT_USERNAME}, а не копию текста."
+        return (
+            "Нужно переслать сюда именно ответ от одного из поддерживаемых Iris-ботов: "
+            f"{_format_iris_source_bot_usernames()}, а не копию текста."
+        )
 
-    forwarded_username = _resolve_forwarded_bot_username(message)
-    if forwarded_username != _IRIS_SOURCE_BOT_USERNAME:
-        return f"Нужен пересланный ответ именно от @{_IRIS_SOURCE_BOT_USERNAME}."
+    if _resolve_supported_iris_forward_source_username(message) is None:
+        return (
+            "Нужен пересланный ответ от одного из поддерживаемых Iris-ботов: "
+            f"{_format_iris_source_bot_usernames()}."
+        )
     return None
 
 
@@ -274,18 +299,24 @@ def _build_iris_import_intro(*, session: _PendingIrisImportSession) -> str:
         f"<b>Перенос из Iris</b>\n"
         f"Чат: <b>{chat_title}</b>\n"
         f"Кого переносим: <b>{target_label}</b> (@{target_username})\n\n"
-        f"1. В той же группе отправьте Iris команду <code>кто ты @{target_username}</code>.\n"
-        f"2. Перешлите сюда ответ от @{_IRIS_SOURCE_BOT_USERNAME}.\n\n"
+        f"1. В той же группе отправьте одному из Iris команду <code>кто ты @{target_username}</code>.\n"
+        f"   Поддерживаются: {_format_iris_source_bot_usernames()}.\n"
+        f"2. Перешлите сюда его ответ.\n\n"
         "После этого я попрошу второй ответ с наградами. "
         f"Сессия активна {int(_IRIS_IMPORT_TTL.total_seconds() // 60)} минут."
     )
 
 
 def _build_iris_awards_step_prompt(*, session: _PendingIrisImportSession) -> str:
+    source_hint = (
+        f"тому же Iris-боту @{escape(session.source_bot_username)}"
+        if session.source_bot_username is not None
+        else f"одному из поддерживаемых Iris-ботов: {_format_iris_source_bot_usernames()}"
+    )
     return (
         "Первый шаг принят.\n\n"
-        f"Теперь отправьте в группе Iris команду <code>награды @{escape(session.target_username)}</code> "
-        f"и перешлите сюда ответ от @{_IRIS_SOURCE_BOT_USERNAME}."
+        f"Теперь отправьте в группе {source_hint} команду <code>награды @{escape(session.target_username)}</code> "
+        "и перешлите сюда ответ."
     )
 
 
@@ -1417,30 +1448,36 @@ def parse_activity_top_period_request(
     raw_value: str | None,
     *,
     chat_settings: ChatSettings,
-) -> tuple[bool, LeaderboardPeriod | None, int | None, str | None]:
+) -> tuple[bool, LeaderboardPeriod | None, int | None, int | None, str | None]:
     tokens = [token for token in (raw_value or "").strip().split() if token]
     if not tokens:
-        return False, None, None, None
+        return False, None, None, None, None
 
     period = _ACTIVITY_TOP_PERIOD_ALIASES.get(tokens[0].lower())
     if period is None:
-        return False, None, None, None
+        return False, None, None, None, None
 
     if len(tokens) == 1:
-        return True, period, chat_settings.top_limit_default, None
+        return True, period, chat_settings.top_limit_default, None, None
 
     if len(tokens) > 2:
-        return True, None, None, _ACTIVITY_TOP_PERIOD_HELP
+        return True, None, None, None, _ACTIVITY_TOP_PERIOD_HELP
 
     raw_limit = tokens[1]
+    if raw_limit.startswith("<"):
+        raw_threshold = raw_limit[1:]
+        if not raw_threshold.isdigit():
+            return True, None, None, None, "Порог должен быть числом"
+        return True, period, chat_settings.top_limit_max, int(raw_threshold), None
+
     if not raw_limit.isdigit():
-        return True, None, None, "Лимит должен быть числом"
+        return True, None, None, None, "Лимит должен быть числом"
 
     limit = int(raw_limit)
     if not 1 <= limit <= chat_settings.top_limit_max:
-        return True, None, None, f"Лимит должен быть в диапазоне 1..{chat_settings.top_limit_max}"
+        return True, None, None, None, f"Лимит должен быть в диапазоне 1..{chat_settings.top_limit_max}"
 
-    return True, period, limit, None
+    return True, period, limit, None, None
 
 
 def _build_leaderboard_keyboard(*, mode: LeaderboardMode, period: LeaderboardPeriod, limit: int) -> InlineKeyboardMarkup:
@@ -1606,6 +1643,7 @@ async def send_top_stats(
     period: LeaderboardPeriod = "all",
     include_chart: bool = True,
     include_keyboard: bool = False,
+    activity_less_than: int | None = None,
 ) -> None:
     leaderboard = await get_top_users(
         repo=activity_repo,
@@ -1618,6 +1656,7 @@ async def send_top_stats(
         week_start_hour=chat_settings.leaderboard_week_start_hour,
         karma_weight=chat_settings.leaderboard_hybrid_karma_weight,
         activity_weight=chat_settings.leaderboard_hybrid_activity_weight,
+        activity_less_than=activity_less_than,
     )
     text = format_leaderboard(
         leaderboard,
@@ -1625,6 +1664,7 @@ async def send_top_stats(
         period=period,
         limit=limit,
         timezone_name=settings.bot_timezone,
+        activity_less_than=activity_less_than,
     )
 
     chart = None
@@ -1997,6 +2037,16 @@ async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot,
     if source_error is not None:
         await message.answer(source_error)
         return
+    source_bot_username = _resolve_supported_iris_forward_source_username(message)
+    if source_bot_username is None:
+        await message.answer("Не удалось определить Iris-бота из пересланного сообщения. Перешлите ответ заново.")
+        return
+    if session.source_bot_username is not None and source_bot_username != session.source_bot_username:
+        await message.answer(
+            f"Второй ответ нужен от того же Iris-бота @{escape(session.source_bot_username)}.",
+            parse_mode="HTML",
+        )
+        return
 
     step_error = _validate_iris_message_step(
         expected_step=session.step,
@@ -2032,6 +2082,7 @@ async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot,
 
         session.profile_data = profile
         session.profile_text = raw_text
+        session.source_bot_username = source_bot_username
         session.step = "awards"
         session.expires_at = _now_utc() + _IRIS_IMPORT_TTL
         await message.answer(_build_iris_awards_step_prompt(session=session), parse_mode="HTML")
@@ -2081,7 +2132,7 @@ async def pending_iris_import_handler(message: Message, activity_repo, bot: Bot,
                 chat_display_name=session.target_chat_display_name,
             ),
             imported_by_user_id=session.actor_user_id,
-            source_bot_username=_IRIS_SOURCE_BOT_USERNAME,
+            source_bot_username=source_bot_username,
             source_target_username=awards_data.target_username,
             imported_at=imported_at,
             profile_text=session.profile_text,
@@ -2470,7 +2521,7 @@ async def top_command(
     settings: Settings,
     chat_settings: ChatSettings,
 ) -> None:
-    period_matched, period, period_limit, period_error = parse_activity_top_period_request(
+    period_matched, period, period_limit, activity_less_than, period_error = parse_activity_top_period_request(
         command.args,
         chat_settings=chat_settings,
     )
@@ -2491,6 +2542,7 @@ async def top_command(
             period=period,
             include_chart=False,
             include_keyboard=False,
+            activity_less_than=activity_less_than,
         )
         return
 

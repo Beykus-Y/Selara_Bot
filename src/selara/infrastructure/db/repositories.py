@@ -3001,11 +3001,13 @@ class SqlAlchemyActivityRepository:
         limit: int,
         karma_weight: float,
         activity_weight: float,
+        activity_less_than: int | None = None,
     ) -> list[LeaderboardItem]:
         activity_rows = await self._get_activity_aggregate(chat_id=chat_id, period=period, since=since)
         karma_rows = await self._get_karma_aggregate(chat_id=chat_id, period=period, since=since)
 
-        all_user_ids = set(activity_rows.keys()) | set(karma_rows.keys())
+        active_member_ids = await self._get_active_chat_member_ids(chat_id=chat_id)
+        all_user_ids = set(activity_rows.keys()) | set(karma_rows.keys()) | active_member_ids
         if not all_user_ids:
             return []
 
@@ -3058,7 +3060,15 @@ class SqlAlchemyActivityRepository:
                 )
             )
 
-        sorted_items = sort_leaderboard_items(items, mode=mode)
+        if activity_less_than is not None:
+            threshold = max(0, int(activity_less_than))
+            items = [item for item in items if item.activity_value < threshold]
+            if mode == "activity":
+                sorted_items = sorted(items, key=lambda item: (item.activity_value, -item.karma_value, item.user_id))
+            else:
+                sorted_items = sort_leaderboard_items(items, mode=mode)
+        else:
+            sorted_items = sort_leaderboard_items(items, mode=mode)
         return sorted_items[:limit]
 
     async def set_announcement_subscription(
@@ -6292,6 +6302,14 @@ class SqlAlchemyActivityRepository:
             for user_id, karma_base in bases.items():
                 values[user_id] = values.get(user_id, 0) + karma_base
         return values
+
+    async def _get_active_chat_member_ids(self, *, chat_id: int) -> set[int]:
+        stmt = select(UserChatActivityModel.user_id).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.is_active_member.is_(True),
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {int(user_id) for (user_id,) in rows}
 
     async def _get_iris_karma_base(self, *, chat_id: int, user_id: int) -> int:
         row = await self._session.get(

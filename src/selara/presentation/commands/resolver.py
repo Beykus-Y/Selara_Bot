@@ -24,6 +24,15 @@ def _parse_limit(raw: str, *, top_max: int) -> int:
     return limit
 
 
+def _parse_activity_less_than(raw: str) -> int | None:
+    if not raw.startswith("<"):
+        return None
+    raw_value = raw[1:]
+    if not raw_value.isdigit():
+        raise TextCommandResolutionError("Порог должен быть числом")
+    return int(raw_value)
+
+
 def _parse_active_command(tokens: list[str], *, top_default: int, top_max: int) -> CommandIntent:
     if not tokens:
         return CommandIntent(name="active", args={"limit": top_default})
@@ -67,10 +76,33 @@ def _parse_top_command(tokens: list[str], *, top_default: int, top_max: int) -> 
 
     if not tokens:
         return CommandIntent(name="top", args={"mode": mode, "period": period, "limit": top_default})
-    if len(tokens) != 1:
-        raise TextCommandResolutionError("Формат команды: топ [karma|activity] [неделя|сутки|час|месяц] [N]")
-    limit = _parse_limit(tokens[0], top_max=top_max)
-    return CommandIntent(name="top", args={"mode": mode, "period": period, "limit": limit})
+    if len(tokens) > 2:
+        raise TextCommandResolutionError("Формат команды: топ [karma|activity] [неделя|сутки|час|месяц] [N|<N]")
+
+    limit: int | None = None
+    activity_less_than: int | None = None
+    for token in tokens:
+        parsed_threshold = _parse_activity_less_than(token)
+        if parsed_threshold is not None:
+            if activity_less_than is not None:
+                raise TextCommandResolutionError("Формат команды: топ [karma|activity] [неделя|сутки|час|месяц] [N|<N]")
+            activity_less_than = parsed_threshold
+            continue
+        if limit is not None:
+            raise TextCommandResolutionError("Формат команды: топ [karma|activity] [неделя|сутки|час|месяц] [N|<N]")
+        limit = _parse_limit(token, top_max=top_max)
+
+    if activity_less_than is not None and mode != "activity":
+        raise TextCommandResolutionError("Фильтр <N доступен только для топа активности")
+
+    args = {
+        "mode": mode,
+        "period": period,
+        "limit": limit if limit is not None else (top_max if activity_less_than is not None else top_default),
+    }
+    if activity_less_than is not None:
+        args["activity_less_than"] = activity_less_than
+    return CommandIntent(name="top", args=args)
 
 
 def _parse_duration_seconds(token: str) -> int | None:

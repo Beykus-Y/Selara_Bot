@@ -39,7 +39,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• <code>/active [N]</code> — топ по активности\n"
         "• <code>/top karma [N]</code> — топ по карме\n"
         "• <code>/top гибрид [N]</code> — гибридный топ\n"
-        "• <code>/top неделя|сутки|час|месяц [N]</code> — топ по сообщениям за период\n"
+        "• <code>/top неделя|сутки|час|месяц [N|&lt;N]</code> — топ или список ниже порога за период\n"
         "• <code>/lastseen [@username|user_id]</code> — когда был активен"
     ),
     "games": (

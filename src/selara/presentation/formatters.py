@@ -224,13 +224,22 @@ def format_leaderboard(
     period: LeaderboardPeriod,
     limit: int,
     timezone_name: str,
+    activity_less_than: int | None = None,
 ) -> str:
     if not items:
+        if mode == "activity" and activity_less_than is not None:
+            return f"<b>Нет пользователей с активностью меньше <code>{activity_less_than}</code> для выбранного периода.</b>"
         return "<b>Пока нет данных для выбранного рейтинга.</b>"
 
     if mode == "activity":
         title = _period_title(period)
-        lines = [f"<b>Топ пользователей {title}</b>\n<b>Лимит:</b> <code>{limit}</code>"]
+        if activity_less_than is None:
+            lines = [f"<b>Топ пользователей {title}</b>\n<b>Лимит:</b> <code>{limit}</code>"]
+        else:
+            lines = [
+                f"<b>Пользователи {title} с активностью меньше <code>{activity_less_than}</code></b>\n"
+                f"<b>Лимит:</b> <code>{limit}</code>"
+            ]
         for index, item in enumerate(items, start=1):
             user_html = _format_leaderboard_user_html(item)
             lines.append(f"<b>{index}.</b> {user_html} — <code>{item.activity_value}</code> сообщ.")

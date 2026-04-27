@@ -55,7 +55,7 @@ def test_parse_active_rejects_mode_switch() -> None:
 
 
 def test_parse_activity_top_period_week_with_default_limit() -> None:
-    matched, period, limit, error = parse_activity_top_period_request(
+    matched, period, limit, activity_less_than, error = parse_activity_top_period_request(
         "неделя",
         chat_settings=_chat_settings(),
     )
@@ -63,16 +63,30 @@ def test_parse_activity_top_period_week_with_default_limit() -> None:
     assert error is None
     assert period == "week"
     assert limit == _chat_settings().top_limit_default
+    assert activity_less_than is None
+
+
+def test_parse_activity_top_period_week_with_less_than_filter() -> None:
+    matched, period, limit, activity_less_than, error = parse_activity_top_period_request(
+        "неделя <100",
+        chat_settings=_chat_settings(),
+    )
+    assert matched is True
+    assert error is None
+    assert period == "week"
+    assert limit == _chat_settings().top_limit_max
+    assert activity_less_than == 100
 
 
 def test_parse_activity_top_period_rejects_bad_limit() -> None:
-    matched, period, limit, error = parse_activity_top_period_request(
+    matched, period, limit, activity_less_than, error = parse_activity_top_period_request(
         "месяц abc",
         chat_settings=_chat_settings(),
     )
     assert matched is True
     assert period is None
     assert limit is None
+    assert activity_less_than is None
     assert error == "Лимит должен быть числом"
 
 

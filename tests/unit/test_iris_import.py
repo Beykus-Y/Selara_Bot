@@ -11,6 +11,7 @@ from selara.application.use_cases.iris_import import (
 )
 from selara.domain.entities import UserSnapshot
 from selara.presentation.handlers.stats import (
+    _IRIS_SOURCE_BOT_USERNAMES,
     _PendingIrisImportSession,
     _build_iris_unrelated_message_text,
     _can_start_iris_import,
@@ -140,7 +141,7 @@ def test_parse_forwarded_awards_message_allows_empty_awards_list() -> None:
     assert result.awards == ()
 
 
-def test_validate_iris_forward_source_requires_forwarded_message_and_exact_bot() -> None:
+def test_validate_iris_forward_source_requires_forwarded_message_and_supported_bot() -> None:
     not_forwarded = SimpleNamespace(
         forward_origin=None,
         forward_from=None,
@@ -153,6 +154,11 @@ def test_validate_iris_forward_source_requires_forwarded_message_and_exact_bot()
     assert "именно ответ" in _validate_iris_forward_source(not_forwarded)
     assert "iris_moon_bot" in _validate_iris_forward_source(wrong_bot)
     assert _validate_iris_forward_source(correct_bot) is None
+
+
+@pytest.mark.parametrize("username", _IRIS_SOURCE_BOT_USERNAMES)
+def test_validate_iris_forward_source_accepts_supported_iris_bots(username: str) -> None:
+    assert _validate_iris_forward_source(_forwarded_message(username=username)) is None
 
 
 def test_validate_iris_message_step_rejects_wrong_order() -> None:

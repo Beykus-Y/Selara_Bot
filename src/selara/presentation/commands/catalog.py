@@ -706,6 +706,10 @@ def _is_user_ref_token(token: str) -> bool:
     return bool(token) and (token.startswith("@") and len(token) > 1 or token.lstrip("-").isdigit())
 
 
+def _is_activity_less_than_token(token: str) -> bool:
+    return token.startswith("<") and token[1:].isdigit()
+
+
 def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool:
     normalized_tail = normalize_text_command(tail_text)
     tokens = _split_tail_tokens(tail_text)
@@ -723,7 +727,15 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
             rest = rest[1:]
         if rest and rest[0] in period_aliases:
             rest = rest[1:]
-        return not rest or len(rest) == 1 and rest[0].isdigit()
+        if not rest:
+            return True
+        if len(rest) == 1:
+            return rest[0].isdigit() or _is_activity_less_than_token(rest[0])
+        return (
+            len(rest) == 2
+            and any(_is_activity_less_than_token(token) for token in rest)
+            and any(token.isdigit() for token in rest)
+        )
 
     if command_key in {"announce", "naming"}:
         return True

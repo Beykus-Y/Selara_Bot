@@ -490,6 +490,55 @@ async def test_activity_event_runtime_economy_does_not_wipe_known_username() -> 
 
 
 @pytest.mark.asyncio
+async def test_period_leaderboard_includes_active_zero_message_members_and_filters_inactive() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=405, chat_type="group", title="Leaderboard")
+    speaker = UserSnapshot(telegram_user_id=901, username="speaker", first_name="Speaker", last_name=None, is_bot=False)
+    quiet = UserSnapshot(telegram_user_id=902, username="quiet", first_name="Quiet", last_name=None, is_bot=False)
+    left = UserSnapshot(telegram_user_id=903, username="left", first_name="Left", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        await repo.upsert_activity(chat=chat, user=speaker, event_at=now)
+        await repo.upsert_activity(chat=chat, user=speaker, event_at=now + timedelta(minutes=1))
+        await repo.set_chat_member_active(chat=chat, user=quiet, is_active=True, event_at=now)
+        await repo.set_chat_member_active(chat=chat, user=left, is_active=False, event_at=now)
+
+        leaderboard = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="activity",
+            period="day",
+            since=now - timedelta(days=1),
+            limit=10,
+            karma_weight=0.0,
+            activity_weight=1.0,
+        )
+        under_one = await repo.get_leaderboard(
+            chat_id=chat.telegram_chat_id,
+            mode="activity",
+            period="day",
+            since=now - timedelta(days=1),
+            limit=10,
+            karma_weight=0.0,
+            activity_weight=1.0,
+            activity_less_than=1,
+        )
+
+        values_by_id = {item.user_id: item.activity_value for item in leaderboard}
+        assert values_by_id == {speaker.telegram_user_id: 2, quiet.telegram_user_id: 0}
+        assert [item.user_id for item in under_one] == [quiet.telegram_user_id]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_activity_event_runtime_flush_batch_deduplicates_duplicate_message_ids() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

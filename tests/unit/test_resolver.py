@@ -56,6 +56,26 @@ def test_resolver_maps_top_week_period_default_activity_mode() -> None:
     assert intent.args["limit"] == 10
 
 
+def test_resolver_maps_top_week_period_less_than_filter() -> None:
+    intent = resolve_text_command("топ неделя <100", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "top"
+    assert intent.args["mode"] == "activity"
+    assert intent.args["period"] == "week"
+    assert intent.args["limit"] == 50
+    assert intent.args["activity_less_than"] == 100
+
+
+def test_resolver_maps_top_period_less_than_filter_with_limit() -> None:
+    intent = resolve_text_command("топ месяц <100 30", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "top"
+    assert intent.args["mode"] == "activity"
+    assert intent.args["period"] == "month"
+    assert intent.args["limit"] == 30
+    assert intent.args["activity_less_than"] == 100
+
+
 def test_resolver_maps_top_month_period_with_limit() -> None:
     intent = resolve_text_command("топ месяц 12", top_default=10, top_max=50)
     assert intent is not None
