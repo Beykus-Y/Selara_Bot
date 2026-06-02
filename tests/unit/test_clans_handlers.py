@@ -141,34 +141,55 @@ def test_clan_list_markup_one_button_per_clan():
 # Unit tests: _resolve_member_name
 # ---------------------------------------------------------------------------
 
-def _uca_row(display_name_override):
-    """Simulate a SQLAlchemy Row for the UCA query (subscriptable by index)."""
-    from collections import namedtuple
-    R = namedtuple("R", ["display_name_override"])
-    return R(display_name_override=display_name_override)
+from collections import namedtuple
+
+# Unified row returned by the combined UCA+UserModel query
+_Row = namedtuple("_Row", ["display_name_override", "persona_label", "title_prefix", "first_name", "last_name", "username"])
+# Fallback-only row (UserModel)
+_URow = namedtuple("_URow", ["first_name", "last_name", "username"])
 
 
-def _user_row(first_name, last_name, username):
-    from collections import namedtuple
-    R = namedtuple("R", ["first_name", "last_name", "username"])
-    return R(first_name=first_name, last_name=last_name, username=username)
+def _row(*, display=None, persona=None, title=None, first=None, last=None, uname=None):
+    return _Row(display, persona, title, first, last, uname)
+
+
+def _urow(first=None, last=None, uname=None):
+    return _URow(first, last, uname)
 
 
 async def test_resolve_member_name_uses_display_override():
     session = _mock_session()
-    session.execute.return_value.first = MagicMock(return_value=_uca_row("Ник"))
+    session.execute.return_value.first = MagicMock(return_value=_row(display="Ник", first="Igor"))
 
     name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
     assert name == "Ник"
 
 
-async def test_resolve_member_name_falls_back_to_first_name():
+async def test_resolve_member_name_prepends_persona():
     session = _mock_session()
     session.execute.return_value.first = MagicMock(
-        side_effect=[
-            _uca_row(None),
-            _user_row("Иван", "Петров", None),
-        ]
+        return_value=_row(persona="Альбедо", first="Faust")
+    )
+
+    name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
+    assert name == "[Альбедо] Faust"
+
+
+async def test_resolve_member_name_persona_only_when_no_base():
+    session = _mock_session()
+    session.execute.return_value.first = MagicMock(
+        return_value=_row(persona="Альбедо")
+    )
+
+    name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
+    assert name == "[Альбедо]"
+
+
+async def test_resolve_member_name_falls_back_to_first_name():
+    session = _mock_session()
+    # First execute: UCA+UserModel row found but no display override / persona
+    session.execute.return_value.first = MagicMock(
+        return_value=_row(first="Иван", last="Петров")
     )
 
     name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
@@ -178,24 +199,27 @@ async def test_resolve_member_name_falls_back_to_first_name():
 async def test_resolve_member_name_falls_back_to_username():
     session = _mock_session()
     session.execute.return_value.first = MagicMock(
-        side_effect=[
-            _uca_row(None),
-            _user_row(None, None, "vasya"),
-        ]
+        return_value=_row(uname="vasya")
     )
 
     name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
     assert name == "@vasya"
 
 
-async def test_resolve_member_name_falls_back_to_telegram_api():
+async def test_resolve_member_name_falls_back_to_usermodel_when_no_uca():
+    """User never appeared in this chat — UCA row missing, UserModel exists."""
     session = _mock_session()
     session.execute.return_value.first = MagicMock(
-        side_effect=[
-            _uca_row(None),
-            _user_row(None, None, None),
-        ]
+        side_effect=[None, _urow(first="Маша")]
     )
+
+    name = await _resolve_member_name(_bot(), session, user_id=7, chat_id=-100)
+    assert name == "Маша"
+
+
+async def test_resolve_member_name_falls_back_to_telegram_api():
+    session = _mock_session()
+    session.execute.return_value.first = MagicMock(side_effect=[None, _urow()])
     bot = _bot()
     bot.get_chat_member = AsyncMock(
         return_value=SimpleNamespace(
@@ -209,12 +233,7 @@ async def test_resolve_member_name_falls_back_to_telegram_api():
 
 async def test_resolve_member_name_last_resort_id():
     session = _mock_session()
-    session.execute.return_value.first = MagicMock(
-        side_effect=[
-            _uca_row(None),
-            _user_row(None, None, None),
-        ]
-    )
+    session.execute.return_value.first = MagicMock(side_effect=[None, _urow()])
     bot = _bot()
     bot.get_chat_member = AsyncMock(side_effect=Exception("network error"))
 

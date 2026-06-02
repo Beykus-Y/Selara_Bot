@@ -59,24 +59,44 @@ async def _get_member_ids_ordered(session: AsyncSession, *, clan_id: int) -> lis
 async def _resolve_member_name(
     bot: Bot, session: AsyncSession, *, user_id: int, chat_id: int
 ) -> str:
-    # 1. display_name_override из профиля чата
+    # Single query: UCA fields + UserModel fields
     result = await session.execute(
-        select(UserChatActivityModel.display_name_override)
+        select(
+            UserChatActivityModel.display_name_override,
+            UserChatActivityModel.persona_label,
+            UserChatActivityModel.title_prefix,
+            UserModel.first_name,
+            UserModel.last_name,
+            UserModel.username,
+        )
+        .outerjoin(UserModel, UserModel.telegram_user_id == user_id)
         .where(
             UserChatActivityModel.user_id == user_id,
             UserChatActivityModel.chat_id == chat_id,
         )
     )
     row = result.first()
-    if row and row[0]:
-        return row[0]
 
-    # 2. Данные из users (могут быть None если пользователь давно не писал)
-    result = await session.execute(
+    if row:
+        display_override, persona_label, title_prefix, first_name, last_name, username = row
+        base = (display_override or "").strip() or None
+        if base is None:
+            full = " ".join(filter(None, [first_name, last_name])).strip()
+            base = full or (f"@{username}" if username else None)
+
+        if base and persona_label:
+            return f"[{persona_label}] {base}"
+        if persona_label:
+            return f"[{persona_label}]"
+        if base:
+            return base
+
+    # Fallback: only UserModel (user never appeared in this chat)
+    result2 = await session.execute(
         select(UserModel.first_name, UserModel.last_name, UserModel.username)
         .where(UserModel.telegram_user_id == user_id)
     )
-    urow = result.first()
+    urow = result2.first()
     if urow:
         first_name, last_name, username = urow
         if first_name:
@@ -84,16 +104,15 @@ async def _resolve_member_name(
         if username:
             return f"@{username}"
 
-    # 3. Запрос к Telegram API как последний резерв
+    # Last resort: Telegram API
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         u = member.user
         if u.first_name:
-            name = f"{u.first_name} {u.last_name}".strip() if u.last_name else u.first_name
-            return name
+            return f"{u.first_name} {u.last_name}".strip() if u.last_name else u.first_name
         if u.username:
             return f"@{u.username}"
-    except (TelegramBadRequest, Exception):
+    except Exception:
         pass
 
     return f"id:{user_id}"
