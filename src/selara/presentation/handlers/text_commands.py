@@ -5092,6 +5092,7 @@ async def text_commands_handler(
     settings: Settings,
     chat_settings: ChatSettings,
     session_factory,
+    db_session=None,
     achievement_orchestrator=None,
 ) -> None:
     text = message.text or ""
@@ -5105,6 +5106,7 @@ async def text_commands_handler(
             settings,
             chat_settings,
             user_id=message.reply_to_message.from_user.id,
+            db_session=db_session,
         )
         return
 
@@ -5132,6 +5134,7 @@ async def text_commands_handler(
             settings,
             chat_settings,
             user_id=message.reply_to_message.from_user.id,
+            db_session=db_session,
         )
         return
 
@@ -5495,9 +5498,10 @@ async def text_commands_handler(
                 settings,
                 chat_settings,
                 user_id=target.telegram_user_id,
+                db_session=db_session,
             )
             return
-        await send_me_stats(message, activity_repo, bot, settings, chat_settings)
+        await send_me_stats(message, activity_repo, bot, settings, chat_settings, db_session=db_session)
         return
 
     if intent.name == "rep":
@@ -5580,6 +5584,7 @@ async def text_commands_handler(
         await economy_tap_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            bot=bot,
             economy_repo=economy_repo,
             chat_settings=chat_settings,
         )
