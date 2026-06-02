@@ -1788,4 +1788,16 @@ class ClanMemberModel(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_clan_member_chat_user"),)
+
+class DisabledRpActionModel(Base):
+    __tablename__ = "disabled_rp_actions"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    action_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

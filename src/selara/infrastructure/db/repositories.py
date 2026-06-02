@@ -137,6 +137,7 @@ from selara.infrastructure.db.models import (
     UserGlobalAchievementModel,
     UserKarmaVoteModel,
     UserModel,
+    DisabledRpActionModel,
 )
 from selara.infrastructure.db.achievement_metrics import (
     adjust_chat_active_members_count,
@@ -2104,6 +2105,43 @@ class SqlAlchemyActivityRepository:
         if settings is None:
             raise RuntimeError("Failed to load chat settings after upsert")
         return settings
+
+    async def get_disabled_rp_actions(self, *, chat_id: int) -> set[str]:
+        stmt = select(DisabledRpActionModel.action_key).where(
+            DisabledRpActionModel.chat_id == chat_id
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return set(rows)
+
+    async def add_disabled_rp_action(self, *, chat: ChatSnapshot, action_key: str) -> bool:
+        await self._upsert_chat(chat)
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if dialect == "postgresql":
+            stmt = pg_insert(DisabledRpActionModel).values(
+                chat_id=chat.telegram_chat_id, action_key=action_key
+            ).on_conflict_do_nothing(index_elements=["chat_id", "action_key"])
+            result = await self._session.execute(stmt)
+            await self._session.flush()
+            return bool(result.rowcount)
+        else:
+            existing = await self._session.get(
+                DisabledRpActionModel, (chat.telegram_chat_id, action_key)
+            )
+            if existing is not None:
+                return False
+            row = DisabledRpActionModel(chat_id=chat.telegram_chat_id, action_key=action_key)
+            self._session.add(row)
+            await self._session.flush()
+            return True
+
+    async def remove_disabled_rp_action(self, *, chat_id: int, action_key: str) -> bool:
+        stmt = delete(DisabledRpActionModel).where(
+            DisabledRpActionModel.chat_id == chat_id,
+            DisabledRpActionModel.action_key == action_key,
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return bool(result.rowcount)
 
     async def list_chats_with_interesting_facts_enabled(self) -> list[ChatSnapshot]:
         stmt = (

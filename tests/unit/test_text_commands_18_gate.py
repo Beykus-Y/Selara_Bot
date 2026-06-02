@@ -90,6 +90,9 @@ class _FakeActivityRepo:
             ),
         ]
 
+    async def get_disabled_rp_actions(self, *, chat_id: int) -> set[str]:
+        return set()
+
     async def find_chat_user_by_username(self, *, chat_id: int, username: str):
         return None
 

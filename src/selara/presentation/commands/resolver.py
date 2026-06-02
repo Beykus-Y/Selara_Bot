@@ -219,6 +219,25 @@ def _parse_chat_gate_command(tokens: list[str]) -> CommandIntent | None:
     return None
 
 
+def _parse_rp_command(tokens: list[str]) -> CommandIntent | None:
+    usage = "Формат: рп отключить/включить <действие> или рп список"
+    if not tokens or tokens[0] != "рп":
+        return None
+    if len(tokens) == 1:
+        raise TextCommandResolutionError(usage)
+    if tokens[1] == "список":
+        if len(tokens) != 2:
+            raise TextCommandResolutionError(usage)
+        return CommandIntent(name="rp_list")
+    if tokens[1] in {"отключить", "включить"}:
+        if len(tokens) < 3:
+            raise TextCommandResolutionError(usage)
+        action_trigger = " ".join(tokens[2:])
+        command = "rp_disable" if tokens[1] == "отключить" else "rp_enable"
+        return CommandIntent(name=command, args={"action_trigger": action_trigger})
+    raise TextCommandResolutionError(usage)
+
+
 def resolve_text_command(
     text: str,
     *,
@@ -239,6 +258,10 @@ def resolve_text_command(
     gacha_command = _parse_gacha_command(tokens)
     if gacha_command is not None:
         return gacha_command
+
+    rp_command = _parse_rp_command(tokens)
+    if rp_command is not None:
+        return rp_command
 
     chat_gate_command = _parse_chat_gate_command(tokens)
     if chat_gate_command is not None:

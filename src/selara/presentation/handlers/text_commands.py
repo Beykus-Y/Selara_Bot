@@ -2578,6 +2578,113 @@ async def _manage_gacha_toggle(
         await message.answer(f"Гача {state_label}.")
 
 
+async def _manage_rp_action_disable(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+    *,
+    command_key: str,
+    action_trigger: str,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    user_id = message.from_user.id
+    is_env_admin = settings.admin_user_id is not None and user_id == settings.admin_user_id
+
+    if not is_env_admin:
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            user_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            permission="manage_settings",
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            return
+
+    normalized_trigger = normalize_text_command(action_trigger)
+    action_key = _SOCIAL_ACTION_ALIASES.get(normalized_trigger)
+    if action_key is None and normalized_trigger in _SOCIAL_ACTION_CANONICAL:
+        action_key = normalized_trigger
+    if action_key is None:
+        await message.answer(
+            f"Неизвестное действие «{action_trigger}». Укажите название команды, например: <code>напоить</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    chat = ChatSnapshot(
+        telegram_chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        title=message.chat.title,
+    )
+    display_name = _SOCIAL_ACTION_CANONICAL.get(action_key, action_key)
+
+    if command_key == "rp_disable":
+        added = await activity_repo.add_disabled_rp_action(chat=chat, action_key=action_key)
+        if added:
+            await message.answer(f"РП-действие «{display_name}» отключено в этом чате.")
+        else:
+            await message.answer(f"РП-действие «{display_name}» уже было отключено.")
+    else:
+        removed = await activity_repo.remove_disabled_rp_action(chat_id=message.chat.id, action_key=action_key)
+        if removed:
+            await message.answer(f"РП-действие «{display_name}» включено.")
+        else:
+            await message.answer(f"РП-действие «{display_name}» не было отключено.")
+
+
+async def _manage_rp_action_list(
+    message: Message,
+    activity_repo,
+    settings: Settings,
+) -> None:
+    if message.from_user is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    user_id = message.from_user.id
+    is_env_admin = settings.admin_user_id is not None and user_id == settings.admin_user_id
+
+    if not is_env_admin:
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            user_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            permission="manage_settings",
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            return
+
+    disabled = await activity_repo.get_disabled_rp_actions(chat_id=message.chat.id)
+    if not disabled:
+        await message.answer("Все РП-действия включены.")
+        return
+
+    lines = sorted(_SOCIAL_ACTION_CANONICAL.get(key, key) for key in disabled)
+    text = "Отключённые РП-действия:\n" + "\n".join(f"• {line}" for line in lines)
+    await message.answer(text)
+
+
 async def _check_and_maybe_restore_gacha(
     message: Message,
     activity_repo,
@@ -3750,6 +3857,10 @@ async def _send_social_action(message: Message, activity_repo, chat_settings: Ch
         return
 
     if message.from_user is None:
+        return
+
+    disabled_rp = await activity_repo.get_disabled_rp_actions(chat_id=message.chat.id)
+    if action_key in disabled_rp:
         return
 
     if action_key in _SOCIAL_ACTION_18_PLUS and not chat_settings.actions_18_enabled:
@@ -5382,6 +5493,20 @@ async def text_commands_handler(
             command_key=intent.name,
             duration_seconds=intent.args.get("duration_seconds") if intent.args else None,
         )
+        return
+
+    if intent.name in {"rp_disable", "rp_enable"}:
+        await _manage_rp_action_disable(
+            message,
+            activity_repo,
+            settings,
+            command_key=intent.name,
+            action_trigger=str(intent.args.get("action_trigger", "")) if intent.args else "",
+        )
+        return
+
+    if intent.name == "rp_list":
+        await _manage_rp_action_list(message, activity_repo, settings)
         return
 
     if not await _enforce_command_access(message, activity_repo, command_key=intent.name):
