@@ -253,6 +253,20 @@ SOCIAL_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "потрепай": "social_ruffle",
     "поиграть": "social_play",
     "поиграй": "social_play",
+    "пустить на шашлык": "social_bbq",
+    "пусти на шашлык": "social_bbq",
+    "воскресить": "social_revive",
+    "воскреси": "social_revive",
+    "укусить": "social_chomp",
+    "укуси": "social_chomp",
+    "напоить": "social_givewine",
+    "напои": "social_givewine",
+    "согреть": "social_warm",
+    "согрей": "social_warm",
+    "пригласить на танец": "social_invitedance",
+    "пригласи на танец": "social_invitedance",
+    "поводить членом": "social_dickwave",
+    "поводи членом": "social_dickwave",
 }
 
 SOCIAL_COMMAND_KEY_TO_ACTION: dict[TextCommandKey, str] = {
@@ -366,6 +380,13 @@ SOCIAL_COMMAND_KEY_TO_ACTION: dict[TextCommandKey, str] = {
     "social_nosesnap": "nosesnap",
     "social_ruffle": "ruffle",
     "social_play": "play",
+    "social_bbq": "bbq",
+    "social_revive": "revive",
+    "social_chomp": "chomp",
+    "social_givewine": "givewine",
+    "social_warm": "warm",
+    "social_invitedance": "invitedance",
+    "social_dickwave": "dickwave",
 }
 
 PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
@@ -589,6 +610,13 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "social_nosesnap": "щёлкнуть по носу",
     "social_ruffle": "потрепать",
     "social_play": "поиграть",
+    "social_bbq": "пустить на шашлык",
+    "social_revive": "воскресить",
+    "social_chomp": "укусить",
+    "social_givewine": "напоить",
+    "social_warm": "согреть",
+    "social_invitedance": "пригласить на танец",
+    "social_dickwave": "поводить членом",
 }
 
 COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
