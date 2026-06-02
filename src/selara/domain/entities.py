@@ -481,3 +481,19 @@ class ChatAuditLogEntry:
     description: str
     meta_json: dict | None
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class ClanInfo:
+    id: int
+    chat_id: int
+    name: str
+    creator_user_id: int
+    member_count: int
+
+
+@dataclass(frozen=True)
+class ClanMembership:
+    clan_id: int
+    clan_name: str
+    is_creator: bool

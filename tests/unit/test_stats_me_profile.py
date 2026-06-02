@@ -167,7 +167,7 @@ def test_extract_linked_user_label_from_message_reads_tg_text_link() -> None:
 async def test_me_command_with_username_routes_to_target_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, int] = {}
 
-    async def fake_send_user_stats(message, activity_repo, bot, settings, chat_settings, *, user_id: int) -> None:
+    async def fake_send_user_stats(message, activity_repo, bot, settings, chat_settings, *, user_id: int, **kwargs) -> None:
         called["user_id"] = user_id
 
     async def fake_send_me_stats(*args, **kwargs) -> None:

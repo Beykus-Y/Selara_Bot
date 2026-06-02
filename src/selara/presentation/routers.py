@@ -12,6 +12,7 @@ from selara.presentation.handlers.chat_assistant import router as chat_assistant
 from selara.presentation.handlers.message_archive import router as message_archive_router
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
+from selara.presentation.handlers.clans import router as clans_router
 from selara.presentation.handlers.relationships import router as relationships_router
 from selara.presentation.handlers.settings import router as settings_router
 from selara.presentation.handlers.stats import router as stats_router
@@ -71,6 +72,7 @@ def build_router(
     root.include_router(chat_assistant_router)
     root.include_router(economy_router)
     root.include_router(game_router)
+    root.include_router(clans_router)
     root.include_router(relationships_router)
     root.include_router(moderation_router)
     root.include_router(settings_router)

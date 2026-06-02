@@ -19,7 +19,9 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.use_cases.get_last_seen import execute as get_last_seen
@@ -37,6 +39,7 @@ from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.core.timezone import to_timezone
 from selara.domain.entities import ActivityStats, AchievementView, ChatSnapshot, LeaderboardMode, LeaderboardPeriod, UserSnapshot
+from selara.infrastructure.db.models import ClanMemberModel, ClanModel
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import get_actor_role_definition
@@ -622,27 +625,33 @@ def _profile_callback_data(*, action: str, user_id: int) -> str:
     return f"{_PROFILE_CALLBACK_PREFIX}:{action}:{user_id}"
 
 
-def _build_profile_actions_markup(*, user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Ачивки",
-                    callback_data=_profile_callback_data(action="achievements", user_id=user_id),
-                ),
-                InlineKeyboardButton(
-                    text="Награды",
-                    callback_data=_profile_callback_data(action="awards", user_id=user_id),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="О себе",
-                    callback_data=_profile_callback_data(action="about", user_id=user_id),
-                ),
-            ],
-        ]
-    )
+def _build_profile_actions_markup(*, user_id: int, clan_id: int | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="Ачивки",
+                callback_data=_profile_callback_data(action="achievements", user_id=user_id),
+            ),
+            InlineKeyboardButton(
+                text="Награды",
+                callback_data=_profile_callback_data(action="awards", user_id=user_id),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="О себе",
+                callback_data=_profile_callback_data(action="about", user_id=user_id),
+            ),
+        ],
+    ]
+    if clan_id is not None:
+        rows.append([
+            InlineKeyboardButton(
+                text="Мой клан",
+                callback_data=f"clan:info:{clan_id}",
+            ),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _parse_profile_callback_data(data: str | None) -> tuple[str | None, int | None]:
@@ -1549,6 +1558,7 @@ async def send_user_stats(
     chat_settings: ChatSettings,
     *,
     user_id: int,
+    db_session: AsyncSession | None = None,
 ) -> None:
     stats = await get_my_stats(repo=activity_repo, chat_id=message.chat.id, user_id=user_id)
 
@@ -1588,6 +1598,19 @@ async def send_user_stats(
     )
     extra_section = "\n".join(meta_lines + social_lines) if (meta_lines or social_lines) else None
 
+    clan_id: int | None = None
+    clan_line: str | None = None
+    if db_session is not None:
+        clan_row = await db_session.execute(
+            select(ClanModel.id, ClanModel.name)
+            .join(ClanMemberModel, ClanMemberModel.clan_id == ClanModel.id)
+            .where(ClanMemberModel.chat_id == message.chat.id, ClanMemberModel.user_id == user_id)
+        )
+        clan_result = clan_row.first()
+        if clan_result is not None:
+            clan_id = clan_result.id
+            clan_line = f"<b>Клан:</b> {escape(clan_result.name)} <code>#{clan_result.id}</code>"
+
     text = _join_profile_sections(
         [
             text,
@@ -1596,6 +1619,7 @@ async def send_user_stats(
                     format_profile_positions_line(rank_all=rep.rank_all, rank_7d=rep.rank_7d),
                     format_profile_karma_line(karma_all=rep.karma_all, karma_7d=rep.karma_7d),
                 ]
+                + ([clan_line] if clan_line else [])
             ),
             extra_section,
         ]
@@ -1615,11 +1639,11 @@ async def send_user_stats(
         html_text=text,
         chart_bytes=chart,
         filename="me_stats.png",
-        reply_markup=_build_profile_actions_markup(user_id=user_id),
+        reply_markup=_build_profile_actions_markup(user_id=user_id, clan_id=clan_id),
     )
 
 
-async def send_me_stats(message: Message, activity_repo, bot: Bot, settings: Settings, chat_settings: ChatSettings) -> None:
+async def send_me_stats(message: Message, activity_repo, bot: Bot, settings: Settings, chat_settings: ChatSettings, db_session: AsyncSession | None = None) -> None:
     if message.from_user is None:
         return
 
@@ -1630,6 +1654,7 @@ async def send_me_stats(message: Message, activity_repo, bot: Bot, settings: Set
         settings,
         chat_settings,
         user_id=message.from_user.id,
+        db_session=db_session,
     )
 
 
@@ -2486,6 +2511,7 @@ async def me_command(
     bot: Bot,
     settings: Settings,
     chat_settings: ChatSettings,
+    db_session: AsyncSession | None = None,
 ) -> None:
     if (command.args or "").strip() or message.reply_to_message is not None:
         target, error = await _resolve_stats_target_user(message, command=command, activity_repo=activity_repo)
@@ -2502,10 +2528,11 @@ async def me_command(
             settings,
             chat_settings,
             user_id=target.telegram_user_id,
+            db_session=db_session,
         )
         return
 
-    await send_me_stats(message, activity_repo, bot, settings, chat_settings)
+    await send_me_stats(message, activity_repo, bot, settings, chat_settings, db_session=db_session)
 
 
 @router.message(Command("rep"))

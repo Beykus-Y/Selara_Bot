@@ -1762,3 +1762,30 @@ class GlobalMetricsModel(Base):
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default="1")
     global_users_base_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ClanModel(Base):
+    __tablename__ = "clans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    creator_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("chat_id", "name", name="uq_clan_chat_name"),)
+
+
+class ClanMemberModel(Base):
+    __tablename__ = "clan_members"
+
+    clan_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("clans.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_clan_member_chat_user"),)
