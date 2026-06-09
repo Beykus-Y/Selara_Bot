@@ -959,6 +959,7 @@ class RelationshipGraphModel(Base):
         ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
         nullable=True,
     )
+    child_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -974,6 +975,21 @@ class RelationshipGraphModel(Base):
         ),
         CheckConstraint("user_a != user_b", name="ck_relationships_graph_distinct_users"),
     )
+
+
+class FamilyRelationshipArchiveModel(Base):
+    __tablename__ = "family_relationship_archive"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    original_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_a: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_b: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    child_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    archive_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 Index("idx_relationships_graph_chat_a", RelationshipGraphModel.chat_id, RelationshipGraphModel.user_a)

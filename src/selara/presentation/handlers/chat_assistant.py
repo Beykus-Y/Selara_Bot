@@ -100,6 +100,8 @@ class PendingFamilyRequest:
     actor_user_id: int
     target_user_id: int
     created_at: datetime
+    adopt_verb: str = "усыновить"
+    child_role: str = "сын"
 
 
 @dataclass(frozen=True)
@@ -1278,6 +1280,8 @@ async def _send_family_request(
     activity_repo,
     relation_type: str,
     raw_args: str | None,
+    adopt_verb: str = "усыновить",
+    child_role: str = "сын",
 ) -> None:
     if message.from_user is None:
         return
@@ -1287,7 +1291,10 @@ async def _send_family_request(
 
     target = await _build_target_snapshot(message, activity_repo, raw_args=raw_args)
     if target is None:
-        example = "/adopt @username" if relation_type == "parent" else "/pet @username"
+        if relation_type == "parent":
+            example = f"/adopt @username ({adopt_verb})"
+        else:
+            example = "/pet @username"
         await message.answer(f"Формат: reply или <code>{example}</code>.", parse_mode="HTML")
         return
     if target.telegram_user_id == message.from_user.id:
@@ -1302,12 +1309,14 @@ async def _send_family_request(
         actor_user_id=message.from_user.id,
         target_user_id=target.telegram_user_id,
         created_at=datetime.now(timezone.utc),
+        adopt_verb=adopt_verb,
+        child_role=child_role,
     )
 
     actor_label = await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=message.from_user.id)
     target_label = await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=target.telegram_user_id, fallback_user=target)
     if relation_type == "parent":
-        headline = f"{_format_user_mention(user_id=message.from_user.id, label=actor_label)} хочет усыновить {_format_user_mention(user_id=target.telegram_user_id, label=target_label)}."
+        headline = f"{_format_user_mention(user_id=message.from_user.id, label=actor_label)} хочет {adopt_verb} {_format_user_mention(user_id=target.telegram_user_id, label=target_label)} (как {child_role})."
     else:
         headline = f"{_format_user_mention(user_id=message.from_user.id, label=actor_label)} хочет стать питомцем для {_format_user_mention(user_id=target.telegram_user_id, label=target_label)}."
     keyboard = InlineKeyboardMarkup(
@@ -1326,7 +1335,21 @@ async def adopt_command(message: Message, command: CommandObject, activity_repo,
     if not chat_settings.family_tree_enabled:
         await message.answer("Семейные команды отключены в этом чате.")
         return
-    await _send_family_request(message, activity_repo=activity_repo, relation_type="parent", raw_args=command.args)
+    await _send_family_request(
+        message, activity_repo=activity_repo, relation_type="parent",
+        raw_args=command.args, adopt_verb="усыновить", child_role="сын",
+    )
+
+
+@router.message(Command("adoptdaughter"))
+async def adopt_daughter_command(message: Message, command: CommandObject, activity_repo, chat_settings: ChatSettings) -> None:
+    if not chat_settings.family_tree_enabled:
+        await message.answer("Семейные команды отключены в этом чате.")
+        return
+    await _send_family_request(
+        message, activity_repo=activity_repo, relation_type="parent",
+        raw_args=command.args, adopt_verb="удочерить", child_role="дочь",
+    )
 
 
 @router.message(Command("pet"))
@@ -1402,6 +1425,193 @@ async def family_command(message: Message, command: CommandObject, activity_repo
         pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.pets)),
     )
     await message.answer_photo(BufferedInputFile(image_bytes, filename="family_tree.png"))
+
+
+@router.message(Command("escapefamily"))
+async def escape_family_command(
+    message: Message,
+    activity_repo,
+    chat_settings: ChatSettings,
+) -> None:
+    if not chat_settings.family_tree_enabled:
+        await message.answer("Семейные команды отключены в этом чате.")
+        return
+    if message.from_user is None:
+        return
+    if not _group_only(message):
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    bundle = await activity_repo.list_family_bundle(
+        chat_id=message.chat.id, user_id=message.from_user.id
+    )
+    if not bundle.parents:
+        await message.answer("У вас нет родителей в этом чате, из чьей семьи можно сбежать.")
+        return
+
+    actor_id = message.from_user.id
+    buttons: list[list[InlineKeyboardButton]] = []
+    for parent_id in bundle.parents:
+        parent_label = await _resolve_display_label(
+            activity_repo, chat_id=message.chat.id, user_id=parent_id
+        )
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"✅ Сбежать от {parent_label}",
+                callback_data=f"famleave:confirm:escape_family:{actor_id}:{parent_id}",
+            ),
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=f"famleave:cancel:escape_family:{actor_id}:{bundle.parents[0]}",
+        )
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(
+        "Вы уверены, что хотите сбежать из семьи? Это действие необратимо.",
+        reply_markup=keyboard,
+    )
+
+
+@router.message(Command("escapepet"))
+async def escape_pet_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    chat_settings: ChatSettings,
+) -> None:
+    if not chat_settings.family_tree_enabled:
+        await message.answer("Семейные команды отключены в этом чате.")
+        return
+    if message.from_user is None:
+        return
+    if not _group_only(message):
+        await message.answer("Команда доступна только в группе.")
+        return
+
+    actor_id = message.from_user.id
+    target = await _build_target_snapshot(message, activity_repo, raw_args=command.args)
+
+    if target is None:
+        bundle = await activity_repo.list_family_bundle(
+            chat_id=message.chat.id, user_id=actor_id
+        )
+        if not bundle.owners:
+            await message.answer("У вас нет хозяев в этом чате, от которых можно сбежать.")
+            return
+        buttons: list[list[InlineKeyboardButton]] = []
+        for owner_id in bundle.owners:
+            owner_label = await _resolve_display_label(
+                activity_repo, chat_id=message.chat.id, user_id=owner_id
+            )
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"✅ Сбежать от {owner_label}",
+                    callback_data=f"famleave:confirm:escape_pet:{actor_id}:{owner_id}",
+                )
+            ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"famleave:cancel:escape_pet:{actor_id}:{bundle.owners[0]}",
+            )
+        ])
+        await message.answer(
+            "От какого хозяина сбегаем?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        return
+
+    if target.telegram_user_id == actor_id:
+        await message.answer("Нельзя сбежать от самого себя.")
+        return
+
+    owner_id = target.telegram_user_id
+    owner_label = await _resolve_display_label(
+        activity_repo, chat_id=message.chat.id, user_id=owner_id, fallback_user=target,
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"famleave:confirm:escape_pet:{actor_id}:{owner_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"famleave:cancel:escape_pet:{actor_id}:{owner_id}",
+                ),
+            ]
+        ]
+    )
+    await message.answer(
+        f"Сбежать от хозяина {_format_user_mention(user_id=owner_id, label=owner_label)}? "
+        "Это действие необратимо.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data.startswith("famleave:"))
+async def famleave_callback(query: CallbackQuery, activity_repo) -> None:
+    if query.from_user is None or query.data is None or query.message is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 5:
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    _, decision, action, initiator_raw, target_raw = parts
+    if not initiator_raw.isdigit() or not target_raw.isdigit():
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+
+    initiator_id = int(initiator_raw)
+    target_id = int(target_raw)
+
+    if query.from_user.id != initiator_id:
+        await query.answer("Подтвердить может только инициатор.", show_alert=True)
+        return
+
+    if decision == "cancel":
+        cancel_text = "Побег отменён." if action == "escape_family" else "Побег от хозяина отменён."
+        await query.message.edit_text(cancel_text, reply_markup=None)
+        await query.answer("Отменено")
+        return
+
+    if action == "escape_family":
+        removed = await activity_repo.remove_graph_relationship(
+            chat_id=query.message.chat.id,
+            user_a=initiator_id,
+            user_b=target_id,
+            relation_type="child",
+        )
+        result_text = (
+            "Вы сбежали из семьи. Семейная связь разорвана."
+            if removed
+            else "Семейная связь не найдена — возможно, её уже нет."
+        )
+    elif action == "escape_pet":
+        removed = await activity_repo.remove_graph_relationship(
+            chat_id=query.message.chat.id,
+            user_a=initiator_id,
+            user_b=target_id,
+            relation_type="pet",
+        )
+        result_text = (
+            "Вы сбежали от хозяина. Связь разорвана."
+            if removed
+            else "Связь с хозяином не найдена — возможно, вы уже не являетесь его питомцем."
+        )
+    else:
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    await query.message.edit_text(result_text, reply_markup=None)
+    await query.answer("Подтверждено")
 
 
 @router.message(F.new_chat_members)
@@ -1793,7 +2003,8 @@ async def family_request_callback(query: CallbackQuery, activity_repo, achieveme
             relation_type="parent",
             actor_user_id=query.from_user.id,
         )
-        text = "Связь сохранена: усыновление подтверждено."
+        adoption_noun = "Удочерение" if pending.child_role == "дочь" else "Усыновление"
+        text = f"Связь сохранена: {adoption_noun.lower()} подтверждено. Теперь это {pending.child_role}."
     await log_chat_action(
         activity_repo,
         chat_id=query.message.chat.id,

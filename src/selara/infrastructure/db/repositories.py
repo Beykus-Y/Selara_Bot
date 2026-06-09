@@ -138,6 +138,7 @@ from selara.infrastructure.db.models import (
     UserKarmaVoteModel,
     UserModel,
     DisabledRpActionModel,
+    FamilyRelationshipArchiveModel,
 )
 from selara.infrastructure.db.achievement_metrics import (
     adjust_chat_active_members_count,
@@ -2637,6 +2638,58 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         return True
 
+    async def update_child_role(
+        self,
+        *,
+        chat_id: int,
+        parent_id: int,
+        child_id: int,
+        role: str,
+    ) -> bool:
+        stmt = select(RelationshipGraphModel).where(
+            RelationshipGraphModel.chat_id == chat_id,
+            RelationshipGraphModel.user_a == parent_id,
+            RelationshipGraphModel.user_b == child_id,
+            RelationshipGraphModel.relation_type == "parent",
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        row.child_role = role  # type: ignore[assignment]
+        await self._session.flush()
+        return True
+
+    async def list_unresolved_parent_links(self) -> list[GraphRelationship]:
+        stmt = select(RelationshipGraphModel).where(
+            RelationshipGraphModel.relation_type == "parent",
+            RelationshipGraphModel.child_role.is_(None),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [self._to_graph_relationship(r) for r in rows]
+
+    async def archive_and_remove_graph_relationship(
+        self,
+        *,
+        row: GraphRelationship,
+        reason: str,
+    ) -> None:
+        archive_row = FamilyRelationshipArchiveModel(
+            original_id=row.id,
+            chat_id=row.chat_id,
+            user_a=row.user_a,
+            user_b=row.user_b,
+            relation_type=row.relation_type,
+            child_role=row.child_role,
+            created_at=row.created_at,
+            archive_reason=reason,
+        )
+        self._session.add(archive_row)
+        stmt = select(RelationshipGraphModel).where(RelationshipGraphModel.id == row.id)
+        db_row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if db_row is not None:
+            await self._session.delete(db_row)
+        await self._session.flush()
+
     async def list_graph_relationships(self, *, chat_id: int, user_id: int | None = None) -> list[GraphRelationship]:
         stmt = select(RelationshipGraphModel).where(RelationshipGraphModel.chat_id == chat_id)
         if user_id is not None:
@@ -2710,6 +2763,7 @@ class SqlAlchemyActivityRepository:
         parents = sorted({item.user_a for item in parent_edges if item.user_b == user_id})
         children = sorted({item.user_b for item in parent_edges if item.user_a == user_id})
         pets = sorted({item.user_b for item in pet_edges if item.user_a == user_id})
+        owners = sorted({item.user_a for item in pet_edges if item.user_b == user_id})
         grandparents = sorted({item.user_a for item in parent_edges if item.user_b in parents})
         siblings = sorted(
             {
@@ -2753,6 +2807,7 @@ class SqlAlchemyActivityRepository:
             siblings=tuple(siblings),
             children=tuple(children),
             pets=tuple(pets),
+            owners=tuple(owners),
         )
 
     async def list_family_graph(self, *, chat_id: int, user_id: int) -> FamilyGraph:
@@ -6672,6 +6727,7 @@ class SqlAlchemyActivityRepository:
             relation_type=row.relation_type,  # type: ignore[arg-type]
             created_by_user_id=int(row.created_by_user_id) if row.created_by_user_id is not None else None,
             created_at=row.created_at,
+            child_role=row.child_role,
             updated_at=row.updated_at,
         )
 

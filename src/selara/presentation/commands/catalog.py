@@ -423,8 +423,11 @@ PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "роль": "role",
     "титул": "title",
     "усыновить": "adopt",
+    "удочерить": "adoptdaughter",
     "стать питомцем": "pet",
     "семья": "family",
+    "сбежать из семьи": "escape_family",
+    "сбежать от хозяина": "escape_pet",
     **SOCIAL_TRIGGER_TO_COMMAND_KEY,
 }
 
@@ -490,8 +493,11 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "vow": "клятва",
     "title": "титул",
     "adopt": "усыновить",
+    "adoptdaughter": "удочерить",
     "pet": "стать питомцем",
     "family": "семья",
+    "escape_family": "сбежать из семьи",
+    "escape_pet": "сбежать от хозяина",
     "antiraid_on": "+антирейд",
     "antiraid_off": "-антирейд",
     "chat_lock": "-чат",
@@ -643,8 +649,11 @@ COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "marry",
     "title",
     "adopt",
+    "adoptdaughter",
     "pet",
     "family",
+    "escape_family",
+    "escape_pet",
     "antiraid_on",
     "social_slap",
     "social_burn",
@@ -915,7 +924,13 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
     if command_key == "lastseen":
         return len(tokens) == 1 and _is_user_ref_token(tokens[0])
 
-    if command_key in {"pair", "marry", "adopt", "pet", "family"}:
+    if command_key in {"pair", "marry", "adopt", "adoptdaughter", "pet", "family"}:
+        return len(tokens) == 1 and _is_user_ref_token(tokens[0])
+
+    if command_key == "escape_family":
+        return len(tokens) == 0
+
+    if command_key == "escape_pet":
         return len(tokens) == 1 and _is_user_ref_token(tokens[0])
 
     if command_key == "title":

@@ -60,7 +60,7 @@ def _message_content_type(message: Message) -> str:
 
 
 def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> dict[str, object]:
-    raw_message_json = json.loads(message.model_dump_json(exclude_none=False, warnings=False))
+    raw_message_json = message.model_dump(mode='json', exclude_none=True)
     canonical_snapshot = json.dumps(raw_message_json, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     snapshot_at = getattr(message, "edit_date", None) if snapshot_kind == "edited" else message.date
     if snapshot_at is None:
@@ -92,7 +92,7 @@ def _build_reply_capture_payload(
             "raw_message_json": archive_payload["raw_message_json"],
         }
 
-    raw_message_json = json.loads(message.model_dump_json(exclude_none=False, warnings=False))
+    raw_message_json = message.model_dump(mode='json', exclude_none=True)
     return {
         "message_type": _message_content_type(message),
         "text": message.text,

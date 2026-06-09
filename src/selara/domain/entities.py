@@ -440,6 +440,7 @@ class GraphRelationship:
     relation_type: GraphRelationType
     created_by_user_id: int | None
     created_at: datetime
+    child_role: str | None = None
     updated_at: datetime | None = None
 
 
@@ -453,6 +454,7 @@ class FamilyBundle:
     siblings: tuple[int, ...]
     children: tuple[int, ...]
     pets: tuple[int, ...]
+    owners: tuple[int, ...]
 
 
 @dataclass(frozen=True)

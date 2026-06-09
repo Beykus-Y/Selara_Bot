@@ -85,6 +85,9 @@ from selara.presentation.handlers.game.router import start_command as game_start
 from selara.presentation.handlers.help import send_help
 from selara.presentation.handlers.chat_assistant import (
     adopt_command as family_adopt_command,
+    adopt_daughter_command as family_adopt_daughter_command,
+    escape_family_command as family_escape_command,
+    escape_pet_command as family_escape_pet_command,
     family_command as family_tree_command,
     manage_chat_gate_command,
     match_chat_trigger,
@@ -5909,6 +5912,15 @@ async def text_commands_handler(
         )
         return
 
+    if intent.name == "adoptdaughter":
+        await family_adopt_daughter_command(
+            message,
+            command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            activity_repo=activity_repo,
+            chat_settings=chat_settings,
+        )
+        return
+
     if intent.name == "pet":
         await family_pet_command(
             message,
@@ -5920,6 +5932,23 @@ async def text_commands_handler(
 
     if intent.name == "family":
         await family_tree_command(
+            message,
+            command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
+            activity_repo=activity_repo,
+            chat_settings=chat_settings,
+        )
+        return
+
+    if intent.name == "escape_family":
+        await family_escape_command(
+            message,
+            activity_repo=activity_repo,
+            chat_settings=chat_settings,
+        )
+        return
+
+    if intent.name == "escape_pet":
+        await family_escape_pet_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
             activity_repo=activity_repo,

@@ -66,7 +66,7 @@ def _event(*, text: str = "hello", chat_type: str = "group") -> Message:
     message.edit_date = None
     message.message_id = 777
     message.content_type = "text"
-    message.model_dump_json.return_value = json.dumps({"message_id": 777, "text": text}, ensure_ascii=False)
+    message.model_dump.return_value = {"message_id": 777, "text": text}
     message.new_chat_members = []
     message.left_chat_member = None
     return message
@@ -117,7 +117,7 @@ async def test_activity_tracker_enqueues_archive_payload_when_save_message_enabl
     handler = AsyncMock(return_value="handled")
     event = _event(text="/me")
     raw_payload = {"message_id": 777, "text": "/me", "chat": {"id": 101}}
-    event.model_dump_json.return_value = json.dumps(raw_payload, ensure_ascii=False)
+    event.model_dump.return_value = raw_payload
     expected_hash = hashlib.sha256(
         json.dumps(raw_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -164,7 +164,7 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
     event = _event(text="edited text")
     event.edit_date = datetime(2026, 3, 13, 12, 5, tzinfo=timezone.utc)
     raw_payload = {"message_id": 777, "text": "edited text", "edit_date": "2026-03-13T12:05:00Z"}
-    event.model_dump_json.return_value = json.dumps(raw_payload, ensure_ascii=False)
+    event.model_dump.return_value = raw_payload
     expected_hash = hashlib.sha256(
         json.dumps(raw_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).hexdigest()
