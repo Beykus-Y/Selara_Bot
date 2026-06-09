@@ -5,6 +5,35 @@
 
 ---
 
+## [2026-06-09] — Семейные команды, child_role, фикс activity tracker
+
+### Добавлено
+
+- **`удочерить`** — отдельная команда для усыновления как дочь (в отличие от `усыновить` → сын). Разграничение: `усыновить` передаёт `child_role=сын`, `удочерить` — `child_role=дочь`.
+- **`сбежать из семьи`** — ребёнок разрывает связь с родителем. Если родителей несколько — показываются inline-кнопки для выбора от кого уходить. Только инициатор может нажать кнопку подтверждения.
+- **`сбежать от хозяина`** — питомец уходит от хозяина. Без аргументов — список хозяев кнопками; с аргументом (образ/username) — прямое подтверждение.
+- Callback `famleave:{decision}:{action}:{initiator_id}:{target_id}` для обоих escape-команд с защитой от нажатия посторонними.
+
+### Изменено
+
+- Текст подтверждения усыновления теперь различает «усыновление» и «удочерение» и указывает конкретную роль (`сын`/`дочь`).
+- `FamilyBundle` дополнен полем `owners: tuple[int, ...]` — список хозяев для питомца.
+
+### Исправлено
+
+- **PydanticSerializationError** в `ActivityTrackerMiddleware` (52 ошибки в продакшене с 5 июня): `model_dump_json(exclude_none=False)` падал на aiogram `Default` placeholder-объектах при обработке ответов на admin broadcast. Заменено на `model_dump(mode='json', exclude_none=True)`.
+
+### Техническое
+
+- Миграция `0047_add_child_role_and_family_archive`:
+  - `ALTER TABLE relationships_graph ADD COLUMN child_role VARCHAR(16)` — роль ребёнка, nullable, fallback `ребёнок`.
+  - Новая таблица `family_relationship_archive` — архив разорванных связей (original_id, chat_id, user_a/b, relation_type, child_role, archive_reason, archived_at).
+- Новые методы репозитория: `update_child_role`, `list_unresolved_parent_links`, `archive_and_remove_graph_relationship`.
+- Сущность `GraphRelationship` дополнена полем `child_role: str | None`.
+- 25 новых юнит-тестов (`tests/unit/test_family_escape_commands.py`), итого 633 passing.
+
+---
+
 ## [2026-06-02] — Кланы 2.0, меню бота, фиксы
 
 ### Добавлено
