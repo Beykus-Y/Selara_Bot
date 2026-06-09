@@ -1,6 +1,6 @@
 """add child_role to relationships_graph and family_relationship_archive table
 
-Revision ID: 0047_add_child_role_and_family_archive
+Revision ID: 0047_add_child_role
 Revises: 0046_add_disabled_rp_actions
 Create Date: 2026-06-09 00:00:00
 """
@@ -12,7 +12,7 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0047_add_child_role_and_family_archive"
+revision: str = "0047_add_child_role"
 down_revision: str | None = "0046_add_disabled_rp_actions"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
