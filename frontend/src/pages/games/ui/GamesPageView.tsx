@@ -936,38 +936,65 @@ export function GamesPageView({
 
   return (
     <div className="games-page">
-      <section className="games-hero">
-        <div>
-          <span className="page-card__eyebrow">Selara Party</span>
-          <h1>{data.hero_title}</h1>
-          <p>{data.hero_subtitle}</p>
-          <div className="games-hero__actions">
-            <a className="button button--secondary" href="#games-active">
-              К партиям
-            </a>
-            <button className="button button--primary" type="button" onClick={onRefresh} disabled={isRefreshing || isMutating}>
-              {isRefreshing ? 'Обновляю…' : 'Обновить сцену'}
-            </button>
-          </div>
-        </div>
-        <div className="games-hero__chips">
-          <span className="games-chip">Блеф и дедукция</span>
-          <span className="games-chip">Живые партии</span>
-          <span className="games-chip">Telegram и браузер</span>
-        </div>
-      </section>
+      <div>
+        <div className="eyebrow">Игры</div>
+        <h1 className="page">Игровой центр</h1>
+        <div className="page-sub">Live-партии и личные режимы</div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button
+          className="button button--primary"
+          style={{ flex: 1 }}
+          type="button"
+          onClick={onRefresh}
+          disabled={isRefreshing || isMutating}
+        >
+          {isRefreshing ? 'Обновляю…' : 'Обновить сцену'}
+        </button>
+      </div>
 
       {feedbackMessage ? <section className="games-banner">{feedbackMessage}</section> : null}
 
-      <section className="games-metrics">
-        {data.metrics.map((metric) => (
-          <article key={metric.label} className={`games-metric games-metric--${metric.tone}`}>
-            <span className="games-metric__label">{metric.label}</span>
-            <strong className="games-metric__value">{metric.value}</strong>
-            <span className="games-metric__note">{metric.note}</span>
-          </article>
-        ))}
-      </section>
+      <h2 className="sec">Режимы</h2>
+      <div className="mode-grid">
+        <div className="mode">
+          <div className="ico">☢️</div>
+          <b>Бункер</b>
+          <span>социальная выживалка</span>
+        </div>
+        <div className="mode">
+          <div className="ico">🤪</div>
+          <b>Бредовуха</b>
+          <span>ассоциации и абсурд</span>
+        </div>
+        <div className="mode">
+          <div className="ico">🎲</div>
+          <b>Кости</b>
+          <span>ставки на pts</span>
+        </div>
+        <div className="mode">
+          <div className="ico">🃏</div>
+          <b>Дуэли</b>
+          <span>1 на 1 по карточкам</span>
+        </div>
+      </div>
+
+      <h2 className="sec">Личная статистика</h2>
+      <div className="card" style={{ display: 'flex', gap: 0, padding: 0, overflow: 'hidden' }}>
+        <div className="stat" style={{ border: 'none', borderRadius: 0, borderRight: '1px solid var(--line)', background: 'transparent' }}>
+          <div className="k">Партий</div>
+          <div className="v">{data.metrics.find((m) => /всего игр|партий|games/i.test(m.label))?.value || '0'}</div>
+        </div>
+        <div className="stat" style={{ border: 'none', borderRadius: 0, borderRight: '1px solid var(--line)', background: 'transparent' }}>
+          <div className="k">Побед</div>
+          <div className="v" style={{ color: 'var(--green)' }}>{data.metrics.find((m) => /всего побед|побед|wins/i.test(m.label))?.value || '0'}</div>
+        </div>
+        <div className="stat" style={{ border: 'none', borderRadius: 0, background: 'transparent' }}>
+          <div className="k">Винрейт</div>
+          <div className="v">{data.metrics.find((m) => /винрейт|winrate/i.test(m.label))?.value || '0%'}</div>
+        </div>
+      </div>
 
       {showCreateLobby ? (
         <section className="games-panel">

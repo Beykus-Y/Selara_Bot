@@ -12,10 +12,10 @@ export function GroupsPage() {
     queryFn: () => getMiniAppPage<MiniAppGroupsPageData>('/miniapp/groups', 'Не удалось загрузить список групп.'),
   })
 
-  usePageTitle('Groups')
+  usePageTitle('Чаты')
 
   if (groupsQuery.isLoading) {
-    return <LoadingShell eyebrow="Groups" title="Собираю список групп" cards={3} />
+    return <LoadingShell eyebrow="Группы" title="Собираю список групп" cards={3} />
   }
 
   if (groupsQuery.isError) {
@@ -23,34 +23,56 @@ export function GroupsPage() {
   }
 
   if (!groupsQuery.data) {
-    return <LoadingShell eyebrow="Groups" title="Подгружаю доступные чаты" cards={3} />
+    return <LoadingShell eyebrow="Группы" title="Подгружаю доступные чаты" cards={3} />
   }
+
+  const adminGroups = groupsQuery.data.admin_groups || []
+  const activityGroups = groupsQuery.data.activity_groups || []
+
+  // Combine unique groups to count sums
+  const uniqueGroups = new Map()
+  adminGroups.forEach((g) => uniqueGroups.set(g.chat_id, g))
+  activityGroups.forEach((g) => uniqueGroups.set(g.chat_id, g))
+
+  const totalGroups = uniqueGroups.size
+  let totalMessages = 0
+  uniqueGroups.forEach((g) => {
+    totalMessages += g.message_count || 0
+  })
 
   return (
     <div className="miniapp-page-stack">
-      <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">Groups</span>
-        <div className="miniapp-hero-card__headline">
-          <div>
-            <h1>{groupsQuery.data.hero_title}</h1>
-            <p>{groupsQuery.data.hero_subtitle}</p>
-          </div>
+      <div>
+        <div className="eyebrow">Группы</div>
+        <h1 className="page">Ваши чаты</h1>
+        <div className="page-sub">
+          {totalGroups} групп · {totalMessages.toLocaleString()} сообщений суммарно
         </div>
-      </section>
+      </div>
 
       <MiniGroupSection
-        title="Managed groups"
+        title="Управляемые"
         text="Чаты, где у аккаунта есть права на управление ботом."
-        items={groupsQuery.data.admin_groups}
+        items={adminGroups}
         emptyText="Пока нет групп с управленческим доступом."
       />
 
       <MiniGroupSection
-        title="Activity groups"
-        text="Текущая активность и видимость групп для viewer."
-        items={groupsQuery.data.activity_groups}
+        title="Активность"
+        text="Текущая активность и видимость групп для пользователя."
+        items={activityGroups}
         emptyText="После активности в чатах здесь появятся группы."
       />
+
+      <a
+        className="btn ghost block"
+        style={{ marginTop: '10px' }}
+        href="https://t.me/Selara_Bot?startgroup=true"
+        target="_blank"
+        rel="noreferrer"
+      >
+        ＋ Добавить бота в группу
+      </a>
     </div>
   )
 }

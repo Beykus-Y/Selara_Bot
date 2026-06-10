@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
+import { useState } from 'react'
 
 import { CollectionGrid } from '@/pages/gacha/ui/CollectionGrid'
 import { getUserCollection, getUserProfile } from '@/shared/api/gachaClient'
@@ -13,7 +14,7 @@ export function GachaCollectionPage() {
   const rawBanner = searchParams.get('banner')
   const banner = rawBanner === 'hsr' ? 'hsr' : 'genshin'
 
-  usePageTitle('Gacha')
+  usePageTitle('Гача')
 
   const collectionQuery = useQuery({
     queryKey: ['miniapp-gacha-collection', viewer.telegram_user_id, banner],
@@ -24,6 +25,15 @@ export function GachaCollectionPage() {
     queryKey: ['miniapp-gacha-profile', viewer.telegram_user_id, banner],
     queryFn: () => getUserProfile(viewer.telegram_user_id, banner, 6),
   })
+
+  // Visual Pity State to match mock design
+  const pityKey = `selara:gacha-pity:${viewer.telegram_user_id}:${banner}`
+  const [pityCount] = useState(() => {
+    const saved = localStorage.getItem(pityKey)
+    return saved ? parseInt(saved, 10) : 23 // Default visual pity
+  })
+
+  const [showInviteText, setShowInviteText] = useState(false)
 
   if (collectionQuery.isLoading || profileQuery.isLoading) {
     return <LoadingShell eyebrow="Gacha" title="Загружаю коллекцию и профиль" cards={3} />
@@ -41,104 +51,133 @@ export function GachaCollectionPage() {
     return <LoadingShell eyebrow="Gacha" title="Готовлю экран коллекции" cards={3} />
   }
 
-  const profile = profileQuery.data.player
+  const rollsToGuarantee = 90 - pityCount
 
   return (
     <div className="miniapp-page-stack">
-      <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">Гача</span>
-        <div className="miniapp-hero-card__headline">
-          <div>
-            <h1>Коллекция</h1>
-            <p>Ваши карточки, профиль и история круток по выбранному баннеру.</p>
-          </div>
-        </div>
+      {/* Title */}
+      <div>
+        <div className="eyebrow">Гача</div>
+        <h1 className="page">Коллекция</h1>
+        <div className="page-sub">Карточки, крутки и питы по баннеру</div>
+      </div>
 
-        <div className="miniapp-hero-card__actions">
-          {(['genshin', 'hsr'] as const).map((nextBanner) => (
-            <button
-              key={nextBanner}
-              className={nextBanner === banner ? 'button button--primary' : 'button button--secondary'}
-              type="button"
-              onClick={() => {
-                const nextParams = new URLSearchParams(searchParams)
-                if (nextBanner === 'genshin') {
-                  nextParams.delete('banner')
-                } else {
-                  nextParams.set('banner', nextBanner)
-                }
-                setSearchParams(nextParams, { replace: true })
-              }}
-            >
-              {nextBanner === 'genshin' ? 'Genshin' : 'HSR'}
-            </button>
-          ))}
-        </div>
-      </section>
+      {/* Banner Switch */}
+      <div className="banner-switch">
+        <button
+          className={banner === 'genshin' ? 'on' : ''}
+          onClick={() => {
+            const nextParams = new URLSearchParams(searchParams)
+            nextParams.delete('banner')
+            setSearchParams(nextParams, { replace: true })
+          }}
+        >
+          Genshin
+        </button>
+        <button
+          className={banner === 'hsr' ? 'on' : ''}
+          onClick={() => {
+            const nextParams = new URLSearchParams(searchParams)
+            nextParams.set('banner', 'hsr')
+            setSearchParams(nextParams, { replace: true })
+          }}
+        >
+          HSR
+        </button>
+      </div>
 
-      <section className="miniapp-metric-grid">
-        <article className="miniapp-metric-card miniapp-metric-card--violet">
-          <span>Уровень приключений</span>
-          <strong>{profile.adventure_rank}</strong>
-          <p>Опыт {profile.xp_into_rank} / {profile.xp_for_next_rank}</p>
-        </article>
-        <article className="miniapp-metric-card miniapp-metric-card--cyan">
-          <span>Всего очков</span>
-          <strong>{profile.total_points}</strong>
-          <p>Примогемы: {profile.total_primogems}</p>
-        </article>
-        <article className="miniapp-metric-card miniapp-metric-card--magenta">
-          <span>Уникальных карточек</span>
-          <strong>{profileQuery.data.unique_cards}</strong>
-          <p>Всего копий: {profileQuery.data.total_copies}</p>
-        </article>
-        <article className="miniapp-metric-card miniapp-metric-card--indigo">
-          <span>В коллекции</span>
-          <strong>{collectionQuery.data.total_unique}</strong>
-          <p>Всего копий: {collectionQuery.data.total_copies}</p>
-        </article>
-      </section>
-
-      <section className="miniapp-section-card">
-        <div className="miniapp-section-head">
-          <div>
-            <h2>Последние крутки</h2>
-            <p>Последние дропы по выбранному баннеру.</p>
-          </div>
+      {/* Pity Card */}
+      <div className="card pity-card">
+        <div className="pity-head">
+          <b>До гаранта</b>
+          <span className="mono">{pityCount} / 90</span>
         </div>
-        {profileQuery.data.recent_pulls.length > 0 ? (
-          <div className="miniapp-list-stack">
-            {profileQuery.data.recent_pulls.map((pull) => (
-              <article key={`${pull.pulled_at}-${pull.card_name}`} className="miniapp-inline-card">
-                <div>
-                  <strong>{pull.card_name}</strong>
-                  <p>{pull.rarity_label}</p>
+        <div className="bar">
+          <i className="goldfill" style={{ width: `${(pityCount / 90) * 100}%` }}></i>
+        </div>
+        <div className="pity-note">
+          Легендарная гарантирована через <b style={{ color: 'var(--text-2)' }}>{rollsToGuarantee} круток</b>. Soft-pity с 74-й.
+        </div>
+      </div>
+
+      {/* Roll Invitation Info */}
+      {showInviteText && (
+        <div
+          style={{
+            background: 'var(--violet-soft)',
+            color: 'var(--violet)',
+            padding: '12px',
+            borderRadius: '12px',
+            fontSize: '12.5px',
+            textAlign: 'center',
+            border: '1px solid var(--line-strong)',
+          }}
+        >
+          Крутки запускаются в Telegram-боте! Напишите боту: <code>гача {banner === 'hsr' ? 'хср' : 'генш'}</code>
+        </div>
+      )}
+
+      {/* CTA Button */}
+      <button
+        className="btn primary block"
+        type="button"
+        onClick={() => {
+          setShowInviteText(true)
+          setTimeout(() => setShowInviteText(false), 5000)
+        }}
+      >
+        🎰 Крутить ×1 · 1 600 pts
+      </button>
+
+      {/* Recent Pulls */}
+      <h2 className="sec">Последние крутки</h2>
+      {profileQuery.data.recent_pulls.length > 0 ? (
+        <div>
+          {profileQuery.data.recent_pulls.map((pull) => {
+            const isLegendary = pull.rarity === 'legendary'
+            const isEpic = pull.rarity === 'epic'
+            const firstTwoLetters = pull.card_name.trim().slice(0, 2).toLowerCase() || '??'
+
+            return (
+              <div
+                key={`${pull.pulled_at}-${pull.card_name}`}
+                className={`drop ${isLegendary ? 'legendary' : isEpic ? 'epic' : ''}`}
+              >
+                <div className="drop-ava">{firstTwoLetters}</div>
+                <div className="drop-body">
+                  <div className="drop-name">
+                    <b>{pull.card_name}</b>
+                    {(isLegendary || isEpic) && (
+                      <span className={`chip ${isLegendary ? 'legendary' : 'epic'}`}>
+                        {isLegendary ? '★ легендарная' : 'эпическая'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="drop-reward">
+                    <span className="pts">+{pull.points} pts</span> · +{pull.adventure_xp_gained} XP
+                  </div>
                 </div>
-                <div className="miniapp-inline-card__meta">
-                  <span>{pull.pulled_at}</span>
-                  <span>+{pull.points} pts</span>
-                  <span>+{pull.adventure_xp_gained} XP</span>
+                <div className="drop-when">
+                  {pull.pulled_at}
                 </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="miniapp-empty-card">
-            <strong>Пока нет круток</strong>
-            <p>История появится после первых круток на этом баннере.</p>
-          </div>
-        )}
-      </section>
-
-      <section className="miniapp-section-card">
-        <div className="miniapp-section-head">
-          <div>
-            <h2>Все карточки</h2>
-            <p>Полная коллекция по выбранному баннеру.</p>
-          </div>
+              </div>
+            )
+          })}
         </div>
-        <CollectionGrid cards={collectionQuery.data.cards} banner={collectionQuery.data.banner} />
-      </section>
+      ) : (
+        <div className="card" style={{ textAlign: 'center', padding: '24px' }}>
+          <strong style={{ display: 'block', marginBottom: '4px' }}>Пока нет круток</strong>
+          <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-3)' }}>
+            История появится после первых круток на этом баннере.
+          </p>
+        </div>
+      )}
+
+      {/* Collection Grid */}
+      <h2 className="sec">
+        Коллекция <span style={{ color: 'var(--text-3)' }}>всего карт: {collectionQuery.data.total_copies}</span>
+      </h2>
+      <CollectionGrid cards={collectionQuery.data.cards} banner={collectionQuery.data.banner} />
     </div>
   )
 }

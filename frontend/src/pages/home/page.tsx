@@ -6,7 +6,6 @@ import { usePageTitle } from '@/shared/lib/use-page-title'
 import { getMiniAppPage } from '@/shared/miniapp/api'
 import { useMiniApp } from '@/shared/miniapp/context'
 import type { MiniAppHomePageData } from '@/shared/miniapp/model'
-import { MiniDashboardPanel, MiniGroupSection, MiniMetricGrid, MiniRecentGamesSection } from '@/shared/miniapp/ui'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function HomePage() {
@@ -30,64 +29,140 @@ export function HomePage() {
     return <LoadingShell eyebrow="Главная" title="Загружаю данные" cards={3} />
   }
 
+  // Extract metrics dynamically
+  const metrics = homeQuery.data.metrics || []
+  const levelMetric = metrics.find((m) => /уровень|level/i.test(m.label))
+  const xpMetric = metrics.find((m) => /опыт|xp/i.test(m.label))
+  const balanceMetric = metrics.find((m) => /баланс|очки|points|pts/i.test(m.label))
+  const streakMetric = metrics.find((m) => /серия|streak|дней/i.test(m.label))
+
+  const levelValue = levelMetric ? levelMetric.value : '1'
+  const xpText = xpMetric ? xpMetric.value : '0 / 100 XP'
+  const balanceValue = balanceMetric ? balanceMetric.value : '0'
+  const streakValue = streakMetric ? streakMetric.value : '0'
+
+  // Calculate XP percentage for progress bar and avatar ring
+  let xpPercent = 0
+  if (xpMetric) {
+    const cleanXpValue = xpMetric.value.replace(/\s/g, '')
+    const match = cleanXpValue.match(/(\d+)\/(\d+)/)
+    if (match) {
+      const current = parseInt(match[1], 10)
+      const total = parseInt(match[2], 10)
+      if (total > 0) {
+        xpPercent = Math.min(100, Math.round((current / total) * 100))
+      }
+    }
+  }
+
+  const strokeOffset = 188.5 - (188.5 * xpPercent) / 100
+  const initials = viewer.initials || viewer.display_name.slice(0, 2)
+
   return (
     <div className="miniapp-page-stack">
-      <section className="miniapp-hero-card">
-        <span className="miniapp-hero-card__eyebrow">Личный кабинет</span>
-        <div className="miniapp-hero-card__headline">
-          <div>
-            <h1>{homeQuery.data.hero_title}</h1>
-            <p>{homeQuery.data.hero_subtitle}</p>
+      {/* Profile Hero Card */}
+      <div className="profile-hero">
+        <div className="profile-top">
+          <div className="avatar-ring">
+            <svg viewBox="0 0 64 64">
+              <circle className="track" cx="32" cy="32" r="30" />
+              <circle
+                className="prog"
+                cx="32"
+                cy="32"
+                r="30"
+                style={{ strokeDashoffset: strokeOffset }}
+              />
+            </svg>
+            <div className="avatar">
+              {viewer.avatar_url ? (
+                <img src={viewer.avatar_url} alt={viewer.display_name} />
+              ) : (
+                initials
+              )}
+            </div>
+            <div className="lvl-badge">{levelValue}</div>
           </div>
-          {viewer.avatar_url ? <img className="miniapp-profile-avatar" src={viewer.avatar_url} alt={viewer.display_name} /> : null}
+          <div>
+            <div className="profile-name">{viewer.display_name}</div>
+            <div className="profile-handle">
+              {viewer.username ? `@${viewer.username}` : 'Telegram-аккаунт'}
+            </div>
+          </div>
         </div>
 
-        <div className="miniapp-hero-card__actions">
-          <a className="button button--secondary" href={homeQuery.data.desktop_url} target="_blank" rel="noreferrer">
-            ПК-панель
-          </a>
-          <Link className="button button--primary" to={routes.games}>
-            Игровой центр
-          </Link>
+        <div className="xp-row">
+          <div className="xp-meta">
+            <span>Уровень {levelValue}</span>
+            <span className="mono">{xpText}</span>
+          </div>
+          <div className="bar">
+            <i style={{ width: `${xpPercent}%` }}></i>
+          </div>
         </div>
 
-        <div className="miniapp-quick-grid">
-          <Link className="miniapp-quick-action" to={routes.groups}>
-            <strong>Группы</strong>
-            <span>Список групп, статистика и лидерборд.</span>
-          </Link>
-          <Link className="miniapp-quick-action" to={routes.games}>
-            <strong>Игры</strong>
-            <span>Активные партии и личные действия.</span>
-          </Link>
-          <Link className="miniapp-quick-action" to={routes.gacha}>
-            <strong>Коллекция</strong>
-            <span>Ваши карточки и история круток.</span>
-          </Link>
-          <Link className="miniapp-quick-action" to={routes.more}>
-            <strong>Ещё</strong>
-            <span>Профиль, справка и выход.</span>
-          </Link>
+        <div className="balance-row">
+          <div className="stat">
+            <div className="k">Баланс</div>
+            <div className="v gold">
+              {balanceValue} <small>pts</small>
+            </div>
+          </div>
+          <div className="stat">
+            <div className="k">Серия дней</div>
+            <div className="v">
+              {streakValue} <small>🔥</small>
+            </div>
+          </div>
         </div>
-      </section>
+      </div>
 
-      <MiniMetricGrid items={homeQuery.data.metrics} />
+      {/* Quick Actions */}
+      <h2 className="sec">Быстрые действия</h2>
+      <div className="quick">
+        <Link className="q accent" to={routes.gacha}>
+          <div className="ico">🎰</div>
+          <b>Крутить баннер</b>
+          <span>коллекция и крутки</span>
+        </Link>
+        <Link className="q" to={routes.more}>
+          <div className="ico">🎁</div>
+          <b>Ежедневный бонус</b>
+          <span>доступен в боте</span>
+        </Link>
+        <Link className="q" to={routes.games}>
+          <div className="ico">🎮</div>
+          <b>Игровой центр</b>
+          <span>активные партии</span>
+        </Link>
+        <Link className="q" to={routes.groups}>
+          <div className="ico">🏆</div>
+          <b>Лидерборд</b>
+          <span>активность чатов</span>
+        </Link>
+      </div>
 
-      <MiniGroupSection
-        title="Последние группы"
-        text="Чаты, доступные вашему аккаунту в мини-приложении."
-        items={homeQuery.data.recent_groups}
-        emptyText="Список появится после первой активности в группах."
-      />
-
-      <MiniRecentGamesSection
-        title="Последние партии"
-        text="Краткая история завершённых игр."
-        items={homeQuery.data.recent_games}
-        emptyText="История появится после первых завершённых игр."
-      />
-
-      <MiniDashboardPanel panel={homeQuery.data.global_dashboard} />
+      {/* Activity Feed */}
+      <h2 className="sec">
+        Лента <Link to={routes.groups}>все чаты</Link>
+      </h2>
+      <div className="card feed" style={{ padding: '6px 14px' }}>
+        {homeQuery.data.recent_games.map((game) => (
+          <Link key={game.game_id} className="row" to={routes.games}>
+            <div className="dot violet">🃏</div>
+            <div className="txt">
+              <b>{game.title}</b>
+              <span>{game.chat_title} · {game.result_text}</span>
+            </div>
+            <div className="when">{game.started_at}</div>
+          </Link>
+        ))}
+        {homeQuery.data.recent_games.length === 0 && (
+          <div style={{ padding: '12px 0', color: 'var(--text-3)', fontSize: '13px', textAlign: 'center' }}>
+            История появится после первых завершённых игр.
+          </div>
+        )}
+      </div>
     </div>
   )
 }

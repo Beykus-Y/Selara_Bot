@@ -4,14 +4,6 @@ import type { HomeDashboardPanel, HomeMetric } from '@/pages/home/model/types'
 import { routes } from '@/shared/config/routes'
 import type { MiniAppGroup, MiniAppRecentGameSummary } from '@/shared/miniapp/model'
 
-function filterMeta(meta: string): string {
-  return meta
-    .split(/\s*(?:•|·|\|)\s*/u)
-    .map((t) => t.trim())
-    .filter((t) => t && !/\bID\b/i.test(t) && !/-?\d{7,}/.test(t))
-    .join(' · ')
-}
-
 export function MiniMetricGrid({ items }: { items: HomeMetric[] }) {
   return (
     <section className="miniapp-metric-grid">
@@ -28,40 +20,71 @@ export function MiniMetricGrid({ items }: { items: HomeMetric[] }) {
 
 export function MiniGroupSection({
   title,
-  text,
   items,
   emptyText,
 }: {
   title: string
-  text: string
+  text?: string
   items: MiniAppGroup[]
   emptyText: string
 }) {
+  const gradients = [
+    'linear-gradient(140deg, #7c5cff, #4f3dbb)',
+    'linear-gradient(140deg, #e86aa6, #a4426f)',
+    'linear-gradient(140deg, #56a4f8, #3568b8)',
+    'linear-gradient(140deg, #4ade80, #27895a)',
+    'linear-gradient(140deg, #f3b94d, #b87d22)',
+  ]
+
   return (
-    <section className="miniapp-section-card">
-      <div className="miniapp-section-head">
-        <div>
-          <h2>{title}</h2>
-          <p>{text}</p>
-        </div>
-      </div>
+    <section>
+      <h2 className="sec">{title}</h2>
 
       {items.length > 0 ? (
-        <div className="miniapp-group-list">
-          {items.map((group) => (
-            <Link key={group.chat_id} className="miniapp-group-card" to={routes.chat(group.chat_id)}>
-              <div className="miniapp-group-card__head">
-                <strong>{group.title}</strong>
-                <span className={`miniapp-badge miniapp-badge--${group.badge}`}>{group.is_admin ? 'Админ' : 'Участник'}</span>
-              </div>
-              <p>{filterMeta(group.meta)}</p>
-            </Link>
-          ))}
+        <div>
+          {items.map((group) => {
+            const gradient = gradients[Math.abs(group.chat_id) % gradients.length]
+            const firstLetter = group.title.trim().slice(0, 1).toUpperCase() || '?'
+            
+            let actClass = 'stale'
+            const lastSeen = group.last_seen_at || 'давно'
+            if (/минут|секунд|онлайн|online|сейчас/i.test(lastSeen)) {
+              actClass = 'online'
+            } else if (/час|вчера/i.test(lastSeen)) {
+              actClass = 'recent'
+            }
+
+            return (
+              <Link key={group.chat_id} className="group-row" to={routes.chat(group.chat_id)}>
+                <div className="g-ava" style={{ background: gradient }}>
+                  {firstLetter}
+                </div>
+                <div className="g-body">
+                  <div className="g-name">
+                    <b>{group.title}</b>
+                    {(group.badge === 'owner' || group.is_admin) && (
+                      <span className={`chip ${group.badge === 'owner' ? 'owner' : 'coowner'}`}>
+                        {group.badge === 'owner' ? 'владелец' : 'совладелец'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="g-meta">
+                    <span className="mono">{group.message_count?.toLocaleString() ?? 0}</span> сообщений
+                  </div>
+                </div>
+                <div className="g-right">
+                  <div className={`g-act ${actClass}`}>{lastSeen}</div>
+                  <div className="g-arrow">›</div>
+                </div>
+              </Link>
+            )
+          })}
         </div>
       ) : (
-        <div className="miniapp-empty-card">
-          <strong>Пока пусто</strong>
-          <p>{emptyText}</p>
+        <div className="card">
+          <div style={{ color: 'var(--text-3)', fontSize: '13px', textAlign: 'center' }}>
+            {emptyText}
+          </div>
         </div>
       )}
     </section>

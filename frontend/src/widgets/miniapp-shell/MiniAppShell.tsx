@@ -1,22 +1,21 @@
 import { NavLink, Outlet, Link, useLocation } from 'react-router-dom'
 
 import { miniappNavigation, routes } from '@/shared/config/routes'
-import { useMiniApp } from '@/shared/miniapp/context'
 
 function resolveShellMeta(pathname: string) {
   if (pathname.startsWith('/chat/')) {
     return {
-      eyebrow: 'Group',
-      title: 'Overview & leaderboard',
+      title: 'Selara',
+      subtitle: 'обзор и лидерборд',
       backTo: routes.groups,
-      backLabel: 'Groups',
+      backLabel: 'Назад',
     }
   }
 
   if (pathname === routes.groups) {
     return {
-      eyebrow: 'Groups',
-      title: 'Ваши чаты и доступ',
+      title: 'Selara',
+      subtitle: 'ваши чаты и доступ',
       backTo: null,
       backLabel: null,
     }
@@ -24,8 +23,8 @@ function resolveShellMeta(pathname: string) {
 
   if (pathname === routes.games) {
     return {
-      eyebrow: 'Games',
-      title: 'Play / watch',
+      title: 'Selara',
+      subtitle: 'игровой центр',
       backTo: null,
       backLabel: null,
     }
@@ -33,8 +32,8 @@ function resolveShellMeta(pathname: string) {
 
   if (pathname === routes.gacha) {
     return {
-      eyebrow: 'Gacha',
-      title: 'Коллекция и профиль',
+      title: 'Selara',
+      subtitle: 'коллекция и крутки',
       backTo: null,
       backLabel: null,
     }
@@ -42,66 +41,83 @@ function resolveShellMeta(pathname: string) {
 
   if (pathname === routes.more) {
     return {
-      eyebrow: 'More',
-      title: 'Профиль и ссылки',
+      title: 'Selara',
+      subtitle: 'профиль и ссылки',
       backTo: null,
       backLabel: null,
     }
   }
 
   return {
-    eyebrow: 'Home',
-    title: 'Mini App',
+    title: 'Selara',
+    subtitle: 'мини-приложение',
     backTo: null,
     backLabel: null,
   }
 }
 
+const tabIcons: Record<string, { icon: string; labelRu: string }> = {
+  [routes.home]: { icon: '⌂', labelRu: 'Главная' },
+  [routes.groups]: { icon: '👥', labelRu: 'Группы' },
+  [routes.games]: { icon: '🎮', labelRu: 'Игры' },
+  [routes.gacha]: { icon: '🎴', labelRu: 'Гача' },
+  [routes.more]: { icon: '⋯', labelRu: 'Ещё' },
+}
+
 export function MiniAppShell() {
   const location = useLocation()
-  const { viewer } = useMiniApp()
   const meta = resolveShellMeta(location.pathname)
+
+  const handleClose = () => {
+    const tg = (window as any).Telegram?.WebApp
+    if (tg) {
+      tg.close()
+    }
+  }
 
   return (
     <div className="miniapp-shell">
-      <header className="miniapp-shell__header">
-        <div className="miniapp-shell__header-main">
-          {meta.backTo ? (
-            <Link className="miniapp-shell__back" to={meta.backTo}>
-              {meta.backLabel}
-            </Link>
-          ) : (
-            <span className="miniapp-shell__eyebrow">{meta.eyebrow}</span>
-          )}
-          <strong>{meta.title}</strong>
+      {/* Telegram chrome */}
+      <header className="tg-bar">
+        {meta.backTo ? (
+          <Link className="close" to={meta.backTo}>
+            {meta.backLabel}
+          </Link>
+        ) : (
+          <div className="close" onClick={handleClose}>
+            Закрыть
+          </div>
+        )}
+        <div className="title">
+          <b>{meta.title}</b>
+          <span>{meta.subtitle}</span>
         </div>
-
-        <NavLink className="miniapp-shell__viewer" to={routes.more}>
-          {viewer.avatar_url ? (
-            <img src={viewer.avatar_url} alt={viewer.display_name} />
-          ) : (
-            <span className="miniapp-shell__viewer-fallback">{viewer.initials}</span>
-          )}
-        </NavLink>
+        <div className="dots">•••</div>
       </header>
 
+      {/* Main Screen Scroll Area */}
       <main className="miniapp-shell__main">
         <Outlet />
       </main>
 
-      <nav className="miniapp-tabbar" aria-label="Mini App navigation">
-        {miniappNavigation.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.to === routes.home}
-            className={({ isActive }) =>
-              isActive ? 'miniapp-tabbar__item miniapp-tabbar__item--active' : 'miniapp-tabbar__item'
-            }
-          >
-            <span>{item.label}</span>
-          </NavLink>
-        ))}
+      {/* Bottom Navigation Tab Bar */}
+      <nav className="tabbar" aria-label="Mini App navigation">
+        {miniappNavigation.map((item) => {
+          const tabInfo = tabIcons[item.to] || { icon: '⋯', labelRu: item.label }
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === routes.home}
+              className={({ isActive }) =>
+                isActive ? 'tab on' : 'tab'
+              }
+            >
+              <span className="t-ico">{tabInfo.icon}</span>
+              <span className="t-lbl">{tabInfo.labelRu}</span>
+            </NavLink>
+          )
+        })}
       </nav>
     </div>
   )
