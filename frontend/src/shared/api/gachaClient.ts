@@ -92,7 +92,7 @@ function normalizeGachaImageUrl(imageUrl: string): string {
     return value
   }
 
-  const proxyBase = `${window.location.origin}${resolveAppPath('/gacha')}`
+  const proxyBase = GACHA_API_URL
 
   if (value.startsWith('/images/')) {
     return `${proxyBase}${value}`

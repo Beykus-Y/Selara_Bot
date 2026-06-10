@@ -32,38 +32,57 @@ body.miniapp-mode {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
   margin: 0;
   -webkit-font-smoothing: antialiased;
+
+  /* Lock viewport on mobile */
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 body.miniapp-mode #root {
   width: 100%;
+  height: 100%;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 100vh;
 }
 
 /* ===== Phone shell / Main Shell ===== */
 body.miniapp-mode .miniapp-shell {
   width: 100%;
-  max-width: 412px;
   height: 100vh;
-  max-height: 880px;
+  height: 100dvh;
   background: var(--bg);
   position: relative;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 0 0 1px rgba(148, 163, 216, .08), 0 40px 120px rgba(0, 0, 0, .7);
   padding: 0;
 }
 
 @media(min-width: 480px) {
+  body.miniapp-mode {
+    position: static;
+    width: auto;
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+  body.miniapp-mode #root {
+    min-height: 100vh;
+    height: auto;
+  }
   body.miniapp-mode .miniapp-shell {
-    border-radius: 36px;
+    max-width: 412px;
     height: 92vh;
+    max-height: 880px;
+    border-radius: 36px;
+    box-shadow: 0 0 0 1px rgba(148, 163, 216, .08), 0 40px 120px rgba(0, 0, 0, .7);
   }
 }
 
@@ -127,6 +146,7 @@ body.miniapp-mode .miniapp-shell__main {
   position: relative;
   z-index: 1;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: 18px 16px 96px;
   scrollbar-width: none;
   display: flex;
@@ -1161,5 +1181,402 @@ body.miniapp-mode .games-players .games-pill {
   background: var(--surface-3) !important;
   border: 1px solid var(--line) !important;
   font-size: 11px !important;
+}
+
+/* ===== Redesigned Shared / Chat miniapp- components ===== */
+body.miniapp-mode .miniapp-page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+body.miniapp-mode .miniapp-hero-card,
+body.miniapp-mode .miniapp-section-card,
+body.miniapp-mode .miniapp-empty-card,
+body.miniapp-mode .miniapp-chart-card,
+body.miniapp-mode .miniapp-table-card,
+body.miniapp-mode .miniapp-more-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+body.miniapp-mode .miniapp-hero-card {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, #191c30 0%, #12141f 60%);
+  border: 1px solid var(--line-strong);
+}
+body.miniapp-mode .miniapp-hero-card::after {
+  content: '';
+  position: absolute;
+  top: -60px;
+  right: -40px;
+  width: 200px;
+  height: 200px;
+  background: radial-gradient(circle, rgba(141, 123, 255, .22), transparent 70%);
+  pointer-events: none;
+}
+body.miniapp-mode .miniapp-hero-card__eyebrow {
+  display: inline-flex;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+body.miniapp-mode .miniapp-hero-card__headline {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+body.miniapp-mode .miniapp-hero-card__headline h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  margin: 4px 0 2px;
+}
+body.miniapp-mode .miniapp-hero-card__headline p {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 0;
+}
+
+/* Stat strip */
+body.miniapp-mode .miniapp-stat-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+body.miniapp-mode .miniapp-stat-strip__item {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+body.miniapp-mode .miniapp-stat-strip__item span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+body.miniapp-mode .miniapp-stat-strip__item strong {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  margin-top: 3px;
+}
+
+/* Metric card */
+body.miniapp-mode .miniapp-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+body.miniapp-mode .miniapp-metric-card {
+  background: rgba(10, 12, 20, .5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+body.miniapp-mode .miniapp-metric-card span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+body.miniapp-mode .miniapp-metric-card strong {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  margin-top: 3px;
+}
+body.miniapp-mode .miniapp-metric-card p {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+body.miniapp-mode .miniapp-metric-card--violet strong {
+  color: var(--violet);
+}
+body.miniapp-mode .miniapp-metric-card--cyan strong {
+  color: var(--rare);
+}
+body.miniapp-mode .miniapp-metric-card--magenta strong {
+  color: var(--epic);
+}
+body.miniapp-mode .miniapp-metric-card--indigo strong {
+  color: #7c5cff;
+}
+
+/* Chart */
+body.miniapp-mode .miniapp-chart {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  align-items: flex-end;
+  min-height: 140px;
+  padding: 10px 0;
+}
+body.miniapp-mode .miniapp-chart__bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+body.miniapp-mode .miniapp-chart__bar span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+}
+body.miniapp-mode .miniapp-chart__value {
+  width: 100%;
+  border-radius: 6px 6px 3px 3px;
+  background: linear-gradient(180deg, var(--violet), rgba(141, 123, 255, .3));
+  min-height: 4px;
+}
+body.miniapp-mode .miniapp-chart__label {
+  font-size: 9px !important;
+  color: var(--text-3) !important;
+  text-transform: uppercase;
+}
+
+/* Glance Grid */
+body.miniapp-mode .miniapp-glance-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+body.miniapp-mode .miniapp-glance-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+body.miniapp-mode .miniapp-glance-card span {
+  display: block;
+  font-size: 10px;
+  color: var(--text-3);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+body.miniapp-mode .miniapp-glance-card strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  margin-top: 6px;
+  color: var(--text);
+}
+body.miniapp-mode .miniapp-glance-card p {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+/* Inline card & list stack */
+body.miniapp-mode .miniapp-list-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+body.miniapp-mode .miniapp-inline-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+body.miniapp-mode .miniapp-inline-card strong {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+body.miniapp-mode .miniapp-inline-card p {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+body.miniapp-mode .miniapp-inline-card__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+}
+body.miniapp-mode .miniapp-inline-card__value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+/* Section Head */
+body.miniapp-mode .miniapp-section-head {
+  margin-bottom: 12px;
+}
+body.miniapp-mode .miniapp-section-head h2 {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+body.miniapp-mode .miniapp-section-head p {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+/* Leaderboard Preview */
+body.miniapp-mode .miniapp-leaderboard-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+body.miniapp-mode .miniapp-leaderboard-preview__section {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+body.miniapp-mode .miniapp-leaderboard-preview__section h3 {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+body.miniapp-mode .miniapp-leaderboard-preview__section p {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+  margin-bottom: 8px;
+}
+body.miniapp-mode .miniapp-leaderboard-row {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  align-items: center;
+}
+body.miniapp-mode .miniapp-leaderboard-row > strong {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  text-align: center;
+}
+body.miniapp-mode .miniapp-leaderboard-row > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+body.miniapp-mode .miniapp-leaderboard-row > div strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+body.miniapp-mode .miniapp-leaderboard-row > div span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* Full Leaderboard Table styles */
+body.miniapp-mode .miniapp-mode-switch {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+body.miniapp-mode .miniapp-mode-switch .button {
+  flex: 1;
+  font-size: 11px;
+  padding: 6px 12px;
+}
+body.miniapp-mode .miniapp-table-controls {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+body.miniapp-mode .miniapp-table-controls form {
+  display: flex;
+  gap: 6px;
+}
+body.miniapp-mode .miniapp-table-controls input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+}
+body.miniapp-mode .miniapp-table-controls input::placeholder {
+  color: var(--text-3);
+}
+body.miniapp-mode .miniapp-table-controls .button {
+  padding: 8px 14px;
+}
+body.miniapp-mode .miniapp-table-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.miniapp-mode .miniapp-table-row {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  align-items: center;
+}
+body.miniapp-mode .miniapp-table-row > strong {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-2);
+  text-align: center;
+}
+body.miniapp-mode .miniapp-table-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+body.miniapp-mode .miniapp-table-row__meta span {
+  background: rgba(10, 12, 20, 0.4);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+body.miniapp-mode .miniapp-table-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+body.miniapp-mode .miniapp-table-pagination .button {
+  padding: 6px 12px;
+  font-size: 11px;
 }
 

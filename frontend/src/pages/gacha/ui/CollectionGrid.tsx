@@ -31,9 +31,23 @@ export function CollectionGrid({ cards, banner }: CollectionGridProps) {
         const constellationText = upgradeLevel > 0 ? (banner === 'hsr' ? `E${upgradeLevel}` : `C${upgradeLevel}`) : ''
 
         return (
-          <div key={card.code} className={`coll ${rarityClass}`}>
-            {card.name}
-            {constellationText && <span className="c">{constellationText}</span>}
+          <div
+            key={card.code}
+            className={`coll ${rarityClass}`}
+            style={
+              card.image_url
+                ? {
+                    backgroundImage: `linear-gradient(180deg, transparent 40%, rgba(7, 8, 16, 0.85) 90%), url(${card.image_url})`,
+                    backgroundSize: 'cover',
+                    backgroundPosition: 'center',
+                  }
+                : undefined
+            }
+          >
+            <span style={{ position: 'relative', zIndex: 1, textShadow: '0 1px 3px rgba(0,0,0,0.9)', color: '#ffffff' }}>
+              {card.name}
+            </span>
+            {constellationText && <span className="c" style={{ zIndex: 2 }}>{constellationText}</span>}
           </div>
         )
       })}

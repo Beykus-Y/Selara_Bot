@@ -1,58 +1,16 @@
-import { NavLink, Outlet, Link, useLocation } from 'react-router-dom'
+import { useEffect } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
 import { miniappNavigation, routes } from '@/shared/config/routes'
 
 function resolveShellMeta(pathname: string) {
   if (pathname.startsWith('/chat/')) {
     return {
-      title: 'Selara',
-      subtitle: 'обзор и лидерборд',
       backTo: routes.groups,
-      backLabel: 'Назад',
     }
   }
-
-  if (pathname === routes.groups) {
-    return {
-      title: 'Selara',
-      subtitle: 'ваши чаты и доступ',
-      backTo: null,
-      backLabel: null,
-    }
-  }
-
-  if (pathname === routes.games) {
-    return {
-      title: 'Selara',
-      subtitle: 'игровой центр',
-      backTo: null,
-      backLabel: null,
-    }
-  }
-
-  if (pathname === routes.gacha) {
-    return {
-      title: 'Selara',
-      subtitle: 'коллекция и крутки',
-      backTo: null,
-      backLabel: null,
-    }
-  }
-
-  if (pathname === routes.more) {
-    return {
-      title: 'Selara',
-      subtitle: 'профиль и ссылки',
-      backTo: null,
-      backLabel: null,
-    }
-  }
-
   return {
-    title: 'Selara',
-    subtitle: 'мини-приложение',
     backTo: null,
-    backLabel: null,
   }
 }
 
@@ -66,35 +24,30 @@ const tabIcons: Record<string, { icon: string; labelRu: string }> = {
 
 export function MiniAppShell() {
   const location = useLocation()
+  const navigate = useNavigate()
   const meta = resolveShellMeta(location.pathname)
 
-  const handleClose = () => {
+  useEffect(() => {
     const tg = (window as any).Telegram?.WebApp
-    if (tg) {
-      tg.close()
+    if (!tg) return
+
+    if (meta.backTo) {
+      tg.BackButton.show()
+      const handleBackClick = () => {
+        navigate(meta.backTo!)
+      }
+      tg.BackButton.onClick(handleBackClick)
+      return () => {
+        tg.BackButton.offClick(handleBackClick)
+        tg.BackButton.hide()
+      }
+    } else {
+      tg.BackButton.hide()
     }
-  }
+  }, [meta.backTo, navigate])
 
   return (
     <div className="miniapp-shell">
-      {/* Telegram chrome */}
-      <header className="tg-bar">
-        {meta.backTo ? (
-          <Link className="close" to={meta.backTo}>
-            {meta.backLabel}
-          </Link>
-        ) : (
-          <div className="close" onClick={handleClose}>
-            Закрыть
-          </div>
-        )}
-        <div className="title">
-          <b>{meta.title}</b>
-          <span>{meta.subtitle}</span>
-        </div>
-        <div className="dots">•••</div>
-      </header>
-
       {/* Main Screen Scroll Area */}
       <main className="miniapp-shell__main">
         <Outlet />
