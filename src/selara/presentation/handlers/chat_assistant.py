@@ -1389,15 +1389,19 @@ async def family_command(message: Message, command: CommandObject, activity_repo
     )
 
     bundle = await activity_repo.list_family_bundle(chat_id=message.chat.id, user_id=subject.telegram_user_id)
+    
+    from selara.presentation.family_resolver import resolve_family_relations
+    resolved_bundle = resolve_family_relations(bundle)
+
     if not any(
         [
-            bundle.parents,
-            bundle.step_parents,
-            bundle.children,
-            bundle.pets,
-            bundle.spouse_user_id,
-            bundle.grandparents,
-            bundle.siblings,
+            resolved_bundle.parents,
+            resolved_bundle.step_parents,
+            resolved_bundle.children,
+            resolved_bundle.pets,
+            resolved_bundle.spouse_user_id is not None,
+            resolved_bundle.grandparents,
+            resolved_bundle.siblings,
         ]
     ):
         await message.answer("Для этого пользователя семейные связи пока не найдены.")
@@ -1411,18 +1415,18 @@ async def family_command(message: Message, command: CommandObject, activity_repo
     )
     spouse_label = (
         None
-        if bundle.spouse_user_id is None
-        else await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=bundle.spouse_user_id)
+        if resolved_bundle.spouse_user_id is None
+        else await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=resolved_bundle.spouse_user_id)
     )
-    image_bytes = build_family_tree_image(
+    image_bytes = await build_family_tree_image(
         subject_label=subject_label,
-        grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.grandparents)),
-        parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.parents)),
-        step_parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.step_parents)),
+        grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.grandparents)),
+        parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.parents)),
+        step_parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.step_parents)),
         spouse=spouse_label,
-        siblings=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.siblings)),
-        children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.children)),
-        pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(bundle.pets)),
+        siblings=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.siblings)),
+        children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.children)),
+        pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.pets)),
     )
     await message.answer_photo(BufferedInputFile(image_bytes, filename="family_tree.png"))
 

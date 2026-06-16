@@ -161,12 +161,17 @@ async def run() -> None:
     session_factory = create_session_factory(engine)
     GAME_STORE.configure_runtime(redis_url=settings.redis_url, ttl_hours=settings.game_state_ttl_hours)
 
+    from selara.presentation.renderer_service import PlaywrightRendererService
+    renderer_service = PlaywrightRendererService.get_instance()
+    await renderer_service.start()
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(run_message_event_backfill(session_factory))
             tg.create_task(_run_bot(settings, session_factory))
             tg.create_task(_run_web_panel(settings, session_factory))
     finally:
+        await renderer_service.stop()
         await GAME_STORE.close()
         await engine.dispose()
 

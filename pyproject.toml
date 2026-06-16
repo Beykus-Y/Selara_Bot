@@ -26,6 +26,7 @@ dependencies = [
   "redis>=5.2.1,<6",
   "openai>=1.30.0,<2",
   "cryptography>=42.0.0,<44",
+  "playwright>=1.40.0,<2",
 ]
 
 [project.optional-dependencies]

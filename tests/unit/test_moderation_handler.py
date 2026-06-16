@@ -63,7 +63,10 @@ async def test_apply_moderation_action_ignores_telegram_admin_target_for_ban(mon
         ),
         apply_moderation_action=AsyncMock(),
     )
-    bot = SimpleNamespace(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")))
+    bot = SimpleNamespace(
+        get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")),
+        promote_chat_member=AsyncMock(),
+    )
 
     monkeypatch.setattr(moderation, "has_command_access", AsyncMock(return_value=(True, "owner", "admin", False)))
     monkeypatch.setattr(moderation, "has_permission", AsyncMock(return_value=(True, "owner", False)))
@@ -79,7 +82,7 @@ async def test_apply_moderation_action_ignores_telegram_admin_target_for_ban(mon
     )
 
     activity_repo.apply_moderation_action.assert_not_awaited()
-    message.answer.assert_not_awaited()
+    message.answer.assert_awaited_once()
     bot.get_chat_member.assert_awaited_once_with(chat_id=message.chat.id, user_id=target.telegram_user_id)
 
 

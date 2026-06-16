@@ -96,6 +96,25 @@ class PendingPersonaConflict:
 _PENDING_PERSONA_CONFLICTS: dict[str, PendingPersonaConflict] = {}
 
 
+@dataclass(frozen=True)
+class PendingBanConfirmation:
+    request_id: str
+    chat_id: int
+    actor_user_id: int
+    target_user_id: int
+    target_username: str | None
+    target_first_name: str | None
+    target_last_name: str | None
+    target_chat_display_name: str | None
+    target_is_bot: bool
+    reason: str | None
+    created_at: datetime
+
+
+_PENDING_BAN_CONFIRMATIONS: dict[str, PendingBanConfirmation] = {}
+_BAN_CONFIRM_TTL = timedelta(minutes=10)
+
+
 def _target_label(target: UserSnapshot) -> str:
     return display_name_from_parts(
         user_id=target.telegram_user_id,
@@ -358,6 +377,45 @@ async def _try_unrestrict_user(bot: Bot, *, chat_id: int, user_id: int) -> bool:
         return False
 
 
+async def _try_demote_admin(bot: Bot, *, chat_id: int, user_id: int) -> bool:
+    try:
+        await bot.promote_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            can_manage_chat=False,
+            can_post_messages=False,
+            can_edit_messages=False,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+
+
+def _cleanup_pending_ban_confirmations() -> None:
+    now = datetime.now(timezone.utc)
+    for request_id, pending in list(_PENDING_BAN_CONFIRMATIONS.items()):
+        if pending.created_at + _BAN_CONFIRM_TTL <= now:
+            _PENDING_BAN_CONFIRMATIONS.pop(request_id, None)
+
+
+def _ban_confirm_markup(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Забанить", callback_data=f"banconfirm:confirm:{request_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"banconfirm:cancel:{request_id}"),
+            ]
+        ]
+    )
+
+
 def _is_chat_member_admin(member) -> bool:
     return getattr(member, "status", None) in {"administrator", "creator"}
 
@@ -544,6 +602,36 @@ async def _apply_moderation_action(
         chat_id=message.chat.id,
         user_id=target.telegram_user_id,
     ):
+        demoted = await _try_demote_admin(bot, chat_id=message.chat.id, user_id=target.telegram_user_id)
+        if not demoted:
+            await message.answer(
+                f"<b>{escape(_target_label(target))}</b> является администратором чата.\n"
+                "Не удалось снять административные права автоматически. "
+                "Разжалуйте пользователя вручную и повторите команду.",
+                parse_mode="HTML",
+            )
+            return
+        _cleanup_pending_ban_confirmations()
+        request_id = secrets.token_hex(8)
+        _PENDING_BAN_CONFIRMATIONS[request_id] = PendingBanConfirmation(
+            request_id=request_id,
+            chat_id=message.chat.id,
+            actor_user_id=message.from_user.id,
+            target_user_id=target.telegram_user_id,
+            target_username=target.username,
+            target_first_name=target.first_name,
+            target_last_name=target.last_name,
+            target_chat_display_name=target.chat_display_name,
+            target_is_bot=target.is_bot,
+            reason=reason or None,
+            created_at=datetime.now(timezone.utc),
+        )
+        await message.answer(
+            f"Административные права сняты с <b>{escape(_target_label(target))}</b>.\n"
+            "Подтвердите бан:",
+            parse_mode="HTML",
+            reply_markup=_ban_confirm_markup(request_id),
+        )
         return
 
     chat = build_chat_snapshot(chat_id=message.chat.id, chat_type=message.chat.type, chat_title=message.chat.title)
@@ -1796,6 +1884,86 @@ async def persona_conflict_callback(query: CallbackQuery, activity_repo) -> None
         parse_mode="HTML",
     )
     await query.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("banconfirm:"))
+async def ban_confirm_callback(query: CallbackQuery, activity_repo, bot: Bot) -> None:
+    if query.data is None or query.from_user is None or query.message is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    _cleanup_pending_ban_confirmations()
+    _, action, request_id = parts
+    pending = _PENDING_BAN_CONFIRMATIONS.get(request_id)
+    if pending is None:
+        await query.answer("Запрос уже не активен.", show_alert=True)
+        return
+    if query.from_user.id != pending.actor_user_id:
+        await query.answer("Подтвердить бан может только инициатор.", show_alert=True)
+        return
+    if query.message.chat.id != pending.chat_id:
+        await query.answer("Чат запроса не совпадает.", show_alert=True)
+        return
+
+    _PENDING_BAN_CONFIRMATIONS.pop(request_id, None)
+
+    if action != "confirm":
+        await query.message.edit_text("Бан отменён.")
+        await query.answer("Отменено")
+        return
+
+    target_snapshot = UserSnapshot(
+        telegram_user_id=pending.target_user_id,
+        username=pending.target_username,
+        first_name=pending.target_first_name,
+        last_name=pending.target_last_name,
+        is_bot=pending.target_is_bot,
+        chat_display_name=pending.target_chat_display_name,
+    )
+    chat = build_chat_snapshot(
+        chat_id=query.message.chat.id,
+        chat_type=query.message.chat.type,
+        chat_title=query.message.chat.title,
+    )
+    actor = build_user_snapshot(
+        user_id=query.from_user.id,
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name,
+        is_bot=bool(query.from_user.is_bot),
+    )
+
+    result = await activity_repo.apply_moderation_action(
+        chat=chat,
+        actor=actor,
+        target=target_snapshot,
+        action="ban",
+        reason=pending.reason,
+        amount=1,
+    )
+    restrict_applied = await _try_restrict_user(bot, chat_id=pending.chat_id, user_id=pending.target_user_id)
+
+    st = result.state
+    lines = [
+        f"<b>{escape(_target_label(target_snapshot))}</b>",
+        "Бан.",
+        "Причина:",
+        escape(pending.reason or "не указана"),
+    ]
+    if result.auto_warns_added > 0:
+        lines.append(f"Авто-конвертация: +{result.auto_warns_added} варн(ов) из предов.")
+    if result.auto_ban_triggered:
+        lines.append("Авто-бан: достигнут порог 3 варна.")
+    lines.append(f"Преды: <b>{st.pending_preds}</b>/3 | Варны: <b>{st.warn_count}</b>/3 | Банов: {st.total_bans}")
+    if restrict_applied is False:
+        lines.append("<i>Telegram-бан не применён (нет прав у бота), но внутренний статус обновлён.</i>")
+
+    await query.message.edit_text("\n".join(lines), parse_mode="HTML")
+    await query.answer("Забанен")
 
 
 @router.message(Command(*_SLASH_MODERATION_COMMANDS))

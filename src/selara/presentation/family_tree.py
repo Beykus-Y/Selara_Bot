@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import html
+import re
 from io import BytesIO
 import unicodedata
+from typing import Any, Sequence
 
 from selara.presentation.font_support import resolve_emoji_font_paths, resolve_matplotlib_font_path
+from selara.presentation.renderer_service import PlaywrightRendererService
 from selara.presentation.charts import (
     _ACCENT_CYAN,
     _ACCENT_GOLD,
@@ -16,13 +20,9 @@ from selara.presentation.charts import (
     _TEXT_MUTED,
 )
 
+# Pillow downscale dependency
+from PIL import Image
 
-_CARD_WIDTH = 196
-_CARD_RADIUS = 24
-_CARD_OUTLINE_WIDTH = 2
-_LINE_WIDTH = 4
-_DASHED_WIDTH = 3
-_EMOJI_FIXED_SIZES = (109, 128, 96, 72, 64)
 _EMOJI_RANGES = (
     (0x1F1E6, 0x1F1FF),
     (0x1F300, 0x1F5FF),
@@ -37,21 +37,18 @@ _EMOJI_RANGES = (
     (0x2700, 0x27BF),
 )
 
-
+# Kept for backward compatibility with existing tests
 def _font_candidates(*, bold: bool) -> tuple[str, ...]:
     resolved = resolve_matplotlib_font_path(bold=bold)
     if resolved is None:
         return ()
     return (resolved,)
 
-
 def _emoji_font_candidates() -> tuple[str, ...]:
     return resolve_emoji_font_paths()
 
-
 def _load_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
-
     for candidate in _font_candidates(bold=bold):
         try:
             return ImageFont.truetype(candidate, size=size)
@@ -59,10 +56,10 @@ def _load_font(size: int, *, bold: bool = False):
             continue
     return ImageFont.load_default()
 
+_EMOJI_FIXED_SIZES = (109, 128, 96, 72, 64)
 
 def _load_emoji_font(size: int):
     from PIL import ImageFont
-
     load_sizes = (size, *[candidate for candidate in _EMOJI_FIXED_SIZES if candidate != size])
     for candidate in _emoji_font_candidates():
         for load_size in load_sizes:
@@ -72,29 +69,23 @@ def _load_emoji_font(size: int):
                 continue
     return None
 
-
 def _is_emoji_char(value: str) -> bool:
     if not value:
         return False
     codepoint = ord(value)
     return any(start <= codepoint <= end for start, end in _EMOJI_RANGES)
 
-
 def _is_regional_indicator(value: str) -> bool:
     return bool(value) and 0x1F1E6 <= ord(value) <= 0x1F1FF
-
 
 def _is_emoji_modifier(value: str) -> bool:
     return bool(value) and 0x1F3FB <= ord(value) <= 0x1F3FF
 
-
 def _is_variation_selector(value: str) -> bool:
     return value in {"\ufe0e", "\ufe0f"}
 
-
 def _is_keycap_base(value: str) -> bool:
     return value in set("0123456789#*")
-
 
 def _is_emoji_start(text: str, index: int) -> bool:
     value = text[index]
@@ -105,7 +96,6 @@ def _is_emoji_start(text: str, index: int) -> bool:
         after_next = text[index + 2] if index + 2 < len(text) else ""
         return next_value == "\ufe0f" or next_value == "\u20e3" or after_next == "\u20e3"
     return False
-
 
 def _consume_emoji_cluster(text: str, start: int) -> tuple[str, int]:
     cluster = [text[start]]
@@ -129,7 +119,6 @@ def _consume_emoji_cluster(text: str, start: int) -> tuple[str, int]:
         break
     return "".join(cluster), index
 
-
 def _split_text_runs(text: str) -> list[tuple[str, bool]]:
     runs: list[tuple[str, bool]] = []
     index = 0
@@ -146,31 +135,58 @@ def _split_text_runs(text: str) -> list[tuple[str, bool]]:
     return runs
 
 
-def _wrap_lines(text: str, *, line_len: int = 20) -> list[str]:
-    normalized = " ".join((text or "").split()).strip()
+# New rendering logic
+def escape_html(text: str | None) -> str:
+    if not text:
+        return "(без имени)"
+    normalized = " ".join(text.split()).strip()
     if not normalized:
-        return ["-"]
-    words = normalized.split(" ")
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        candidate = word if not current else f"{current} {word}"
-        if len(candidate) <= line_len:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-        current = word
-    if current:
-        lines.append(current)
-    return lines[:3]
+        return "(без имени)"
+    return html.escape(normalized)
 
+def is_aggregate(label: str) -> bool:
+    return bool(re.match(r"^\+\d+\s*(еще|ещё|more)", label, re.IGNORECASE))
 
-def _card_height_for_label(label: str) -> int:
-    return 90 + max(0, len(_wrap_lines(label)) - 1) * 20
+def chunk_list(lst: list[Any], chunk_size: int) -> list[list[Any]]:
+    return [lst[i : i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
+def truncate_list(labels: list[str], limit: int) -> list[str]:
+    if len(labels) <= limit:
+        return labels
+    visible = labels[:limit - 1]
+    remaining = len(labels) - len(visible)
+    visible.append(f"+{remaining} еще")
+    return visible
 
-def build_family_tree_image(
+def render_card(role_title: str, name_label: str, accent_color: str, extra_class: str = "") -> str:
+    escaped_name = escape_html(name_label)
+    if is_aggregate(name_label):
+        return f"""
+        <div class="card aggregate {extra_class}" style="--border-color: var(--text-muted)">
+            <div class="card-name"><span dir="auto">{escaped_name}</span></div>
+        </div>
+        """
+    return f"""
+    <div class="card {extra_class}" style="--border-color: {accent_color}">
+        <div class="card-dot" style="background-color: {accent_color}"></div>
+        <div class="card-subtitle">{role_title}</div>
+        <div class="card-name"><span dir="auto">{escaped_name}</span></div>
+    </div>
+    """
+
+def downscale_if_needed(image_bytes: bytes, max_side: int = 1280) -> bytes:
+    im = Image.open(BytesIO(image_bytes))
+    w, h = im.size
+    if max(w, h) > max_side:
+        scale = max_side / max(w, h)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
+        im = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    buffer = BytesIO()
+    im.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+async def build_family_tree_image(
     *,
     subject_label: str,
     parents: list[str],
@@ -181,346 +197,387 @@ def build_family_tree_image(
     pets: list[str],
     grandparents: list[str] | None = None,
 ) -> bytes:
-    from PIL import Image, ImageDraw
+    # 1. Compute stats row metrics (based on total deduplicated counts before truncation)
+    total_parents_count = len(parents) + len(step_parents or [])
+    total_spouse_count = 1 if spouse else 0
+    total_children_count = len(children)
+    total_pets_count = len(pets)
 
-    direct_parents = parents[:2]
-    indirect_parents = (step_parents or [])[:2]
-    sibling_labels = (siblings or [])[:5]
-    grandparent_labels = (grandparents or [])[:4]
-    lower_generation = [*children[:8], *pets[:6]]
-    top_count = max(1, len(direct_parents) + len(indirect_parents))
-    bottom_count = max(1, len(lower_generation))
-    content_slots = max(3, top_count, bottom_count)
-    width = max(1320, 280 + content_slots * 220)
-    height = 980
+    # 2. Truncate using display limits
+    step_parents = step_parents or []
+    siblings = siblings or []
+    grandparents = grandparents or []
 
-    image = Image.new("RGBA", (width, height), _FIGURE_BG)
-    draw = ImageDraw.Draw(image)
+    truncated_parents = truncate_list(parents, 2)
+    truncated_step_parents = truncate_list(step_parents, 2)
+    truncated_siblings = truncate_list(siblings, 5)
+    truncated_children = truncate_list(children, 8)
+    truncated_pets = truncate_list(pets, 6)
+    truncated_grandparents = truncate_list(grandparents, 4)
 
-    title_font = _load_font(34, bold=True)
-    section_font = _load_font(20)
-    name_font = _load_font(20, bold=True)
-    small_font = _load_font(15)
-    chip_font = _load_font(15, bold=True)
-    emoji_font_cache: dict[int, tuple[object, int] | None] = {}
-    emoji_render_cache: dict[tuple[str, int, str], Image.Image | None] = {}
-
-    def _font_size(font, fallback: int = 16) -> int:
-        return int(getattr(font, "size", fallback))
-
-    def _line_height(font) -> int:
-        _left, _top, _right, bottom = draw.textbbox((0, 0), "Ag", font=font)
-        return bottom - _top
-
-    def _get_emoji_font(font):
-        size = _font_size(font)
-        if size not in emoji_font_cache:
-            emoji_font_cache[size] = _load_emoji_font(size)
-        return emoji_font_cache[size]
-
-    def _render_emoji(text: str, *, font, fill: str) -> Image.Image | None:
-        size = _font_size(font)
-        cache_key = (text, size, fill)
-        if cache_key in emoji_render_cache:
-            cached = emoji_render_cache[cache_key]
-            return None if cached is None else cached.copy()
-
-        emoji_font_info = _get_emoji_font(font)
-        if emoji_font_info is None:
-            emoji_render_cache[cache_key] = None
-            return None
-
-        emoji_font, load_size = emoji_font_info
-        measure = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-        measure_draw = ImageDraw.Draw(measure)
-        try:
-            bbox = measure_draw.textbbox((0, 0), text, font=emoji_font, embedded_color=True)
-        except TypeError:
-            bbox = measure_draw.textbbox((0, 0), text, font=emoji_font)
-
-        width_local = max(1, bbox[2] - bbox[0])
-        height_local = max(1, bbox[3] - bbox[1])
-        temp = Image.new("RGBA", (width_local + 8, height_local + 8), (0, 0, 0, 0))
-        temp_draw = ImageDraw.Draw(temp)
-        try:
-            temp_draw.text((4 - bbox[0], 4 - bbox[1]), text, font=emoji_font, fill=fill, embedded_color=True)
-        except TypeError:
-            temp_draw.text((4 - bbox[0], 4 - bbox[1]), text, font=emoji_font, fill=fill)
-
-        alpha_bbox = temp.getbbox()
-        if alpha_bbox is None:
-            emoji_render_cache[cache_key] = None
-            return None
-
-        rendered = temp.crop(alpha_bbox)
-        if load_size != size:
-            scale = size / load_size
-            rendered = rendered.resize(
-                (
-                    max(1, round(rendered.width * scale)),
-                    max(1, round(rendered.height * scale)),
-                ),
-                Image.Resampling.LANCZOS,
-            )
-
-        emoji_render_cache[cache_key] = rendered
-        return rendered.copy()
-
-    def _measure_text(text: str, *, font) -> tuple[int, int]:
-        if not text:
-            return (0, _line_height(font))
-
-        width_local = 0
-        height_local = _line_height(font)
-        for segment, is_emoji in _split_text_runs(text):
-            if not segment:
-                continue
-            if is_emoji:
-                rendered = _render_emoji(segment, font=font, fill=_TEXT_MAIN)
-                if rendered is not None:
-                    width_local += rendered.width
-                    height_local = max(height_local, rendered.height)
-                    continue
-            bbox = draw.textbbox((0, 0), segment, font=font)
-            width_local += max(0, bbox[2] - bbox[0])
-            height_local = max(height_local, bbox[3] - bbox[1])
-        return width_local, height_local
-
-    def _draw_text(x: float, y: float, text: str, *, fill: str, font) -> tuple[int, int]:
-        width_local, height_local = _measure_text(text, font=font)
-        cursor_x = x
-        line_height = _line_height(font)
-        for segment, is_emoji in _split_text_runs(text):
-            if not segment:
-                continue
-            if is_emoji:
-                rendered = _render_emoji(segment, font=font, fill=fill)
-                if rendered is not None:
-                    emoji_y = y + max(0, (line_height - rendered.height) / 2)
-                    image.alpha_composite(rendered, dest=(int(round(cursor_x)), int(round(emoji_y))))
-                    cursor_x += rendered.width
-                    continue
-            draw.text((cursor_x, y), segment, fill=fill, font=font)
-            bbox = draw.textbbox((0, 0), segment, font=font)
-            cursor_x += max(0, bbox[2] - bbox[0])
-        return width_local, height_local
-
-    _draw_text(64, 48, "Семья и династия", fill=_TEXT_MAIN, font=title_font)
-
-    def _text_height(text: str, font) -> int:
-        return _measure_text(text, font=font)[1]
-
-    def draw_pill(
-        x: int,
-        y: int,
-        text: str,
-        *,
-        outline: str,
-        font,
-        text_fill: str = _TEXT_MAIN,
-        fill: str = _PANEL_BG,
-        padding_x: int = 14,
-        height_local: int = 34,
-    ) -> int:
-        text_width, text_height = _measure_text(text, font=font)
-        width_local = text_width + padding_x * 2
-        draw.rounded_rectangle(
-            (x, y, x + width_local, y + height_local),
-            radius=height_local // 2,
-            fill=fill,
-            outline=outline,
-            width=2,
-        )
-        _draw_text(
-            x + (width_local - text_width) / 2,
-            y + (height_local - text_height) / 2 - 1,
-            text,
-            fill=text_fill,
-            font=font,
-        )
-        return width_local
-
-    def draw_badge(x: int, y: int, text: str, *, outline: str = _GRID, text_fill: str = _TEXT_MUTED) -> int:
-        return draw_pill(
-            x,
-            y,
-            text,
-            outline=outline,
-            font=small_font,
-            text_fill=text_fill,
-            padding_x=12,
-            height_local=28,
-        )
-
-    def draw_card(
-        x: int,
-        y: int,
-        *,
-        label: str,
-        subtitle: str,
-        outline: str,
-        text_fill: str = _TEXT_MAIN,
-        subtitle_fill: str = _TEXT_MUTED,
-    ) -> tuple[int, int, int, int]:
-        card_height = _card_height_for_label(label)
-        draw.rounded_rectangle(
-            (x, y, x + _CARD_WIDTH, y + card_height),
-            radius=_CARD_RADIUS,
-            fill=_PANEL_BG,
-            outline=outline,
-            width=_CARD_OUTLINE_WIDTH,
-        )
-        _draw_text(x + 18, y + 16, subtitle, fill=subtitle_fill, font=small_font)
-        for index, line in enumerate(_wrap_lines(label)):
-            _draw_text(
-                x + 18,
-                y + 40 + index * 24,
-                line,
-                fill=text_fill,
-                font=name_font if text_fill == _TEXT_MAIN else small_font,
-            )
-        return (x, y, x + _CARD_WIDTH, y + card_height)
-
-    def draw_dashed_line(start: tuple[int, int], end: tuple[int, int], *, color: str, width_local: int = 3) -> None:
-        segments = 14
-        for index in range(segments):
-            if index % 2:
-                continue
-            x0 = start[0] + (end[0] - start[0]) * index / segments
-            y0 = start[1] + (end[1] - start[1]) * index / segments
-            x1 = start[0] + (end[0] - start[0]) * (index + 1) / segments
-            y1 = start[1] + (end[1] - start[1]) * (index + 1) / segments
-            draw.line((x0, y0, x1, y1), fill=color, width=width_local)
-
-    def centered_positions(count: int, *, row_width: int, card_width: int, gap: int = 28) -> list[int]:
-        total_width = count * card_width + max(0, count - 1) * gap
-        start_x = 64 + max(0, (row_width - total_width) // 2)
-        return [start_x + index * (card_width + gap) for index in range(count)]
-
-    content_width = width - 128
-    stats_y = 100
-    top_y = 188
-    subject_y = 430
-    bottom_y = 724
-
-    stat_x = 64
-    for text, outline in (
-        (f"Родителей: {len(direct_parents)}", _ACCENT_CYAN),
-        (f"Партнёров: {1 if spouse else 0}", _ACCENT_GOLD),
-        (f"Детей: {len(children)}", _ACCENT_VIOLET),
-        (f"Питомцев: {len(pets)}", _ACCENT_ROSE),
-    ):
-        stat_x += draw_pill(stat_x, stats_y, text, outline=outline, font=chip_font) + 12
-
-    _draw_text(64, top_y - 34, "Родители и супруги", fill=_TEXT_MUTED, font=section_font)
-    top_cards: list[tuple[int, int, int, int]] = []
-    top_people = [*(("Родитель", label) for label in direct_parents), *(("Отчим/мачеха", label) for label in indirect_parents)]
-    top_positions = centered_positions(max(1, len(top_people)), row_width=content_width, card_width=_CARD_WIDTH)
-    if top_people:
-        for index, (subtitle, label) in enumerate(top_people):
-            top_cards.append(draw_card(top_positions[index], top_y, label=label, subtitle=subtitle, outline=_ACCENT_VIOLET))
-    else:
-        top_cards.append(
-            draw_card(
-                top_positions[0],
-                top_y,
-                label="Связи ещё не заданы",
-                subtitle="Родители",
-                outline=_GRID,
-                text_fill=_TEXT_MUTED,
-                subtitle_fill=_TEXT_MUTED,
-            )
-        )
-
-    if grandparent_labels:
-        chip_x = 64
-        chip_y = top_y + 142
-        _draw_text(chip_x, chip_y, "Предки", fill=_TEXT_MUTED, font=small_font)
-        chip_cursor = chip_x
-        for label in grandparent_labels:
-            chip_cursor += draw_badge(chip_cursor, chip_y + 26, label) + 10
-
-    subject_box = draw_card(
-        max(96, width // 2 - (_CARD_WIDTH // 2)),
-        subject_y,
-        label=subject_label,
-        subtitle="Центр династии",
-        outline=_ACCENT_CYAN,
+    # 3. Generate stats row HTML
+    stats_pills = [
+        (f"Родителей: {total_parents_count}", "#6FA8FF"),
+        (f"Партнёров: {total_spouse_count}", "#F5B544"),
+        (f"Детей: {total_children_count}", "#8B7CF6"),
+        (f"Питомцев: {total_pets_count}", "#FF6B8A"),
+    ]
+    stats_html = "".join(
+        f'<div class="pill" style="--border-color: {color}">{escape_html(text)}</div>'
+        for text, color in stats_pills
     )
-    spouse_box = None
-    if spouse:
-        spouse_box = draw_card(
-            subject_box[2] + 34,
-            subject_y + 12,
-            label=spouse,
-            subtitle="Супруг(а)",
-            outline=_ACCENT_GOLD,
-        )
-        draw_dashed_line(
-            (subject_box[2], subject_box[1] + 42),
-            (spouse_box[0], spouse_box[1] + 42),
-            color=_ACCENT_GOLD,
-            width_local=_DASHED_WIDTH,
-        )
 
-    if sibling_labels:
-        _draw_text(64, subject_y + 12, "Братья и сёстры", fill=_TEXT_MUTED, font=section_font)
-        chip_x = 64
-        chip_y = subject_y + 52
-        for label in sibling_labels:
-            chip_x += draw_badge(chip_x, chip_y, label) + 10
+    # 4. Generate content HTML
+    content_parts = []
 
-    lower_people = [*(("Ребёнок", label) for label in children[:8]), *(("Питомец", label) for label in pets[:6])]
-    lower_positions = centered_positions(max(1, len(lower_people)), row_width=content_width, card_width=_CARD_WIDTH)
-    _draw_text(64, bottom_y - 34, "Дети и питомцы", fill=_TEXT_MUTED, font=section_font)
-    lower_cards: list[tuple[int, int, int, int]] = []
-    if lower_people:
-        for index, (subtitle, label) in enumerate(lower_people):
-            lower_cards.append(draw_card(lower_positions[index], bottom_y, label=label, subtitle=subtitle, outline=_ACCENT_VIOLET))
+    # A. Grandparents zone
+    if truncated_grandparents:
+        grandparent_rows = chunk_list(truncated_grandparents, 4)
+        gp_html = []
+        gp_html.append('<div class="zone grandparents-zone">')
+        gp_html.append('  <div class="section-title">Предки</div>')
+        gp_html.append('  <div style="display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%;">')
+        for row in grandparent_rows:
+            gp_html.append('    <div class="cards-row">')
+            for name in row:
+                gp_html.append(f'      {render_card("Предок", name, "var(--accent-ancestor)")}')
+            gp_html.append('    </div>')
+        gp_html.append('  </div>')
+        gp_html.append('</div>')
+        content_parts.append("\n".join(gp_html))
+
+    # B. Parents zone
+    parents_list = [("parent", p) for p in truncated_parents] + [("step_parent", sp) for sp in truncated_step_parents]
+    if parents_list:
+        parents_rows = chunk_list(parents_list, 4)
+        p_html = []
+        p_html.append('<div class="zone parents-zone">')
+        p_html.append('  <div class="section-title">Родители</div>')
+        p_html.append('  <div class="parents-wrapper">')
+        for row_idx, row in enumerate(parents_rows):
+            p_html.append('    <div style="display: flex; flex-direction: column; align-items: center; width: fit-content;">')
+            p_html.append('      <div class="cards-row" style="width: fit-content;">')
+            for rel_type, name in row:
+                accent = "var(--accent-parent)" if rel_type == "parent" else "var(--accent-step)"
+                role = "Родитель" if rel_type == "parent" else "Отчим/мачеха"
+                p_html.append('        <div class="card-wrapper">')
+                p_html.append(f'          {render_card(role, name, accent)}')
+                p_html.append('          <div class="vertical-branch parent-branch"></div>')
+                p_html.append('        </div>')
+            p_html.append('      </div>')
+            p_html.append('      <div class="horizontal-branch parent-branch" style="width: calc(100% - 200px);"></div>')
+            p_html.append('    </div>')
+        p_html.append('    <div class="vertical-trunk parent-branch"></div>')
+        p_html.append('  </div>')
+        p_html.append('</div>')
+        content_parts.append("\n".join(p_html))
     else:
-        lower_cards.append(
-            draw_card(
-                lower_positions[0],
-                bottom_y,
-                label="Потомков нет",
-                subtitle="Дети и питомцы",
-                outline=_GRID,
-                text_fill=_TEXT_MUTED,
-                subtitle_fill=_TEXT_MUTED,
-            )
-        )
+        # Fallback empty title / text
+        content_parts.append('<div class="zone parents-zone"><div class="section-title">Родители не заданы</div></div>')
 
-    top_anchor_x = subject_box[0] + (subject_box[2] - subject_box[0]) // 2
-    for card in top_cards:
-        parent_anchor_x = card[0] + (card[2] - card[0]) // 2
-        draw.line((parent_anchor_x, card[3], parent_anchor_x, subject_y - 42), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
-        draw.line((parent_anchor_x, subject_y - 42, top_anchor_x, subject_y - 42), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
-    draw.line((top_anchor_x, subject_y - 42, top_anchor_x, subject_box[1]), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
+    # C. Ego and Spouse zone
+    ego_html = []
+    ego_html.append('<div class="zone ego-zone">')
+    ego_html.append('  <div class="ego-spouse-container">')
+    ego_html.append(f'    {render_card("Центр династии", subject_label, "var(--accent-center)", "ego")}')
+    if spouse:
+        ego_html.append('    <div class="spouse-connector"></div>')
+        ego_html.append(f'    {render_card("Супруг(а)", spouse, "var(--accent-spouse)")}')
+    ego_html.append('  </div>')
+    ego_html.append('</div>')
+    content_parts.append("\n".join(ego_html))
 
-    child_anchor_y = subject_box[3] + 24
-    draw.line((top_anchor_x, subject_box[3], top_anchor_x, child_anchor_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
-    if lower_cards:
-        branch_y = child_anchor_y + 42
-        draw.line((top_anchor_x, child_anchor_y, top_anchor_x, branch_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
-        left_x = lower_cards[0][0] + (lower_cards[0][2] - lower_cards[0][0]) // 2
-        right_x = lower_cards[-1][0] + (lower_cards[-1][2] - lower_cards[-1][0]) // 2
-        draw.line((left_x, branch_y, right_x, branch_y), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
-        for card in lower_cards:
-            anchor_x = card[0] + (card[2] - card[0]) // 2
-            draw.line((anchor_x, branch_y, anchor_x, card[1]), fill=_ACCENT_CYAN, width=_LINE_WIDTH)
+    # D. Siblings zone
+    if truncated_siblings:
+        sib_rows = chunk_list(truncated_siblings, 4)
+        sib_html = []
+        sib_html.append('<div class="zone siblings-zone">')
+        sib_html.append('  <div class="section-title">Братья и сёстры</div>')
+        sib_html.append('  <div style="display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%;">')
+        for row in sib_rows:
+            sib_html.append('    <div class="cards-row">')
+            for name in row:
+                sib_html.append(f'      {render_card("Брат/сестра", name, "var(--accent-sibling)")}')
+            sib_html.append('    </div>')
+        sib_html.append('  </div>')
+        sib_html.append('</div>')
+        content_parts.append("\n".join(sib_html))
 
-    for index in range(min(len(direct_parents), len(indirect_parents))):
-        direct_box = top_cards[index]
-        indirect_box = top_cards[len(direct_parents) + index]
-        draw_dashed_line(
-            (direct_box[2], direct_box[1] + 28),
-            (indirect_box[0], indirect_box[1] + 28),
-            color=_ACCENT_GOLD,
-            width_local=2,
-        )
+    # E. Children and Pets zone
+    lower_list = [("child", ch) for ch in truncated_children] + [("pet", pet) for pet in truncated_pets]
+    if lower_list:
+        lower_rows = chunk_list(lower_list, 4)
+        ch_html = []
+        ch_html.append('<div class="zone children-zone">')
+        ch_html.append('  <div class="section-title">Дети и питомцы</div>')
+        ch_html.append('  <div class="children-wrapper">')
+        for row_idx, row in enumerate(lower_rows):
+            if row_idx > 0:
+                ch_html.append('    <div class="vertical-trunk child-branch middle-trunk"></div>')
+            ch_html.append('    <div class="children-row-container">')
+            ch_html.append('      <div class="vertical-trunk child-branch"></div>')
+            ch_html.append('      <div style="display: flex; flex-direction: column; align-items: center; width: fit-content;">')
+            ch_html.append('        <div class="horizontal-branch child-branch" style="width: calc(100% - 200px);"></div>')
+            ch_html.append('        <div class="cards-row" style="width: fit-content; margin-top: 0;">')
+            for item_type, name in row:
+                accent = "var(--accent-child)" if item_type == "child" else "var(--accent-pet)"
+                role = "Ребёнок" if item_type == "child" else "Питомец"
+                ch_html.append('          <div class="card-wrapper">')
+                ch_html.append('            <div class="vertical-branch child-branch"></div>')
+                ch_html.append(f'            {render_card(role, name, accent)}')
+                ch_html.append('          </div>')
+            ch_html.append('        </div>')
+            ch_html.append('      </div>')
+            ch_html.append('    </div>')
+        ch_html.append('  </div>')
+        ch_html.append('</div>')
+        content_parts.append("\n".join(ch_html))
 
-    _draw_text(width - 272, height - 54, "Selara • family graph", fill=_TEXT_MUTED, font=small_font)
+    content_html = "\n".join(content_parts)
 
-    buffer = BytesIO()
-    image.convert("RGB").save(buffer, format="PNG")
-    return buffer.getvalue()
+    html_template = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root {{
+  --bg-deep:        #0A0E1A;
+  --bg-panel:       #111729;
+  --card-bg-top:    #1A2238;
+  --card-bg-bot:    #141B30;
+  --card-border:    #2A3550;
+  --text-primary:   #EAF0FF;
+  --text-muted:     #8593B0;
+  --grid:           rgba(255,255,255,0.06);
+
+  --accent-center:  #38E1FF;
+  --accent-spouse:  #F5B544;
+  --accent-parent:  #6FA8FF;
+  --accent-step:    #B0A0FF;
+  --accent-sibling: #3DD6C0;
+  --accent-child:   #8B7CF6;
+  --accent-pet:     #FF6B8A;
+  --accent-ancestor:#5A6B92;
+}}
+
+body {{
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: 'Nunito', 'Inter', 'Noto Sans', 'Noto Sans CJK JP', 'Noto Color Emoji', sans-serif;
+  margin: 0;
+  padding: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  width: 1000px;
+  min-height: 500px;
+}}
+
+.header {{
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}}
+.header-title {{
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+}}
+.header-subtitle {{
+  font-size: 14px;
+  color: var(--text-muted);
+  font-weight: 600;
+}}
+
+.stats-row {{
+  display: flex;
+  gap: 12px;
+  margin-bottom: 32px;
+  width: 100%;
+}}
+.pill {{
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  background-color: var(--bg-panel);
+  border: 1.5px solid var(--border-color);
+  color: var(--text-primary);
+}}
+
+.zone {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 28px;
+}}
+.section-title {{
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  text-align: center;
+  width: 100%;
+}}
+
+.cards-row {{
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+}}
+
+.card-wrapper {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}}
+
+.card {{
+  width: 200px;
+  height: 86px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--card-bg-top) 0%, var(--card-bg-bot) 100%);
+  border: 2px solid var(--border-color);
+  padding: 12px 14px;
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}}
+.card.ego {{
+  border-width: 3px;
+  box-shadow: 0 0 12px rgba(56, 225, 255, 0.35);
+}}
+.card.aggregate {{
+  background: var(--bg-panel);
+  border-style: dashed;
+  text-align: center;
+  align-items: center;
+}}
+.card.aggregate .card-name {{
+  color: var(--text-muted);
+}}
+.card-subtitle {{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}}
+.card-name {{
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.25;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.card-dot {{
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}}
+
+/* Branch Line CSS */
+.parents-wrapper {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}}
+.vertical-branch.parent-branch {{
+  width: 2px;
+  height: 16px;
+  background-color: var(--accent-parent);
+}}
+.horizontal-branch.parent-branch {{
+  height: 2px;
+  background-color: var(--accent-parent);
+  margin-bottom: 0;
+}}
+.vertical-trunk.parent-branch {{
+  width: 2px;
+  height: 24px;
+  background-color: var(--accent-parent);
+}}
+
+.ego-spouse-container {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+.spouse-connector {{
+  width: 32px;
+  height: 0;
+  border-top: 2px dashed var(--accent-spouse);
+}}
+
+.children-wrapper {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}}
+.children-row-container {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}}
+.vertical-trunk.child-branch {{
+  width: 2px;
+  height: 24px;
+  background-color: var(--accent-child);
+}}
+.horizontal-branch.child-branch {{
+  height: 2px;
+  background-color: var(--accent-child);
+}}
+.vertical-branch.child-branch {{
+  width: 2px;
+  height: 16px;
+  background-color: var(--accent-child);
+}}
+.vertical-trunk.child-branch.middle-trunk {{
+  height: 32px;
+}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-title">Семья и династия</div>
+  <div class="header-subtitle">Selara • family graph</div>
+</div>
+
+<div class="stats-row">
+  {stats_html}
+</div>
+
+{content_html}
+
+</body>
+</html>
+"""
+
+    renderer = PlaywrightRendererService.get_instance()
+    image_bytes = await renderer.render_html(html_template, width=1000, height=800)
+    
+    # Target @2x is already rendered in renderer. Now downscale to <= 1280px on the longest side
+    return downscale_if_needed(image_bytes, max_side=1280)

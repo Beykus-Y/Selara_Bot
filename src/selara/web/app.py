@@ -6053,6 +6053,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             focus_user_id = int(user_id or user.telegram_user_id)
             bundle = await activity_repo.list_family_bundle(chat_id=chat_id, user_id=focus_user_id)
+            from selara.presentation.family_resolver import resolve_family_relations
+            bundle = resolve_family_relations(bundle)
             graph = await activity_repo.list_family_graph(chat_id=chat_id, user_id=focus_user_id)
             role_map: dict[int, str] = {focus_user_id: "subject"}
             for relation_name, user_ids in (

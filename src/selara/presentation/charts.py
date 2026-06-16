@@ -142,11 +142,13 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
     fig, ax = plt.subplots(figsize=(10.4, 5.8), dpi=160)
     _style_chart(fig, ax, grid_axis="y")
     fig.subplots_adjust(top=0.72, left=0.08, right=0.97, bottom=0.18)
+    active_days = sum(1 for value in values if value > 0)
+    if active_days == 0:
+        return None
 
     total = sum(values)
     peak = max(values) if values else 0
-    active_days = sum(1 for value in values if value > 0)
-    average = (total / len(values)) if values else 0
+    average = total / active_days
     last_value = values[-1] if values else 0
     max_value = _safe_plot_max(values)
 
@@ -159,15 +161,24 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
     _add_chip(fig, x=0.23, y=0.82, label="Пик", value=str(peak), edge=_ACCENT_GOLD)
     _add_chip(fig, x=0.37, y=0.82, label="Среднее", value=f"{average:.1f}", edge=_ACCENT_VIOLET)
     _add_chip(fig, x=0.56, y=0.82, label="Активных дней", value=str(active_days), edge=_ACCENT_MINT)
-    _add_chip(fig, x=0.79, y=0.82, label="Последний день", value=str(last_value), edge=_ACCENT_ROSE)
+    _add_chip(fig, x=0.79, y=0.82, label="Последний день", value=str(last_value), edge=_TEXT_MUTED)
 
+    # Highlight all peaks gold, last day violet, others blue
     colors = [
         _ACCENT_GOLD if value == peak and peak > 0 else (_ACCENT_VIOLET if index == len(values) - 1 else _ACCENT_BLUE)
         for index, value in enumerate(values)
     ]
-    bars = ax.bar(x, values, color=colors, alpha=0.92, width=0.62, zorder=3)
-    ax.plot(x, values, color=_ACCENT_CYAN, linewidth=2.4, marker="o", markersize=5.2, zorder=4)
-    ax.fill_between(x, values, color=_ACCENT_CYAN, alpha=0.08, zorder=2)
+    
+    # Minimum bar height for positive values > 0
+    min_height = max_value * 0.04
+    plotted_values = [max(value, min_height) if value > 0 else 0 for value in values]
+    
+    bars = ax.bar(x, plotted_values, color=colors, alpha=0.92, width=0.62, zorder=3)
+    
+    # Thin dots on the axis for zero values
+    zero_x = [i for i, v in enumerate(values) if v == 0]
+    if zero_x:
+        ax.scatter(zero_x, [0] * len(zero_x), color=_GRID, s=8, zorder=3)
 
     step = max(1, len(labels) // 7)
     tick_positions = x[::step]
@@ -178,14 +189,29 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_labels, fontsize=10, color=_TEXT_MAIN)
     ax.set_ylabel("Сообщения", color=_TEXT_MUTED)
-    ax.set_ylim(0, max_value * 1.28 + 1)
+    
+    # Clean rounding for Y axis limit to avoid clipping annotations
+    import math
+    def _round_headroom(val: float) -> float:
+        if val <= 5:
+            return 5.0
+        if val <= 10:
+            return 10.0
+        order = 10 ** int(math.log10(val))
+        step = order / 2
+        if step < 1:
+            step = 1
+        return float(math.ceil(val / step) * step)
 
-    for bar, value in zip(bars, values, strict=False):
+    y_upper = _round_headroom(max_value * 1.35)
+    ax.set_ylim(0, y_upper)
+
+    for bar, value, plotted_val in zip(bars, values, plotted_values, strict=False):
         if value <= 0:
             continue
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            value + max_value * 0.04 + 0.15,
+            plotted_val + max_value * 0.03 + 0.1,
             str(value),
             ha="center",
             va="bottom",
@@ -195,11 +221,13 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
         )
 
     if peak > 0 and len(values) > 1:
-        peak_index = values.index(peak)
+        # Consistent tie-peak handling: annotate the last peak index
+        peak_index = len(values) - 1 - values[::-1].index(peak)
+        plotted_peak = plotted_values[peak_index]
         ax.annotate(
             "пик",
-            xy=(peak_index, peak),
-            xytext=(peak_index, peak + max_value * 0.18 + 0.5),
+            xy=(peak_index, plotted_peak),
+            xytext=(peak_index, plotted_peak + max_value * 0.16 + 0.5),
             ha="center",
             color=_TEXT_MAIN,
             fontsize=9,
@@ -218,6 +246,7 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
     fig.savefig(buffer, format="png")
     plt.close(fig)
     return buffer.getvalue()
+
 
 
 def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMode) -> bytes | None:
