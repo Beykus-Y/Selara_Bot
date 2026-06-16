@@ -1,124 +1,219 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="hero landing-hero">
-    <div class="hero-copy landing-hero-copy">
-      <span class="eyebrow">{{ hero_eyebrow }}</span>
+  <!-- Google Fonts Connection -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@300..900&family=Manrope:wght@300..800&family=JetBrains+Mono:wght@300..800&display=swap" rel="stylesheet">
+
+  <!-- Hero Section -->
+  <section class="landing-hero-container">
+    <div class="hero-aurora"></div>
+    <div class="hero-content-centered">
+      <span class="landing-badge">Telegram-бот для сообществ</span>
+      
       {% if session_note %}
-        <div class="landing-session-note">{{ session_note }}</div>
+        <div class="landing-session-badge">{{ session_note }}</div>
       {% endif %}
-      <h1 class="landing-display">
-        <span>{{ hero_title_primary }}</span>
-        <strong>{{ hero_title_secondary }}</strong>
+      
+      <h1 class="landing-hero-title">
+        <span class="title-primary">{{ hero_title_primary }}</span>
+        <span class="title-secondary">{{ hero_title_secondary }}</span>
       </h1>
-      <p class="lead landing-lead">{{ hero_subtitle }}</p>
-      <div class="hero-cta-row landing-cta-row">
-        {% for cta in hero_ctas %}
-          <a class="button {{ cta.variant }}" href="{{ cta.href }}">{{ cta.label }}</a>
-        {% endfor %}
+      
+      <p class="landing-hero-subtitle">{{ hero_subtitle }}</p>
+      
+      <div class="landing-hero-ctas">
+        {% if hero_ctas|length > 0 %}
+          <a class="button primary landing-btn-primary" href="{{ hero_ctas[0]["href"] }}">{{ hero_ctas[0]["label"] }}</a>
+        {% endif %}
+        {% if hero_ctas|length > 1 %}
+          <a class="button ghost landing-btn-secondary" href="{{ hero_ctas[1]["href"] }}">{{ hero_ctas[1]["label"] }}</a>
+        {% endif %}
       </div>
-      <div class="landing-credit">{{ developer_credit }}</div>
-    </div>
-
-    <div class="landing-signal-board">
-      {% for card in signal_cards %}
-        <article class="landing-signal-card tone-{{ card["tone"] }}">
-          <span class="landing-signal-label">{{ card["label"] }}</span>
-          <strong class="landing-signal-value">{{ card["value"] }}</strong>
-          <p>{{ card["note"] }}</p>
-        </article>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section class="metrics-grid landing-metrics">
-    {% for metric in metrics %}
-      <article class="metric-card tone-{{ metric.tone }}">
-        <span class="metric-label">{{ metric.label }}</span>
-        <strong class="metric-value">{{ metric.value }}</strong>
-        <span class="metric-note">{{ metric.note }}</span>
-      </article>
-    {% endfor %}
-  </section>
-
-  <section class="grid two-col landing-overview" id="capabilities">
-    <article class="panel landing-copy-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Что внутри Selara</h2>
-          <p class="panel-subtitle">
-            Один бот закрывает пользовательский, игровой и админский слой чата без отдельного набора разрозненных сервисов.
-          </p>
+      
+      <!-- Stats Strip -->
+      <div class="landing-stats-strip">
+        {% if metrics|length > 0 %}
+        <div class="stats-item">
+          <span class="stats-number">{{ metrics[0]["value"] }}+</span>
+          <span class="stats-text">режимов</span>
+        </div>
+        <div class="stats-separator"></div>
+        {% endif %}
+        <div class="stats-item">
+          <span class="stats-number">117+</span>
+          <span class="stats-text">реакций</span>
+        </div>
+        <div class="stats-separator"></div>
+        <div class="stats-item">
+          <span class="stats-pill">семьи</span>
+        </div>
+        <div class="stats-separator"></div>
+        <div class="stats-item">
+          <span class="stats-pill">экономика</span>
+        </div>
+        <div class="stats-separator"></div>
+        <div class="stats-item">
+          <span class="stats-pill">игры</span>
         </div>
       </div>
-      <div class="landing-prose">
-        <p>{{ overview_text }}</p>
-        <div class="landing-pill-row">
-          {% for pill in overview_pills %}
-            <span class="landing-pill">{{ pill }}</span>
+    </div>
+  </section>
+
+  <!-- Capabilities (Features) Section -->
+  <section class="landing-section" id="capabilities">
+    <div class="landing-section-head">
+      <h2>Возможности Selara</h2>
+      <p class="landing-section-subtitle">Всё необходимое для вашего чата собрано в одном месте и управляется через веб-панель</p>
+    </div>
+    
+    <div class="landing-features-three-grid">
+      {% set games_card = feature_cards[1] if feature_cards|length > 1 else (feature_cards[0] if feature_cards|length > 0 else none) %}
+      {% set eco_card = feature_cards[2] if feature_cards|length > 2 else none %}
+      {% set social_card = feature_cards[3] if feature_cards|length > 3 else (feature_cards[0] if feature_cards|length > 0 else none) %}
+
+      <!-- Card 1: Games -->
+      {% if games_card %}
+      <article class="landing-feature-big-card card-games">
+        <div class="card-glow"></div>
+        <div class="card-icon-wrapper">
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="6" y1="12" x2="10" y2="12"></line>
+            <line x1="8" y1="10" x2="8" y2="14"></line>
+            <line x1="15" y1="13" x2="15.01" y2="13"></line>
+            <line x1="18" y1="11" x2="18.01" y2="11"></line>
+            <rect x="2" y="6" width="20" height="12" rx="3"></rect>
+          </svg>
+        </div>
+        <span class="card-kicker">{{ games_card["kicker"] }}</span>
+        <h3>{{ games_card["title"] }}</h3>
+        <p>{{ games_card["text"] }}</p>
+        <div class="card-pills">
+          {% for item in games_card["items"] %}
+            <span class="card-pill">{{ item }}</span>
           {% endfor %}
         </div>
-      </div>
-    </article>
-
-    <article class="panel landing-step-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Как начать</h2>
-          <p class="panel-subtitle">Четыре шага, чтобы перейти от Telegram к панели и обратно без потери контекста.</p>
-        </div>
-      </div>
-      <div class="step-list">
-        {% for step in step_cards %}
-          <div class="step-card">
-            <strong>{{ step.step }}</strong>
-            <span>
-              <b>{{ step.title }}</b><br>
-              {{ step.text }}
-            </span>
-          </div>
-        {% endfor %}
-      </div>
-    </article>
-  </section>
-
-  <section class="landing-feature-grid">
-    {% for feature in feature_cards %}
-      <article class="panel landing-feature-card">
-        <span class="landing-card-kicker">{{ feature["kicker"] }}</span>
-        <h2>{{ feature["title"] }}</h2>
-        <p class="panel-subtitle">{{ feature["text"] }}</p>
-        <div class="landing-pill-row">
-          {% for item in feature["items"] %}
-            <span class="landing-pill landing-pill-soft">{{ item }}</span>
-          {% endfor %}
-        </div>
-        {% if feature["href"] %}
-          <a class="button subtle" href="{{ feature["href"] }}">{{ feature["link_label"] }}</a>
+        {% if games_card["href"] %}
+          <a class="card-action-btn" href="{{ games_card["href"] }}">{{ games_card["link_label"] }}</a>
         {% endif %}
       </article>
-    {% endfor %}
+      {% endif %}
+
+      <!-- Card 2: Economy -->
+      {% if eco_card %}
+      <article class="landing-feature-big-card card-economy">
+        <div class="card-glow"></div>
+        <div class="card-icon-wrapper">
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+            <line x1="12" y1="4" x2="12" y2="20"></line>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+          </svg>
+        </div>
+        <span class="card-kicker">{{ eco_card["kicker"] }}</span>
+        <h3>{{ eco_card["title"] }}</h3>
+        <p>{{ eco_card["text"] }}</p>
+        <div class="card-pills">
+          {% for item in eco_card["items"] %}
+            <span class="card-pill">{{ item }}</span>
+          {% endfor %}
+        </div>
+        {% if eco_card["href"] %}
+          <a class="card-action-btn" href="{{ eco_card["href"] }}">{{ eco_card["link_label"] }}</a>
+        {% endif %}
+      </article>
+      {% endif %}
+
+      <!-- Card 3: Social -->
+      {% if social_card %}
+      <article class="landing-feature-big-card card-social">
+        <div class="card-glow"></div>
+        <div class="card-icon-wrapper">
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+          </svg>
+        </div>
+        <span class="card-kicker">{% if feature_cards|length > 4 %}{{ social_card["kicker"] }} + {{ feature_cards[4]["kicker"] }}{% else %}{{ social_card["kicker"] }}{% endif %}</span>
+        <h3>Социальные связи и RP-реакции</h3>
+        <p>{{ social_card["text"] }}{% if feature_cards|length > 4 %} А также RP-команды для живого общения в чате.{% endif %}</p>
+        <div class="card-pills">
+          {% for item in social_card["items"] %}
+            <span class="card-pill">{{ item }}</span>
+          {% endfor %}
+          {% if feature_cards|length > 4 %}
+            {% for item in feature_cards[4]["items"][:6] %}
+              <span class="card-pill card-pill-soft">{{ item }}</span>
+            {% endfor %}
+          {% endif %}
+        </div>
+        {% if social_card["href"] %}
+          <a class="card-action-btn" href="{{ social_card["href"] }}">{{ social_card["link_label"] }}</a>
+        {% endif %}
+      </article>
+      {% endif %}
+    </div>
   </section>
 
-  <section class="panel landing-route-panel" id="routes">
-    <div class="panel-head">
-      <div>
-        <h2>Нужные ссылки</h2>
-        <p class="panel-subtitle">Все основные маршруты Selara в одном месте: вход, кабинет, документация, игры и Telegram.</p>
+  <!-- Timeline Section -->
+  <section class="landing-section" id="how-to-start">
+    <div class="landing-section-head">
+      <h2>Как начать</h2>
+      <p class="landing-section-subtitle">Четыре шага, чтобы перейти от Telegram к панели и обратно без потери контекста</p>
+    </div>
+    
+    <div class="timeline-container">
+      <div class="timeline-line"></div>
+      <div class="timeline-steps">
+        {% for step in step_cards %}
+          <div class="timeline-step">
+            <div class="step-badge">
+              <span class="step-number">{{ step["step"] }}</span>
+            </div>
+            <div class="step-content">
+              <h4 class="step-title">{{ step["title"] }}</h4>
+              <p class="step-text">{{ step["text"] }}</p>
+            </div>
+          </div>
+        {% endfor %}
       </div>
     </div>
+  </section>
 
-    <div class="landing-route-grid">
+  <!-- Big Bottom CTA -->
+  <section class="landing-section cta-section">
+    <div class="landing-cta-block">
+      <div class="cta-glow"></div>
+      <h2>Оживите свой чат вместе с Selara</h2>
+      <p>Запустите интерактивные игры, постройте экономику и укрепите социальные связи участников вашего сообщества уже сегодня.</p>
+      <div class="cta-buttons">
+        {% if hero_ctas|length > 0 %}
+          <a class="button primary large" href="{{ hero_ctas[0]["href"] }}">{{ hero_ctas[0]["label"] }}</a>
+        {% endif %}
+        {% if hero_ctas|length > 1 %}
+          <a class="button ghost large" href="{{ hero_ctas[1]["href"] }}">{{ hero_ctas[1]["label"] }}</a>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <!-- Compact Links Footer -->
+  <footer class="landing-footer">
+    <div class="footer-links-grid">
       {% for route in route_cards %}
-        <a class="landing-route-card" href="{{ route["href"] }}">
-          <div class="landing-route-head">
-            <span class="landing-route-note">{{ route["note"] }}</span>
-            <code>{{ route["display_href"] }}</code>
+        <a class="footer-compact-link" href="{{ route["href"] }}">
+          <div class="link-meta">
+            <span class="link-title">{{ route["title"] }}</span>
+            <span class="link-note">{{ route["note"] }}</span>
           </div>
-          <strong>{{ route["title"] }}</strong>
-          <p>{{ route["description"] }}</p>
+          <code class="link-code">{{ route["display_href"] }}</code>
         </a>
       {% endfor %}
     </div>
-  </section>
+    <div class="footer-credits-strip">
+      <span class="developer-credit">{{ developer_credit }}</span>
+      <span class="footer-dot">•</span>
+      <span class="copyright">Selara © 2026</span>
+    </div>
+  </footer>
 {% endblock %}
