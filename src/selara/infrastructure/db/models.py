@@ -859,6 +859,8 @@ class ChatSettingsModel(Base):
     cleanup_economy_commands: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     gacha_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     gacha_restore_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    llm_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    llm_context_threshold: Mapped[int] = mapped_column(BigInteger, nullable=False, default=30, server_default="30")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1816,4 +1818,116 @@ class DisabledRpActionModel(Base):
     action_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LlmChatGlossaryModel(Base):
+    __tablename__ = "llm_chat_glossary"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    term: Mapped[str] = mapped_column(String(256), nullable=False)
+    definition: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "term", name="uq_llm_glossary_chat_term"),
+        Index("idx_llm_glossary_chat", "chat_id"),
+    )
+
+
+class LlmContextMessageModel(Base):
+    __tablename__ = "llm_context_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    admin_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    is_context: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant', 'tool')", name="ck_llm_context_messages_role"),
+        Index("idx_llm_ctx_msgs_chat_created", "chat_id", "created_at"),
+        Index("idx_llm_ctx_msgs_chat_compressed", "chat_id", "compressed"),
+        Index("idx_llm_ctx_msgs_chat_is_context_compressed", "chat_id", "is_context", "compressed"),
+    )
+
+
+class LlmContextSummaryModel(Base):
+    __tablename__ = "llm_context_summaries"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    messages_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    level: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_llm_ctx_summaries_chat_period", "chat_id", "period_end"),
+        Index("idx_llm_ctx_summaries_chat_level", "chat_id", "level"),
+    )
+
+
+class LlmAdminActionModel(Base):
+    __tablename__ = "llm_admin_actions"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    admin_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_description: Mapped[str] = mapped_column(Text, nullable=False)
+    undo_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index("idx_llm_admin_actions_chat_created", "chat_id", "created_at"),
+        Index("idx_llm_admin_actions_chat_admin", "chat_id", "admin_user_id"),
     )

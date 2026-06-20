@@ -70,6 +70,8 @@ class ChatSettings:
     persona_display_mode: str = "image_name"
     gacha_enabled: bool = True
     gacha_restore_at: datetime | None = None
+    llm_enabled: bool = False
+    llm_context_threshold: int = 30
 
 
 PERSONA_DISPLAY_MODE_IMAGE_ONLY = "image_only"
@@ -143,6 +145,8 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "economy_negative_event_chance_percent",
     "economy_negative_event_loss_percent",
     "cleanup_economy_commands",
+    "llm_enabled",
+    "llm_context_threshold",
 )
 
 
@@ -267,6 +271,14 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
             raise ValueError("Значение должно быть в диапазоне 0..1")
         return parsed
 
+    if key == "llm_context_threshold":
+        if not value.isdigit():
+            raise ValueError("Значение должно быть целым числом")
+        parsed = int(value)
+        if not 5 <= parsed <= 500:
+            raise ValueError("Значение должно быть в диапазоне 5..500")
+        return parsed
+
     if key in {
         "text_commands_enabled",
         "leaderboard_hybrid_buttons_enabled",
@@ -290,6 +302,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "craft_enabled",
         "auctions_enabled",
         "cleanup_economy_commands",
+        "llm_enabled",
     }:
         lowered = value.lower()
         if lowered in {"true", "1", "yes", "on"}:

@@ -6918,6 +6918,8 @@ class SqlAlchemyActivityRepository:
             interesting_facts_sleep_cap_minutes=int(row.interesting_facts_sleep_cap_minutes),
             gacha_enabled=bool(row.gacha_enabled),
             gacha_restore_at=_normalize_optional_datetime(row.gacha_restore_at),
+            llm_enabled=bool(getattr(row, "llm_enabled", False)),
+            llm_context_threshold=int(getattr(row, "llm_context_threshold", 30)),
         )
 
     @staticmethod

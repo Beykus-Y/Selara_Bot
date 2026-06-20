@@ -590,6 +590,8 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "economy_negative_event_chance_percent": value.economy_negative_event_chance_percent,
         "economy_negative_event_loss_percent": value.economy_negative_event_loss_percent,
         "cleanup_economy_commands": value.cleanup_economy_commands,
+        "llm_enabled": value.llm_enabled,
+        "llm_context_threshold": value.llm_context_threshold,
     }
 
 

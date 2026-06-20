@@ -8,6 +8,7 @@ from selara.application.achievements import get_achievement_catalog_from_setting
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
+from selara.infrastructure.llm import LlmClient, LlmConfig
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
@@ -63,6 +64,26 @@ def _build_stt_client(settings) -> SttClient | None:
         return None
 
 
+def _build_llm_client(settings) -> LlmClient | None:
+    if not settings.llm_enabled:
+        return None
+    if not settings.llm_api_key.strip():
+        logger.warning("LLM включён (LLM_ENABLED=true), но LLM_API_KEY не задан — AI-ассистент отключён.")
+        return None
+    try:
+        config = LlmConfig(
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            base_url=settings.llm_base_url or None,
+            timeout_seconds=settings.llm_timeout_seconds,
+            summary_model=settings.llm_summary_model,
+        )
+        return LlmClient(config)
+    except ValueError as exc:
+        logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", exc)
+        return None
+
+
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
     achievement_catalog = get_achievement_catalog_from_settings(settings)
@@ -74,8 +95,10 @@ async def _run_bot(settings, session_factory) -> None:
         live_event_publisher=GAME_STORE.publish_event,
     )
     stt_client = _build_stt_client(settings)
+    llm_client = _build_llm_client(settings)
+    logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
     dispatcher = Dispatcher()
-    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client))
+    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
     await bot.set_my_commands(build_bot_commands())
     if settings.web_enabled:
@@ -104,6 +127,8 @@ async def _run_bot(settings, session_factory) -> None:
     polling_kwargs: dict = {"settings": settings}
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
+    if llm_client is not None:
+        polling_kwargs["llm_client"] = llm_client
 
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)

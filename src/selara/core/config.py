@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     stt_language: str = Field(default="ru", validation_alias="STT_LANGUAGE")
     stt_timeout_seconds: float = Field(default=30.0, validation_alias="STT_TIMEOUT_SECONDS")
 
+    llm_enabled: bool = Field(default=False, validation_alias="LLM_ENABLED")
+    llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
+    llm_base_url: str = Field(default="https://api.openai.com/v1", validation_alias="LLM_BASE_URL")
+    llm_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_MODEL")
+    llm_summary_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_SUMMARY_MODEL")
+    llm_timeout_seconds: float = Field(default=60.0, validation_alias="LLM_TIMEOUT_SECONDS")
+
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
