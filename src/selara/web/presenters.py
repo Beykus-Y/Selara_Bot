@@ -29,7 +29,6 @@ from selara.presentation.handlers.settings_common import (
     SETTINGS_GROUPS,
     setting_description_ru,
     setting_short_ru,
-    setting_title_ru,
     setting_value_hint_ru,
     settings_to_dict,
 )

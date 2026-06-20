@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
+from sqlalchemy import and_, case, delete, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -11,7 +11,6 @@ from selara.application.use_cases.iris_import import strip_iris_award_prefix
 from selara.application.use_cases.leaderboard_scoring import compute_hybrid_score, sort_leaderboard_items
 from selara.core.chat_settings import (
     DEFAULT_PERSONA_DISPLAY_MODE,
-    PERSONA_DISPLAY_MODE_IMAGE_NAME,
     PERSONA_DISPLAY_MODE_IMAGE_ONLY,
     PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME,
     ChatSettings,

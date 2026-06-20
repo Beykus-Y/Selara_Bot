@@ -264,7 +264,7 @@ def format_leaderboard(
         else:
             last_seen_text = _format_dt(item.last_seen_at, timezone_name) if item.last_seen_at is not None else "нет данных"
             item_lines = [
-                f"<b>{index}.</b> {escape(name)} — <code>{item.activity_value}</code>",
+                f"<b>{index}.</b> {user_html} — <code>{item.activity_value}</code>",
                 f"<code>последнее сообщение: {last_seen_text}</code>",
             ]
 

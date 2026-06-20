@@ -31,6 +31,7 @@ from aiogram.types import (
     InputTextMessageContent,
     Message,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.use_cases.gacha import (

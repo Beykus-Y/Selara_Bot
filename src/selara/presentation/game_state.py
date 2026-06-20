@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Literal, Protocol
+from typing import Any, AsyncIterator, Literal, Protocol
 from uuid import uuid4
 
 try:

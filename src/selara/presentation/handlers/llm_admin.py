@@ -406,7 +406,6 @@ async def _execute_rollback(
     if target_user_id is None:
         raise ValueError("undo_payload missing target_user_id")
 
-    from sqlalchemy import select
     from selara.infrastructure.db.models import UserModel
 
     user_row = await activity_repo._session.get(UserModel, int(target_user_id))

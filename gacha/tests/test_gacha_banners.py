@@ -165,7 +165,7 @@ class TestImageFiles:
     def test_hsr_no_duplicate_images(self, hsr_config):
         """Test that HSR doesn't have duplicate image files."""
         images = [card["image_url"] for card in hsr_config["cards"]]
-        assert len(images) == len(set(images)), f"Duplicate images found in HSR"
+        assert len(images) == len(set(images)), "Duplicate images found in HSR"
 
 
 class TestRarityDistribution:

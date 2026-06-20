@@ -4,21 +4,10 @@ import html
 import re
 from io import BytesIO
 import unicodedata
-from typing import Any, Sequence
+from typing import Any
 
 from selara.presentation.font_support import resolve_emoji_font_paths, resolve_matplotlib_font_path
 from selara.presentation.renderer_service import PlaywrightRendererService
-from selara.presentation.charts import (
-    _ACCENT_CYAN,
-    _ACCENT_GOLD,
-    _ACCENT_ROSE,
-    _ACCENT_VIOLET,
-    _FIGURE_BG,
-    _GRID,
-    _PANEL_BG,
-    _TEXT_MAIN,
-    _TEXT_MUTED,
-)
 
 # Pillow downscale dependency
 from PIL import Image

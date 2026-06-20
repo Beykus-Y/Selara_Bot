@@ -26,9 +26,7 @@ from selara.presentation.game_state import (
     BUNKER_CARD_FIELDS,
     BredRoundResolution,
     BunkerCard,
-    BunkerRevealResult,
     BunkerVoteResolution,
-    DiceRollResult,
     DayVoteResolution,
     ExecutionConfirmResolution,
     GameKind,
@@ -47,7 +45,6 @@ from selara.presentation.game_state import (
     SpyVoteResolution,
     WhoamiAnswerResolution,
     WhoamiGuessResolution,
-    WhoamiQuestionResult,
     ZlobRoundResolution,
 )
 from selara.presentation.handlers.game.modes import (
@@ -2554,7 +2551,6 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
     """
     from datetime import datetime, timezone
 
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from selara.core.chat_settings import default_chat_settings
     from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
@@ -3122,7 +3118,7 @@ async def _resolve_mafia_execution_confirm(
     protocol_text = _format_execution_confirm_protocol(game, resolution)
     note_parts: list[str] = [f"<b>Подтверждение:</b> да={resolution.yes_count}, нет={resolution.no_count}."]
     event_parts: list[str] = [
-        f"<b>Ведущий:</b> Подтверждение казни завершено.",
+        "<b>Ведущий:</b> Подтверждение казни завершено.",
         f"<b>Счёт:</b> да={resolution.yes_count}, нет={resolution.no_count}.",
         protocol_text,
     ]

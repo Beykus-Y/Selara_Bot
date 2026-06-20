@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1099,7 +1098,7 @@ async def _exec_list_members(
     activity_repo: Any,
     **_: Any,
 ) -> ToolResult:
-    from sqlalchemy import select, outerjoin
+    from sqlalchemy import select
     from selara.infrastructure.db.models import UserChatActivityModel, UserChatBotRoleModel, UserModel
 
     limit = min(int(call.arguments.get("limit", 50)), 200)

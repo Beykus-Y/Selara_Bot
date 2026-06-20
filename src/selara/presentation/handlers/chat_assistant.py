@@ -7,7 +7,6 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
-from io import BytesIO
 
 from aiogram import F, Bot, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError

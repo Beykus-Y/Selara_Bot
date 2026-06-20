@@ -7,13 +7,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from sqlalchemy.exc import IntegrityError
 
 from selara.presentation.handlers.clans import (
     _clan_card_markup,
     _clan_list_markup,
-    _get_member_ids_ordered,
     _resolve_member_name,
     clans_list_handler,
     create_clan_handler,
