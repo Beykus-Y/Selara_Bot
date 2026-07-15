@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.methods import EditMessageText
 
 from selara.presentation.handlers import text_commands
 
@@ -13,6 +16,7 @@ _CHAT_SETTINGS = SimpleNamespace(economy_mode="global", gacha_enabled=True)
 class _DummyCallbackMessage:
     def __init__(self) -> None:
         self.chat = SimpleNamespace(type="group", id=-100123, title="Test chat")
+        self.message_id = 700
         self.edit_text_calls: list[tuple[str, dict[str, object]]] = []
         self.edit_reply_markup_calls: list[dict[str, object]] = []
 
@@ -146,6 +150,57 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_gacha_callback_rejects_second_press_while_same_message_is_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    second_query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def purchase(*args, **kwargs):
+        _ = (args, kwargs)
+        started.set()
+        await release.wait()
+        return SimpleNamespace(
+            message="paid pull",
+            card=SimpleNamespace(name="Эмбер", image_url="http://example.com/card.jpg"),
+            sell_offer=None,
+            pull_id=10,
+        )
+
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase)
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("info", None)))
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    first_task = asyncio.create_task(
+        text_commands.gacha_callback(
+            first_query,
+            bot=AsyncMock(),
+            settings=SimpleNamespace(),
+            economy_repo=object(),
+            activity_repo=activity_repo,
+            chat_settings=_CHAT_SETTINGS,
+        )
+    )
+    await started.wait()
+    await text_commands.gacha_callback(
+        second_query,
+        bot=AsyncMock(),
+        settings=SimpleNamespace(),
+        economy_repo=object(),
+        activity_repo=activity_repo,
+        chat_settings=_CHAT_SETTINGS,
+    )
+    release.set()
+    await first_task
+
+    assert second_query.answers == [("Запрос уже обрабатывается.", True)]
+
+
+@pytest.mark.asyncio
 async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = SimpleNamespace(
         player=SimpleNamespace(
@@ -203,3 +258,62 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert markup.inline_keyboard[0][1].icon_custom_emoji_id == "primogem-id"
     assert markup.inline_keyboard[1][0].icon_custom_emoji_id is None
     assert markup.inline_keyboard[1][1].icon_custom_emoji_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_gacha_message_edit_retries_after_flood_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyCallbackMessage()
+    method = EditMessageText(chat_id=message.chat.id, message_id=message.message_id, text="updated")
+    operation = AsyncMock(
+        side_effect=[
+            TelegramRetryAfter(method=method, message="retry", retry_after=3),
+            None,
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(text_commands.asyncio, "sleep", sleep)
+
+    await text_commands._run_gacha_message_edit(message, operation)
+
+    assert operation.await_count == 2
+    sleep.assert_awaited_once_with(3)
+
+
+@pytest.mark.asyncio
+async def test_run_gacha_message_edit_ignores_message_not_modified() -> None:
+    message = _DummyCallbackMessage()
+    method = EditMessageText(chat_id=message.chat.id, message_id=message.message_id, text="same")
+    operation = AsyncMock(
+        side_effect=TelegramBadRequest(method=method, message="message is not modified")
+    )
+
+    await text_commands._run_gacha_message_edit(message, operation)
+
+    operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_gacha_message_edit_serializes_edits_for_same_message() -> None:
+    message = _DummyCallbackMessage()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def operation() -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if not first_started.is_set():
+            first_started.set()
+            await release_first.wait()
+        active -= 1
+
+    first_task = asyncio.create_task(text_commands._run_gacha_message_edit(message, operation))
+    await first_started.wait()
+    second_task = asyncio.create_task(text_commands._run_gacha_message_edit(message, operation))
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert max_active == 1

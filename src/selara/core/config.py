@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     goodbye_enabled: bool = Field(default=False, validation_alias="GOODBYE_ENABLED")
     goodbye_text: str = Field(default="Пока, {user}.", validation_alias="GOODBYE_TEXT")
     welcome_cleanup_service_messages: bool = Field(default=True, validation_alias="WELCOME_CLEANUP_SERVICE_MESSAGES")
+    cleanup_leave_service_messages: bool = Field(default=False, validation_alias="CLEANUP_LEAVE_SERVICE_MESSAGES")
     entry_captcha_enabled: bool = Field(default=False, validation_alias="ENTRY_CAPTCHA_ENABLED")
     entry_captcha_timeout_seconds: int = Field(default=180, validation_alias="ENTRY_CAPTCHA_TIMEOUT_SECONDS")
     entry_captcha_kick_on_fail: bool = Field(default=True, validation_alias="ENTRY_CAPTCHA_KICK_ON_FAIL")

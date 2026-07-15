@@ -7,6 +7,9 @@ from typing import Any
 from selara.core.config import Settings
 
 
+WELCOME_BUTTON_TEXT_MAX_LENGTH = 128
+
+
 @dataclass(frozen=True)
 class ChatSettings:
     top_limit_default: int
@@ -72,6 +75,7 @@ class ChatSettings:
     gacha_restore_at: datetime | None = None
     llm_enabled: bool = False
     llm_context_threshold: int = 30
+    cleanup_leave_service_messages: bool = False
 
 
 PERSONA_DISPLAY_MODE_IMAGE_ONLY = "image_only"
@@ -111,6 +115,7 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "goodbye_enabled",
     "goodbye_text",
     "welcome_cleanup_service_messages",
+    "cleanup_leave_service_messages",
     "entry_captcha_enabled",
     "entry_captcha_timeout_seconds",
     "entry_captcha_kick_on_fail",
@@ -176,6 +181,7 @@ def default_chat_settings(settings: Settings) -> ChatSettings:
         goodbye_enabled=settings.goodbye_enabled,
         goodbye_text=settings.goodbye_text,
         welcome_cleanup_service_messages=settings.welcome_cleanup_service_messages,
+        cleanup_leave_service_messages=settings.cleanup_leave_service_messages,
         entry_captcha_enabled=settings.entry_captcha_enabled,
         entry_captcha_timeout_seconds=settings.entry_captcha_timeout_seconds,
         entry_captcha_kick_on_fail=settings.entry_captcha_kick_on_fail,
@@ -289,6 +295,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "welcome_enabled",
         "goodbye_enabled",
         "welcome_cleanup_service_messages",
+        "cleanup_leave_service_messages",
         "entry_captcha_enabled",
         "entry_captcha_kick_on_fail",
         "antiraid_enabled",
@@ -327,13 +334,18 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
 
     if key in {
         "welcome_text",
-        "welcome_button_text",
         "welcome_button_url",
         "goodbye_text",
     }:
         normalized = value.strip()
         if len(normalized) > 1000:
             raise ValueError("Строка слишком длинная")
+        return normalized
+
+    if key == "welcome_button_text":
+        normalized = value.strip()
+        if len(normalized) > WELCOME_BUTTON_TEXT_MAX_LENGTH:
+            raise ValueError(f"Текст кнопки должен быть не длиннее {WELCOME_BUTTON_TEXT_MAX_LENGTH} символов")
         return normalized
 
     if key == "economy_mode":

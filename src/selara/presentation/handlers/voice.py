@@ -13,6 +13,26 @@ log = logging.getLogger(__name__)
 _PENDING_TEXT = "🎙 Распознаю..."
 
 
+def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, max_len + 1)
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, max_len + 1)
+        if split_at <= 0:
+            split_at = max_len
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    return chunks
+
+
 @router.message(F.voice)
 async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient) -> None:
     voice = message.voice
@@ -37,4 +57,7 @@ async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClien
         await status.edit_text(f"❌ Не удалось распознать: {exc.message}")
         return
 
-    await status.edit_text(f"```\n{text}\n```", parse_mode="Markdown")
+    chunks = _split_transcription(text)
+    await status.edit_text(chunks[0])
+    for chunk in chunks[1:]:
+        await message.reply(chunk)

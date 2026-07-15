@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
-from selara.core.chat_settings import CHAT_SETTINGS_KEYS, ChatSettings, parse_chat_setting_value
+from selara.core.chat_settings import (
+    CHAT_SETTINGS_KEYS,
+    WELCOME_BUTTON_TEXT_MAX_LENGTH,
+    ChatSettings,
+    parse_chat_setting_value,
+)
 
 CFG_BOOL_KEYS: set[str] = {
     "text_commands_enabled",
@@ -15,6 +20,7 @@ CFG_BOOL_KEYS: set[str] = {
     "welcome_enabled",
     "goodbye_enabled",
     "welcome_cleanup_service_messages",
+    "cleanup_leave_service_messages",
     "entry_captcha_enabled",
     "entry_captcha_kick_on_fail",
     "antiraid_enabled",
@@ -176,7 +182,7 @@ SETTING_META: dict[str, SettingMeta] = {
         title_ru="Текст кнопки приветствия",
         short_ru="Кнопка приветствия",
         description_ru="Необязательный текст кнопки под welcome-сообщением.",
-        value_hint_ru="Пусто или короткая строка.",
+        value_hint_ru=f"Пусто или строка до {WELCOME_BUTTON_TEXT_MAX_LENGTH} символов.",
     ),
     "welcome_button_url": SettingMeta(
         title_ru="Ссылка кнопки приветствия",
@@ -187,7 +193,7 @@ SETTING_META: dict[str, SettingMeta] = {
     "goodbye_enabled": SettingMeta(
         title_ru="Прощания включены",
         short_ru="Прощания",
-        description_ru="После выхода участника бот отправляет кастомное сообщение.",
+        description_ru="После выхода участника бот отправляет сообщение с кликабельной ссылкой на его профиль.",
         value_hint_ru="true/false.",
     ),
     "goodbye_text": SettingMeta(
@@ -197,9 +203,18 @@ SETTING_META: dict[str, SettingMeta] = {
         value_hint_ru="Строка до 1000 символов.",
     ),
     "welcome_cleanup_service_messages": SettingMeta(
-        title_ru="Удалять сервисные сообщения входа/выхода",
-        short_ru="Чистка сервисных сообщений",
-        description_ru="Бот пытается удалить стандартные telegram-плашки о входе/выходе участников.",
+        title_ru="Удалять сервисные сообщения о входе",
+        short_ru="Чистка сообщений о входе",
+        description_ru="Бот пытается удалить только стандартные Telegram-сообщения о входе участников.",
+        value_hint_ru="true/false.",
+    ),
+    "cleanup_leave_service_messages": SettingMeta(
+        title_ru="Удалять сервисные сообщения о выходе",
+        short_ru="Чистка сообщений о выходе",
+        description_ru=(
+            "Удаляет штатное сообщение Telegram об уходе только при включённых прощаниях. "
+            "Ссылка на профиль останется в кликабельном имени сообщения Selara."
+        ),
         value_hint_ru="true/false.",
     ),
     "entry_captcha_enabled": SettingMeta(
@@ -448,6 +463,7 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "goodbye_enabled",
             "goodbye_text",
             "welcome_cleanup_service_messages",
+            "cleanup_leave_service_messages",
             "entry_captcha_enabled",
             "entry_captcha_timeout_seconds",
             "entry_captcha_kick_on_fail",
@@ -556,6 +572,7 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "goodbye_enabled": value.goodbye_enabled,
         "goodbye_text": value.goodbye_text,
         "welcome_cleanup_service_messages": value.welcome_cleanup_service_messages,
+        "cleanup_leave_service_messages": value.cleanup_leave_service_messages,
         "entry_captcha_enabled": value.entry_captcha_enabled,
         "entry_captcha_timeout_seconds": value.entry_captcha_timeout_seconds,
         "entry_captcha_kick_on_fail": value.entry_captcha_kick_on_fail,

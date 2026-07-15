@@ -17,6 +17,11 @@ def _is_stale_callback_query_error(exc: TelegramBadRequest) -> bool:
     return "query is too old" in error_text or "query id is invalid" in error_text
 
 
+def _is_closed_topic_error(exc: TelegramBadRequest) -> bool:
+    error_text = str(exc).lower()
+    return "topic_closed" in error_text or "topic is closed" in error_text
+
+
 class ErrorHandlerMiddleware(BaseMiddleware):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession] | None = None) -> None:
         self._session_factory = session_factory
@@ -35,6 +40,9 @@ class ErrorHandlerMiddleware(BaseMiddleware):
         except TelegramBadRequest as exc:
             if _is_stale_callback_query_error(exc):
                 logger.info("Skipped stale callback query response", extra={"event_type": type(event).__name__})
+                return None
+            if _is_closed_topic_error(exc):
+                logger.info("Skipped response to closed topic", extra={"event_type": type(event).__name__})
                 return None
             logger.exception("Unhandled Telegram bad request while processing update")
             await self._send_fallback_error(event=event, data=data)

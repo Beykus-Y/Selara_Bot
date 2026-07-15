@@ -6880,6 +6880,7 @@ class SqlAlchemyActivityRepository:
             goodbye_enabled=bool(row.goodbye_enabled),
             goodbye_text=row.goodbye_text,
             welcome_cleanup_service_messages=bool(row.welcome_cleanup_service_messages),
+            cleanup_leave_service_messages=bool(row.cleanup_leave_service_messages),
             entry_captcha_enabled=bool(row.entry_captcha_enabled),
             entry_captcha_timeout_seconds=int(row.entry_captcha_timeout_seconds),
             entry_captcha_kick_on_fail=bool(row.entry_captcha_kick_on_fail),

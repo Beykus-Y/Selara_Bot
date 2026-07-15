@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -7,6 +8,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from selara.core.chat_settings import default_chat_settings
 from selara.presentation.db_recovery import safe_rollback
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatSettingsMiddleware(BaseMiddleware):
@@ -29,14 +33,26 @@ class ChatSettingsMiddleware(BaseMiddleware):
             chat_id = event.message.chat.id
 
         current = default_chat_settings(settings)
+        settings_source = "global_default"
         if repo is not None and chat_id is not None:
             try:
                 saved = await repo.get_chat_settings(chat_id=chat_id)
             except SQLAlchemyError:
+                event_update = data.get("event_update")
+                update_id = getattr(event_update, "update_id", None)
+                logger.exception(
+                    "chat_settings_load_failed chat_id=%s update_id=%s",
+                    chat_id,
+                    update_id,
+                    extra={"chat_id": chat_id, "update_id": update_id},
+                )
                 await safe_rollback(data.get("db_session"))
                 saved = None
+                settings_source = "default_after_db_error"
             if saved is not None:
                 current = saved
+                settings_source = "database"
 
         data["chat_settings"] = current
+        data["settings_source"] = settings_source
         return await handler(event, data)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import random
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import NamedTuple
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -25,6 +27,24 @@ from selara.presentation.handlers.common import safe_callback_answer as _safe_ca
 from selara.presentation.targeting import resolve_chat_target_user
 
 router = Router(name="relationships")
+logger = logging.getLogger(__name__)
+
+
+async def _answer_relationship_with_retry(message: Message, text: str, *, disable_notification: bool = False) -> None:
+    for attempt in range(2):
+        try:
+            await message.answer(text, parse_mode="HTML", disable_notification=disable_notification)
+            return
+        except TelegramRetryAfter as exc:
+            logger.warning(
+                "relationship_send_retry_after chat_id=%s retry_after=%s attempt=%s",
+                getattr(message.chat, "id", None),
+                exc.retry_after,
+                attempt + 1,
+            )
+            if attempt == 1:
+                raise
+            await asyncio.sleep(exc.retry_after)
 
 # ---------------------------------------------------------------------------
 # Affection stages (pair and marriage)
@@ -1185,9 +1205,9 @@ async def relationship_action_callback(query: CallbackQuery, activity_repo) -> N
         await _safe_callback_answer(query, "Не удалось применить действие.", show_alert=True)
         return
 
-    await query.message.answer(action_text, parse_mode="HTML", disable_notification=True)
+    await _answer_relationship_with_retry(query.message, action_text, disable_notification=True)
     if milestone_text:
-        await query.message.answer(milestone_text, parse_mode="HTML")
+        await _answer_relationship_with_retry(query.message, milestone_text)
     await _edit_relationship_panel(query, activity_repo=activity_repo, view=view)
     await _safe_callback_answer(query, "Готово")
 

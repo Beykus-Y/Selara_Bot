@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import Chat, Message, User
+from sqlalchemy.exc import SQLAlchemyError
 
 from selara.core.chat_settings import ChatSettings
 from selara.domain.entities import ChatAuditLogEntry
 from selara.presentation.handlers import chat_assistant
+from selara.presentation.middlewares import chat_settings as chat_settings_middleware
 
 
 _BASE_CHAT_SETTINGS = ChatSettings(
@@ -80,6 +84,40 @@ def _join_message(member: SimpleNamespace) -> SimpleNamespace:
         date=datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc),
         new_chat_members=[member],
     )
+
+
+def _leave_message(
+    *,
+    first_name: str = "Left",
+    last_name: str | None = "User",
+    username: str | None = "left_user",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-100123, type="group", title="Test chat"),
+        message_id=78,
+        date=datetime(2026, 7, 14, 18, 52, tzinfo=timezone.utc),
+        left_chat_member=SimpleNamespace(
+            id=501,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            is_bot=False,
+        ),
+    )
+
+
+def _leave_dependencies(*, notification_message_id: int = 901) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
+    bot = SimpleNamespace(
+        delete_message=AsyncMock(),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=notification_message_id)),
+    )
+    activity_repo = SimpleNamespace(
+        set_chat_member_active=AsyncMock(),
+        get_chat_display_name=AsyncMock(return_value=None),
+        add_audit_log=AsyncMock(),
+    )
+    achievement_orchestrator = SimpleNamespace(process_membership=AsyncMock())
+    return bot, activity_repo, achievement_orchestrator
 
 
 @pytest.mark.asyncio
@@ -247,3 +285,190 @@ async def test_new_chat_members_handler_bans_joiner_during_antiraid() -> None:
     action_codes = [call.kwargs["action_code"] for call in activity_repo.add_audit_log.await_args_list]
     assert "member_joined" in action_codes
     assert "antiraid_join_ban" in action_codes
+
+
+@pytest.mark.asyncio
+async def test_left_chat_member_handler_deletes_service_message_and_sends_goodbye() -> None:
+    message = _leave_message()
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies(notification_message_id=902)
+
+    await chat_assistant.left_chat_member_handler(
+        message,
+        bot=bot,
+        activity_repo=activity_repo,
+        achievement_orchestrator=achievement_orchestrator,
+        chat_settings=replace(
+            _BASE_CHAT_SETTINGS,
+            goodbye_enabled=True,
+            cleanup_leave_service_messages=True,
+        ),
+        settings_source="database",
+        event_update=SimpleNamespace(update_id=122602390),
+    )
+
+    bot.delete_message.assert_awaited_once_with(chat_id=message.chat.id, message_id=message.message_id)
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs["parse_mode"] == "HTML"
+    action_calls = {call.kwargs["action_code"]: call.kwargs for call in activity_repo.add_audit_log.await_args_list}
+    assert action_calls["service_leave_deleted"]["meta_json"] == {
+        "user_id": message.left_chat_member.id,
+        "service_message_id": message.message_id,
+        "update_id": 122602390,
+        "settings_source": "database",
+    }
+    assert action_calls["leave_notification_sent"]["meta_json"]["notification_message_id"] == 902
+
+
+@pytest.mark.asyncio
+async def test_left_chat_member_handler_skips_goodbye_disabled_from_database(caplog: pytest.LogCaptureFixture) -> None:
+    message = _leave_message()
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+
+    with caplog.at_level(logging.INFO, logger=chat_assistant.__name__):
+        await chat_assistant.left_chat_member_handler(
+            message,
+            bot=bot,
+            activity_repo=activity_repo,
+            achievement_orchestrator=achievement_orchestrator,
+            chat_settings=replace(
+                _BASE_CHAT_SETTINGS,
+                goodbye_enabled=False,
+                cleanup_leave_service_messages=True,
+            ),
+            settings_source="database",
+            event_update=SimpleNamespace(update_id=122603349),
+        )
+
+    bot.delete_message.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+    assert "leave_notification_skipped" in caplog.text
+    assert "settings_source=database" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_left_chat_member_handler_skips_goodbye_after_settings_db_error(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = Message(
+        message_id=78,
+        date=datetime(2026, 7, 14, 21, 7, tzinfo=timezone.utc),
+        chat=Chat(id=-100123, type="group", title="Test chat"),
+        left_chat_member=User(id=501, is_bot=False, first_name="Left", username=None),
+    )
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+    activity_repo.get_chat_settings = AsyncMock(side_effect=SQLAlchemyError("settings unavailable"))
+    db_session = SimpleNamespace(rollback=AsyncMock())
+    fallback_settings = replace(
+        _BASE_CHAT_SETTINGS,
+        goodbye_enabled=False,
+        cleanup_leave_service_messages=False,
+    )
+    monkeypatch.setattr(chat_settings_middleware, "default_chat_settings", lambda settings: fallback_settings)
+
+    async def dispatch(event: Message, data: dict[str, object]) -> None:
+        await chat_assistant.left_chat_member_handler(
+            event,
+            bot=bot,
+            activity_repo=activity_repo,
+            achievement_orchestrator=achievement_orchestrator,
+            chat_settings=data["chat_settings"],
+            settings_source=data["settings_source"],
+            event_update=data["event_update"],
+        )
+
+    with caplog.at_level(logging.INFO):
+        await chat_settings_middleware.ChatSettingsMiddleware()(
+            dispatch,
+            message,
+            {
+                "settings": object(),
+                "activity_repo": activity_repo,
+                "db_session": db_session,
+                "event_update": SimpleNamespace(update_id=122603350),
+            },
+        )
+
+    db_session.rollback.assert_awaited_once()
+    bot.delete_message.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+    assert "chat_settings_load_failed" in caplog.text
+    assert "leave_notification_skipped" in caplog.text
+    assert "settings_source=default_after_db_error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_left_chat_member_handler_logs_and_reraises_send_error(caplog: pytest.LogCaptureFixture) -> None:
+    message = _leave_message()
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+    bot.send_message.side_effect = RuntimeError("send failed")
+
+    with caplog.at_level(logging.ERROR, logger=chat_assistant.__name__):
+        with pytest.raises(RuntimeError, match="send failed"):
+            await chat_assistant.left_chat_member_handler(
+                message,
+                bot=bot,
+                activity_repo=activity_repo,
+                achievement_orchestrator=achievement_orchestrator,
+                chat_settings=replace(_BASE_CHAT_SETTINGS, goodbye_enabled=True),
+                settings_source="database",
+                event_update=SimpleNamespace(update_id=122603349),
+            )
+
+    failure_record = next(
+        record for record in caplog.records if record.getMessage().startswith("leave_notification_send_failed")
+    )
+    assert failure_record.exc_info is not None
+    action_codes = [call.kwargs["action_code"] for call in activity_repo.add_audit_log.await_args_list]
+    assert "leave_notification_sent" not in action_codes
+    assert "leave_notification_failed" not in action_codes
+
+
+@pytest.mark.asyncio
+async def test_left_chat_member_handler_escapes_html_in_user_name() -> None:
+    message = _leave_message(first_name='Иван <Admin> & "Owner"', last_name=None, username=None)
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+
+    await chat_assistant.left_chat_member_handler(
+        message,
+        bot=bot,
+        activity_repo=activity_repo,
+        achievement_orchestrator=achievement_orchestrator,
+        chat_settings=replace(_BASE_CHAT_SETTINGS, goodbye_enabled=True),
+        settings_source="database",
+        event_update=SimpleNamespace(update_id=122602390),
+    )
+
+    sent_text = bot.send_message.await_args.kwargs["text"]
+    assert 'href="tg://user?id=501"' in sent_text
+    assert 'Иван &lt;Admin&gt; &amp; &quot;Owner&quot;' in sent_text
+    assert 'Иван <Admin> & "Owner"' not in sent_text
+    assert bot.send_message.await_args.kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("username", "expected_label"),
+    [
+        ("left_user", "Left User"),
+        (None, "Left User"),
+    ],
+)
+async def test_left_chat_member_handler_uses_clickable_profile_mention(
+    username: str | None,
+    expected_label: str,
+) -> None:
+    message = _leave_message(username=username)
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+
+    await chat_assistant.left_chat_member_handler(
+        message,
+        bot=bot,
+        activity_repo=activity_repo,
+        achievement_orchestrator=achievement_orchestrator,
+        chat_settings=replace(_BASE_CHAT_SETTINGS, goodbye_enabled=True),
+    )
+
+    sent_text = bot.send_message.await_args.kwargs["text"]
+    assert f'<a href="tg://user?id={message.left_chat_member.id}">{expected_label}</a>' in sent_text
+    assert bot.send_message.await_args.kwargs["parse_mode"] == "HTML"

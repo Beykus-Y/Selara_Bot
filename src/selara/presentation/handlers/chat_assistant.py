@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import secrets
 import shlex
@@ -21,6 +22,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
     ReplyParameters,
+    Update,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -36,6 +38,7 @@ from selara.presentation.family_tree import build_family_tree_image
 from selara.presentation.handlers.settings_common import settings_to_dict
 
 router = Router(name="chat_assistant")
+logger = logging.getLogger(__name__)
 
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
 _TRIGGER_CACHE_TTL = timedelta(seconds=45)
@@ -1780,13 +1783,46 @@ async def left_chat_member_handler(
     activity_repo,
     achievement_orchestrator,
     chat_settings: ChatSettings,
+    settings_source: str = "global_default",
+    event_update: Update | None = None,
 ) -> None:
     if message.chat.type not in _GROUP_CHAT_TYPES or message.left_chat_member is None:
         return
 
-    if chat_settings.welcome_cleanup_service_messages:
+    left = message.left_chat_member
+    update_id = getattr(event_update, "update_id", None)
+    log_extra = {
+        "chat_id": message.chat.id,
+        "user_id": left.id,
+        "message_id": message.message_id,
+        "update_id": update_id,
+        "settings_source": settings_source,
+    }
+
+    cleanup_leave_service_message = bool(
+        chat_settings.cleanup_leave_service_messages and chat_settings.goodbye_enabled
+    )
+    if cleanup_leave_service_message:
+        logger.info(
+            "leave_service_delete_started chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+            message.chat.id,
+            left.id,
+            message.message_id,
+            update_id,
+            settings_source,
+            extra=log_extra,
+        )
         deleted = await _safe_delete_message(bot, chat_id=message.chat.id, message_id=message.message_id)
         if deleted:
+            logger.info(
+                "leave_service_delete_succeeded chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+                message.chat.id,
+                left.id,
+                message.message_id,
+                update_id,
+                settings_source,
+                extra=log_extra,
+            )
             await log_chat_action(
                 activity_repo,
                 chat_id=message.chat.id,
@@ -1794,9 +1830,34 @@ async def left_chat_member_handler(
                 chat_title=message.chat.title,
                 action_code="service_leave_deleted",
                 description="Удалено сервисное сообщение о выходе участника.",
+                meta_json={
+                    "user_id": left.id,
+                    "service_message_id": message.message_id,
+                    "update_id": update_id,
+                    "settings_source": settings_source,
+                },
             )
+        else:
+            logger.warning(
+                "leave_service_delete_failed chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+                message.chat.id,
+                left.id,
+                message.message_id,
+                update_id,
+                settings_source,
+                extra=log_extra,
+            )
+    elif chat_settings.cleanup_leave_service_messages:
+        logger.info(
+            "leave_service_delete_skipped chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s reason=goodbye_disabled",
+            message.chat.id,
+            left.id,
+            message.message_id,
+            update_id,
+            settings_source,
+            extra={**log_extra, "reason": "goodbye_disabled"},
+        )
 
-    left = message.left_chat_member
     if not left.is_bot:
         await activity_repo.set_chat_member_active(
             chat=ChatSnapshot(
@@ -1823,6 +1884,15 @@ async def left_chat_member_handler(
             )
 
     if not chat_settings.goodbye_enabled:
+        logger.info(
+            "leave_notification_skipped chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+            message.chat.id,
+            left.id,
+            message.message_id,
+            update_id,
+            settings_source,
+            extra=log_extra,
+        )
         return
 
     label = await _resolve_display_label(
@@ -1837,14 +1907,64 @@ async def left_chat_member_handler(
             is_bot=bool(left.is_bot),
         ),
     )
-    await bot.send_message(
+    logger.info(
+        "leave_notification_send_started chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+        message.chat.id,
+        left.id,
+        message.message_id,
+        update_id,
+        settings_source,
+        extra=log_extra,
+    )
+    try:
+        notification = await bot.send_message(
+            chat_id=message.chat.id,
+            text=_render_template_text(
+                chat_settings.goodbye_text,
+                user_mention=_format_user_mention(user_id=left.id, label=label),
+                chat_title=message.chat.title,
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception(
+            "leave_notification_send_failed chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+            message.chat.id,
+            left.id,
+            message.message_id,
+            update_id,
+            settings_source,
+            extra=log_extra,
+        )
+        raise
+
+    notification_message_id = notification.message_id
+    logger.info(
+        "leave_notification_send_succeeded chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s notification_message_id=%s",
+        message.chat.id,
+        left.id,
+        message.message_id,
+        update_id,
+        settings_source,
+        notification_message_id,
+        extra={**log_extra, "notification_message_id": notification_message_id},
+    )
+    await log_chat_action(
+        activity_repo,
         chat_id=message.chat.id,
-        text=_render_template_text(
-            chat_settings.goodbye_text,
-            user_mention=_format_user_mention(user_id=left.id, label=label),
-            chat_title=message.chat.title,
-        ),
-        parse_mode="HTML",
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        action_code="leave_notification_sent",
+        description="Отправлено сообщение о выходе участника.",
+        target_user_id=left.id,
+        meta_json={
+            "user_id": left.id,
+            "service_message_id": message.message_id,
+            "update_id": update_id,
+            "settings_source": settings_source,
+            "notification_message_id": notification_message_id,
+        },
+        created_at=message.date,
     )
 
 

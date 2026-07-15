@@ -37,6 +37,7 @@ from selara.presentation.handlers.settings_common import (
     setting_short_ru,
     setting_title_ru,
     settings_to_dict,
+    split_html_message,
 )
 
 router = Router(name="private_panel")
@@ -76,6 +77,21 @@ class _PendingAdminInput:
 
 _pending_cfg_inputs: dict[int, _PendingCfgInput] = {}
 _pending_admin_inputs: dict[int, _PendingAdminInput] = {}
+
+
+async def _answer_html_chunks(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    chunks = split_html_message(text)
+    for index, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            parse_mode="HTML",
+            reply_markup=reply_markup if index == len(chunks) - 1 else None,
+        )
 
 
 def encode_pm_callback(route: str, *parts: object) -> str:
@@ -1302,14 +1318,14 @@ async def pending_cfg_input_handler(message: Message, activity_repo, settings: S
     _clear_pending_cfg_input(message.from_user.id)
 
     refreshed, refreshed_defaults = await _load_chat_settings(activity_repo, settings, chat_id=pending.chat_id)
-    await message.answer(
+    await _answer_html_chunks(
+        message,
         (
             f"Сохранено: <b>{escape(setting_title_ru(pending.key))}</b>\n"
             f"Ключ: <code>{pending.key}</code>\n"
             f"Значение: <code>{escape(str(settings_to_dict(refreshed)[pending.key]))}</code>\n\n"
             f"{render_settings_compact(refreshed, refreshed_defaults)}"
         ),
-        parse_mode="HTML",
         reply_markup=_build_settings_keys_keyboard(chat_id=pending.chat_id, page=_cfg_index(pending.key) // _CFG_PAGE_SIZE),
     )
 

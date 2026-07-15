@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
@@ -140,6 +140,62 @@ from selara.presentation.targeting import resolve_chat_target_user, split_explic
 
 router = Router(name="text_commands")
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _GachaMessageLockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
+_GACHA_MESSAGE_LOCKS: dict[tuple[int, int], _GachaMessageLockEntry] = {}
+_GACHA_CALLBACK_IN_FLIGHT: set[tuple[int, int]] = set()
+
+
+def _gacha_message_lock_key(message: Message) -> tuple[int, int]:
+    return int(message.chat.id), int(getattr(message, "message_id", id(message)))
+
+
+def _is_message_not_modified(exc: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def _run_gacha_message_edit(message: Message, operation, *, fallback_operation=None) -> None:
+    lock_key = _gacha_message_lock_key(message)
+    entry = _GACHA_MESSAGE_LOCKS.setdefault(lock_key, _GachaMessageLockEntry(lock=asyncio.Lock()))
+    entry.users += 1
+    try:
+        async with entry.lock:
+            async def _run_with_retry(current_operation) -> None:
+                for attempt in range(2):
+                    try:
+                        await current_operation()
+                        return
+                    except TelegramRetryAfter as exc:
+                        logger.warning(
+                            "gacha_message_edit_retry_after chat_id=%s message_id=%s retry_after=%s attempt=%s",
+                            lock_key[0],
+                            lock_key[1],
+                            exc.retry_after,
+                            attempt + 1,
+                        )
+                        if attempt == 1:
+                            return
+                        await asyncio.sleep(exc.retry_after)
+
+            try:
+                await _run_with_retry(operation)
+            except TelegramBadRequest as exc:
+                if _is_message_not_modified(exc) or fallback_operation is None:
+                    return
+                try:
+                    await _run_with_retry(fallback_operation)
+                except TelegramBadRequest:
+                    return
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _GACHA_MESSAGE_LOCKS.get(lock_key) is entry:
+            _GACHA_MESSAGE_LOCKS.pop(lock_key, None)
 
 _ANNOUNCE_PATTERN = re.compile(r"^\s*объява\b(?P<body>[\s\S]*)$", re.IGNORECASE)
 _NAMING_PATTERN = re.compile(r"^\s*(?:нейминг|/naming(?:@[A-Za-z0-9_]+)?)\b(?P<body>[\s\S]*)$", re.IGNORECASE)
@@ -4928,6 +4984,45 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
 
 @router.callback_query(F.data.startswith(_GACHA_CALLBACK_PREFIX))
 async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, economy_repo, activity_repo, chat_settings: ChatSettings) -> None:
+    if query.message is None:
+        await _gacha_callback_impl(
+            query,
+            bot=bot,
+            settings=settings,
+            economy_repo=economy_repo,
+            activity_repo=activity_repo,
+            chat_settings=chat_settings,
+        )
+        return
+
+    lock_key = _gacha_message_lock_key(query.message)
+    if lock_key in _GACHA_CALLBACK_IN_FLIGHT:
+        await _safe_callback_answer(query, "Запрос уже обрабатывается.", show_alert=True)
+        return
+
+    _GACHA_CALLBACK_IN_FLIGHT.add(lock_key)
+    try:
+        await _gacha_callback_impl(
+            query,
+            bot=bot,
+            settings=settings,
+            economy_repo=economy_repo,
+            activity_repo=activity_repo,
+            chat_settings=chat_settings,
+        )
+    finally:
+        _GACHA_CALLBACK_IN_FLIGHT.discard(lock_key)
+
+
+async def _gacha_callback_impl(
+    query: CallbackQuery,
+    *,
+    bot: Bot,
+    settings: Settings,
+    economy_repo,
+    activity_repo,
+    chat_settings: ChatSettings,
+) -> None:
     action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
     if action is None or banner is None or owner_user_id is None:
         await _safe_callback_answer(query)
@@ -4984,18 +5079,21 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             chat_id=economy_chat_id,
             use_custom_emojis=False,
         )
-        try:
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
-        except TelegramBadRequest:
-            try:
-                await query.message.edit_text(
-                    fallback_text,
-                    parse_mode="HTML",
-                    reply_markup=fallback_reply_markup,
-                    disable_web_page_preview=True,
-                )
-            except TelegramBadRequest:
-                pass
+        await _run_gacha_message_edit(
+            query.message,
+            lambda: query.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            ),
+            fallback_operation=lambda: query.message.edit_text(
+                fallback_text,
+                parse_mode="HTML",
+                reply_markup=fallback_reply_markup,
+                disable_web_page_preview=True,
+            ),
+        )
         await _safe_callback_answer(query)
         return
 
@@ -5034,18 +5132,21 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             chat_id=economy_chat_id,
             use_custom_emojis=False,
         )
-        try:
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
-        except TelegramBadRequest:
-            try:
-                await query.message.edit_text(
-                    fallback_text,
-                    parse_mode="HTML",
-                    reply_markup=fallback_reply_markup,
-                    disable_web_page_preview=True,
-                )
-            except TelegramBadRequest:
-                pass
+        await _run_gacha_message_edit(
+            query.message,
+            lambda: query.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            ),
+            fallback_operation=lambda: query.message.edit_text(
+                fallback_text,
+                parse_mode="HTML",
+                reply_markup=fallback_reply_markup,
+                disable_web_page_preview=True,
+            ),
+        )
         await _safe_callback_answer(query, result.message)
         return
 
@@ -5064,10 +5165,10 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
         await _safe_callback_answer(query, exc.message, show_alert=True)
         return
 
-    try:
-        await query.message.edit_reply_markup(reply_markup=None)
-    except TelegramBadRequest:
-        pass
+    await _run_gacha_message_edit(
+        query.message,
+        lambda: query.message.edit_reply_markup(reply_markup=None),
+    )
     await _safe_callback_answer(query, response.message)
 
 

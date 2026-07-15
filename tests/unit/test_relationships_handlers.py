@@ -5,11 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import SendMessage
 
 from selara.domain.entities import MarriageState, RelationshipState
 from selara.presentation.handlers.relationships import (
     _build_relationship_end_keyboard,
     _build_relationship_action_keyboard,
+    _answer_relationship_with_retry,
     breakup_command,
     divorce_command,
     marriage_status_command,
@@ -173,6 +176,20 @@ async def test_relationship_action_callback_shows_cooldown_alert() -> None:
     assert query.answer.await_count == 1
     assert query.answer.await_args.kwargs["show_alert"] is True
     assert "Слишком рано" in query.answer.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_answer_relationship_with_retry_retries_flood_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage()
+    method = SendMessage(chat_id=message.chat.id, text="action")
+    message.answer.side_effect = [TelegramRetryAfter(method=method, message="retry", retry_after=2), None]
+    sleep = AsyncMock()
+    monkeypatch.setattr("selara.presentation.handlers.relationships.asyncio.sleep", sleep)
+
+    await _answer_relationship_with_retry(message, "action", disable_notification=True)
+
+    assert message.answer.await_count == 2
+    sleep.assert_awaited_once_with(2)
 
 
 @pytest.mark.asyncio

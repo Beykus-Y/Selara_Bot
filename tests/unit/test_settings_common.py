@@ -197,3 +197,34 @@ def test_apply_setting_update_rejects_invalid_persona_display_mode() -> None:
 
     assert updated is None
     assert error == "Поддерживаются только режимы образа: image_only, image_name, title_image_name"
+
+
+def test_apply_setting_update_accepts_welcome_button_text_at_database_limit() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+
+    updated, error = apply_setting_update(
+        key="welcome_button_text",
+        raw_value="x" * 128,
+        current=current,
+        defaults=defaults,
+    )
+
+    assert error is None
+    assert updated is not None
+    assert updated["welcome_button_text"] == "x" * 128
+
+
+def test_apply_setting_update_rejects_welcome_button_text_over_database_limit() -> None:
+    current = settings_to_dict(_chat_settings())
+    defaults = settings_to_dict(_chat_settings())
+
+    updated, error = apply_setting_update(
+        key="welcome_button_text",
+        raw_value="x" * 129,
+        current=current,
+        defaults=defaults,
+    )
+
+    assert updated is None
+    assert error == "Текст кнопки должен быть не длиннее 128 символов"

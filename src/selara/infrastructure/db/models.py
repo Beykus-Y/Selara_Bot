@@ -823,6 +823,7 @@ class ChatSettingsModel(Base):
     goodbye_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     goodbye_text: Mapped[str] = mapped_column(Text, nullable=False, default="Пока, {user}.", server_default="Пока, {user}.")
     welcome_cleanup_service_messages: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    cleanup_leave_service_messages: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     entry_captcha_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     entry_captcha_timeout_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False, default=180, server_default="180")
     entry_captcha_kick_on_fail: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")

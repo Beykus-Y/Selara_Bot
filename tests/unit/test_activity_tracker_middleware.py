@@ -5,13 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.types import Message
+from aiogram.client.default import Default
+from aiogram.types import Chat, Message
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.presentation.middlewares.activity_tracker import (
     ActivityTrackerMiddleware,
     _is_membership_service_message,
     _is_profile_lookup_message,
+    _serialize_message,
 )
 
 
@@ -48,6 +50,19 @@ def test_membership_service_message_detects_join_and_leave() -> None:
     assert _is_membership_service_message(join_event) is True
     assert _is_membership_service_message(leave_event) is True
     assert _is_membership_service_message(regular_event) is False
+
+
+def test_serialize_message_preserves_aiogram_default_as_json_marker() -> None:
+    message = Message(
+        message_id=777,
+        date=datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc),
+        chat=Chat(id=101, type="group", title="Test Chat"),
+        unresolved_parse_mode=Default("parse_mode"),
+    )
+
+    payload = _serialize_message(message)
+
+    assert payload["unresolved_parse_mode"] == {"__aiogram_default__": "parse_mode"}
 
 
 def _event(*, text: str = "hello", chat_type: str = "group") -> Message:

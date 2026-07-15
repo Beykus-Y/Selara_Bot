@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.client.default import Default
 from aiogram.types import Message
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
@@ -59,8 +60,17 @@ def _message_content_type(message: Message) -> str:
     return str(content_type)
 
 
+def _serialize_message(message: Message) -> dict[str, object]:
+    def _fallback(value: object) -> object:
+        if isinstance(value, Default):
+            return {"__aiogram_default__": value.name}
+        raise TypeError(f"Unsupported message snapshot value: {type(value)!r}")
+
+    return message.model_dump(mode="json", exclude_none=True, fallback=_fallback)
+
+
 def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> dict[str, object]:
-    raw_message_json = message.model_dump(mode='json', exclude_none=True)
+    raw_message_json = _serialize_message(message)
     canonical_snapshot = json.dumps(raw_message_json, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     snapshot_at = getattr(message, "edit_date", None) if snapshot_kind == "edited" else message.date
     if snapshot_at is None:
@@ -92,7 +102,7 @@ def _build_reply_capture_payload(
             "raw_message_json": archive_payload["raw_message_json"],
         }
 
-    raw_message_json = message.model_dump(mode='json', exclude_none=True)
+    raw_message_json = _serialize_message(message)
     return {
         "message_type": _message_content_type(message),
         "text": message.text,
