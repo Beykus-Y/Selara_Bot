@@ -1802,52 +1802,7 @@ async def left_chat_member_handler(
     cleanup_leave_service_message = bool(
         chat_settings.cleanup_leave_service_messages and chat_settings.goodbye_enabled
     )
-    if cleanup_leave_service_message:
-        logger.info(
-            "leave_service_delete_started chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
-            message.chat.id,
-            left.id,
-            message.message_id,
-            update_id,
-            settings_source,
-            extra=log_extra,
-        )
-        deleted = await _safe_delete_message(bot, chat_id=message.chat.id, message_id=message.message_id)
-        if deleted:
-            logger.info(
-                "leave_service_delete_succeeded chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
-                message.chat.id,
-                left.id,
-                message.message_id,
-                update_id,
-                settings_source,
-                extra=log_extra,
-            )
-            await log_chat_action(
-                activity_repo,
-                chat_id=message.chat.id,
-                chat_type=message.chat.type,
-                chat_title=message.chat.title,
-                action_code="service_leave_deleted",
-                description="Удалено сервисное сообщение о выходе участника.",
-                meta_json={
-                    "user_id": left.id,
-                    "service_message_id": message.message_id,
-                    "update_id": update_id,
-                    "settings_source": settings_source,
-                },
-            )
-        else:
-            logger.warning(
-                "leave_service_delete_failed chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
-                message.chat.id,
-                left.id,
-                message.message_id,
-                update_id,
-                settings_source,
-                extra=log_extra,
-            )
-    elif chat_settings.cleanup_leave_service_messages:
+    if chat_settings.cleanup_leave_service_messages and not cleanup_leave_service_message:
         logger.info(
             "leave_service_delete_skipped chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s reason=goodbye_disabled",
             message.chat.id,
@@ -1966,6 +1921,52 @@ async def left_chat_member_handler(
         },
         created_at=message.date,
     )
+
+    if cleanup_leave_service_message:
+        logger.info(
+            "leave_service_delete_started chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+            message.chat.id,
+            left.id,
+            message.message_id,
+            update_id,
+            settings_source,
+            extra=log_extra,
+        )
+        deleted = await _safe_delete_message(bot, chat_id=message.chat.id, message_id=message.message_id)
+        if deleted:
+            logger.info(
+                "leave_service_delete_succeeded chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+                message.chat.id,
+                left.id,
+                message.message_id,
+                update_id,
+                settings_source,
+                extra=log_extra,
+            )
+            await log_chat_action(
+                activity_repo,
+                chat_id=message.chat.id,
+                chat_type=message.chat.type,
+                chat_title=message.chat.title,
+                action_code="service_leave_deleted",
+                description="Удалено сервисное сообщение о выходе участника.",
+                meta_json={
+                    "user_id": left.id,
+                    "service_message_id": message.message_id,
+                    "update_id": update_id,
+                    "settings_source": settings_source,
+                },
+            )
+        else:
+            logger.warning(
+                "leave_service_delete_failed chat_id=%s user_id=%s message_id=%s update_id=%s settings_source=%s",
+                message.chat.id,
+                left.id,
+                message.message_id,
+                update_id,
+                settings_source,
+                extra=log_extra,
+            )
 
 
 @router.chat_member()

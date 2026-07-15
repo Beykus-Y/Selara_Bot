@@ -291,6 +291,34 @@ async def test_new_chat_members_handler_bans_joiner_during_antiraid() -> None:
 async def test_left_chat_member_handler_deletes_service_message_and_sends_goodbye() -> None:
     message = _leave_message()
     bot, activity_repo, achievement_orchestrator = _leave_dependencies(notification_message_id=902)
+    operations: list[str] = []
+
+    async def record_state_change(**kwargs) -> None:
+        operations.append("state")
+
+    async def record_achievement(**kwargs) -> None:
+        operations.append("achievement")
+
+    async def resolve_label(**kwargs) -> str | None:
+        operations.append("resolve_label")
+        return None
+
+    async def send_goodbye(**kwargs) -> SimpleNamespace:
+        operations.append("send_goodbye")
+        return SimpleNamespace(message_id=902)
+
+    async def delete_service_message(**kwargs) -> None:
+        operations.append("delete_service_message")
+
+    async def record_audit(**kwargs) -> None:
+        operations.append(f"audit:{kwargs['action_code']}")
+
+    activity_repo.set_chat_member_active.side_effect = record_state_change
+    achievement_orchestrator.process_membership.side_effect = record_achievement
+    activity_repo.get_chat_display_name.side_effect = resolve_label
+    bot.send_message.side_effect = send_goodbye
+    bot.delete_message.side_effect = delete_service_message
+    activity_repo.add_audit_log.side_effect = record_audit
 
     await chat_assistant.left_chat_member_handler(
         message,
@@ -317,6 +345,15 @@ async def test_left_chat_member_handler_deletes_service_message_and_sends_goodby
         "settings_source": "database",
     }
     assert action_calls["leave_notification_sent"]["meta_json"]["notification_message_id"] == 902
+    assert operations == [
+        "state",
+        "achievement",
+        "resolve_label",
+        "send_goodbye",
+        "audit:leave_notification_sent",
+        "delete_service_message",
+        "audit:service_leave_deleted",
+    ]
 
 
 @pytest.mark.asyncio
@@ -410,7 +447,11 @@ async def test_left_chat_member_handler_logs_and_reraises_send_error(caplog: pyt
                 bot=bot,
                 activity_repo=activity_repo,
                 achievement_orchestrator=achievement_orchestrator,
-                chat_settings=replace(_BASE_CHAT_SETTINGS, goodbye_enabled=True),
+                chat_settings=replace(
+                    _BASE_CHAT_SETTINGS,
+                    goodbye_enabled=True,
+                    cleanup_leave_service_messages=True,
+                ),
                 settings_source="database",
                 event_update=SimpleNamespace(update_id=122603349),
             )
@@ -419,9 +460,42 @@ async def test_left_chat_member_handler_logs_and_reraises_send_error(caplog: pyt
         record for record in caplog.records if record.getMessage().startswith("leave_notification_send_failed")
     )
     assert failure_record.exc_info is not None
+    bot.delete_message.assert_not_awaited()
     action_codes = [call.kwargs["action_code"] for call in activity_repo.add_audit_log.await_args_list]
     assert "leave_notification_sent" not in action_codes
     assert "leave_notification_failed" not in action_codes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_step", ["state", "achievement", "resolve_label"])
+async def test_left_chat_member_handler_keeps_service_message_when_pre_send_step_fails(
+    failure_step: str,
+) -> None:
+    message = _leave_message()
+    bot, activity_repo, achievement_orchestrator = _leave_dependencies()
+    failure = RuntimeError(f"{failure_step} failed")
+    if failure_step == "state":
+        activity_repo.set_chat_member_active.side_effect = failure
+    elif failure_step == "achievement":
+        achievement_orchestrator.process_membership.side_effect = failure
+    else:
+        activity_repo.get_chat_display_name.side_effect = failure
+
+    with pytest.raises(RuntimeError, match=f"{failure_step} failed"):
+        await chat_assistant.left_chat_member_handler(
+            message,
+            bot=bot,
+            activity_repo=activity_repo,
+            achievement_orchestrator=achievement_orchestrator,
+            chat_settings=replace(
+                _BASE_CHAT_SETTINGS,
+                goodbye_enabled=True,
+                cleanup_leave_service_messages=True,
+            ),
+        )
+
+    bot.delete_message.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
