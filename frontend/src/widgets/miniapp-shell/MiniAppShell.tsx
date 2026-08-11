@@ -22,19 +22,31 @@ const tabIcons: Record<string, { icon: string; labelRu: string }> = {
   [routes.more]: { icon: '⋯', labelRu: 'Ещё' },
 }
 
+type TelegramBackButton = {
+  show: () => void
+  hide: () => void
+  onClick: (handler: () => void) => void
+  offClick: (handler: () => void) => void
+}
+
+type TelegramWindow = Window & {
+  Telegram?: { WebApp?: { BackButton: TelegramBackButton } }
+}
+
 export function MiniAppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const meta = resolveShellMeta(location.pathname)
 
   useEffect(() => {
-    const tg = (window as any).Telegram?.WebApp
+    const tg = (window as TelegramWindow).Telegram?.WebApp
     if (!tg) return
 
     if (meta.backTo) {
+      const backTo = meta.backTo
       tg.BackButton.show()
       const handleBackClick = () => {
-        navigate(meta.backTo!)
+        navigate(backTo)
       }
       tg.BackButton.onClick(handleBackClick)
       return () => {

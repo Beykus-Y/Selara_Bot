@@ -47,7 +47,7 @@ python -m selara.main
 
 ```env
 BOT_TOKEN=<ваш_telegram_token>
-DATABASE_URL=postgresql+asyncpg://selara:selara@localhost:5432/selara
+DATABASE_URL=postgresql+asyncpg://selara:<сгенерированный_пароль_БД>@localhost:5432/selara
 REDIS_URL=redis://localhost:6379/0
 WEB_AUTH_SECRET=<длинный_случайный_секрет>
 WEB_BASE_URL=http://127.0.0.1:8080
@@ -104,7 +104,10 @@ docker push ghcr.io/<your-user>/selara:latest
 
 ```env
 SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
-SELARA_DATABASE_URL=postgresql+asyncpg://selara:selara@postgres:5432/selara
+SELARA_POSTGRES_DB=selara
+SELARA_POSTGRES_USER=selara
+SELARA_POSTGRES_PASSWORD=<сгенерированный_пароль_БД>
+SELARA_DATABASE_URL=postgresql+asyncpg://selara:<тот_же_пароль_БД>@postgres:5432/selara
 SELARA_REDIS_URL=redis://redis:6379/0
 WEB_HOST=0.0.0.0
 WEB_PORT=8080

@@ -6,7 +6,7 @@ import { resolveAppPath } from '@/shared/config/app-base-path'
 import { MiniAppContextProvider } from '@/shared/miniapp/context'
 import type { MiniAppContextValue, MiniAppSessionData } from '@/shared/miniapp/model'
 import { postMiniAppData } from '@/shared/miniapp/api'
-import { notifySessionChanged } from '@/shared/lib/session-sync'
+import { notifySessionChanged } from '@/shared/lib/session-events'
 
 type LaunchStatus = 'loading' | 'blocked' | 'error' | 'logged_out' | 'ready'
 

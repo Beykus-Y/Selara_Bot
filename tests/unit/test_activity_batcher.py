@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
 import asyncio
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -8,7 +8,9 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.achievements import AchievementCatalogService
+from selara.infrastructure.db import activity_batcher as activity_batcher_module
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
@@ -119,3 +121,63 @@ async def test_activity_batcher_retries_failed_flush_without_losing_events(monke
 
     assert calls["count"] >= 2
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_batcher_applies_backpressure_at_capacity(monkeypatch) -> None:
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    class FakeSessionFactory:
+        def __call__(self):
+            class Manager:
+                async def __aenter__(self):
+                    return FakeSession()
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+            return Manager()
+
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+        async def flush_activity_batch(self, batch):
+            _ = batch
+            return ActivityBatchFlushResult()
+
+    monkeypatch.setattr(activity_batcher_module, "SqlAlchemyActivityRepository", FakeRepo)
+
+    batcher = ActivityBatcher(
+        session_factory=FakeSessionFactory(),
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=10,
+        max_pending_events=1,
+    )
+    event = {
+        "chat_id": 3003,
+        "chat_type": "group",
+        "chat_title": "Capacity",
+        "user_id": 701,
+        "username": "carol",
+        "first_name": "Carol",
+        "last_name": None,
+        "is_bot": False,
+        "event_at": datetime(2026, 3, 13, 14, 0, tzinfo=timezone.utc),
+    }
+    await batcher.enqueue_message(**event, telegram_message_id=1)
+    blocked_enqueue = asyncio.create_task(
+        batcher.enqueue_message(**event, telegram_message_id=2)
+    )
+    await asyncio.sleep(0)
+    assert not blocked_enqueue.done()
+
+    first_batch = await batcher._drain_pending()
+    assert await batcher._flush_batch(first_batch)
+    await asyncio.wait_for(blocked_enqueue, timeout=1)
+
+    second_batch = await batcher._drain_pending()
+    assert await batcher._flush_batch(second_batch)

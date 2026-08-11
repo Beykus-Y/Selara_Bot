@@ -1,8 +1,9 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.domain.entities import ChatRoleDefinition, ChatSnapshot, UserSnapshot
 from selara.infrastructure.llm.tools import ToolCall, execute_tool
 
 
@@ -43,6 +44,13 @@ def activity_repo(target_user):
     repo.get_moderation_state = AsyncMock(return_value=None)
     repo.get_active_rest_state = AsyncMock(return_value=None)
     repo.get_bot_role = AsyncMock(return_value=None)
+    repo.get_effective_role_definition = AsyncMock(
+        side_effect=lambda *, chat_id, user_id: (
+            _role(chat_id, "owner", 40, "moderate_users", "manage_roles")
+            if user_id == 111
+            else _role(chat_id, "participant", 0)
+        )
+    )
     return repo
 
 
@@ -92,6 +100,7 @@ async def test_grant_rest_success(chat_snapshot, actor_snapshot, activity_repo, 
     assert data["ok"] is True
     assert data["duration_days"] == 14
     activity_repo.grant_rest.assert_awaited_once()
+    assert "vacation" in llm_repo.add_admin_action.await_args.kwargs["action_description"]
 
 
 @pytest.mark.asyncio
@@ -193,3 +202,109 @@ async def test_read_bot_doc_path_traversal(chat_snapshot, actor_snapshot, activi
     assert result.success is False
     data = json.loads(result.result_text)
     assert "error" in data
+
+
+def _role(chat_id: int, code: str, rank: int, *permissions: str) -> ChatRoleDefinition:
+    return ChatRoleDefinition(
+        chat_id=chat_id,
+        role_code=code,
+        title_ru=code,
+        rank=rank,
+        permissions=permissions,
+        is_system=True,
+        template_key=code,
+    )
+
+
+@pytest.mark.asyncio
+async def test_moderation_tool_rejects_target_at_actor_level(
+    chat_snapshot,
+    actor_snapshot,
+    target_user,
+    activity_repo,
+    llm_repo,
+):
+    activity_repo.get_effective_role_definition = AsyncMock(
+        side_effect=[
+            _role(chat_snapshot.telegram_chat_id, "senior_admin", 20, "moderate_users"),
+            _role(chat_snapshot.telegram_chat_id, "other_senior", 20, "moderate_users"),
+        ]
+    )
+    activity_repo.find_chat_user_by_username = AsyncMock(return_value=target_user)
+
+    result = await execute_tool(
+        ToolCall(name="ban_user", arguments={"target": "@target_user"}, call_id="ban-rank"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=AsyncMock(),
+    )
+
+    assert result.success is False
+    assert "уров" in result.result_text.lower()
+    activity_repo.apply_moderation_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_rank_rejects_actor_without_manage_roles(
+    chat_snapshot,
+    actor_snapshot,
+    target_user,
+    activity_repo,
+    llm_repo,
+):
+    activity_repo.get_effective_role_definition = AsyncMock(
+        side_effect=[
+            _role(chat_snapshot.telegram_chat_id, "senior_admin", 20, "moderate_users"),
+            _role(chat_snapshot.telegram_chat_id, "participant", 0),
+        ]
+    )
+    activity_repo.get_chat_role_definition = AsyncMock(
+        return_value=_role(chat_snapshot.telegram_chat_id, "owner", 40, "manage_roles")
+    )
+    activity_repo.find_chat_user_by_username = AsyncMock(return_value=target_user)
+
+    result = await execute_tool(
+        ToolCall(name="set_rank", arguments={"target": "@target_user", "rank": "owner"}, call_id="rank-1"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+    )
+
+    assert result.success is False
+    assert "прав" in result.result_text.lower()
+    activity_repo.set_bot_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_rank_rejects_role_not_below_actor(
+    chat_snapshot,
+    actor_snapshot,
+    target_user,
+    activity_repo,
+    llm_repo,
+):
+    activity_repo.get_effective_role_definition = AsyncMock(
+        side_effect=[
+            _role(chat_snapshot.telegram_chat_id, "co_owner", 30, "manage_roles"),
+            _role(chat_snapshot.telegram_chat_id, "participant", 0),
+        ]
+    )
+    activity_repo.get_chat_role_definition = AsyncMock(
+        return_value=_role(chat_snapshot.telegram_chat_id, "owner", 40, "manage_roles")
+    )
+    activity_repo.find_chat_user_by_username = AsyncMock(return_value=target_user)
+
+    result = await execute_tool(
+        ToolCall(name="set_rank", arguments={"target": "@target_user", "rank": "owner"}, call_id="rank-2"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+    )
+
+    assert result.success is False
+    assert "уров" in result.result_text.lower()
+    activity_repo.set_bot_role.assert_not_awaited()

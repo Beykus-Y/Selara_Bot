@@ -5,11 +5,39 @@ from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.results import EconomyDashboard
-from selara.domain.economy_entities import EconomyAccount, EconomyScope, FarmState, InventoryItem, PlotState
+from selara.domain.economy_entities import (
+    EconomyAccount,
+    EconomyScope,
+    FarmState,
+    InventoryItem,
+    PlotState,
+)
 
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def lock_economy_resources(repo: EconomyRepository, *resource_keys: str) -> None:
+    lock = getattr(repo, "lock_resources", None)
+    if lock is not None:
+        await lock(*resource_keys)
+
+
+def account_lock_key(*, scope: EconomyScope, user_id: int) -> str:
+    return f"economy:account:{scope.scope_id}:{int(user_id)}"
+
+
+def market_listing_lock_key(listing_id: int) -> str:
+    return f"economy:market-listing:{int(listing_id)}"
+
+
+def auction_lock_key(auction_id: int) -> str:
+    return f"economy:auction:{int(auction_id)}"
+
+
+def chat_auction_lock_key(chat_id: int) -> str:
+    return f"economy:chat-auction:{int(chat_id)}"
 
 
 async def resolve_scope_or_error(

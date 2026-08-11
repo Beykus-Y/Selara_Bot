@@ -40,6 +40,14 @@ def digest_session_token(*, secret: str, token: str) -> str:
     ).hexdigest()
 
 
+def digest_admin_session_token(*, secret: str, token: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"admin-session:{token}".encode("utf-8"),
+        sha256,
+    ).hexdigest()
+
+
 def normalize_base_url(raw_value: str) -> str:
     value = (raw_value or "").strip()
     if not value:
@@ -78,7 +86,9 @@ def validate_telegram_webapp_init_data(
         )
         data_check_string = f"{bot_id}:WebAppData\n{sorted_fields}"
         try:
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                Ed25519PublicKey,
+            )
             signature_bytes = base64.urlsafe_b64decode(signature_b64 + "==")
             pub_key = Ed25519PublicKey.from_public_bytes(_TELEGRAM_PUBLIC_KEY)
             pub_key.verify(signature_bytes, data_check_string.encode("utf-8"))

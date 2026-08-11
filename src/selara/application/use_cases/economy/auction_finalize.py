@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, scope_from_snapshot
+from selara.application.use_cases.economy.common import (
+    auction_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    scope_from_snapshot,
+)
 from selara.application.use_cases.economy.results import AuctionFinalizeResult
 
 
@@ -16,6 +21,7 @@ async def execute(
     message_id: int | None = None,
 ) -> AuctionFinalizeResult:
     now = event_at or datetime.now(timezone.utc)
+    await lock_economy_resources(repo, auction_lock_key(auction_id))
     auction = await repo.get_chat_auction(auction_id=auction_id)
     if auction is None:
         return AuctionFinalizeResult(accepted=False, reason="Аукцион не найден.", auction=None, winner_user_id=None)

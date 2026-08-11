@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query'
 
 import { redirectToServerPath } from '@/shared/lib/resolve-server-redirect'
-import { notifySessionChanged } from '@/shared/lib/session-sync'
+import { notifySessionChanged } from '@/shared/lib/session-events'
 import { logoutSession } from '@/widgets/app-shell/api/logout-session'
 
 type LogoutButtonProps = {

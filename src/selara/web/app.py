@@ -1,35 +1,63 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import logging
+import re
+import xml.etree.ElementTree as ElementTree
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
-import hashlib
-from io import BytesIO
-import json
-import logging
 from html import escape, unescape
 from importlib import import_module
+from io import BytesIO
 from pathlib import Path
-import re
 from urllib.parse import parse_qs, quote, urlencode
-import xml.etree.ElementTree as ElementTree
 
 from aiogram import Bot
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, func, or_, select, String, Text, Integer, BigInteger, SmallInteger, Boolean, DateTime, Date
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    and_,
+    func,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from selara.application.use_cases.economy.common import load_dashboard_for_scope
-from selara.application.use_cases.economy.results import EconomyDashboard
 from selara.application.achievements import get_achievement_catalog_from_settings
-from selara.application.use_cases.economy.catalog import localize_crop_code, localize_item_code
-from selara.application.use_cases.economy.market_buy_listing import execute as market_buy_listing
-from selara.application.use_cases.economy.market_cancel_listing import execute as market_cancel_listing
-from selara.application.use_cases.economy.market_create_listing import execute as market_create_listing
+from selara.application.use_cases.economy.catalog import (
+    localize_crop_code,
+    localize_item_code,
+)
+from selara.application.use_cases.economy.common import load_dashboard_for_scope
+from selara.application.use_cases.economy.market_buy_listing import (
+    execute as market_buy_listing,
+)
+from selara.application.use_cases.economy.market_cancel_listing import (
+    execute as market_cancel_listing,
+)
+from selara.application.use_cases.economy.market_create_listing import (
+    execute as market_create_listing,
+)
 from selara.application.use_cases.economy.plant_crop import execute as plant_crop
+from selara.application.use_cases.economy.results import EconomyDashboard
 from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
@@ -38,14 +66,22 @@ from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.core.web_auth import (
+    digest_admin_session_token,
     digest_login_code,
     digest_session_token,
     generate_session_token,
     normalize_login_code,
     validate_telegram_webapp_init_data,
 )
-from selara.domain.entities import ChatSnapshot, LeaderboardItem, UserChatOverview, UserSnapshot
+from selara.domain.entities import (
+    ChatSnapshot,
+    LeaderboardItem,
+    UserChatOverview,
+    UserSnapshot,
+)
 from selara.domain.value_objects import display_name_from_parts
+from selara.infrastructure.backup import send_daily_backup
+from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.models import (
     ChatModel,
     EconomyAccountModel,
@@ -54,35 +90,40 @@ from selara.infrastructure.db.models import (
     UserFeatureRequestModel,
     UserModel,
 )
-from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
+from selara.infrastructure.db.repositories import (
+    SqlAlchemyActivityRepository,
+    SqlAlchemyEconomyRepository,
+)
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
-from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
-from selara.infrastructure.backup import send_daily_backup
+from selara.presentation import game_state as game_state_module
+from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
-from selara.presentation.audit import log_chat_action
-from selara.presentation.handlers.chat_assistant import invalidate_chat_feature_cache
-from selara.presentation import game_state as game_state_module
 from selara.presentation.game_state import (
     GAME_DEFINITIONS,
     GAME_LAUNCHABLE_KINDS,
     GAME_STORE,
-    GroupGame,
-    LiveEvent,
+    WHOAMI_CARDS_BY_CATEGORY,
+    WHOAMI_CATEGORIES,
     ZLOBCARDS_BLACK_BY_CATEGORY,
     ZLOBCARDS_CATEGORIES,
     ZLOBCARDS_WHITE_BY_CATEGORY,
-    WHOAMI_CARDS_BY_CATEGORY,
-    WHOAMI_CATEGORIES,
+    GroupGame,
+    LiveEvent,
 )
-from selara.presentation.handlers.settings_common import apply_setting_update, setting_title_ru, settings_to_dict
+from selara.presentation.handlers.chat_assistant import invalidate_chat_feature_cache
+from selara.presentation.handlers.settings_common import (
+    apply_setting_update,
+    setting_title_ru,
+    settings_to_dict,
+)
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.presenters import (
     build_achievement_rows,
+    build_alias_mode_setting,
     build_alias_rows,
     build_alias_source_options,
-    build_alias_mode_setting,
     build_audit_rows,
     build_chat_context,
     build_group_link,
@@ -311,7 +352,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             game_bot = Bot(token=settings.bot_token)
         return game_bot
 
-    @app.on_event("shutdown")
     async def _close_game_bot() -> None:
         nonlocal game_bot
         if game_bot is not None:
@@ -323,6 +363,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await store_close()
             except Exception:
                 logger.exception("Failed to close shared game store")
+
+    app.router.add_event_handler("shutdown", _close_game_bot)
 
     async def _load_user_from_websocket(session: AsyncSession, websocket: WebSocket, *, touch: bool) -> UserSnapshot | None:
         token = websocket.cookies.get(settings.web_session_cookie_name)
@@ -878,6 +920,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     def _register_failed_attempt(host: str, now: datetime) -> None:
         failed_attempts[host].append(now)
+
+    def _admin_password_matches(candidate: str) -> bool:
+        configured = settings.admin_password
+        if not configured:
+            return False
+        normalized = configured.strip().lower()
+        if normalized in {"change-me", "changeme", "password", "admin"}:
+            return False
+        if normalized.startswith("__generate_"):
+            return False
+        return hmac.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8"))
 
     async def _parse_form(request: Request) -> dict[str, str]:
         payload = (await request.body()).decode("utf-8")
@@ -4078,8 +4131,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return False, "Неизвестное действие."
 
     @app.get("/healthz")
-    async def healthcheck() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthcheck() -> Response:
+        try:
+            async with session_factory() as session:
+                await session.execute(select(1))
+        except Exception:
+            logger.warning("Web readiness check failed", exc_info=True)
+            return JSONResponse(content={"status": "unavailable"}, status_code=503)
+        return JSONResponse(content={"status": "ok"}, status_code=200)
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -4163,8 +4222,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     async def login_submit(request: Request):
         now = _now_utc()
         host = request.client.host if request.client is not None and request.client.host else "unknown"
+        rate_limit_key = f"web:{host}"
         prefers_json = _prefers_json(request)
-        if _check_rate_limit(host, now):
+        if _check_rate_limit(rate_limit_key, now):
             redirect_path = _with_message(
                 "/login",
                 key="error",
@@ -4182,7 +4242,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         form = await _parse_form(request)
         code = normalize_login_code(form.get("code"))
         if len(code) != 6:
-            _register_failed_attempt(host, now)
+            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/login", key="error", text="Введите корректный шестизначный код.")
             if prefers_json:
                 return _json_result(
@@ -4202,7 +4262,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if user is None:
                 await session.commit()
-                _register_failed_attempt(host, now)
+                _register_failed_attempt(rate_limit_key, now)
                 redirect_path = _with_message(
                     "/login",
                     key="error",
@@ -4219,7 +4279,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             token = await _create_user_session(auth_repo, user=user, now=now)
             await session.commit()
-            failed_attempts.pop(host, None)
+            failed_attempts.pop(rate_limit_key, None)
 
         redirect_path = _with_message("/app", key="flash", text="Вход выполнен.")
         response = (
@@ -5065,6 +5125,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             status_code=200,
         )
 
+    @app.post("/api/miniapp/games/create")
     @app.post("/app/games/create")
     async def game_create_submit(request: Request):
         prefers_json = _prefers_json(request)
@@ -6140,14 +6201,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     user=user,
                 ),
             )
-        family_nodes = page_context["family_nodes"]
-        family_edges = page_context["family_edges"]
-        return _render_template(
-            "family.html",
-            **page_context,
-            family_nodes_json=json.dumps(family_nodes, ensure_ascii=False),
-            family_edges_json=json.dumps(family_edges, ensure_ascii=False),
-        )
+        return _render_template("family.html", **page_context)
 
     @app.get("/api/chat/{chat_id}/family")
     async def family_page_api(chat_id: int, request: Request, user_id: int | None = None):
@@ -6421,6 +6475,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _json_result(ok=False, message="Экономика в этой группе выключена.", status_code=403)
+            if current_settings.chat_write_locked:
+                await session.commit()
+                return _json_result(ok=False, message="Запись в этой группе временно заблокирована.", status_code=423)
             form = await _parse_form(request)
             item_code = (form.get("item_code") or "").strip().lower()
             target_type = (form.get("target_type") or "").strip().lower()
@@ -6475,6 +6535,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _json_result(ok=False, message="Экономика в этой группе выключена.", status_code=403)
+            if current_settings.chat_write_locked:
+                await session.commit()
+                return _json_result(ok=False, message="Запись в этой группе временно заблокирована.", status_code=423)
             form = await _parse_form(request)
             item_code = (form.get("item_code") or "").strip().lower()
             quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
@@ -6508,6 +6574,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _json_result(ok=False, message="Экономика в этой группе выключена.", status_code=403)
+            if current_settings.chat_write_locked:
+                await session.commit()
+                return _json_result(ok=False, message="Запись в этой группе временно заблокирована.", status_code=423)
             form = await _parse_form(request)
             listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
             quantity = int(form["quantity"]) if (form.get("quantity") or "").isdigit() else 0
@@ -6541,6 +6613,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             form = await _parse_form(request)
             listing_id = int(form["listing_id"]) if (form.get("listing_id") or "").isdigit() else 0
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _json_result(ok=False, message="Экономика в этой группе выключена.", status_code=403)
+            if current_settings.chat_write_locked:
+                await session.commit()
+                return _json_result(ok=False, message="Запись в этой группе временно заблокирована.", status_code=423)
             result = await market_cancel_listing(
                 economy_repo,
                 economy_mode=current_settings.economy_mode,
@@ -7273,7 +7351,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         auth_repo = SqlAlchemyAdminAuthRepository(session)
         return await auth_repo.get_admin_by_session(
-            session_token=token,
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token=token,
+            ),
             now=_now_utc(),
             touch=touch,
         )
@@ -7660,12 +7741,29 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/app/admin/login")
     async def admin_login_submit(request: Request):
         now = _now_utc()
+        host = request.client.host if request.client is not None and request.client.host else "unknown"
+        rate_limit_key = f"admin:{host}"
         prefers_json = _prefers_json(request)
+        if _check_rate_limit(rate_limit_key, now):
+            redirect_path = _with_message(
+                "/app/admin/login",
+                key="error",
+                text="Слишком много попыток. Попробуйте позже.",
+            )
+            if prefers_json:
+                return _json_result(
+                    ok=False,
+                    message="Слишком много попыток. Попробуйте позже.",
+                    status_code=429,
+                    redirect=redirect_path,
+                )
+            return _redirect(redirect_path)
+
         form = await _parse_form(request)
         password = form.get("password", "")
 
-        # Проверка пароля
-        if not settings.admin_password or password != settings.admin_password:
+        if not _admin_password_matches(password):
+            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/app/admin/login", key="error", text="Неверный пароль.")
             if prefers_json:
                 return _json_result(ok=False, message="Неверный пароль.", status_code=401, redirect=redirect_path)
@@ -7685,11 +7783,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             token = generate_session_token()
             await auth_repo.create_session(
                 admin_user_id=settings.admin_user_id,
-                session_token=token,
+                session_token=digest_admin_session_token(
+                    secret=settings.resolved_web_auth_secret,
+                    token=token,
+                ),
                 expires_at=now + timedelta(hours=settings.admin_session_ttl_hours),
                 now=now,
             )
             await session.commit()
+        failed_attempts.pop(rate_limit_key, None)
 
         redirect_path = _with_message("/app/admin", key="flash", text="Вход выполнен.")
         response = (
@@ -7714,7 +7816,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if token:
             async with session_factory() as session:
                 auth_repo = SqlAlchemyAdminAuthRepository(session)
-                await auth_repo.revoke_session(session_token=token, now=_now_utc())
+                await auth_repo.revoke_session(
+                    session_token=digest_admin_session_token(
+                        secret=settings.resolved_web_auth_secret,
+                        token=token,
+                    ),
+                    now=_now_utc(),
+                )
                 await session.commit()
 
         redirect_path = _with_message("/app/admin/login", key="flash", text="Сессия завершена.")
@@ -8476,10 +8584,20 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.post("/api/admin/login")
     async def admin_login_api(request: Request):
         now = _now_utc()
+        host = request.client.host if request.client is not None and request.client.host else "unknown"
+        rate_limit_key = f"admin:{host}"
+        if _check_rate_limit(rate_limit_key, now):
+            return _json_result(
+                ok=False,
+                message="Слишком много попыток. Попробуйте позже.",
+                status_code=429,
+            )
+
         form = await _parse_form(request)
         password = form.get("password", "")
 
-        if not settings.admin_password or password != settings.admin_password:
+        if not _admin_password_matches(password):
+            _register_failed_attempt(rate_limit_key, now)
             return _json_result(ok=False, message="Неверный пароль.", status_code=401)
 
         if settings.admin_user_id is None:
@@ -8492,11 +8610,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             token = generate_session_token()
             await auth_repo.create_session(
                 admin_user_id=settings.admin_user_id,
-                session_token=token,
+                session_token=digest_admin_session_token(
+                    secret=settings.resolved_web_auth_secret,
+                    token=token,
+                ),
                 expires_at=now + timedelta(hours=settings.admin_session_ttl_hours),
                 now=now,
             )
             await session.commit()
+        failed_attempts.pop(rate_limit_key, None)
 
         response = _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect="/app/admin")
         response.set_cookie(
@@ -8517,7 +8639,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 auth_repo = SqlAlchemyAdminAuthRepository(session)
                 session_token = request.cookies.get(settings.admin_session_cookie_name)
                 if session_token:
-                    await auth_repo.revoke_session(session_token=session_token, now=_now_utc())
+                    await auth_repo.revoke_session(
+                        session_token=digest_admin_session_token(
+                            secret=settings.resolved_web_auth_secret,
+                            token=session_token,
+                        ),
+                        now=_now_utc(),
+                    )
             await session.commit()
 
         response = _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect="/admin/login")

@@ -113,9 +113,13 @@ class GachaClientError(RuntimeError):
 
 
 class HttpGachaClient:
-    def __init__(self, *, base_url: str, timeout_seconds: float) -> None:
+    def __init__(self, *, base_url: str, timeout_seconds: float, service_token: str = "") -> None:
         self._base_url = base_url
         self._timeout_seconds = timeout_seconds
+        self._service_token = service_token.strip()
+
+    def _service_headers(self) -> dict[str, str]:
+        return {"X-Gacha-Service-Token": self._service_token}
 
     async def pull(self, *, user_id: int, username: str | None, banner: str) -> GachaPullResponse:
         payload = await self._request(
@@ -126,6 +130,7 @@ class HttpGachaClient:
                 "username": username,
                 "banner": banner,
             },
+            headers=self._service_headers(),
         )
         return GachaPullResponse.model_validate(payload)
 
@@ -146,6 +151,7 @@ class HttpGachaClient:
                 "username": username,
                 "banner": banner,
             },
+            headers=self._service_headers(),
         )
         return GachaPullResponse.model_validate(payload)
 
@@ -154,6 +160,7 @@ class HttpGachaClient:
             "POST",
             f"/v1/gacha/pulls/{pull_id}/sell",
             json={"user_id": user_id},
+            headers=self._service_headers(),
         )
         return GachaSellPullResponse.model_validate(payload)
 

@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
+from selara.application.use_cases.economy.common import (
+    chat_auction_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+)
 from selara.application.use_cases.economy.results import AuctionStartResult
 
 
@@ -36,6 +41,7 @@ async def execute(
     if scope is None:
         return AuctionStartResult(accepted=False, reason=error or "Не удалось определить режим экономики.", auction=None)
 
+    await lock_economy_resources(repo, chat_auction_lock_key(chat_id))
     if await repo.get_active_chat_auction(chat_id=chat_id) is not None:
         return AuctionStartResult(accepted=False, reason="В этом чате уже идёт активный аукцион.", auction=None)
 

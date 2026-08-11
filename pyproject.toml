@@ -18,21 +18,21 @@ dependencies = [
   "pydantic>=2.9.2,<3",
   "pydantic-settings>=2.5.2,<3",
   "matplotlib>=3.8.0,<4",
-  "Pillow>=10.4.0,<11",
+  "Pillow>=12.3.0,<13",
   "fastapi>=0.115.0,<1",
   "httpx>=0.28.1,<1",
   "uvicorn>=0.34.0,<1",
   "Jinja2>=3.1.4,<4",
   "redis>=5.2.1,<6",
   "openai>=1.30.0,<2",
-  "cryptography>=42.0.0,<44",
+  "cryptography>=50.0.0,<51",
   "playwright>=1.40.0,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.3.3,<9",
-  "pytest-asyncio>=0.24.0,<1",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1.4.0,<2",
 ]
 
 [tool.setuptools.packages.find]
@@ -48,5 +48,6 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 markers = [
   "integration: tests with real database",
+  "postgres: tests that require PostgreSQL",
   "e2e: end-to-end tests",
 ]

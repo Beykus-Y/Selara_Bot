@@ -8,7 +8,12 @@ import pytest
 
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
-from selara.domain.entities import ChatRoleDefinition, ChatSnapshot, UserChatOverview, UserSnapshot
+from selara.domain.entities import (
+    ChatRoleDefinition,
+    ChatSnapshot,
+    UserChatOverview,
+    UserSnapshot,
+)
 from selara.presentation.game_state import GameStore
 from selara.web import app as web_app_module
 
@@ -170,7 +175,7 @@ async def _web_client(monkeypatch, state: WebRepoState):
         yield client, store, safe_edit_mock, send_roles_mock
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
 
 async def _create_started_whoami_game(store: GameStore, *, owner_user_id: int, owner_label: str, chat_id: int, chat_title: str):
@@ -287,7 +292,7 @@ async def test_web_game_create_requires_manage_games(monkeypatch) -> None:
 
     async with _web_client(monkeypatch, state) as (client, _store, _safe_edit_mock, _send_roles_mock):
         response = await client.post(
-            "/app/games/create",
+            "/api/miniapp/games/create",
             data={"kind": "dice", "chat_id": "-2001"},
             headers={"accept": "application/json"},
         )
@@ -309,7 +314,7 @@ async def test_web_game_create_allows_manage_games_chat(monkeypatch) -> None:
 
     async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
         response = await client.post(
-            "/app/games/create",
+            "/api/miniapp/games/create",
             data={"kind": "dice", "chat_id": "-2002"},
             headers={"accept": "application/json"},
         )

@@ -8,7 +8,14 @@ import httpx
 import pytest
 
 from selara.core.config import Settings
-from selara.infrastructure.db.models import ChatModel, MarriageModel, MessageArchiveModel, UserChatActivityModel, UserModel
+from selara.core.web_auth import digest_admin_session_token
+from selara.infrastructure.db.models import (
+    ChatModel,
+    MarriageModel,
+    MessageArchiveModel,
+    UserChatActivityModel,
+    UserModel,
+)
 from selara.web import app as web_app_module
 
 
@@ -37,6 +44,25 @@ class FakeAdminAuthRepo:
     async def get_admin_by_session(self, *, session_token: str, now: datetime, touch: bool):
         _ = session_token, now, touch
         return self._admin_user_id
+
+
+class CapturingAdminAuthRepo:
+    def __init__(self) -> None:
+        self.created_session_token: str | None = None
+
+    async def purge_expired_state(self, *, now: datetime) -> None:
+        _ = now
+
+    async def create_session(
+        self,
+        *,
+        admin_user_id: int,
+        session_token: str,
+        expires_at: datetime,
+        now: datetime,
+    ) -> None:
+        _ = admin_user_id, expires_at, now
+        self.created_session_token = session_token
 
 
 class FakeExecuteResult:
@@ -127,7 +153,7 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
         response = await client.get("/app/admin")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "Активность и пользователи" in response.text
@@ -160,11 +186,103 @@ async def test_admin_login_invalid_password_redirect_keeps_readable_query_text()
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin/login?error=")
     assert _location_query_value(response.headers["location"], "error") == "Неверный пароль."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_password", ["change-me", "__GENERATE_A_LONG_RANDOM_PASSWORD__"])
+async def test_admin_login_rejects_unsafe_configured_passwords(configured_password: str) -> None:
+    settings = _settings().model_copy(update={"admin_password": configured_password})
+    app = web_app_module.create_web_app(settings=settings, session_factory=QueueSessionFactory())
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.post("/api/admin/login", data={"password": configured_password})
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_login_accepts_configured_short_password(monkeypatch) -> None:
+    settings = _settings().model_copy(update={"admin_password": "short"})
+    repo = CapturingAdminAuthRepo()
+    monkeypatch.setattr(web_app_module, "SqlAlchemyAdminAuthRepository", lambda session: repo)
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(FakeSession()),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.post("/api/admin/login", data={"password": "short"})
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert repo.created_session_token is not None
+
+
+@pytest.mark.asyncio
+async def test_admin_login_stores_only_session_digest(monkeypatch) -> None:
+    settings = _settings()
+    repo = CapturingAdminAuthRepo()
+    monkeypatch.setattr(web_app_module, "SqlAlchemyAdminAuthRepository", lambda session: repo)
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(FakeSession()),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.post(
+            "/api/admin/login",
+            data={"password": "admin-secret"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    cookie_token = response.cookies.get(settings.admin_session_cookie_name)
+    assert response.status_code == 200
+    assert cookie_token
+    assert repo.created_session_token == digest_admin_session_token(
+        secret=settings.resolved_web_auth_secret,
+        token=cookie_token,
+    )
+    assert repo.created_session_token != cookie_token
+
+
+@pytest.mark.asyncio
+async def test_admin_login_is_rate_limited_by_client() -> None:
+    settings = _settings().model_copy(update={"web_login_attempt_limit": 2})
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        responses = [
+            await client.post(
+                "/api/admin/login",
+                data={"password": "wrong-password"},
+            )
+            for _ in range(3)
+        ]
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert [response.status_code for response in responses] == [401, 401, 429]
 
 
 @pytest.mark.asyncio
@@ -215,7 +333,7 @@ async def test_admin_table_page_renders_with_column_filters(monkeypatch) -> None
         response = await client.get("/app/admin/table/users?username=alice")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "alice" in response.text
@@ -277,7 +395,7 @@ async def test_admin_table_page_shows_reference_labels(monkeypatch) -> None:
         response = await client.get("/app/admin/table/marriages")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "Alice" in response.text
@@ -326,7 +444,7 @@ async def test_admin_table_page_builds_composite_pk_links(monkeypatch) -> None:
         response = await client.get("/app/admin/table/user_chat_activity")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "/app/admin/table/user_chat_activity/edit?chat_id=30&amp;user_id=10" in response.text
@@ -386,7 +504,7 @@ async def test_admin_table_page_renders_messages_table_with_json_payload(monkeyp
         response = await client.get("/app/admin/table/messages")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "Архив сообщений" in response.text
@@ -457,7 +575,7 @@ async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> No
         response = await client.get("/app/admin/table/messages_compact")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert "Архив сообщений · полезное" in response.text
@@ -514,7 +632,7 @@ async def test_admin_table_edit_page_reads_record_id_from_query(monkeypatch) -> 
         response = await client.get("/app/admin/table/marriages/edit?id=2")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
     assert 'name="id" value="2"' in response.text
@@ -567,7 +685,7 @@ async def test_admin_table_update_supports_composite_primary_keys(monkeypatch) -
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert activity.message_count == 12
@@ -624,7 +742,7 @@ async def test_admin_table_update_converts_blank_datetime_fields_to_none(monkeyp
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert marriage.married_at == datetime(2026, 2, 27, 9, 6, tzinfo=timezone.utc)
@@ -659,7 +777,7 @@ async def test_admin_request_backup_calls_runtime_backup(monkeypatch) -> None:
         response = await client.post("/app/admin/request-backup")
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?flash=")

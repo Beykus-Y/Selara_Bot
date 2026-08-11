@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.core.config import Settings
+from selara.core.web_auth import digest_admin_session_token
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.base import Base
@@ -74,7 +75,10 @@ async def test_admin_broadcast_send_creates_deliveries_and_tracks_replies(monkey
         activity_repo = SqlAlchemyActivityRepository(session)
         await auth_repo.create_session(
             admin_user_id=settings.admin_user_id,
-            session_token="admin-session",
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="admin-session",
+            ),
             expires_at=now + timedelta(hours=2),
             now=now,
         )
@@ -101,7 +105,7 @@ async def test_admin_broadcast_send_creates_deliveries_and_tracks_replies(monkey
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin/broadcasts/")
@@ -170,7 +174,10 @@ async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.Mo
         activity_repo = SqlAlchemyActivityRepository(session)
         await auth_repo.create_session(
             admin_user_id=settings.admin_user_id,
-            session_token="admin-session-html",
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="admin-session-html",
+            ),
             expires_at=now + timedelta(hours=2),
             now=now,
         )
@@ -195,7 +202,7 @@ async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.Mo
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert len(FakeBot.instances) == 1
@@ -224,7 +231,10 @@ async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
         activity_repo = SqlAlchemyActivityRepository(session)
         await auth_repo.create_session(
             admin_user_id=settings.admin_user_id,
-            session_token="admin-session-broken-html",
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="admin-session-broken-html",
+            ),
             expires_at=now + timedelta(hours=2),
             now=now,
         )
@@ -249,7 +259,7 @@ async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?error=")
@@ -283,7 +293,10 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
         activity_repo = SqlAlchemyActivityRepository(session)
         await auth_repo.create_session(
             admin_user_id=settings.admin_user_id,
-            session_token="admin-session-none",
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="admin-session-none",
+            ),
             expires_at=now + timedelta(hours=2),
             now=now,
         )
@@ -305,7 +318,7 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 303
     assert _location_query_value(response.headers["location"], "error") == "Не выбрано ни одного чата для рассылки."

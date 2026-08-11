@@ -31,7 +31,7 @@ export const routes = {
 
   settings: '/more',
   achievements: '/more',
-  gachaCollection: (_userId: string | number) => '/gacha',
+  gachaCollection: () => '/gacha',
   appUserDocs: '/app/docs/user',
   appAdminDocs: '/app/docs/admin',
   publicDocs: (variant: DocsVariant, chatId?: string | number | null) =>

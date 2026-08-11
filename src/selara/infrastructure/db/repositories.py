@@ -1,21 +1,24 @@
+import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, case, delete, func, or_, select, tuple_
+from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from selara.application.use_cases.iris_import import strip_iris_award_prefix
-from selara.application.use_cases.leaderboard_scoring import compute_hybrid_score, sort_leaderboard_items
+from selara.application.use_cases.leaderboard_scoring import (
+    compute_hybrid_score,
+    sort_leaderboard_items,
+)
 from selara.core.chat_settings import (
     DEFAULT_PERSONA_DISPLAY_MODE,
     PERSONA_DISPLAY_MODE_IMAGE_ONLY,
     PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME,
     ChatSettings,
 )
-from selara.core.trigger_templates import validate_template_variables
 from selara.core.roles import (
     BOT_PERMISSIONS,
     SYSTEM_ROLE_BY_TEMPLATE_KEY,
@@ -26,53 +29,7 @@ from selara.core.roles import (
     resolve_role_template_key,
 )
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
-from selara.domain.entities import (
-    AdminBroadcast,
-    AdminBroadcastDelivery,
-    AdminBroadcastOverview,
-    AdminBroadcastReply,
-    AdminBroadcastTarget,
-    ActiveRestEntry,
-    ActivityStats,
-    AchievementAward,
-    BotRole,
-    ChatAuditLogEntry,
-    ChatActivitySummary,
-    ChatCommandAccessRule,
-    ChatInterestingFactState,
-    ChatPersonaAssignment,
-    ChatRoleDefinition,
-    UserChatAward,
-    UserChatProfile,
-    ChatTrigger,
-    CustomSocialAction,
-    ChatTextAlias,
-    ChatTextAliasUpsertResult,
-    ChatSnapshot,
-    FamilyBundle,
-    FamilyGraph,
-    FamilyGraphEdge,
-    GraphRelationType,
-    GraphRelationship,
-    IrisImportState,
-    InlinePrivateMessage,
-    LeaderboardItem,
-    LeaderboardMode,
-    LeaderboardPeriod,
-    PairState,
-    RelationshipActionCode,
-    RelationshipKind,
-    RelationshipState,
-    MarriageState,
-    ModerationAction,
-    ModerationResult,
-    ModerationState,
-    RestState,
-    RelationshipProposal,
-    TextAliasMode,
-    UserChatOverview,
-    UserSnapshot,
-)
+from selara.core.trigger_templates import validate_template_variables
 from selara.domain.economy_entities import (
     ChatAuction,
     ChatBoost,
@@ -84,25 +41,85 @@ from selara.domain.economy_entities import (
     MarketTrade,
     PlotState,
 )
+from selara.domain.entities import (
+    AchievementAward,
+    ActiveRestEntry,
+    ActivityStats,
+    AdminBroadcast,
+    AdminBroadcastDelivery,
+    AdminBroadcastOverview,
+    AdminBroadcastReply,
+    AdminBroadcastTarget,
+    BotRole,
+    ChatActivitySummary,
+    ChatAuditLogEntry,
+    ChatCommandAccessRule,
+    ChatInterestingFactState,
+    ChatPersonaAssignment,
+    ChatRoleDefinition,
+    ChatSnapshot,
+    ChatTextAlias,
+    ChatTextAliasUpsertResult,
+    ChatTrigger,
+    CustomSocialAction,
+    FamilyBundle,
+    FamilyGraph,
+    FamilyGraphEdge,
+    GraphRelationship,
+    GraphRelationType,
+    InlinePrivateMessage,
+    IrisImportState,
+    LeaderboardItem,
+    LeaderboardMode,
+    LeaderboardPeriod,
+    MarriageState,
+    ModerationAction,
+    ModerationResult,
+    ModerationState,
+    PairState,
+    RelationshipActionCode,
+    RelationshipKind,
+    RelationshipCleanupSummary,
+    RelationshipProposal,
+    RelationshipState,
+    RestState,
+    TextAliasMode,
+    UserChatAward,
+    UserChatOverview,
+    UserChatProfile,
+    UserSnapshot,
+)
 from selara.domain.value_objects import display_name_from_parts
+from selara.infrastructure.db.achievement_metrics import (
+    adjust_chat_active_members_count,
+    compute_holders_percent,
+    increment_global_users_base_count,
+    set_chat_active_members_count,
+    set_global_users_base_count,
+)
+from selara.infrastructure.db.activity_batching import (
+    ActivityBatchFlushResult,
+    ActivityBatchMessage,
+)
 from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
     AdminBroadcastReplyModel,
-    ChatActivityEventSyncStateModel,
-    ChatAuditLogModel,
     ChatAchievementStatsModel,
-    ChatInterestingFactStateModel,
+    ChatActivityEventSyncStateModel,
     ChatAuctionModel,
-    ChatGlobalBoostModel,
+    ChatAuditLogModel,
     ChatCommandAccessRuleModel,
     ChatCustomSocialActionModel,
+    ChatGlobalBoostModel,
+    ChatInterestingFactStateModel,
     ChatModel,
     ChatRoleDefinitionModel,
     ChatSettingsModel,
-    ChatTriggerModel,
     ChatTextAliasModel,
     ChatTextAliasSettingsModel,
+    ChatTriggerModel,
+    DisabledRpActionModel,
     EconomyAccountModel,
     EconomyFarmModel,
     EconomyInventoryModel,
@@ -112,41 +129,32 @@ from selara.infrastructure.db.models import (
     EconomyPlotModel,
     EconomyPrivateContextModel,
     EconomyTransferDailyModel,
+    FamilyRelationshipArchiveModel,
     GlobalAchievementStatsModel,
     InlinePrivateMessageModel,
     MarriageModel,
     MessageArchiveModel,
     PairModel,
-    RelationshipGraphModel,
     RelationshipActionUsageModel,
+    RelationshipGraphModel,
     RelationshipProposalModel,
+    UserChatAchievementModel,
     UserChatActivityDailyModel,
     UserChatActivityMinuteModel,
     UserChatActivityModel,
-    UserChatAchievementModel,
     UserChatAnnouncementSubscriptionModel,
     UserChatAwardModel,
     UserChatBotRoleModel,
-    UserChatModerationStateModel,
-    UserChatRestStateModel,
     UserChatIrisImportHistoryModel,
     UserChatIrisImportStateModel,
     UserChatMessageEventModel,
+    UserChatModerationStateModel,
     UserChatProfileModel,
+    UserChatRestStateModel,
     UserGlobalAchievementModel,
     UserKarmaVoteModel,
     UserModel,
-    DisabledRpActionModel,
-    FamilyRelationshipArchiveModel,
 )
-from selara.infrastructure.db.achievement_metrics import (
-    adjust_chat_active_members_count,
-    compute_holders_percent,
-    increment_global_users_base_count,
-    set_chat_active_members_count,
-    set_global_users_base_count,
-)
-from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult, ActivityBatchMessage
 
 _ACTIVITY_EVENT_SYNCED = "synced"
 _ACTIVITY_EVENT_PENDING = "pending"
@@ -157,6 +165,15 @@ _ACTIVITY_EVENT_SOURCE_LEGACY_DAY = "legacy_day"
 _ACTIVITY_EVENT_SOURCE_LEGACY_TOTAL = "legacy_total"
 _ACTIVITY_EVENT_SOURCE_IMPORT_MINUTE = "import_minute"
 _ACTIVITY_EVENT_SOURCE_IMPORT_TOTAL = "import_total"
+
+_CHAT_SETTINGS_INSERT_DEFAULTS: dict[str, object] = {
+    "top_limit_default": 10,
+    "top_limit_max": 50,
+    "vote_daily_limit": 20,
+    "leaderboard_hybrid_karma_weight": 0.7,
+    "leaderboard_hybrid_activity_weight": 0.3,
+    "leaderboard_7d_days": 7,
+}
 
 
 def _normalize_free_text(value: str) -> str:
@@ -523,10 +540,14 @@ class SqlAlchemyActivityRepository:
 
         existing_activity_state = await self._get_existing_activity_state_batch_postgresql(tuple(pair_rows.keys()))
         active_member_delta_by_chat: dict[int, int] = defaultdict(int)
-        for chat_id, user_id in pair_rows:
-            if existing_activity_state.get((chat_id, user_id), False):
+        for pair_key, (_message_count, last_seen_at) in pair_rows.items():
+            existing_state = existing_activity_state.get(pair_key)
+            if existing_state is not None and (
+                existing_state[0]
+                or _coerce_utc_datetime(last_seen_at) <= _coerce_utc_datetime(existing_state[1])
+            ):
                 continue
-            active_member_delta_by_chat[chat_id] += 1
+            active_member_delta_by_chat[pair_key[0]] += 1
 
         await self._upsert_activity_batch_postgresql(
             [
@@ -786,7 +807,7 @@ class SqlAlchemyActivityRepository:
     async def _get_existing_activity_state_batch_postgresql(
         self,
         pairs: Sequence[tuple[int, int]],
-    ) -> dict[tuple[int, int], bool]:
+    ) -> dict[tuple[int, int], tuple[bool, datetime]]:
         if not pairs:
             return {}
 
@@ -794,13 +815,14 @@ class SqlAlchemyActivityRepository:
             UserChatActivityModel.chat_id,
             UserChatActivityModel.user_id,
             UserChatActivityModel.is_active_member,
+            UserChatActivityModel.last_seen_at,
         ).where(
             tuple_(UserChatActivityModel.chat_id, UserChatActivityModel.user_id).in_(list(pairs))
         )
         rows = (await self._session.execute(stmt)).all()
         return {
-            (int(chat_id), int(user_id)): bool(is_active_member)
-            for chat_id, user_id, is_active_member in rows
+            (int(chat_id), int(user_id)): (bool(is_active_member), last_seen_at)
+            for chat_id, user_id, is_active_member, last_seen_at in rows
         }
 
     async def _upsert_activity_batch_postgresql(self, rows: Sequence[dict[str, object]]) -> None:
@@ -812,7 +834,10 @@ class SqlAlchemyActivityRepository:
             index_elements=[UserChatActivityModel.chat_id, UserChatActivityModel.user_id],
             set_={
                 "message_count": UserChatActivityModel.message_count + stmt.excluded.message_count,
-                "is_active_member": True,
+                "is_active_member": case(
+                    (stmt.excluded.last_seen_at > UserChatActivityModel.last_seen_at, True),
+                    else_=UserChatActivityModel.is_active_member,
+                ),
                 "last_seen_at": func.greatest(UserChatActivityModel.last_seen_at, stmt.excluded.last_seen_at),
                 "updated_at": func.now(),
             },
@@ -1086,6 +1111,9 @@ class SqlAlchemyActivityRepository:
             {"chat_id": chat.telegram_chat_id, "user_id": user.telegram_user_id},
         )
         previous_is_active = bool(existing_activity.is_active_member) if existing_activity is not None else False
+        should_activate = existing_activity is None or (
+            _coerce_utc_datetime(event_at) > _coerce_utc_datetime(existing_activity.last_seen_at)
+        )
 
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
         if dialect == "postgresql":
@@ -1100,7 +1128,10 @@ class SqlAlchemyActivityRepository:
                 index_elements=[UserChatActivityModel.chat_id, UserChatActivityModel.user_id],
                 set_={
                     "message_count": UserChatActivityModel.message_count + 1,
-                    "is_active_member": True,
+                    "is_active_member": case(
+                        (insert_stmt.excluded.last_seen_at > UserChatActivityModel.last_seen_at, True),
+                        else_=UserChatActivityModel.is_active_member,
+                    ),
                     "last_seen_at": func.greatest(UserChatActivityModel.last_seen_at, insert_stmt.excluded.last_seen_at),
                     "updated_at": func.now(),
                 },
@@ -1123,14 +1154,15 @@ class SqlAlchemyActivityRepository:
                 )
             else:
                 activity.message_count += 1
-                activity.is_active_member = True
+                if should_activate:
+                    activity.is_active_member = True
                 activity.last_seen_at = _latest_datetime(activity.last_seen_at, event_at)
                 activity.updated_at = datetime.now(timezone.utc)
 
         await self._upsert_activity_daily(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id, event_at=event_at)
         await self._upsert_activity_minute(chat_id=chat.telegram_chat_id, user_id=user.telegram_user_id, event_at=event_at)
         await self._session.flush()
-        if existing_activity is None or not previous_is_active:
+        if should_activate and not previous_is_active:
             await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=1)
 
     async def set_chat_member_active(
@@ -1171,6 +1203,13 @@ class SqlAlchemyActivityRepository:
             delta = int(is_active) - int(previous_is_active)
             if delta != 0:
                 await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=delta)
+            if not is_active:
+                await self._cleanup_inactive_member_relationships(
+                    chat_id=chat.telegram_chat_id,
+                    user_id=user.telegram_user_id,
+                    event_at=event_at,
+                    reason="member_left_chat",
+                )
             return
 
         row = await self._session.get(
@@ -1196,6 +1235,192 @@ class SqlAlchemyActivityRepository:
         delta = int(is_active) - int(previous_is_active)
         if delta != 0:
             await adjust_chat_active_members_count(self._session, chat_id=chat.telegram_chat_id, delta=delta)
+
+        if not is_active:
+            await self._cleanup_inactive_member_relationships(
+                chat_id=chat.telegram_chat_id,
+                user_id=user.telegram_user_id,
+                event_at=event_at,
+                reason="member_left_chat",
+            )
+
+    async def cleanup_phantom_relationships(self, *, event_at: datetime) -> RelationshipCleanupSummary:
+        inactive_members: set[tuple[int, int]] = set()
+
+        relationship_sources = (
+            (
+                MarriageModel,
+                and_(
+                    MarriageModel.chat_id == UserChatActivityModel.chat_id,
+                    or_(
+                        MarriageModel.user_low_id == UserChatActivityModel.user_id,
+                        MarriageModel.user_high_id == UserChatActivityModel.user_id,
+                    ),
+                    MarriageModel.is_active.is_(True),
+                ),
+            ),
+            (
+                PairModel,
+                and_(
+                    PairModel.chat_id == UserChatActivityModel.chat_id,
+                    or_(
+                        PairModel.user_low_id == UserChatActivityModel.user_id,
+                        PairModel.user_high_id == UserChatActivityModel.user_id,
+                    ),
+                ),
+            ),
+            (
+                RelationshipProposalModel,
+                and_(
+                    RelationshipProposalModel.chat_id == UserChatActivityModel.chat_id,
+                    or_(
+                        RelationshipProposalModel.proposer_user_id == UserChatActivityModel.user_id,
+                        RelationshipProposalModel.target_user_id == UserChatActivityModel.user_id,
+                    ),
+                    RelationshipProposalModel.status == "pending",
+                ),
+            ),
+            (
+                RelationshipGraphModel,
+                and_(
+                    RelationshipGraphModel.chat_id == UserChatActivityModel.chat_id,
+                    or_(
+                        RelationshipGraphModel.user_a == UserChatActivityModel.user_id,
+                        RelationshipGraphModel.user_b == UserChatActivityModel.user_id,
+                    ),
+                ),
+            ),
+        )
+        for model, join_condition in relationship_sources:
+            rows = (
+                await self._session.execute(
+                    select(UserChatActivityModel.chat_id, UserChatActivityModel.user_id)
+                    .select_from(UserChatActivityModel)
+                    .join(model, join_condition)
+                    .where(UserChatActivityModel.is_active_member.is_(False))
+                    .distinct()
+                )
+            ).all()
+            inactive_members.update((int(chat_id), int(user_id)) for chat_id, user_id in rows)
+
+        summary = RelationshipCleanupSummary()
+        for chat_id, user_id in sorted(inactive_members):
+            summary += await self._cleanup_inactive_member_relationships(
+                chat_id=chat_id,
+                user_id=user_id,
+                event_at=event_at,
+                reason="member_left_reconcile",
+            )
+        return summary
+
+    async def _cleanup_inactive_member_relationships(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        event_at: datetime,
+        reason: str,
+    ) -> RelationshipCleanupSummary:
+        marriage_rows = (
+            await self._session.execute(
+                select(MarriageModel)
+                .where(
+                    MarriageModel.chat_id == chat_id,
+                    MarriageModel.is_active.is_(True),
+                    or_(
+                        MarriageModel.user_low_id == user_id,
+                        MarriageModel.user_high_id == user_id,
+                    ),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+        marriage_ids = [int(row.id) for row in marriage_rows]
+        if marriage_ids:
+            await self._session.execute(
+                delete(RelationshipActionUsageModel).where(
+                    RelationshipActionUsageModel.relationship_kind == "marriage",
+                    RelationshipActionUsageModel.relationship_id.in_(marriage_ids),
+                )
+            )
+        for row in marriage_rows:
+            row.is_active = False
+            row.ended_at = event_at
+            row.ended_by_user_id = user_id
+            row.ended_reason = reason
+            row.updated_at = event_at
+
+        pair_rows = (
+            await self._session.execute(
+                select(PairModel)
+                .where(
+                    PairModel.chat_id == chat_id,
+                    or_(PairModel.user_low_id == user_id, PairModel.user_high_id == user_id),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+        pair_ids = [int(row.id) for row in pair_rows]
+        if pair_ids:
+            await self._session.execute(
+                delete(RelationshipActionUsageModel).where(
+                    RelationshipActionUsageModel.relationship_kind == "pair",
+                    RelationshipActionUsageModel.relationship_id.in_(pair_ids),
+                )
+            )
+        for row in pair_rows:
+            await self._session.delete(row)
+
+        proposal_rows = (
+            await self._session.execute(
+                select(RelationshipProposalModel)
+                .where(
+                    RelationshipProposalModel.chat_id == chat_id,
+                    RelationshipProposalModel.status == "pending",
+                    or_(
+                        RelationshipProposalModel.proposer_user_id == user_id,
+                        RelationshipProposalModel.target_user_id == user_id,
+                    ),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+        for row in proposal_rows:
+            row.status = "cancelled"
+            row.responded_at = event_at
+
+        graph_rows = (
+            await self._session.execute(
+                select(RelationshipGraphModel)
+                .where(
+                    RelationshipGraphModel.chat_id == chat_id,
+                    or_(RelationshipGraphModel.user_a == user_id, RelationshipGraphModel.user_b == user_id),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+        for row in graph_rows:
+            self._session.add(
+                FamilyRelationshipArchiveModel(
+                    original_id=int(row.id),
+                    chat_id=int(row.chat_id),
+                    user_a=int(row.user_a),
+                    user_b=int(row.user_b),
+                    relation_type=str(row.relation_type),
+                    child_role=row.child_role,
+                    created_at=row.created_at,
+                    archive_reason=reason,
+                )
+            )
+            await self._session.delete(row)
+
+        await self._session.flush()
+        return RelationshipCleanupSummary(
+            marriages_removed=len(marriage_rows),
+            pairs_removed=len(pair_rows),
+            proposals_cancelled=len(proposal_rows),
+            family_links_archived=len(graph_rows),
+        )
 
     async def _get_chat_event_sync_status(self, *, chat_id: int) -> str | None:
         cached = self._chat_event_sync_cache.get(chat_id)
@@ -2081,10 +2306,11 @@ class SqlAlchemyActivityRepository:
         values: dict[str, object],
     ) -> ChatSettings:
         await self._upsert_chat(chat)
+        insert_values = {**_CHAT_SETTINGS_INSERT_DEFAULTS, **values}
 
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
         if dialect == "postgresql":
-            stmt = pg_insert(ChatSettingsModel).values(chat_id=chat.telegram_chat_id, **values)
+            stmt = pg_insert(ChatSettingsModel).values(chat_id=chat.telegram_chat_id, **insert_values)
             stmt = stmt.on_conflict_do_update(
                 index_elements=[ChatSettingsModel.chat_id],
                 set_={**values, "updated_at": func.now()},
@@ -2093,7 +2319,7 @@ class SqlAlchemyActivityRepository:
         else:
             row = await self._session.get(ChatSettingsModel, chat.telegram_chat_id)
             if row is None:
-                row = ChatSettingsModel(chat_id=chat.telegram_chat_id, **values)
+                row = ChatSettingsModel(chat_id=chat.telegram_chat_id, **insert_values)
                 self._session.add(row)
             else:
                 for key, value in values.items():
@@ -4954,9 +5180,18 @@ class SqlAlchemyActivityRepository:
                     UserChatActivityModel.user_id == user_id,
                 ),
             )
+            .outerjoin(
+                UserChatModerationStateModel,
+                and_(
+                    UserChatModerationStateModel.chat_id == UserChatBotRoleModel.chat_id,
+                    UserChatModerationStateModel.user_id == user_id,
+                ),
+            )
             .where(
                 UserChatBotRoleModel.user_id == user_id,
                 ChatModel.type.in_(["group", "supergroup"]),
+                UserChatActivityModel.is_active_member.is_(True),
+                func.coalesce(UserChatModerationStateModel.is_banned, False).is_(False),
             )
         )
         rows = (await self._session.execute(stmt)).all()
@@ -5032,9 +5267,18 @@ class SqlAlchemyActivityRepository:
                     UserChatBotRoleModel.user_id == user_id,
                 ),
             )
+            .outerjoin(
+                UserChatModerationStateModel,
+                and_(
+                    UserChatModerationStateModel.chat_id == UserChatActivityModel.chat_id,
+                    UserChatModerationStateModel.user_id == user_id,
+                ),
+            )
             .where(
                 UserChatActivityModel.user_id == user_id,
                 ChatModel.type.in_(["group", "supergroup"]),
+                UserChatActivityModel.is_active_member.is_(True),
+                func.coalesce(UserChatModerationStateModel.is_banned, False).is_(False),
             )
             .order_by(
                 UserChatActivityModel.last_seen_at.desc(),
@@ -5435,6 +5679,7 @@ class SqlAlchemyActivityRepository:
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
             .where(
                 UserChatActivityModel.chat_id == chat_id,
+                UserChatActivityModel.is_active_member.is_(True),
                 func.lower(UserModel.username) == lowered,
             )
             .order_by(UserChatActivityModel.last_seen_at.desc())
@@ -5452,6 +5697,14 @@ class SqlAlchemyActivityRepository:
             persona_enabled=persona_enabled,
             persona_display_mode=persona_display_mode,
         )
+
+    async def is_active_chat_member(self, *, chat_id: int, user_id: int) -> bool:
+        stmt = select(UserChatActivityModel.user_id).where(
+            UserChatActivityModel.chat_id == chat_id,
+            UserChatActivityModel.user_id == user_id,
+            UserChatActivityModel.is_active_member.is_(True),
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
     async def find_shared_group_user_by_username(self, *, sender_user_id: int, username: str) -> UserSnapshot | None:
         lowered = username.lstrip("@").strip().lower()
@@ -7076,6 +7329,14 @@ class SqlAlchemyEconomyRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def lock_resources(self, *resource_keys: str) -> None:
+        if not resource_keys or self._session.bind is None or self._session.bind.dialect.name != "postgresql":
+            return
+        for resource_key in sorted(set(resource_keys)):
+            digest = hashlib.blake2b(resource_key.encode("utf-8"), digest_size=8).digest()
+            lock_key = int.from_bytes(digest, byteorder="big", signed=True)
+            await self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
     async def set_private_chat_context(self, *, user_id: int, chat_id: int) -> None:
         await self._upsert_chat(ChatSnapshot(telegram_chat_id=chat_id, chat_type="group", title=None))
         await self._upsert_user(
@@ -7131,6 +7392,7 @@ class SqlAlchemyEconomyRepository:
         scope: EconomyScope,
         user_id: int,
     ) -> tuple[EconomyAccount, FarmState]:
+        await self.lock_resources(f"economy:account:{scope.scope_id}:{int(user_id)}")
         if scope.chat_id is not None:
             await self._upsert_chat(ChatSnapshot(telegram_chat_id=scope.chat_id, chat_type="group", title=None))
         await self._upsert_user(
@@ -7285,18 +7547,26 @@ class SqlAlchemyEconomyRepository:
         return self._to_inventory_item(row)
 
     async def add_balance(self, *, account_id: int, delta: int) -> int:
-        row = await self._session.get(EconomyAccountModel, account_id)
-        if row is None:
+        normalized_delta = int(delta)
+        stmt = (
+            update(EconomyAccountModel)
+            .where(
+                EconomyAccountModel.id == account_id,
+                EconomyAccountModel.balance + normalized_delta >= 0,
+            )
+            .values(
+                balance=EconomyAccountModel.balance + normalized_delta,
+                updated_at=datetime.now(timezone.utc),
+            )
+            .returning(EconomyAccountModel.balance)
+        )
+        new_balance = (await self._session.execute(stmt)).scalar_one_or_none()
+        if new_balance is not None:
+            return int(new_balance)
+        exists = await self._session.scalar(select(EconomyAccountModel.id).where(EconomyAccountModel.id == account_id))
+        if exists is None:
             raise RuntimeError("Economy account not found")
-
-        new_balance = int(row.balance) + int(delta)
-        if new_balance < 0:
-            raise ValueError("Insufficient balance")
-
-        row.balance = new_balance
-        row.updated_at = datetime.now(timezone.utc)
-        await self._session.flush()
-        return new_balance
+        raise ValueError("Insufficient balance")
 
     async def update_tap_state(
         self,

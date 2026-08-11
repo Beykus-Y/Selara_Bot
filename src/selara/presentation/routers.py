@@ -4,29 +4,31 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
-from selara.presentation.handlers.engagement import router as engagement_router
-from selara.presentation.handlers.economy import router as economy_router
-from selara.presentation.handlers.game import router as game_router
-from selara.presentation.handlers.help import router as help_router
 from selara.presentation.handlers.aliases import router as aliases_router
 from selara.presentation.handlers.chat_assistant import router as chat_assistant_router
-from selara.presentation.handlers.message_archive import router as message_archive_router
+from selara.presentation.handlers.clans import router as clans_router
+from selara.presentation.handlers.economy import router as economy_router
+from selara.presentation.handlers.engagement import router as engagement_router
+from selara.presentation.handlers.game import router as game_router
+from selara.presentation.handlers.help import router as help_router
+from selara.presentation.handlers.llm_admin import router as llm_admin_router
+from selara.presentation.handlers.message_archive import (
+    router as message_archive_router,
+)
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
-from selara.presentation.handlers.clans import router as clans_router
 from selara.presentation.handlers.relationships import router as relationships_router
 from selara.presentation.handlers.settings import router as settings_router
 from selara.presentation.handlers.stats import router as stats_router
-from selara.presentation.handlers.llm_admin import router as llm_admin_router
 from selara.presentation.handlers.text_commands import router as text_commands_router
 from selara.presentation.handlers.voice import router as voice_router
 from selara.presentation.middlewares.activity_tracker import ActivityTrackerMiddleware
 from selara.presentation.middlewares.bot_ban import BotBanMiddleware
 from selara.presentation.middlewares.chat_migration import ChatMigrationMiddleware
-from selara.presentation.middlewares.command_cleanup import CommandCleanupMiddleware
 from selara.presentation.middlewares.chat_settings import ChatSettingsMiddleware
 from selara.presentation.middlewares.chat_write_lock import ChatWriteLockMiddleware
 from selara.presentation.middlewares.command_access import CommandAccessMiddleware
+from selara.presentation.middlewares.command_cleanup import CommandCleanupMiddleware
 from selara.presentation.middlewares.db_session import DBSessionMiddleware
 from selara.presentation.middlewares.error_handler import ErrorHandlerMiddleware
 
@@ -59,6 +61,7 @@ def build_router(
     root.callback_query.outer_middleware(DBSessionMiddleware(session_factory))
     root.callback_query.outer_middleware(BotBanMiddleware())
     root.callback_query.outer_middleware(ChatSettingsMiddleware())
+    root.callback_query.outer_middleware(ChatWriteLockMiddleware())
 
     root.inline_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.inline_query.outer_middleware(DBSessionMiddleware(session_factory))

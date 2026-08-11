@@ -8,11 +8,12 @@ from selara.application.achievements import get_achievement_catalog_from_setting
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
-from selara.infrastructure.llm import LlmClient, LlmConfig
-from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.session import create_engine, create_session_factory
+from selara.infrastructure.llm import LlmClient, LlmConfig
+from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
+from selara.infrastructure.stt import SttClient, SttConfig
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
@@ -100,6 +101,7 @@ async def _run_bot(settings, session_factory) -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
+    await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
     await bot.set_my_commands(build_bot_commands())
     if settings.web_enabled:
         miniapp_url = f"{settings.resolved_web_base_url}/miniapp/"
@@ -188,7 +190,6 @@ async def run() -> None:
 
     from selara.presentation.renderer_service import PlaywrightRendererService
     renderer_service = PlaywrightRendererService.get_instance()
-    await renderer_service.start()
 
     try:
         async with asyncio.TaskGroup() as tg:

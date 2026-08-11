@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { useMiniApp } from '@/shared/miniapp/context'
+import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 

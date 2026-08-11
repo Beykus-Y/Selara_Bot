@@ -1,4 +1,5 @@
 from selara.core.web_auth import (
+    digest_admin_session_token,
     digest_login_code,
     digest_session_token,
     generate_login_code,
@@ -28,6 +29,15 @@ def test_session_token_digest_changes_with_token() -> None:
     first = digest_session_token(secret="secret", token=generate_session_token())
     second = digest_session_token(secret="secret", token=generate_session_token())
     assert first != second
+
+
+def test_admin_session_digest_is_domain_separated() -> None:
+    token = generate_session_token()
+
+    assert digest_admin_session_token(secret="secret", token=token) != digest_session_token(
+        secret="secret",
+        token=token,
+    )
 
 
 def test_normalize_base_url_trims_trailing_slash() -> None:

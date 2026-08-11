@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    get_account_or_error,
+    resolve_scope_or_error,
+    to_meta_json,
+)
 from selara.core.config import Settings
 from selara.infrastructure.http.gacha_client import (
     GachaClientError,
@@ -41,7 +45,14 @@ def _build_client(settings: Settings, *, banner: str) -> HttpGachaClient:
         raise GachaUseCaseError(
             f"Для баннера {banner} не настроен gacha API. Укажите GACHA_BASE_URL или отдельный URL для баннера."
         )
-    return HttpGachaClient(base_url=base_url, timeout_seconds=settings.gacha_timeout_seconds)
+    service_token = settings.gacha_service_token.strip()
+    if not service_token:
+        raise GachaUseCaseError("Не настроен GACHA_SERVICE_TOKEN для запросов к gacha API.")
+    return HttpGachaClient(
+        base_url=base_url,
+        timeout_seconds=settings.gacha_timeout_seconds,
+        service_token=service_token,
+    )
 
 
 async def pull_card(

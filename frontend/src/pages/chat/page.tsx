@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 
@@ -27,7 +27,7 @@ export function ChatPage() {
   const [page, setPage] = useState(1)
   const [query, setQuery] = useState('')
   const [searchValue, setSearchValue] = useState('')
-  const [findMeRequested, setFindMeRequested] = useState(false)
+  const [findMeRequest, setFindMeRequest] = useState(0)
 
   const overviewQuery = useQuery({
     queryKey: ['miniapp-chat-overview', chatId],
@@ -36,29 +36,20 @@ export function ChatPage() {
   })
 
   const leaderboardQuery = useQuery({
-    queryKey: ['miniapp-chat-leaderboard', chatId, mode, page, query, findMeRequested],
+    queryKey: ['miniapp-chat-leaderboard', chatId, mode, page, query, findMeRequest],
     queryFn: () =>
       getMiniAppData<ChatLeaderboardData>(`/miniapp/chat/${chatId}/leaderboard`, 'Не удалось загрузить лидерборд.', {
         params: {
           mode,
           page,
           q: query,
-          find_me: findMeRequested ? 1 : 0,
+          find_me: findMeRequest > 0 ? 1 : 0,
         },
       }),
     enabled: Boolean(chatId),
   })
 
   usePageTitle(overviewQuery.data?.chat_title || 'Group')
-
-  useEffect(() => {
-    if (!findMeRequested || !leaderboardQuery.data) {
-      return
-    }
-
-    setPage(leaderboardQuery.data.page)
-    setFindMeRequested(false)
-  }, [findMeRequested, leaderboardQuery.data])
 
   if (!chatId) {
     return <section className="miniapp-empty-card">Не удалось определить ID чата.</section>
@@ -255,7 +246,7 @@ export function ChatPage() {
               onClick={() => {
                 setMode(item)
                 setPage(1)
-                setFindMeRequested(false)
+                setFindMeRequest(0)
               }}
             >
               {modeLabel(item)}
@@ -269,7 +260,7 @@ export function ChatPage() {
               event.preventDefault()
               setPage(1)
               setQuery(searchValue.trim())
-              setFindMeRequested(false)
+              setFindMeRequest(0)
             }}
           >
             <input
@@ -286,7 +277,7 @@ export function ChatPage() {
             type="button"
             onClick={() => {
               setPage(1)
-              setFindMeRequested(true)
+              setFindMeRequest((current) => current + 1)
             }}
           >
             Найти меня
@@ -316,7 +307,10 @@ export function ChatPage() {
             className="button button--secondary"
             type="button"
             disabled={leaderboardQuery.data.page <= 1}
-            onClick={() => setPage((current) => Math.max(1, current - 1))}
+            onClick={() => {
+              setFindMeRequest(0)
+              setPage(Math.max(1, leaderboardQuery.data.page - 1))
+            }}
           >
             Назад
           </button>
@@ -328,7 +322,10 @@ export function ChatPage() {
             className="button button--secondary"
             type="button"
             disabled={leaderboardQuery.data.page >= leaderboardQuery.data.total_pages}
-            onClick={() => setPage((current) => current + 1)}
+            onClick={() => {
+              setFindMeRequest(0)
+              setPage(leaderboardQuery.data.page + 1)
+            }}
           >
             Далее
           </button>

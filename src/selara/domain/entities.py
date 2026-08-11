@@ -319,6 +319,22 @@ class RelationshipState:
 
 
 @dataclass(frozen=True)
+class RelationshipCleanupSummary:
+    marriages_removed: int = 0
+    pairs_removed: int = 0
+    proposals_cancelled: int = 0
+    family_links_archived: int = 0
+
+    def __add__(self, other: "RelationshipCleanupSummary") -> "RelationshipCleanupSummary":
+        return RelationshipCleanupSummary(
+            marriages_removed=self.marriages_removed + other.marriages_removed,
+            pairs_removed=self.pairs_removed + other.pairs_removed,
+            proposals_cancelled=self.proposals_cancelled + other.proposals_cancelled,
+            family_links_archived=self.family_links_archived + other.family_links_archived,
+        )
+
+
+@dataclass(frozen=True)
 class ChatTextAlias:
     id: int
     chat_id: int

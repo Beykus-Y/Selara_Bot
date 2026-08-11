@@ -569,7 +569,7 @@ Index("idx_user_chat_rest_states_chat_expires", UserChatRestStateModel.chat_id, 
 class RelationshipProposalModel(Base):
     __tablename__ = "relationship_proposals"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     proposer_user_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
@@ -635,7 +635,7 @@ Index(
 class PairModel(Base):
     __tablename__ = "pairs"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     user_low_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
@@ -721,7 +721,7 @@ Index(
 class MarriageModel(Base):
     __tablename__ = "marriages"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     user_low_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
@@ -940,7 +940,7 @@ Index("uq_chat_custom_social_actions_chat_trigger", ChatCustomSocialActionModel.
 class RelationshipGraphModel(Base):
     __tablename__ = "relationships_graph"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -983,7 +983,7 @@ class RelationshipGraphModel(Base):
 class FamilyRelationshipArchiveModel(Base):
     __tablename__ = "family_relationship_archive"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     original_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_a: Mapped[int] = mapped_column(BigInteger, nullable=False)

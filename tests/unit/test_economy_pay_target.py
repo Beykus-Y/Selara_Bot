@@ -30,6 +30,7 @@ async def test_pay_command_supports_persona_target(monkeypatch: pytest.MonkeyPat
         chat_display_name="Ху Тао",
     )
     activity_repo = SimpleNamespace(
+        is_active_chat_member=AsyncMock(return_value=True),
         find_chat_persona_owner=AsyncMock(return_value=None),
         list_chat_persona_assignments=AsyncMock(
             return_value=[
@@ -73,3 +74,30 @@ async def test_pay_command_supports_persona_target(monkeypatch: pytest.MonkeyPat
     transfer_coins.assert_awaited_once()
     assert transfer_coins.await_args.kwargs["receiver_user_id"] == 21
     assert transfer_coins.await_args.kwargs["amount"] == 100
+
+
+@pytest.mark.asyncio
+async def test_pay_command_rejects_numeric_user_outside_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _message()
+    activity_repo = SimpleNamespace(is_active_chat_member=AsyncMock(return_value=False))
+    transfer_coins = AsyncMock()
+    monkeypatch.setattr(economy_module, "transfer_coins", transfer_coins)
+
+    await economy_module.pay_command(
+        message,
+        CommandObject(prefix="/", command="pay", mention=None, args="999999999 100"),
+        bot=SimpleNamespace(),
+        economy_repo=SimpleNamespace(),
+        activity_repo=activity_repo,
+        chat_settings=SimpleNamespace(
+            economy_enabled=True,
+            economy_mode="global",
+            economy_transfer_daily_limit=5000,
+            economy_transfer_tax_percent=5,
+            cleanup_economy_commands=False,
+        ),
+    )
+
+    transfer_coins.assert_not_awaited()
+    activity_repo.is_active_chat_member.assert_awaited_once_with(chat_id=-100, user_id=999999999)
+    assert "участник" in message.answer.await_args.args[0].lower()

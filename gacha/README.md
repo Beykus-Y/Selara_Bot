@@ -18,6 +18,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 export GACHA_DATABASE_URL=postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha
+export GACHA_SERVICE_TOKEN="$(openssl rand -hex 32)"
 alembic upgrade head
 uvicorn gacha_service.main:app --reload
 ```
@@ -35,16 +36,20 @@ docker build -f gacha/Dockerfile -t selara-gacha:local .
 Запуск через отдельный compose:
 
 ```bash
+cp gacha/.env.example gacha/.env
+# Замените все __GENERATE_...__ значения в gacha/.env.
 docker compose -f gacha/docker-compose.yml up --build
 ```
 
 По умолчанию compose поднимает:
 
 - `postgres:16-alpine` с базой `gacha`;
-- `gacha` API на `http://0.0.0.0:8001`;
+- `gacha` API на `http://127.0.0.1:8001` (если явно не переопределён `GACHA_BIND_HOST`);
 - схему через `alembic upgrade head` перед стартом приложения.
 
 Данные PostgreSQL хранятся в volume `selara_gacha_postgres_data`.
+Compose не запускается с паролем БД или межсервисным токеном по умолчанию: необходимо явно
+задать `GACHA_POSTGRES_PASSWORD`, `GACHA_DATABASE_URL` и `GACHA_SERVICE_TOKEN` в `gacha/.env`.
 
 Конфиги баннеров и героев лежат в `gacha/config/banners/*.json`.
 Локальные изображения кладите в `gacha/images/<banner>/`.

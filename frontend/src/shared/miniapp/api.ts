@@ -75,8 +75,7 @@ export async function getMiniAppData<T>(
       throw new Error(data.message)
     }
 
-    const { ok: _ok, ...payload } = data
-    return payload as T
+    return Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'ok')) as T
   } catch (error) {
     throw resolveMiniAppError(error, fallbackMessage)
   }
@@ -94,8 +93,7 @@ export async function postMiniAppData<T>(
       throw new Error(data.message)
     }
 
-    const { ok: _ok, ...payload } = data
-    return payload as T
+    return Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'ok')) as T
   } catch (error) {
     throw resolveMiniAppError(error, fallbackMessage)
   }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -39,6 +40,40 @@ class GachaRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def lock_user_banner(self, *, user_id: int, banner: str) -> None:
+        if self._session.bind is None or self._session.bind.dialect.name != "postgresql":
+            return
+        resource = f"gacha:user-banner:{int(user_id)}:{banner.strip().lower()}"
+        digest = hashlib.blake2b(resource.encode("utf-8"), digest_size=8).digest()
+        lock_key = int.from_bytes(digest, byteorder="big", signed=True)
+        await self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+        self._session.expire_all()
+
+    async def prepare_player_for_pull(self, *, user_id: int, username: str | None, banner: str) -> PlayerState:
+        """Lock and load/create a player without ending the pull transaction."""
+        await self.lock_user_banner(user_id=user_id, banner=banner)
+        player = await self._session.get(PlayerModel, user_id)
+        if player is None:
+            player = PlayerModel(
+                user_id=user_id,
+                username=username,
+                adventure_rank=1,
+                adventure_xp=0,
+                total_points=0,
+                total_primogems=0,
+                next_pull_at=None,
+            )
+            self._session.add(player)
+            await self._session.flush()
+        elif username is not None and username != player.username:
+            player.username = username
+            await self._session.flush()
+
+        return _to_player_state(
+            player,
+            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
+        )
+
     async def adjust_banner_currency(
         self,
         *,
@@ -49,6 +84,8 @@ class GachaRepository:
     ) -> PlayerState:
         if amount == 0:
             raise ValueError("Количество валюты должно быть ненулевым.")
+
+        await self.lock_user_banner(user_id=user_id, banner=banner)
 
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
@@ -110,6 +147,7 @@ class GachaRepository:
         return _coerce_utc_datetime(cooldown.next_pull_at)
 
     async def reset_banner_cooldown(self, *, user_id: int, banner: str) -> bool:
+        await self.lock_user_banner(user_id=user_id, banner=banner)
         cooldown = await self._session.get(
             PlayerBannerCooldownModel,
             {
@@ -135,6 +173,17 @@ class GachaRepository:
         if wallet is None:
             return 0
         return int(wallet.currency_balance)
+
+    async def get_player(self, *, user_id: int, banner: str | None = None) -> PlayerState | None:
+        player = await self._session.get(PlayerModel, user_id)
+        if player is None:
+            return None
+        if banner is None:
+            return _to_player_state(player)
+        return _to_player_state(
+            player,
+            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
+        )
 
     async def get_or_create_player(self, *, user_id: int, username: str | None, banner: str | None = None) -> PlayerState:
         player = await self._session.get(PlayerModel, user_id)
@@ -184,6 +233,7 @@ class GachaRepository:
         base_currency_price: int = 0,
         sellable: bool = False,
     ) -> tuple[PlayerState, int, int]:
+        await self.lock_user_banner(user_id=user_id, banner=card.banner)
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
             player = PlayerModel(user_id=user_id, username=username, adventure_rank=1, adventure_xp=0, total_points=0, total_primogems=0)
@@ -306,6 +356,8 @@ class GachaRepository:
             raise ValueError("Эту копию нельзя продать.")
         if entry.sold_at is not None:
             raise ValueError("Эта копия уже продана.")
+
+        await self.lock_user_banner(user_id=user_id, banner=entry.banner)
 
         player = await self._session.get(PlayerModel, user_id)
         if player is None:

@@ -103,7 +103,7 @@ async def test_login_submit_returns_json_for_fetch_requests(monkeypatch) -> None
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     payload = response.json()
 
@@ -133,7 +133,7 @@ async def test_logout_returns_json_for_fetch_requests(monkeypatch) -> None:
         )
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
     payload = response.json()
 

@@ -7,8 +7,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.domain.entities import UserSnapshot
-from selara.infrastructure.db.achievement_metrics import increment_global_users_base_count
-from selara.infrastructure.db.models import UserModel, WebLoginCodeModel, WebSessionModel
+from selara.infrastructure.db.achievement_metrics import (
+    increment_global_users_base_count,
+)
+from selara.infrastructure.db.models import (
+    UserModel,
+    WebLoginCodeModel,
+    WebSessionModel,
+)
 
 
 def _coerce_utc_datetime(value: datetime) -> datetime:
@@ -81,6 +87,7 @@ class SqlAlchemyWebAuthRepository:
             )
             .order_by(WebLoginCodeModel.created_at.desc(), WebLoginCodeModel.id.desc())
             .limit(1)
+            .with_for_update()
         )
         row = (await self._session.execute(stmt)).one_or_none()
         if row is None:

@@ -8,11 +8,25 @@ from aiogram import F
 from aiogram.types import Message
 
 from selara.core.chat_settings import ChatSettings
+from selara.domain.entities import ChatRoleDefinition
 from selara.presentation.handlers.llm_admin import (
+    _execute_rollback,
     _handle,
     llm_admin_context_handler,
     llm_admin_nocontext_handler,
 )
+
+
+def _role(code: str, rank: int, *permissions: str) -> ChatRoleDefinition:
+    return ChatRoleDefinition(
+        chat_id=-100123,
+        role_code=code,
+        title_ru=code,
+        rank=rank,
+        permissions=permissions,
+        is_system=True,
+        template_key=code,
+    )
 
 
 @pytest.fixture
@@ -148,3 +162,77 @@ async def test_handle_empty_query(chat_settings):
         
         # Should reply saying to enter request after prefix
         message.reply.assert_awaited_once_with("Введите запрос после ??")
+
+
+@pytest.mark.asyncio
+async def test_rank_rollback_requires_manage_roles_permission() -> None:
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    telegram_user_id=222,
+                    username="target",
+                    first_name="Target",
+                    last_name=None,
+                    is_bot=False,
+                )
+            )
+        ),
+        get_effective_role_definition=AsyncMock(
+            side_effect=[
+                _role("custom_moderator", 20, "moderate_users"),
+                _role("participant", 0),
+            ]
+        ),
+        get_chat_role_definition=AsyncMock(return_value=_role("junior_admin", 10, "moderate_users")),
+        set_bot_role=AsyncMock(),
+    )
+    actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+
+    with pytest.raises(PermissionError, match="рол"):
+        await _execute_rollback(
+            payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "junior_admin"},
+            chat_id=-100123,
+            rollback_by=actor,
+            activity_repo=activity_repo,
+            bot=MagicMock(),
+        )
+
+    activity_repo.set_bot_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rank_rollback_cannot_restore_role_at_actor_level() -> None:
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    telegram_user_id=222,
+                    username="target",
+                    first_name="Target",
+                    last_name=None,
+                    is_bot=False,
+                )
+            )
+        ),
+        get_effective_role_definition=AsyncMock(
+            side_effect=[
+                _role("senior_admin", 20, "manage_roles", "moderate_users"),
+                _role("participant", 0),
+            ]
+        ),
+        get_chat_role_definition=AsyncMock(return_value=_role("senior_admin", 20, "manage_roles")),
+        set_bot_role=AsyncMock(),
+    )
+    actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+
+    with pytest.raises(PermissionError, match="уров"):
+        await _execute_rollback(
+            payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "senior_admin"},
+            chat_id=-100123,
+            rollback_by=actor,
+            activity_repo=activity_repo,
+            bot=MagicMock(),
+        )
+
+    activity_repo.set_bot_role.assert_not_awaited()

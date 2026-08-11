@@ -4,7 +4,17 @@ from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import inventory_stack_limit
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    get_account_or_error,
+    lock_economy_resources,
+    market_listing_lock_key,
+    resolve_scope_or_error,
+    to_meta_json,
+)
+from selara.application.use_cases.economy.market_limits import (
+    MAX_MARKET_LISTING_ID,
+    MAX_MARKET_QUANTITY,
+)
 from selara.application.use_cases.economy.results import MarketBuyResult
 
 
@@ -30,6 +40,24 @@ async def execute(
             total_cost=0,
             buyer_balance=None,
         )
+    if quantity > MAX_MARKET_QUANTITY:
+        return MarketBuyResult(
+            accepted=False,
+            reason=f"Количество не должно превышать {MAX_MARKET_QUANTITY}.",
+            listing_id=None,
+            quantity=0,
+            total_cost=0,
+            buyer_balance=None,
+        )
+    if listing_id <= 0 or listing_id > MAX_MARKET_LISTING_ID:
+        return MarketBuyResult(
+            accepted=False,
+            reason="Некорректный идентификатор лота.",
+            listing_id=None,
+            quantity=0,
+            total_cost=0,
+            buyer_balance=None,
+        )
 
     scope, error = await resolve_scope_or_error(repo, economy_mode=economy_mode, chat_id=chat_id, user_id=buyer_user_id)
     if scope is None:
@@ -42,6 +70,7 @@ async def execute(
             buyer_balance=None,
         )
 
+    await lock_economy_resources(repo, market_listing_lock_key(listing_id))
     listing = await repo.get_market_listing(listing_id=listing_id)
     if listing is None:
         return MarketBuyResult(

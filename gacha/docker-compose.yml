@@ -6,11 +6,11 @@ services:
     environment:
       POSTGRES_DB: ${GACHA_POSTGRES_DB:-gacha}
       POSTGRES_USER: ${GACHA_POSTGRES_USER:-gacha}
-      POSTGRES_PASSWORD: ${GACHA_POSTGRES_PASSWORD:-gacha}
-    ports:
-      - "${GACHA_POSTGRES_PORT:-5433}:5432"
+      POSTGRES_PASSWORD: ${GACHA_POSTGRES_PASSWORD:?Set GACHA_POSTGRES_PASSWORD}
     volumes:
       - gacha_postgres_data:/var/lib/postgresql/data
+    networks:
+      - gacha_internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${GACHA_POSTGRES_USER:-gacha} -d ${GACHA_POSTGRES_DB:-gacha}"]
       interval: 5s
@@ -28,13 +28,24 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:-postgresql+asyncpg://gacha:gacha@postgres:5432/gacha}
+      GACHA_DATABASE_URL: ${GACHA_DATABASE_URL:?Set GACHA_DATABASE_URL}
       GACHA_DEFAULT_BANNER: ${GACHA_DEFAULT_BANNER:-genshin}
       GACHA_APP_DIR: /app
       GACHA_ADMIN_TOKEN: ${GACHA_ADMIN_TOKEN:-}
+      GACHA_SERVICE_TOKEN: ${GACHA_SERVICE_TOKEN:?Set GACHA_SERVICE_TOKEN}
     ports:
-      - "${GACHA_BIND_HOST:-0.0.0.0}:${GACHA_PORT:-8001}:8001"
+      - "${GACHA_BIND_HOST:-127.0.0.1}:${GACHA_PORT:-8001}:8001"
+    expose:
+      - "8001"
+    networks:
+      - gacha_internal
+      - edge
 
 volumes:
   gacha_postgres_data:
     name: ${GACHA_POSTGRES_VOLUME_NAME:-selara_gacha_postgres_data}
+
+networks:
+  gacha_internal:
+  edge:
+    external: true

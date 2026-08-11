@@ -5,15 +5,19 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from gacha_service.application.catalog import get_banner_config, get_card_for_banner, get_cards_for_banner
+from gacha_service.application.catalog import (
+    get_banner_config,
+    get_card_for_banner,
+    get_cards_for_banner,
+)
 from gacha_service.domain.models import (
-    CurrencyGrantResult,
+    RARITY_LABELS,
+    RARITY_SUMMARY_ORDER,
     CardRarity,
+    CurrencyGrantResult,
     GachaCard,
     PlayerState,
     PullResult,
-    RARITY_LABELS,
-    RARITY_SUMMARY_ORDER,
     SellOffer,
     SellResult,
     format_element_icon,
@@ -268,9 +272,26 @@ class GachaService:
         self._default_cooldown_seconds = default_cooldown_seconds
         self._rng = rng or random.Random()
 
+    async def _lock_user_banner(self, *, user_id: int, banner: str) -> bool:
+        lock = getattr(self._repo, "lock_user_banner", None)
+        if lock is None:
+            return False
+        await lock(user_id=user_id, banner=banner)
+        return True
+
+    async def _prepare_player_for_pull(self, *, user_id: int, username: str | None, banner: str) -> PlayerState:
+        prepare = getattr(self._repo, "prepare_player_for_pull", None)
+        if prepare is not None:
+            return await prepare(user_id=user_id, username=username, banner=banner)
+
+        player = await self._repo.get_or_create_player(user_id=user_id, username=username, banner=banner)
+        if await self._lock_user_banner(user_id=user_id, banner=banner):
+            player = await self._repo.get_or_create_player(user_id=user_id, username=username, banner=banner)
+        return player
+
     async def pull(self, *, user_id: int, username: str | None, banner: str, now: datetime | None = None) -> PullResult:
         current_time = now or _utc_now()
-        player = await self._repo.get_or_create_player(user_id=user_id, username=username, banner=banner)
+        player = await self._prepare_player_for_pull(user_id=user_id, username=username, banner=banner)
         next_pull_at = _coerce_utc_datetime(await self._repo.get_banner_cooldown(user_id=user_id, banner=banner))
         banner_config = get_banner_config(banner)
         cooldown_seconds = self._default_cooldown_seconds or banner_config.cooldown_seconds
@@ -298,7 +319,7 @@ class GachaService:
 
     async def pull_purchase(self, *, user_id: int, username: str | None, banner: str, now: datetime | None = None) -> PullResult:
         current_time = now or _utc_now()
-        player = await self._repo.get_or_create_player(user_id=user_id, username=username, banner=banner)
+        player = await self._prepare_player_for_pull(user_id=user_id, username=username, banner=banner)
         if player.total_primogems < PAID_PULL_PRICE:
             terms = _get_banner_terms(banner)
             raise ValueError(
@@ -392,7 +413,7 @@ class GachaService:
         now: datetime | None = None,
     ) -> PullResult:
         current_time = now or _utc_now()
-        await self._repo.get_or_create_player(user_id=user_id, username=username, banner=banner)
+        await self._prepare_player_for_pull(user_id=user_id, username=username, banner=banner)
         base_card = get_card_for_banner(banner, card_code)
         existing_copies = await self._repo.get_card_copies(user_id=user_id, banner=banner, card_code=base_card.code)
         card, outcome, sellable = _resolve_reward_variant(base_card, existing_copies=existing_copies)

@@ -50,7 +50,6 @@ class FakeGachaRepository:
         if banner is None:
             return player
         return replace(player, total_primogems=self.banner_wallets.get((user_id, banner), 0))
-
     async def adjust_banner_currency(
         self,
         *,
@@ -185,6 +184,35 @@ class FakeGachaRepository:
             for (current_user_id, current_banner, current_card_code), copies_owned in self.collection.items()
             if current_user_id == user_id and current_banner == banner and copies_owned > 0
         ]
+
+
+class AtomicPullPreparationRepository(FakeGachaRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def prepare_player_for_pull(self, *, user_id: int, username: str | None, banner: str) -> PlayerState:
+        self.calls.append("prepare")
+        return await super().get_or_create_player(user_id=user_id, username=username, banner=banner)
+
+    async def get_or_create_player(self, *, user_id: int, username: str | None, banner: str | None = None) -> PlayerState:
+        self.calls.append("legacy-get-or-create")
+        return await super().get_or_create_player(user_id=user_id, username=username, banner=banner)
+
+
+@pytest.mark.asyncio
+async def test_pull_uses_atomic_player_preparation_when_repository_supports_it() -> None:
+    repo = AtomicPullPreparationRepository()
+    service = GachaService(repo)
+
+    await service.pull(
+        user_id=99,
+        username="first-pull",
+        banner="genshin",
+        now=datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert repo.calls[0] == "prepare"
 
 
 @pytest.mark.asyncio

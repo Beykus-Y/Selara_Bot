@@ -3,9 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+    to_meta_json,
+)
 from selara.application.use_cases.economy.results import TransferCoinsResult
-
 
 MIN_TRANSFER = 50
 MAX_TRANSFER = 1500
@@ -56,6 +61,11 @@ async def execute(
             receiver_balance=None,
         )
 
+    await lock_economy_resources(
+        repo,
+        account_lock_key(scope=scope, user_id=sender_user_id),
+        account_lock_key(scope=scope, user_id=receiver_user_id),
+    )
     sender, _ = await get_account_or_error(repo, scope=scope, user_id=sender_user_id)
     receiver, _ = await get_account_or_error(repo, scope=scope, user_id=receiver_user_id)
 

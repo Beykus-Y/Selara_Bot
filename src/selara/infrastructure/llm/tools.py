@@ -15,6 +15,7 @@ from selara.infrastructure.db.llm_repository import LlmRepository
 log = logging.getLogger(__name__)
 
 import os
+
 _BOT_DOCS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "docs", "bot_docs"))
 
 
@@ -45,6 +46,21 @@ class ToolDefinition:
 
 
 _TOOL_REGISTRY: dict[str, ToolDefinition] = {}
+
+_MODERATION_TARGET_TOOLS: frozenset[str] = frozenset(
+    {
+        "grant_rest",
+        "revoke_rest",
+        "warn_user",
+        "unwarn_user",
+        "ban_user",
+        "unban_user",
+        "apply_pred",
+        "remove_pred",
+        "grant_persona",
+        "revoke_persona",
+    }
+)
 
 
 def register_tool(name: str, schema: dict, status_text: str = "") -> Callable:
@@ -84,6 +100,15 @@ async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
             success=False,
         )
     try:
+        if call.name in _MODERATION_TARGET_TOOLS:
+            authorization_error = await _moderation_target_error(
+                target_value=call.arguments.get("target", ""),
+                chat_snapshot=ctx["chat_snapshot"],
+                actor_snapshot=ctx["actor_snapshot"],
+                activity_repo=ctx["activity_repo"],
+            )
+            if authorization_error is not None:
+                return _err(call.call_id, call.name, authorization_error)
         result = await definition.executor(call, **ctx)
         log.info("llm tool %s ok: success=%s db_action_id=%s undo=%s",
                  call.name, result.success, result.db_action_id, result.undo_payload is not None)
@@ -114,7 +139,8 @@ async def _resolve_target(
     if stripped.isdigit():
         user_id = int(stripped)
         from sqlalchemy import select
-        from selara.infrastructure.db.models import UserModel, UserChatActivityModel
+
+        from selara.infrastructure.db.models import UserChatActivityModel, UserModel
         stmt = (
             select(UserModel)
             .join(UserChatActivityModel, UserChatActivityModel.user_id == UserModel.telegram_user_id)
@@ -146,6 +172,41 @@ async def _resolve_target(
     return None
 
 
+async def _moderation_target_error(
+    *,
+    target_value: object,
+    chat_snapshot: ChatSnapshot,
+    actor_snapshot: UserSnapshot,
+    activity_repo: Any,
+) -> str | None:
+    target = await _resolve_target(
+        str(target_value),
+        chat_id=chat_snapshot.telegram_chat_id,
+        activity_repo=activity_repo,
+    )
+    if target is None:
+        return f"Пользователь '{target_value}' не найден в чате."
+    if target.telegram_user_id == actor_snapshot.telegram_user_id:
+        return "Нельзя применять модерацию к самому себе."
+    if target.is_bot:
+        return "Нельзя применять модерацию к боту."
+
+    actor_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_snapshot.telegram_chat_id,
+        user_id=actor_snapshot.telegram_user_id,
+    )
+    if actor_role is None or "moderate_users" not in set(actor_role.permissions):
+        return "Недостаточно прав для модерации пользователей."
+
+    target_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_snapshot.telegram_chat_id,
+        user_id=target.telegram_user_id,
+    )
+    if actor_role.role_code != "owner" and target_role is not None and actor_role.rank <= target_role.rank:
+        return "Недостаточно уровня доступа для модерации этого пользователя."
+    return None
+
+
 def _ok(call_id: str, name: str, data: dict, description: str, undo: dict | None = None) -> ToolResult:
     return ToolResult(
         call_id=call_id,
@@ -161,7 +222,7 @@ def _err(call_id: str, name: str, msg: str) -> ToolResult:
     return ToolResult(
         call_id=call_id,
         name=name,
-        result_text=json.dumps({"error": msg}),
+        result_text=json.dumps({"error": msg}, ensure_ascii=False),
         action_description="",
         success=False,
     )
@@ -198,7 +259,7 @@ async def _exec_grant_rest(
 ) -> ToolResult:
     target_str = call.arguments.get("target", "")
     duration_days = max(1, int(call.arguments.get("duration_days", 1)))
-    reason = call.arguments.get("reason", "")
+    reason = str(call.arguments.get("reason", "")).strip()
 
     target = await _resolve_target(target_str, chat_id=chat_snapshot.telegram_chat_id, activity_repo=activity_repo)
     if target is None:
@@ -211,17 +272,20 @@ async def _exec_grant_rest(
         duration_days=duration_days,
     )
 
+    action_description = f"Рест {target_str} на {duration_days}д"
+    if reason:
+        action_description = f"{action_description}: {reason[:200]}"
     action = await llm_repo.add_admin_action(
         chat_id=chat_snapshot.telegram_chat_id,
         admin_user_id=actor_snapshot.telegram_user_id,
         tool_name=call.name,
-        action_description=f"Рест {target_str} на {duration_days}д",
+        action_description=action_description,
         undo_payload={"tool": "revoke_rest", "target_user_id": target.telegram_user_id, "chat_id": chat_snapshot.telegram_chat_id},
     )
     result = _ok(
         call.call_id, call.name,
         {"ok": True, "target": target_str, "duration_days": duration_days},
-        f"Рест {target_str} на {duration_days}д",
+        action_description,
         undo={"tool": "revoke_rest", "target_user_id": target.telegram_user_id, "chat_id": chat_snapshot.telegram_chat_id},
     )
     result.db_action_id = action.id
@@ -747,8 +811,13 @@ async def _exec_get_chat_stats(
     activity_repo: Any,
     **_: Any,
 ) -> ToolResult:
-    from sqlalchemy import select, func as sqlfunc
-    from selara.infrastructure.db.models import UserChatActivityModel, UserChatRestStateModel
+    from sqlalchemy import func as sqlfunc
+    from sqlalchemy import select
+
+    from selara.infrastructure.db.models import (
+        UserChatActivityModel,
+        UserChatRestStateModel,
+    )
 
     now = datetime.now(timezone.utc)
     chat_id = chat_snapshot.telegram_chat_id
@@ -810,13 +879,36 @@ async def _exec_set_rank(
     if target is None:
         return _err(call.call_id, call.name, f"Пользователь '{target_str}' не найден в чате.")
 
-    previous_role = await activity_repo.get_bot_role(chat_id=chat_snapshot.telegram_chat_id, user_id=target.telegram_user_id)
+    chat_id = chat_snapshot.telegram_chat_id
+    actor_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_id,
+        user_id=actor_snapshot.telegram_user_id,
+    )
+    target_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_id,
+        user_id=target.telegram_user_id,
+    )
+    new_role = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=rank)
+
+    if actor_role is None or "manage_roles" not in set(actor_role.permissions):
+        return _err(call.call_id, call.name, "Недостаточно прав для управления ролями.")
+    if new_role is None:
+        return _err(call.call_id, call.name, f"Роль '{rank}' не найдена.")
+    if target.telegram_user_id == actor_snapshot.telegram_user_id and actor_role.role_code != "owner":
+        return _err(call.call_id, call.name, "Нельзя менять свою роль, если вы не владелец.")
+    if actor_role.role_code != "owner":
+        if target_role is not None and actor_role.rank <= target_role.rank:
+            return _err(call.call_id, call.name, "Недостаточно уровня доступа для этого пользователя.")
+        if actor_role.rank <= new_role.rank:
+            return _err(call.call_id, call.name, "Нельзя назначить роль своего уровня или выше.")
+
+    previous_role = await activity_repo.get_bot_role(chat_id=chat_id, user_id=target.telegram_user_id)
     previous_rank = str(previous_role) if previous_role else "participant"
 
     await activity_repo.set_bot_role(
         chat=chat_snapshot,
         target=target,
-        role=rank,
+        role=new_role.role_code,
         assigned_by_user_id=actor_snapshot.telegram_user_id,
     )
 
@@ -877,6 +969,7 @@ async def _exec_get_top(
     **_: Any,
 ) -> ToolResult:
     from datetime import timedelta
+
     from selara.domain.entities import LeaderboardPeriod
 
     mode_str = call.arguments.get("mode", "activity")
@@ -1099,7 +1192,12 @@ async def _exec_list_members(
     **_: Any,
 ) -> ToolResult:
     from sqlalchemy import select
-    from selara.infrastructure.db.models import UserChatActivityModel, UserChatBotRoleModel, UserModel
+
+    from selara.infrastructure.db.models import (
+        UserChatActivityModel,
+        UserChatBotRoleModel,
+        UserModel,
+    )
 
     limit = min(int(call.arguments.get("limit", 50)), 200)
     chat_id = chat_snapshot.telegram_chat_id

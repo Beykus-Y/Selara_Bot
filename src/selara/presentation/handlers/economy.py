@@ -11,10 +11,12 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from selara.application.use_cases.economy.buy_shop_item import build_shop_offers
 from selara.application.use_cases.economy.auction_bid import execute as auction_bid
-from selara.application.use_cases.economy.auction_finalize import execute as auction_finalize
+from selara.application.use_cases.economy.auction_finalize import (
+    execute as auction_finalize,
+)
 from selara.application.use_cases.economy.auction_start import execute as auction_start
+from selara.application.use_cases.economy.buy_shop_item import build_shop_offers
 from selara.application.use_cases.economy.catalog import (
     CROPS,
     FARM_LEVEL_PLOTS,
@@ -31,20 +33,38 @@ from selara.application.use_cases.economy.catalog import (
 from selara.application.use_cases.economy.claim_daily import execute as claim_daily
 from selara.application.use_cases.economy.craft import execute as craft_item
 from selara.application.use_cases.economy.draw_lottery import execute as draw_lottery
-from selara.application.use_cases.economy.growth import STRESS_DECAY_PER_HOUR
-from selara.application.use_cases.economy.growth import effective_growth_stress_pct
-from selara.application.use_cases.economy.growth import get_profile as get_growth_profile
-from selara.application.use_cases.economy.growth import perform_action as perform_growth_action
 from selara.application.use_cases.economy.get_dashboard import execute as get_dashboard
-from selara.application.use_cases.economy.harvest_all_ready import execute as harvest_all_ready
+from selara.application.use_cases.economy.growth import (
+    STRESS_DECAY_PER_HOUR,
+    effective_growth_stress_pct,
+)
+from selara.application.use_cases.economy.growth import (
+    get_profile as get_growth_profile,
+)
+from selara.application.use_cases.economy.growth import (
+    perform_action as perform_growth_action,
+)
 from selara.application.use_cases.economy.harvest import execute as harvest_crop
-from selara.application.use_cases.economy.market_buy_listing import execute as market_buy_listing
-from selara.application.use_cases.economy.market_cancel_listing import execute as market_cancel_listing
-from selara.application.use_cases.economy.market_create_listing import execute as market_create_listing
-from selara.application.use_cases.economy.plant_all_last_crop import execute as plant_all_last_crop
+from selara.application.use_cases.economy.harvest_all_ready import (
+    execute as harvest_all_ready,
+)
+from selara.application.use_cases.economy.market_buy_listing import (
+    execute as market_buy_listing,
+)
+from selara.application.use_cases.economy.market_cancel_listing import (
+    execute as market_cancel_listing,
+)
+from selara.application.use_cases.economy.market_create_listing import (
+    execute as market_create_listing,
+)
+from selara.application.use_cases.economy.plant_all_last_crop import (
+    execute as plant_all_last_crop,
+)
 from selara.application.use_cases.economy.plant_crop import execute as plant_crop
 from selara.application.use_cases.economy.tap import execute as tap
-from selara.application.use_cases.economy.transfer_coins import execute as transfer_coins
+from selara.application.use_cases.economy.transfer_coins import (
+    execute as transfer_coins,
+)
 from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
@@ -195,7 +215,10 @@ async def _finalize_auction_task(
     try:
         while True:
             async with session_factory() as session:
-                from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
+                from selara.infrastructure.db.repositories import (
+                    SqlAlchemyActivityRepository,
+                    SqlAlchemyEconomyRepository,
+                )
 
                 activity_repo = SqlAlchemyActivityRepository(session)
                 economy_repo = SqlAlchemyEconomyRepository(session)
@@ -1185,7 +1208,9 @@ async def shop_command(message: Message, command: CommandObject, bot: Bot, econo
         if len(tokens) < 2:
             await _answer_message(message, "Формат: /shop buy <номер_оффера>")
             return
-        from selara.application.use_cases.economy.buy_shop_item import execute as buy_shop_item
+        from selara.application.use_cases.economy.buy_shop_item import (
+            execute as buy_shop_item,
+        )
 
         selected = tokens[1].strip()
         offer_code = selected
@@ -1476,6 +1501,15 @@ async def pay_command(message: Message, command: CommandObject, bot: Bot, econom
     if target_user_id is None or amount is None:
         await _answer_message(message, "Не удалось определить получателя/сумму")
         return
+
+    if chat_id is not None:
+        is_active_member = await activity_repo.is_active_chat_member(
+            chat_id=chat_id,
+            user_id=target_user_id,
+        )
+        if not is_active_member:
+            await _answer_message(message, "Получатель не является активным участником этого чата.")
+            return
 
     result = await transfer_coins(
         economy_repo,
@@ -1994,7 +2028,9 @@ async def shop_callback(query: CallbackQuery, economy_repo, chat_settings: ChatS
 
     if action == "b" and len(parts) >= 4:
         offer_code = parts[3]
-        from selara.application.use_cases.economy.buy_shop_item import execute as buy_shop_item
+        from selara.application.use_cases.economy.buy_shop_item import (
+            execute as buy_shop_item,
+        )
 
         result = await buy_shop_item(
             economy_repo,

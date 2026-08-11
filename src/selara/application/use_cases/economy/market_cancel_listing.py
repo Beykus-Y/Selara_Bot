@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
+from selara.application.use_cases.economy.common import (
+    get_account_or_error,
+    lock_economy_resources,
+    market_listing_lock_key,
+    resolve_scope_or_error,
+)
+from selara.application.use_cases.economy.market_limits import MAX_MARKET_LISTING_ID
 from selara.application.use_cases.economy.results import MarketCancelResult
 
 
@@ -18,10 +24,14 @@ async def execute(
 ) -> MarketCancelResult:
     now = event_at or datetime.now(timezone.utc)
 
+    if listing_id <= 0 or listing_id > MAX_MARKET_LISTING_ID:
+        return MarketCancelResult(accepted=False, reason="Некорректный идентификатор лота.", listing_id=None)
+
     scope, error = await resolve_scope_or_error(repo, economy_mode=economy_mode, chat_id=chat_id, user_id=seller_user_id)
     if scope is None:
         return MarketCancelResult(accepted=False, reason=error or "Не удалось определить режим экономики", listing_id=None)
 
+    await lock_economy_resources(repo, market_listing_lock_key(listing_id))
     listing = await repo.get_market_listing(listing_id=listing_id)
     if listing is None:
         return MarketCancelResult(accepted=False, reason="Лот не найден.", listing_id=None)

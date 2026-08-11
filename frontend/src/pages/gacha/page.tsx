@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { CollectionGrid } from '@/pages/gacha/ui/CollectionGrid'
 import { getUserCollection, getUserProfile } from '@/shared/api/gachaClient'
 import { usePageTitle } from '@/shared/lib/use-page-title'
-import { useMiniApp } from '@/shared/miniapp/context'
+import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function GachaCollectionPage() {
@@ -26,13 +26,6 @@ export function GachaCollectionPage() {
     queryFn: () => getUserProfile(viewer.telegram_user_id, banner, 6),
   })
 
-  // Visual Pity State to match mock design
-  const pityKey = `selara:gacha-pity:${viewer.telegram_user_id}:${banner}`
-  const [pityCount] = useState(() => {
-    const saved = localStorage.getItem(pityKey)
-    return saved ? parseInt(saved, 10) : 23 // Default visual pity
-  })
-
   const [showInviteText, setShowInviteText] = useState(false)
 
   if (collectionQuery.isLoading || profileQuery.isLoading) {
@@ -51,15 +44,13 @@ export function GachaCollectionPage() {
     return <LoadingShell eyebrow="Gacha" title="Готовлю экран коллекции" cards={3} />
   }
 
-  const rollsToGuarantee = 90 - pityCount
-
   return (
     <div className="miniapp-page-stack">
       {/* Title */}
       <div>
         <div className="eyebrow">Гача</div>
         <h1 className="page">Коллекция</h1>
-        <div className="page-sub">Карточки, крутки и питы по баннеру</div>
+        <div className="page-sub">Карточки и история круток по баннеру</div>
       </div>
 
       {/* Banner Switch */}
@@ -84,20 +75,6 @@ export function GachaCollectionPage() {
         >
           HSR
         </button>
-      </div>
-
-      {/* Pity Card */}
-      <div className="card pity-card">
-        <div className="pity-head">
-          <b>До гаранта</b>
-          <span className="mono">{pityCount} / 90</span>
-        </div>
-        <div className="bar">
-          <i className="goldfill" style={{ width: `${(pityCount / 90) * 100}%` }}></i>
-        </div>
-        <div className="pity-note">
-          Легендарная гарантирована через <b style={{ color: 'var(--text-2)' }}>{rollsToGuarantee} круток</b>. Soft-pity с 74-й.
-        </div>
       </div>
 
       {/* Roll Invitation Info */}
@@ -126,7 +103,7 @@ export function GachaCollectionPage() {
           setTimeout(() => setShowInviteText(false), 5000)
         }}
       >
-        🎰 Крутить ×1 · 1 600 pts
+        🎰 Крутить в Telegram-боте
       </button>
 
       {/* Recent Pulls */}

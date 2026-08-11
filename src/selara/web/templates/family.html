@@ -70,8 +70,8 @@
 {% block scripts %}
   <script>
     (() => {
-      const nodes = {{ family_nodes_json|safe }};
-      const edges = {{ family_edges_json|safe }};
+      const nodes = {{ family_nodes|tojson }};
+      const edges = {{ family_edges|tojson }};
       const scene = document.getElementById("family-scene");
       const sideList = document.getElementById("family-side-list");
       if (!scene || !sideList) return;
@@ -123,15 +123,27 @@
         svg.appendChild(line);
       });
 
+      const createStatRow = (label, detail, suffix) => {
+        const row = document.createElement("div");
+        row.className = "stat-row";
+        const body = document.createElement("div");
+        const heading = document.createElement("strong");
+        heading.textContent = String(label);
+        const description = document.createElement("p");
+        description.textContent = String(detail);
+        const marker = document.createElement("span");
+        marker.textContent = String(suffix);
+        body.append(heading, description);
+        row.append(body, marker);
+        return row;
+      };
+
       const renderSideList = (nodeId) => {
-        sideList.innerHTML = "";
+        sideList.replaceChildren();
         const node = nodes.find((item) => item.id === nodeId);
         if (!node) return;
 
-        const title = document.createElement("div");
-        title.className = "stat-row";
-        title.innerHTML = `<div><strong>${node.label}</strong><p>роль: ${node.role}</p></div><span>#${node.id}</span>`;
-        sideList.appendChild(title);
+        sideList.appendChild(createStatRow(node.label, `роль: ${node.role}`, `#${node.id}`));
 
         const related = edges.filter((edge) => edge.source === nodeId || edge.target === nodeId);
         if (!related.length) {
@@ -145,10 +157,7 @@
         related.forEach((edge) => {
           const otherId = edge.source === nodeId ? edge.target : edge.source;
           const otherNode = nodes.find((item) => item.id === otherId);
-          const row = document.createElement("div");
-          row.className = "stat-row";
-          row.innerHTML = `<div><strong>${otherNode?.label || otherId}</strong><p>${edge.label}</p></div><span>${edge.relation_type}</span>`;
-          sideList.appendChild(row);
+          sideList.appendChild(createStatRow(otherNode?.label || otherId, edge.label, edge.relation_type));
         });
       };
 
@@ -160,7 +169,11 @@
         anchor.className = `family-node role-${node.role}`;
         anchor.style.left = `${pos.x}px`;
         anchor.style.top = `${pos.y}px`;
-        anchor.innerHTML = `<strong>${node.label}</strong><span>#${node.id}</span>`;
+        const heading = document.createElement("strong");
+        heading.textContent = String(node.label);
+        const marker = document.createElement("span");
+        marker.textContent = `#${node.id}`;
+        anchor.append(heading, marker);
         anchor.addEventListener("mouseenter", () => renderSideList(node.id));
         anchor.addEventListener("focus", () => renderSideList(node.id));
         scene.appendChild(anchor);

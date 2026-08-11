@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 import { getMiniAppPage } from '@/shared/miniapp/api'
-import { useMiniApp } from '@/shared/miniapp/context'
+import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import type { MiniAppHomePageData } from '@/shared/miniapp/model'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 

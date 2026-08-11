@@ -5,24 +5,29 @@ from secrets import compare_digest
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
 
 from gacha_service.application.catalog import get_banner_config, get_card_for_banner
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
 from gacha_service.domain.models import (
-    CardRarity,
     RARITY_LABELS,
     RARITY_SUMMARY_ORDER,
+    CardRarity,
+    PlayerState,
     format_element_label,
     format_rarity_icon,
     format_rarity_summary_label,
     format_region_label,
     resolve_rank,
 )
-from gacha_service.infrastructure.backup import BackupError, cleanup_backup_artifact, create_database_backup
+from gacha_service.infrastructure.backup import (
+    BackupError,
+    cleanup_backup_artifact,
+    create_database_backup,
+)
 from gacha_service.infrastructure.db import session_dependency
 from gacha_service.infrastructure.repository import GachaRepository
 
@@ -385,9 +390,6 @@ def _render_profile_message(
     return "\n".join(lines)
 
 
-router = APIRouter(prefix="/v1/gacha", tags=["gacha"])
-
-
 def _require_admin_token(x_gacha_admin_token: str | None) -> None:
     expected_token = settings.admin_token.strip()
     if not expected_token:
@@ -396,7 +398,23 @@ def _require_admin_token(x_gacha_admin_token: str | None) -> None:
         raise HTTPException(status_code=403, detail="Invalid admin token.")
 
 
+def _require_service_token(x_gacha_service_token: str | None) -> None:
+    expected_token = settings.service_token.strip()
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Service token is not configured on gacha server.")
+    if not compare_digest(x_gacha_service_token or "", expected_token):
+        raise HTTPException(status_code=403, detail="Invalid service token.")
+
+
+async def _service_token_dependency(
+    x_gacha_service_token: str | None = Header(default=None, alias="X-Gacha-Service-Token"),
+) -> None:
+    _require_service_token(x_gacha_service_token)
+
+
 def build_router(session_factory):
+    router = APIRouter(prefix="/v1/gacha", tags=["gacha"])
+
     async def get_session() -> AsyncSession:
         async for session in session_dependency(session_factory):
             yield session
@@ -405,7 +423,7 @@ def build_router(session_factory):
     async def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
 
-    @router.post("/pull", response_model=PullResponse)
+    @router.post("/pull", response_model=PullResponse, dependencies=[Depends(_service_token_dependency)])
     async def pull(
         payload: PullRequest,
         request: Request,
@@ -424,7 +442,7 @@ def build_router(session_factory):
 
         return _pull_response_from_result(result=result, request=request, fallback_banner=payload.banner)
 
-    @router.post("/pull/purchase", response_model=PullResponse)
+    @router.post("/pull/purchase", response_model=PullResponse, dependencies=[Depends(_service_token_dependency)])
     async def purchase_pull(
         payload: PullRequest,
         request: Request,
@@ -457,7 +475,17 @@ def build_router(session_factory):
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        player = await repo.get_or_create_player(user_id=user_id, username=None, banner=banner)
+        player = await repo.get_player(user_id=user_id, banner=banner)
+        if player is None:
+            player = PlayerState(
+                user_id=user_id,
+                username=None,
+                adventure_rank=1,
+                adventure_xp=0,
+                total_points=0,
+                total_primogems=0,
+                next_pull_at=None,
+            )
         unique_cards, total_copies = await repo.get_collection_stats(user_id=user_id, banner=banner)
         cards_collection = await repo.get_user_collection(user_id=user_id, banner=banner)
         rarity_counts = _build_rarity_counts(banner=banner, collection_entries=cards_collection)
@@ -646,7 +674,11 @@ def build_router(session_factory):
             player=_to_player_payload(player=result.player, user_id=result.player.user_id),
         )
 
-    @router.post("/pulls/{pull_id}/sell", response_model=SellPullResponse)
+    @router.post(
+        "/pulls/{pull_id}/sell",
+        response_model=SellPullResponse,
+        dependencies=[Depends(_service_token_dependency)],
+    )
     async def sell_pull(
         pull_id: int,
         payload: SellPullRequest,

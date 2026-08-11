@@ -2,16 +2,24 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from selara.application.dto import RepStats
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.config import Settings
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT
-from selara.application.dto import RepStats
-from selara.domain.entities import ActivityStats, ChatActivitySummary, ChatRoleDefinition, LeaderboardItem, UserChatOverview, UserSnapshot
-from selara.domain.entities import ChatTextAliasUpsertResult
+from selara.domain.entities import (
+    ActivityStats,
+    ChatActivitySummary,
+    ChatRoleDefinition,
+    ChatTextAliasUpsertResult,
+    LeaderboardItem,
+    UserChatOverview,
+    UserSnapshot,
+)
 from selara.web import app as web_app_module
 
 
@@ -312,7 +320,7 @@ async def _web_client(monkeypatch, state: ChatHubState):
         yield client
     finally:
         await client.aclose()
-        await app.router.shutdown()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
 
 
 async def _has_permission(*args, **kwargs):
@@ -551,3 +559,81 @@ async def test_chat_economy_page_api_resolves_scope_once(monkeypatch) -> None:
     assert payload["ok"] is True
     assert payload["page"]["scope_id"] == "chat:-1001"
     assert state.scope_resolve_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "form"),
+    [
+        ("/api/chat/-1001/economy/apply", {"item_code": "seed:radish", "target_type": "plot-empty", "plot_no": "1"}),
+        ("/api/chat/-1001/economy/market/create", {"item_code": "crop:radish", "quantity": "1", "unit_price": "10"}),
+        ("/api/chat/-1001/economy/market/buy", {"listing_id": "1", "quantity": "1"}),
+        ("/api/chat/-1001/economy/market/cancel", {"listing_id": "1"}),
+    ],
+)
+async def test_economy_mutations_are_rejected_when_economy_is_disabled(
+    monkeypatch,
+    path: str,
+    form: dict[str, str],
+) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name=None, is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        chat_settings_by_chat={
+            -1001: replace(default_chat_settings(settings), economy_enabled=False),
+        },
+    )
+    mutation = AsyncMock(return_value=SimpleNamespace(accepted=True, listing=SimpleNamespace(id=1), details="ok"))
+    monkeypatch.setattr(web_app_module, "plant_crop", mutation)
+    monkeypatch.setattr(web_app_module, "use_item", mutation)
+    monkeypatch.setattr(web_app_module, "market_create_listing", mutation)
+    monkeypatch.setattr(web_app_module, "market_buy_listing", mutation)
+    monkeypatch.setattr(web_app_module, "market_cancel_listing", mutation)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(path, data=form)
+
+    assert response.status_code == 403
+    assert response.json()["ok"] is False
+    mutation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "form"),
+    [
+        ("/api/chat/-1001/economy/apply", {"item_code": "seed:radish", "target_type": "plot-empty", "plot_no": "1"}),
+        ("/api/chat/-1001/economy/market/create", {"item_code": "crop:radish", "quantity": "1", "unit_price": "10"}),
+        ("/api/chat/-1001/economy/market/buy", {"listing_id": "1", "quantity": "1"}),
+        ("/api/chat/-1001/economy/market/cancel", {"listing_id": "1"}),
+    ],
+)
+async def test_economy_mutations_are_rejected_while_chat_is_write_locked(
+    monkeypatch,
+    path: str,
+    form: dict[str, str],
+) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name=None, is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        chat_settings_by_chat={
+            -1001: replace(default_chat_settings(settings), economy_enabled=True, chat_write_locked=True),
+        },
+    )
+    mutation = AsyncMock(return_value=SimpleNamespace(accepted=True, listing=SimpleNamespace(id=1), details="ok"))
+    monkeypatch.setattr(web_app_module, "plant_crop", mutation)
+    monkeypatch.setattr(web_app_module, "use_item", mutation)
+    monkeypatch.setattr(web_app_module, "market_create_listing", mutation)
+    monkeypatch.setattr(web_app_module, "market_buy_listing", mutation)
+    monkeypatch.setattr(web_app_module, "market_cancel_listing", mutation)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(path, data=form)
+
+    assert response.status_code == 423
+    assert response.json()["ok"] is False
+    mutation.assert_not_awaited()

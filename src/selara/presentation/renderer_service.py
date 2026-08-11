@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from playwright.async_api import async_playwright, Browser, Playwright
+
+from playwright.async_api import Browser, Playwright, async_playwright
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class PlaywrightRendererService:
         return cls._instance
 
     async def start(self) -> None:
-        """Starts Playwright and the browser instance. Called in startup hooks."""
+        """Starts Playwright eagerly when an explicit warm-up is needed."""
         async with self._lock:
             await self._ensure_browser_started()
 

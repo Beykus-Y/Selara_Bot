@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta, timezone
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import delete, func, select
@@ -10,10 +10,10 @@ from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
     MarriageModel,
-    UserModel,
     UserChatActivityDailyModel,
     UserChatIrisImportHistoryModel,
     UserChatMessageEventModel,
+    UserModel,
 )
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
@@ -212,8 +212,49 @@ async def test_repository_lists_user_admin_and_activity_chats() -> None:
         activity_chats = await repo.list_user_activity_chats(user_id=user.telegram_user_id, limit=10)
         assert len(activity_chats) == 2
         assert activity_chats[0].chat_id == group_helper.telegram_chat_id
-        assert activity_chats[0].bot_role == "helper"
+        assert activity_chats[0].bot_role == "junior_admin"
         assert activity_chats[1].chat_id == group_owner.telegram_chat_id
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_hides_inactive_and_banned_chats_from_web_access_lists() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    user = UserSnapshot(telegram_user_id=551, username="viewer", first_name="View", last_name=None, is_bot=False)
+    actor = UserSnapshot(telegram_user_id=552, username="owner", first_name="Owner", last_name=None, is_bot=False)
+    active_chat = ChatSnapshot(telegram_chat_id=-12001, chat_type="group", title="Active")
+    inactive_chat = ChatSnapshot(telegram_chat_id=-12002, chat_type="group", title="Former")
+    banned_chat = ChatSnapshot(telegram_chat_id=-12003, chat_type="group", title="Banned")
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        for chat in (active_chat, inactive_chat, banned_chat):
+            await repo.upsert_activity(chat=chat, user=user, event_at=now)
+            await repo.set_bot_role(chat=chat, target=user, role="owner", assigned_by_user_id=user.telegram_user_id)
+
+        await repo.set_chat_member_active(chat=inactive_chat, user=user, is_active=False, event_at=now)
+        await repo.apply_moderation_action(chat=banned_chat, actor=actor, target=user, action="ban")
+
+        activity_chats = await repo.list_user_activity_chats(user_id=user.telegram_user_id)
+        admin_chats = await repo.list_user_admin_chats(user_id=user.telegram_user_id)
+
+        assert [chat.chat_id for chat in activity_chats] == [active_chat.telegram_chat_id]
+        assert [chat.chat_id for chat in admin_chats] == [active_chat.telegram_chat_id]
 
         await session.commit()
 
@@ -428,6 +469,7 @@ async def test_repository_persona_assignment_and_display_modes() -> None:
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
 
+        await repo.upsert_activity(chat=chat, user=actor, event_at=now)
         await repo.upsert_activity(chat=chat, user=target, event_at=now)
         await repo.set_chat_title_prefix(chat=chat, user=target, title_prefix="Лорд")
 

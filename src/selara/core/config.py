@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     gacha_timeout_seconds: float = Field(default=10.0, validation_alias="GACHA_TIMEOUT_SECONDS")
     gacha_admin_user_id: int | None = Field(default=None, validation_alias="GACHA_ADMIN_USER_ID")
     gacha_admin_token: str = Field(default="", validation_alias="GACHA_ADMIN_TOKEN")
+    gacha_service_token: str = Field(default="", validation_alias="GACHA_SERVICE_TOKEN")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")

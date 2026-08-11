@@ -179,7 +179,7 @@ export function AppShell() {
           label: 'Коллекция',
           description: 'Карточки гачи текущего аккаунта',
           shortLabel: 'Коллекция',
-          to: routes.gachaCollection(viewerQuery.data.telegram_user_id),
+          to: routes.gachaCollection(),
         },
       ]
     : appNavigation

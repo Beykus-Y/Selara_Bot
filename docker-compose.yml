@@ -3,11 +3,11 @@ services:
     image: postgres:16-alpine
     container_name: selara-postgres
     environment:
-      POSTGRES_DB: selara
-      POSTGRES_USER: selara
-      POSTGRES_PASSWORD: selara
+      POSTGRES_DB: ${SELARA_POSTGRES_DB:-selara}
+      POSTGRES_USER: ${SELARA_POSTGRES_USER:-selara}
+      POSTGRES_PASSWORD: ${SELARA_POSTGRES_PASSWORD:?Set SELARA_POSTGRES_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U selara -d selara"]
+      test: ["CMD-SHELL", "pg_isready -U ${SELARA_POSTGRES_USER:-selara} -d ${SELARA_POSTGRES_DB:-selara}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -40,7 +40,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${SELARA_DATABASE_URL:-postgresql+asyncpg://selara:selara@postgres:5432/selara}
+      DATABASE_URL: ${SELARA_DATABASE_URL:?Set SELARA_DATABASE_URL}
       REDIS_URL: ${SELARA_REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:

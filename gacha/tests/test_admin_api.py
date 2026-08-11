@@ -6,10 +6,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import FastAPI
-from fastapi import HTTPException
-from fastapi.routing import APIRoute
-
+from fastapi import FastAPI, HTTPException
 from gacha_service.domain.models import CardRarity
 from gacha_service.infrastructure.backup import BackupArtifact
 from gacha_service.web import api
@@ -80,19 +77,12 @@ async def test_admin_backup_requires_token_and_returns_file(
     monkeypatch.setattr(api, "create_database_backup", fake_create_database_backup)
     monkeypatch.setattr(api, "cleanup_backup_artifact", fake_cleanup_backup_artifact)
 
-    app = FastAPI()
-    app.include_router(api.build_router(object()))
-    backup_route = next(
-        route
-        for route in app.router.routes
-        if isinstance(route, APIRoute) and route.path == "/v1/gacha/admin/backup"
-    )
+    router = api.build_router(object())
+    route = next(route for route in router.routes if route.path == "/v1/gacha/admin/backup")
 
     with pytest.raises(HTTPException) as denied:
-        await backup_route.endpoint(x_gacha_admin_token=None)
-
-    allowed = await backup_route.endpoint(x_gacha_admin_token="secret")
-    await allowed.background()
+        await route.endpoint(x_gacha_admin_token=None)
+    allowed = await route.endpoint(x_gacha_admin_token="secret")
 
     assert denied.value.status_code == 403
     assert allowed.path == backup_file
@@ -100,6 +90,8 @@ async def test_admin_backup_requires_token_and_returns_file(
     assert "filename=\"selara-gacha-test.dump\"" in allowed.headers["content-disposition"]
     assert allowed.headers["x-gacha-backup-format"] == "dump"
     assert allowed.headers["cache-control"] == "no-store"
+    assert allowed.background is not None
+    await allowed.background()
     assert cleanup_calls == [backup_file]
 
 
@@ -146,6 +138,7 @@ async def test_admin_give_card_requires_token_and_returns_pull_payload(monkeypat
     monkeypatch.setattr(api, "GachaRepository", FakeRepo)
     monkeypatch.setattr(api, "GachaService", FakeService)
     monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    monkeypatch.setattr(api.settings, "service_token", "service-secret")
     monkeypatch.setattr(api.settings, "admin_token", "secret")
 
     app = FastAPI()
@@ -270,6 +263,7 @@ async def test_purchase_pull_returns_sell_offer_payload(monkeypatch: pytest.Monk
     monkeypatch.setattr(api, "GachaRepository", FakeRepo)
     monkeypatch.setattr(api, "GachaService", FakeService)
     monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    monkeypatch.setattr(api.settings, "service_token", "service-secret")
 
     app = FastAPI()
     app.include_router(api.build_router(object()))
@@ -279,6 +273,7 @@ async def test_purchase_pull_returns_sell_offer_payload(monkeypatch: pytest.Monk
         response = await client.post(
             "/v1/gacha/pull/purchase",
             json={"user_id": 123, "username": "buyer", "banner": "hsr"},
+            headers={"X-Gacha-Service-Token": "service-secret"},
         )
 
     assert response.status_code == 200
@@ -320,13 +315,18 @@ async def test_sell_pull_returns_updated_player_payload(monkeypatch: pytest.Monk
     monkeypatch.setattr(api, "GachaRepository", FakeRepo)
     monkeypatch.setattr(api, "GachaService", FakeService)
     monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    monkeypatch.setattr(api.settings, "service_token", "service-secret")
 
     app = FastAPI()
     app.include_router(api.build_router(object()))
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post("/v1/gacha/pulls/12/sell", json={"user_id": 123})
+        response = await client.post(
+            "/v1/gacha/pulls/12/sell",
+            json={"user_id": 123},
+            headers={"X-Gacha-Service-Token": "service-secret"},
+        )
 
     assert response.status_code == 200
     payload = response.json()

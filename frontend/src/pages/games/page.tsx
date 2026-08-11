@@ -64,7 +64,16 @@ export function GamesPage() {
       onRefresh={() => {
         void gamesQuery.refetch()
       }}
-      onCreateGame={async (_payload) => {}}
+      onCreateGame={async (payload) => {
+        setFeedbackMessage(null)
+        const result = await postMiniAppData<{ message: string }>(
+          '/miniapp/games/create',
+          payload,
+          'Не удалось создать игру.',
+        )
+        setFeedbackMessage(result.message)
+        await gamesQuery.refetch()
+      }}
       onGameAction={async (payload) => {
         setFeedbackMessage(null)
         await gameActionMutation.mutateAsync(payload)

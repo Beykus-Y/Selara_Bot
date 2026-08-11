@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import shutil
 import tempfile
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -21,6 +22,10 @@ from selara.infrastructure.http.gacha_client import GachaClientError, HttpGachaC
 
 logger = logging.getLogger(__name__)
 
+# The hosted Telegram Bot API accepts documents smaller than 50 MB. Keep a
+# margin for differences between decimal MB and MiB and for future API changes.
+BACKUP_CHUNK_SIZE_BYTES = 45 * 1024 * 1024
+
 
 class BackupJobError(RuntimeError):
     pass
@@ -30,6 +35,15 @@ class BackupJobError(RuntimeError):
 class BackupFile:
     path: Path
     archive_name: str
+
+
+@dataclass(slots=True)
+class BackupPart:
+    path: Path
+    filename: str
+    number: int
+    total: int
+    size_bytes: int
 
 
 def seconds_until_next_backup(*, timezone_name: str, now: datetime | None = None) -> float:
@@ -75,15 +89,38 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
     try:
         bot_dump = await _create_bot_database_dump(settings=settings, temp_dir=temp_dir)
         gacha_dump = await _download_gacha_backup(settings=settings, temp_dir=temp_dir)
-        archive_path = await asyncio.to_thread(
-            _build_backup_archive,
-            temp_dir / _archive_filename(),
-            [bot_dump, gacha_dump],
+
+        created_at = _backup_timestamp()
+        manifest_files: list[dict[str, object]] = []
+        for backup_file in (bot_dump, gacha_dump):
+            parts, manifest_entry = await asyncio.to_thread(
+                _split_backup_file,
+                backup_file,
+                temp_dir,
+                BACKUP_CHUNK_SIZE_BYTES,
+            )
+            manifest_files.append(manifest_entry)
+            for part in parts:
+                await bot.send_document(
+                    chat_id=admin_user_id,
+                    document=FSInputFile(part.path, filename=part.filename),
+                    caption=(
+                        f"Selara daily backup: {manifest_entry['filename']} "
+                        f"(part {part.number}/{part.total})"
+                    ),
+                )
+
+        manifest_path = await asyncio.to_thread(
+            _write_backup_manifest,
+            temp_dir=temp_dir,
+            created_at=created_at,
+            chunk_size_bytes=BACKUP_CHUNK_SIZE_BYTES,
+            files=manifest_files,
         )
         await bot.send_document(
             chat_id=admin_user_id,
-            document=FSInputFile(archive_path, filename=archive_path.name),
-            caption="Selara daily backup",
+            document=FSInputFile(manifest_path, filename=manifest_path.name),
+            caption="Selara daily backup manifest",
         )
     finally:
         await asyncio.to_thread(shutil.rmtree, temp_dir, True)
@@ -154,11 +191,74 @@ async def _download_gacha_backup(*, settings: Settings, temp_dir: Path) -> Backu
     return BackupFile(path=output_path, archive_name=output_path.name)
 
 
-def _build_backup_archive(archive_path: Path, files: list[BackupFile]) -> Path:
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for item in files:
-            archive.write(item.path, arcname=item.archive_name)
-    return archive_path
+def _split_backup_file(
+    backup_file: BackupFile,
+    temp_dir: Path,
+    chunk_size_bytes: int,
+) -> tuple[list[BackupPart], dict[str, object]]:
+    if chunk_size_bytes <= 0:
+        raise BackupJobError("Backup chunk size must be greater than zero.")
+
+    filename = Path(backup_file.archive_name).name
+    if not filename:
+        raise BackupJobError("Backup filename is empty.")
+
+    size_bytes = backup_file.path.stat().st_size
+    total_parts = max(1, (size_bytes + chunk_size_bytes - 1) // chunk_size_bytes)
+    number_width = max(3, len(str(total_parts)))
+    digest = hashlib.sha256()
+    parts: list[BackupPart] = []
+
+    with backup_file.path.open("rb") as source:
+        for number in range(1, total_parts + 1):
+            content = source.read(chunk_size_bytes)
+            digest.update(content)
+            part_filename = (
+                f"{filename}.part-{number:0{number_width}d}-of-"
+                f"{total_parts:0{number_width}d}"
+            )
+            part_path = temp_dir / part_filename
+            part_path.write_bytes(content)
+            parts.append(
+                BackupPart(
+                    path=part_path,
+                    filename=part_filename,
+                    number=number,
+                    total=total_parts,
+                    size_bytes=len(content),
+                )
+            )
+
+    manifest_entry: dict[str, object] = {
+        "filename": filename,
+        "size_bytes": size_bytes,
+        "sha256": digest.hexdigest(),
+        "parts": [
+            {"filename": part.filename, "size_bytes": part.size_bytes}
+            for part in parts
+        ],
+    }
+    return parts, manifest_entry
+
+
+def _write_backup_manifest(
+    *,
+    temp_dir: Path,
+    created_at: str,
+    chunk_size_bytes: int,
+    files: list[dict[str, object]],
+) -> Path:
+    manifest_path = temp_dir / f"selara-daily-backup-{created_at}.manifest.json"
+    payload = {
+        "created_at": created_at,
+        "chunk_size_bytes": chunk_size_bytes,
+        "files": files,
+    }
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 def _resolve_gacha_backup_base_url(settings: Settings) -> str | None:
@@ -169,9 +269,8 @@ def _resolve_gacha_backup_base_url(settings: Settings) -> str | None:
     return None
 
 
-def _archive_filename(now: datetime | None = None) -> str:
-    timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"selara-daily-backup-{timestamp}.zip"
+def _backup_timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _last_line(raw: bytes) -> str:

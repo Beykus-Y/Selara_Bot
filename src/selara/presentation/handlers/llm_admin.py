@@ -6,20 +6,35 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.core.chat_settings import ChatSettings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.llm.client import LlmClient, LlmClientError
-from selara.infrastructure.llm.context import load_context, maybe_compress, save_interaction
+from selara.infrastructure.llm.context import (
+    load_context,
+    maybe_compress,
+    save_interaction,
+)
 from selara.infrastructure.llm.prompts import (
     ADMIN_SYSTEM_PROMPT,
     DM_SUMMARY_SYSTEM_PROMPT,
     MAX_TOKENS_DM_SUMMARY,
 )
-from selara.infrastructure.llm.tools import ToolCall, ToolResult, execute_tool, get_tool_definitions, get_tool_status
+from selara.infrastructure.llm.tools import (
+    ToolCall,
+    ToolResult,
+    execute_tool,
+    get_tool_definitions,
+    get_tool_status,
+)
 from selara.presentation.auth import has_permission
 
 log = logging.getLogger(__name__)
@@ -122,6 +137,7 @@ async def _handle(
 
     admin_tag = f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id)
     import os
+
     from selara.infrastructure.llm.tools import _BOT_DOCS_DIR
     doc_files = []
     if os.path.exists(_BOT_DOCS_DIR):
@@ -445,10 +461,33 @@ async def _execute_rollback(
 
     elif tool == "set_rank":
         previous_rank = payload.get("previous_rank", "participant")
+        actor_role = await activity_repo.get_effective_role_definition(
+            chat_id=chat_id,
+            user_id=rollback_actor.telegram_user_id,
+        )
+        target_role = await activity_repo.get_effective_role_definition(
+            chat_id=chat_id,
+            user_id=target.telegram_user_id,
+        )
+        restored_role = await activity_repo.get_chat_role_definition(
+            chat_id=chat_id,
+            role_code=str(previous_rank),
+        )
+        if actor_role is None or "manage_roles" not in set(actor_role.permissions):
+            raise PermissionError("Недостаточно прав для отката роли.")
+        if restored_role is None:
+            raise ValueError(f"Роль {previous_rank} больше не существует.")
+        if target.telegram_user_id == rollback_actor.telegram_user_id and actor_role.role_code != "owner":
+            raise PermissionError("Нельзя откатывать собственную роль.")
+        if actor_role.role_code != "owner":
+            if target_role is not None and actor_role.rank <= target_role.rank:
+                raise PermissionError("Недостаточно уровня для изменения роли пользователя.")
+            if actor_role.rank <= restored_role.rank:
+                raise PermissionError("Нельзя восстановить роль своего уровня или выше.")
         await activity_repo.set_bot_role(
             chat=chat_snapshot,
             target=target,
-            role=previous_rank,
+            role=restored_role.role_code,
             assigned_by_user_id=rollback_by.id,
         )
 

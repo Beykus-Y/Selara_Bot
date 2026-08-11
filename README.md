@@ -111,6 +111,7 @@ Selara — Telegram-бот для групп и сообществ, объеди
 ### 7. Docker и CI/CD (кратко)
 
 - В репозитории есть `Dockerfile` и `docker-compose.yml` с сервисами `postgres`, `redis`, `app`.
+- Есть обязательный CI workflow с Python-аудитом, unit/integration/gacha-тестами, frontend lint и build.
 - Есть workflow публикации Docker-образа в GHCR.
 - Есть workflow деплоя на VPS по SSH.
 - Контейнер приложения запускает миграции (`alembic upgrade head`) перед стартом runtime.

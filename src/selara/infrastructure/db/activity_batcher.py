@@ -14,7 +14,10 @@ from selara.application.achievements import (
     AchievementConditionEvaluator,
     AchievementOrchestrator,
 )
-from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult, ActivityBatchMessage
+from selara.infrastructure.db.activity_batching import (
+    ActivityBatchFlushResult,
+    ActivityBatchMessage,
+)
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 logger = logging.getLogger(__name__)
@@ -28,12 +31,15 @@ class ActivityBatcher:
         catalog: AchievementCatalogService,
         flush_seconds: int,
         max_events: int,
+        max_pending_events: int | None = None,
         live_event_publisher: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._catalog = catalog
         self._flush_seconds = max(1, int(flush_seconds))
         self._max_events = max(1, int(max_events))
+        pending_limit = max_pending_events if max_pending_events is not None else self._max_events * 10
+        self._capacity = asyncio.Semaphore(max(1, int(pending_limit)))
         self._live_event_publisher = live_event_publisher
         self._pending: deque[ActivityBatchMessage] = deque()
         self._lock = asyncio.Lock()
@@ -74,32 +80,39 @@ class ActivityBatcher:
         if self._closed:
             raise RuntimeError("ActivityBatcher is closed.")
 
-        async with self._lock:
-            self._pending.append(
-                ActivityBatchMessage(
-                    chat_id=chat_id,
-                    chat_type=chat_type,
-                    chat_title=chat_title,
-                    user_id=user_id,
-                    username=username,
-                    first_name=first_name,
-                    last_name=last_name,
-                    is_bot=is_bot,
-                    event_at=event_at,
-                    telegram_message_id=telegram_message_id,
-                    count_as_activity=count_as_activity,
-                    snapshot_kind=snapshot_kind,
-                    snapshot_at=snapshot_at,
-                    sent_at=sent_at,
-                    edited_at=edited_at,
-                    message_type=message_type,
-                    text=text,
-                    caption=caption,
-                    raw_message_json=raw_message_json,
-                    snapshot_hash=snapshot_hash,
+        await self._capacity.acquire()
+        try:
+            if self._closed:
+                raise RuntimeError("ActivityBatcher is closed.")
+            async with self._lock:
+                self._pending.append(
+                    ActivityBatchMessage(
+                        chat_id=chat_id,
+                        chat_type=chat_type,
+                        chat_title=chat_title,
+                        user_id=user_id,
+                        username=username,
+                        first_name=first_name,
+                        last_name=last_name,
+                        is_bot=is_bot,
+                        event_at=event_at,
+                        telegram_message_id=telegram_message_id,
+                        count_as_activity=count_as_activity,
+                        snapshot_kind=snapshot_kind,
+                        snapshot_at=snapshot_at,
+                        sent_at=sent_at,
+                        edited_at=edited_at,
+                        message_type=message_type,
+                        text=text,
+                        caption=caption,
+                        raw_message_json=raw_message_json,
+                        snapshot_hash=snapshot_hash,
+                    )
                 )
-            )
-            should_wake = len(self._pending) >= self._max_events
+                should_wake = len(self._pending) >= self._max_events
+        except BaseException:
+            self._capacity.release()
+            raise
 
         if should_wake:
             self._wake_event.set()
@@ -169,6 +182,8 @@ class ActivityBatcher:
             await self._requeue_front(batch)
             return False
 
+        for _ in batch:
+            self._capacity.release()
         await self._publish_live_events(result)
         return True
 

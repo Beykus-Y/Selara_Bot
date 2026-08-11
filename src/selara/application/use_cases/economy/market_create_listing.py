@@ -4,7 +4,17 @@ from datetime import datetime, timedelta, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import CONSUMABLE_CATALOG
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+    to_meta_json,
+)
+from selara.application.use_cases.economy.market_limits import (
+    MAX_MARKET_QUANTITY,
+    MAX_MARKET_UNIT_PRICE,
+)
 from selara.application.use_cases.economy.results import MarketCreateResult
 
 MAX_OPEN_LISTINGS_PER_SELLER = 8
@@ -36,8 +46,20 @@ async def execute(
 
     if quantity <= 0:
         return MarketCreateResult(accepted=False, reason="Количество должно быть > 0.", listing=None)
+    if quantity > MAX_MARKET_QUANTITY:
+        return MarketCreateResult(
+            accepted=False,
+            reason=f"Количество не должно превышать {MAX_MARKET_QUANTITY}.",
+            listing=None,
+        )
     if unit_price <= 0:
         return MarketCreateResult(accepted=False, reason="Цена за единицу должна быть > 0.", listing=None)
+    if unit_price > MAX_MARKET_UNIT_PRICE:
+        return MarketCreateResult(
+            accepted=False,
+            reason=f"Цена не должна превышать {MAX_MARKET_UNIT_PRICE}.",
+            listing=None,
+        )
 
     if not _is_tradable(normalized_item):
         return MarketCreateResult(
@@ -50,6 +72,7 @@ async def execute(
     if scope is None:
         return MarketCreateResult(accepted=False, reason=error or "Не удалось определить режим экономики", listing=None)
 
+    await lock_economy_resources(repo, account_lock_key(scope=scope, user_id=user_id))
     open_count = await repo.count_open_market_listings_for_seller(scope=scope, seller_user_id=user_id)
     if open_count >= MAX_OPEN_LISTINGS_PER_SELLER:
         return MarketCreateResult(

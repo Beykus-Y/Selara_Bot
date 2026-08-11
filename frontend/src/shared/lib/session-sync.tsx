@@ -1,33 +1,14 @@
 import { useEffect } from 'react'
 
 import { queryClient } from '@/app/providers/query-client'
+import { SESSION_EVENT_NAME, SESSION_STORAGE_KEY } from '@/shared/lib/session-events'
 
-const SESSION_STORAGE_KEY = 'selara:session-changed'
-const SESSION_EVENT_NAME = 'selara:session-changed'
 const authQueryKeys = [['landing-context'], ['login-context'], ['app-viewer']] as const
 
 function refreshAuthQueries() {
   for (const queryKey of authQueryKeys) {
     void queryClient.invalidateQueries({ queryKey })
   }
-}
-
-export function notifySessionChanged() {
-  refreshAuthQueries()
-
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  const payload = JSON.stringify({ at: Date.now() })
-
-  try {
-    window.localStorage.setItem(SESSION_STORAGE_KEY, payload)
-  } catch {
-    // Storage may be unavailable in hardened browser contexts.
-  }
-
-  window.dispatchEvent(new CustomEvent(SESSION_EVENT_NAME))
 }
 
 export function SessionSync() {
