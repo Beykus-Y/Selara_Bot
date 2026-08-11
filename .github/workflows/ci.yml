@@ -49,6 +49,11 @@ jobs:
       - name: Audit Python dependencies
         run: pip-audit --progress-spinner off
 
+      - name: Install snapshot fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+
       - name: Install headless Chromium
         run: python -m playwright install --with-deps chromium
 
