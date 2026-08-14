@@ -40,3 +40,9 @@ def test_broadcast_details_expose_delivery_mode_and_reactors() -> None:
     assert "Другие реакции" in fallback
     assert "custom_emoji" in fallback
     assert "paid" in fallback
+    assert "/reaction" in fallback
+    assert 'value="❤️"' in fallback
+    assert 'value="👀"' in fallback
+    assert 'value="👍"' in fallback
+    assert 'value="🔥"' in fallback
+    assert "Снять реакцию" in fallback

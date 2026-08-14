@@ -1624,6 +1624,15 @@ class AdminBroadcastReplyModel(Base):
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bot_reaction_emoji: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bot_reaction_updated_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    bot_reaction_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (

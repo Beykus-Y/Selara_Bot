@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from aiogram import Bot
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, ReactionTypeEmoji
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -88,6 +88,7 @@ from selara.domain.entities import (
     UserChatOverview,
     UserSnapshot,
 )
+from selara.domain.reactions import normalize_telegram_reaction_emoji
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.backup import send_daily_backup
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
@@ -156,6 +157,12 @@ _MINIAPP_INIT_DATA_TTL_SECONDS = 3600
 _ADMIN_BROADCAST_ACTIVE_DAYS = 3
 _ADMIN_BROADCAST_BODY_LIMIT = 3200
 _ADMIN_BROADCAST_CAPTION_LIMIT = 1024
+_ADMIN_BROADCAST_BOT_REACTIONS = {
+    "❤": "❤️",
+    "👀": "👀",
+    "👍": "👍",
+    "🔥": "🔥",
+}
 _ADMIN_BROADCAST_ALLOWED_HTML_TAGS = frozenset(
     {
         "a",
@@ -7964,6 +7971,76 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return "Ошибка", "warn"
         return "Ожидание", "muted"
 
+    async def _execute_admin_broadcast_reply_reaction(
+        request: Request,
+        *,
+        broadcast_id: int,
+        reply_id: int,
+        admin_user_id: int,
+    ) -> tuple[bool, str, int]:
+        form = await _parse_form(request)
+        raw_reaction = str(form.get("reaction", "") or "").strip()
+        reaction = normalize_telegram_reaction_emoji(raw_reaction) or None
+        if reaction is not None and reaction not in _ADMIN_BROADCAST_BOT_REACTIONS:
+            return False, "Эта реакция недоступна в админке.", 400
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            reply = await repo.get_admin_broadcast_reply(
+                broadcast_id=broadcast_id,
+                reply_id=reply_id,
+                for_update=True,
+            )
+            if reply is None:
+                return False, "Ответ рассылки не найден.", 404
+
+            telegram_reactions = (
+                [ReactionTypeEmoji(emoji=reaction)] if reaction is not None else []
+            )
+            try:
+                reaction_applied = await (await _get_game_bot()).set_message_reaction(
+                    chat_id=reply.chat_id,
+                    message_id=reply.telegram_message_id,
+                    reaction=telegram_reactions,
+                    is_big=False,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not set bot reaction on admin broadcast reply",
+                    extra={
+                        "broadcast_id": broadcast_id,
+                        "reply_id": reply_id,
+                        "chat_id": reply.chat_id,
+                        "telegram_message_id": reply.telegram_message_id,
+                        "reaction": reaction,
+                    },
+                )
+                return (
+                    False,
+                    "Telegram не смог поставить реакцию. Возможно, она запрещена в этом чате или сообщение удалено.",
+                    502,
+                )
+            if not reaction_applied:
+                logger.error(
+                    "Telegram returned false while setting bot reaction",
+                    extra={"broadcast_id": broadcast_id, "reply_id": reply_id},
+                )
+                return False, "Telegram не подтвердил установку реакции.", 502
+
+            updated = await repo.set_admin_broadcast_reply_bot_reaction(
+                broadcast_id=broadcast_id,
+                reply_id=reply_id,
+                emoji=reaction,
+                admin_user_id=admin_user_id,
+                updated_at=_now_utc(),
+            )
+            if not updated:
+                return False, "Ответ рассылки был удалён во время обновления.", 404
+            await session.commit()
+        if reaction is None:
+            return True, "Реакция бота снята.", 200
+        return True, f"Бот поставил реакцию {_ADMIN_BROADCAST_BOT_REACTIONS[reaction]}.", 200
+
     @app.get("/app/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
         async with session_factory() as session:
@@ -8323,6 +8400,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ],
             replies=[
                 {
+                    "id": item.id,
                     "chat_title": _admin_broadcast_chat_label(
                         chat_id=item.chat_id,
                         chat_type="group",
@@ -8331,10 +8409,23 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "user_label": user_label(item.user),
                     "sent_at": format_datetime(item.sent_at),
                     "message_type": item.message_type,
+                    "telegram_message_id": item.telegram_message_id,
                     "preview": _admin_broadcast_reply_preview(
                         message_type=item.message_type,
                         text=item.text,
                         caption=item.caption,
+                    ),
+                    "bot_reaction_emoji": item.bot_reaction_emoji,
+                    "bot_reaction_display": _ADMIN_BROADCAST_BOT_REACTIONS.get(
+                        item.bot_reaction_emoji or ""
+                    ),
+                    "bot_reaction_updated_by_user_id": (
+                        item.bot_reaction_updated_by_user_id
+                    ),
+                    "bot_reaction_updated_at": (
+                        format_datetime(item.bot_reaction_updated_at)
+                        if item.bot_reaction_updated_at is not None
+                        else None
                     ),
                 }
                 for item in replies
@@ -8352,6 +8443,48 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 item for item in reaction_count_items if item["option_key"] is None
             ],
         )
+
+    @app.post(
+        "/app/admin/broadcasts/{broadcast_id}/replies/{reply_id}/reaction"
+    )
+    async def admin_broadcast_reply_reaction(
+        request: Request,
+        broadcast_id: int,
+        reply_id: int,
+    ):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            if prefers_json:
+                return _json_result(
+                    ok=False,
+                    message="Сессия истекла. Войдите снова.",
+                    status_code=401,
+                    redirect="/admin/login",
+                )
+            return _redirect("/app/admin/login")
+
+        ok, message, status_code = await _execute_admin_broadcast_reply_reaction(
+            request,
+            broadcast_id=broadcast_id,
+            reply_id=reply_id,
+            admin_user_id=int(admin_user_id),
+        )
+        redirect_path = _with_message(
+            f"/app/admin/broadcasts/{broadcast_id}",
+            key="flash" if ok else "error",
+            text=message,
+        )
+        if prefers_json:
+            return _json_result(
+                ok=ok,
+                message=message,
+                status_code=status_code,
+                redirect=redirect_path,
+            )
+        return _redirect(redirect_path)
 
     @app.post("/app/admin/feedback/{request_id}/status")
     async def admin_feedback_status_update(request: Request, request_id: int):
@@ -8967,6 +9100,36 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _json_result(ok=False, message=summary_text, status_code=status_code)
         return _json_result(ok=True, message=summary_text, status_code=200, broadcast_id=broadcast.id)
 
+    @app.post(
+        "/api/admin/broadcasts/{broadcast_id}/replies/{reply_id}/reaction"
+    )
+    async def admin_broadcast_reply_reaction_api(
+        request: Request,
+        broadcast_id: int,
+        reply_id: int,
+    ):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(
+                ok=False,
+                message="Требуется вход в админку.",
+                status_code=401,
+                redirect="/admin/login",
+            )
+        ok, message, status_code = await _execute_admin_broadcast_reply_reaction(
+            request,
+            broadcast_id=broadcast_id,
+            reply_id=reply_id,
+            admin_user_id=int(admin_user_id),
+        )
+        return _json_result(
+            ok=ok,
+            message=message,
+            status_code=status_code,
+        )
+
     @app.get("/api/admin/broadcasts/{broadcast_id}")
     async def admin_broadcast_detail_api(request: Request, broadcast_id: int):
         async with session_factory() as session:
@@ -9034,6 +9197,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ],
             "replies": [
                 {
+                    "id": item.id,
                     "chat_title": _admin_broadcast_chat_label(
                         chat_id=item.chat_id,
                         chat_type="group",
@@ -9042,10 +9206,23 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "user_label": user_label(item.user),
                     "sent_at": format_datetime(item.sent_at),
                     "message_type": item.message_type,
+                    "telegram_message_id": item.telegram_message_id,
                     "preview": _admin_broadcast_reply_preview(
                         message_type=item.message_type,
                         text=item.text,
                         caption=item.caption,
+                    ),
+                    "bot_reaction_emoji": item.bot_reaction_emoji,
+                    "bot_reaction_display": _ADMIN_BROADCAST_BOT_REACTIONS.get(
+                        item.bot_reaction_emoji or ""
+                    ),
+                    "bot_reaction_updated_by_user_id": (
+                        item.bot_reaction_updated_by_user_id
+                    ),
+                    "bot_reaction_updated_at": (
+                        format_datetime(item.bot_reaction_updated_at)
+                        if item.bot_reaction_updated_at is not None
+                        else None
                     ),
                 }
                 for item in replies

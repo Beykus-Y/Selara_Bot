@@ -6021,9 +6021,100 @@ class SqlAlchemyActivityRepository:
                 text=reply.text,
                 caption=reply.caption,
                 sent_at=_coerce_utc_datetime(reply.sent_at),
+                bot_reaction_emoji=reply.bot_reaction_emoji,
+                bot_reaction_updated_by_user_id=(
+                    int(reply.bot_reaction_updated_by_user_id)
+                    if reply.bot_reaction_updated_by_user_id is not None
+                    else None
+                ),
+                bot_reaction_updated_at=_normalize_optional_datetime(
+                    reply.bot_reaction_updated_at
+                ),
             )
             for reply, delivery, user in rows
         ]
+
+    async def get_admin_broadcast_reply(
+        self,
+        *,
+        broadcast_id: int,
+        reply_id: int,
+        for_update: bool = False,
+    ) -> AdminBroadcastReply | None:
+        statement = (
+            select(AdminBroadcastReplyModel, AdminBroadcastDeliveryModel, UserModel)
+            .join(
+                AdminBroadcastDeliveryModel,
+                AdminBroadcastDeliveryModel.id == AdminBroadcastReplyModel.delivery_id,
+            )
+            .join(
+                UserModel,
+                UserModel.telegram_user_id == AdminBroadcastReplyModel.reply_user_id,
+            )
+            .where(
+                AdminBroadcastReplyModel.id == int(reply_id),
+                AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id),
+            )
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AdminBroadcastReplyModel)
+        row = (await self._session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        reply, delivery, user = row
+        return AdminBroadcastReply(
+            id=int(reply.id),
+            broadcast_id=int(delivery.broadcast_id),
+            delivery_id=int(delivery.id),
+            chat_id=int(delivery.chat_id),
+            chat_title=delivery.chat_title_snapshot,
+            user=self._to_user_snapshot(user),
+            telegram_message_id=int(reply.telegram_message_id),
+            message_type=reply.message_type,
+            text=reply.text,
+            caption=reply.caption,
+            sent_at=_coerce_utc_datetime(reply.sent_at),
+            bot_reaction_emoji=reply.bot_reaction_emoji,
+            bot_reaction_updated_by_user_id=(
+                int(reply.bot_reaction_updated_by_user_id)
+                if reply.bot_reaction_updated_by_user_id is not None
+                else None
+            ),
+            bot_reaction_updated_at=_normalize_optional_datetime(
+                reply.bot_reaction_updated_at
+            ),
+        )
+
+    async def set_admin_broadcast_reply_bot_reaction(
+        self,
+        *,
+        broadcast_id: int,
+        reply_id: int,
+        emoji: str | None,
+        admin_user_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        reply = (
+            await self._session.execute(
+                select(AdminBroadcastReplyModel)
+                .join(
+                    AdminBroadcastDeliveryModel,
+                    AdminBroadcastDeliveryModel.id == AdminBroadcastReplyModel.delivery_id,
+                )
+                .where(
+                    AdminBroadcastReplyModel.id == int(reply_id),
+                    AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if reply is None:
+            return False
+        reply.bot_reaction_emoji = (emoji or "").strip()[:32] or None
+        reply.bot_reaction_updated_by_user_id = int(admin_user_id)
+        reply.bot_reaction_updated_at = _coerce_utc_datetime(updated_at)
+        await self._session.flush()
+        return True
 
     async def record_admin_broadcast_reply(
         self,

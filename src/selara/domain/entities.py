@@ -157,6 +157,9 @@ class AdminBroadcastReply:
     text: str | None
     caption: str | None
     sent_at: datetime
+    bot_reaction_emoji: str | None
+    bot_reaction_updated_by_user_id: int | None
+    bot_reaction_updated_at: datetime | None
 
 
 @dataclass(frozen=True)

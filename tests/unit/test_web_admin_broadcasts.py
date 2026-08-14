@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.core.config import Settings
 from selara.core.web_auth import digest_admin_session_token
-from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.domain.entities import AdminBroadcastTarget, ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
@@ -84,6 +85,16 @@ class HybridFakeBot:
     def _get_chat_member(*, chat_id: int, user_id: int):
         del user_id
         return SimpleNamespace(status="administrator" if chat_id == -1004001 else "member")
+
+
+class ReactionFakeBot:
+    instances: ClassVar[list[ReactionFakeBot]] = []
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.session = SimpleNamespace(close=AsyncMock())
+        self.set_message_reaction = AsyncMock(return_value=True)
+        self.__class__.instances.append(self)
 
 
 @pytest.mark.asyncio
@@ -184,6 +195,146 @@ async def test_admin_broadcast_send_creates_deliveries_and_tracks_replies(monkey
         assert replies[0].chat_id == active_chat_one.telegram_chat_id
         assert replies[0].user.telegram_user_id == alpha_user.telegram_user_id
         assert replies[0].text == "Вам тоже спасибо"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_can_set_replace_and_clear_bot_reaction_on_broadcast_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    chat = ChatSnapshot(telegram_chat_id=-1001501, chat_type="supergroup", title="Feedback")
+    user = UserSnapshot(
+        telegram_user_id=551,
+        username="feedback",
+        first_name="Feedback",
+        last_name=None,
+        is_bot=False,
+    )
+    async with session_factory() as session:
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        repo = SqlAlchemyActivityRepository(session)
+        await auth_repo.create_session(
+            admin_user_id=settings.admin_user_id,
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="reaction-session",
+            ),
+            expires_at=now + timedelta(hours=2),
+            now=now,
+        )
+        await repo.upsert_activity(chat=chat, user=user, event_at=now)
+        broadcast = await repo.create_admin_broadcast(
+            body="Как вам обновление?",
+            active_since_days=3,
+            created_by_user_id=settings.admin_user_id,
+        )
+        delivery = (
+            await repo.create_admin_broadcast_deliveries(
+                broadcast_id=broadcast.id,
+                targets=[
+                    AdminBroadcastTarget(
+                        chat_id=chat.telegram_chat_id,
+                        chat_type=chat.chat_type,
+                        chat_title=chat.title,
+                        last_activity_at=now,
+                    )
+                ],
+            )
+        )[0]
+        await repo.mark_admin_broadcast_delivery_sent(
+            delivery_id=delivery.id,
+            telegram_message_id=9501,
+            sent_at=now,
+        )
+        assert await repo.record_admin_broadcast_reply(
+            chat=chat,
+            user=user,
+            reply_to_message_id=9501,
+            telegram_message_id=9502,
+            message_type="text",
+            text="Очень хорошо",
+            caption=None,
+            raw_message_json={"message_id": 9502, "text": "Очень хорошо"},
+            sent_at=now,
+        )
+        await session.commit()
+        reply = (await repo.list_admin_broadcast_replies(broadcast_id=broadcast.id))[0]
+
+    ReactionFakeBot.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", ReactionFakeBot)
+    monkeypatch.setattr(web_app_module, "GAME_STORE", SimpleNamespace(close=AsyncMock()))
+    app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "reaction-session")
+    endpoint = f"/api/admin/broadcasts/{broadcast.id}/replies/{reply.id}/reaction"
+    try:
+        selected = await client.post(
+            f"/app/admin/broadcasts/{broadcast.id}/replies/{reply.id}/reaction",
+            data={"reaction": "❤️"},
+        )
+        replaced = await client.post(endpoint, data={"reaction": "👀"})
+        invalid = await client.post(endpoint, data={"reaction": "💩"})
+        foreign = await client.post(
+            f"/api/admin/broadcasts/{broadcast.id + 1}/replies/{reply.id}/reaction",
+            data={"reaction": "🔥"},
+        )
+        detail = await client.get(f"/api/admin/broadcasts/{broadcast.id}")
+        cleared = await client.post(endpoint, data={"reaction": ""})
+        detail_after_clear = await client.get(f"/api/admin/broadcasts/{broadcast.id}")
+
+        bot = ReactionFakeBot.instances[0]
+        bot.set_message_reaction.side_effect = RuntimeError("REACTION_INVALID")
+        failed = await client.post(endpoint, data={"reaction": "🔥"})
+        detail_after_failure = await client.get(f"/api/admin/broadcasts/{broadcast.id}")
+        bot.set_message_reaction.side_effect = None
+        bot.set_message_reaction.return_value = False
+        unconfirmed = await client.post(endpoint, data={"reaction": "👍"})
+        detail_after_unconfirmed = await client.get(
+            f"/api/admin/broadcasts/{broadcast.id}"
+        )
+
+        client.cookies.clear()
+        unauthorized = await client.post(endpoint, data={"reaction": "👍"})
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert selected.status_code == 303
+    assert selected.headers["location"].startswith(
+        f"/app/admin/broadcasts/{broadcast.id}?flash="
+    )
+    assert replaced.status_code == 200
+    assert invalid.status_code == 400
+    assert foreign.status_code == 404
+    assert cleared.status_code == 200
+    assert failed.status_code == 502
+    assert unconfirmed.status_code == 502
+    assert unauthorized.status_code == 401
+    calls = ReactionFakeBot.instances[0].set_message_reaction.await_args_list
+    assert len(calls) == 5
+    assert calls[0].kwargs["chat_id"] == chat.telegram_chat_id
+    assert calls[0].kwargs["message_id"] == 9502
+    assert calls[0].kwargs["reaction"][0].emoji == "❤"
+    assert calls[1].kwargs["reaction"][0].emoji == "👀"
+    assert calls[2].kwargs["reaction"] == []
+    assert calls[3].kwargs["reaction"][0].emoji == "🔥"
+    assert calls[4].kwargs["reaction"][0].emoji == "👍"
+    current = detail.json()["page"]["replies"][0]
+    assert current["bot_reaction_emoji"] == "👀"
+    assert current["bot_reaction_updated_by_user_id"] == settings.admin_user_id
+    assert current["bot_reaction_updated_at"]
+    assert detail_after_clear.json()["page"]["replies"][0]["bot_reaction_emoji"] is None
+    assert detail_after_failure.json()["page"]["replies"][0]["bot_reaction_emoji"] is None
+    assert detail_after_unconfirmed.json()["page"]["replies"][0]["bot_reaction_emoji"] is None
 
     await engine.dispose()
 

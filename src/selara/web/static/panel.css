@@ -5674,6 +5674,39 @@ body.page-landing {
   font-size: 13px;
 }
 
+.broadcast-reply-reaction-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.broadcast-reply-reaction-status {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.broadcast-reply-reaction-status small {
+  color: var(--muted);
+}
+
+.broadcast-reply-reaction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.broadcast-reply-reaction-actions .button.small {
+  min-width: 38px;
+  padding-inline: 10px;
+}
+
 .broadcast-detail-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

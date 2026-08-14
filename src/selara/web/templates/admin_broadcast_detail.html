@@ -171,6 +171,68 @@
                 <span class="badge">{{ item.message_type }}</span>
               </div>
               <p class="broadcast-reply-preview">{{ item.preview }}</p>
+              <form
+                class="broadcast-reply-reaction-form"
+                method="post"
+                action="/app/admin/broadcasts/{{ broadcast.id }}/replies/{{ item.id }}/reaction"
+              >
+                <div class="broadcast-reply-reaction-status">
+                  {% if item.bot_reaction_emoji %}
+                    <strong>Реакция бота: {{ item.bot_reaction_display or item.bot_reaction_emoji }}</strong>
+                    {% if item.bot_reaction_updated_at %}
+                      <small>обновлено {{ item.bot_reaction_updated_at }}</small>
+                    {% endif %}
+                  {% else %}
+                    <span>Отметить ответ от имени бота</span>
+                  {% endif %}
+                </div>
+                <div class="broadcast-reply-reaction-actions">
+                  <button
+                    class="button small {{ 'primary' if item.bot_reaction_emoji == '❤' else 'ghost' }}"
+                    type="submit"
+                    name="reaction"
+                    value="❤️"
+                    title="Прочитано"
+                    aria-label="Поставить реакцию Прочитано"
+                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '❤' else 'false' }}"
+                  >❤️</button>
+                  <button
+                    class="button small {{ 'primary' if item.bot_reaction_emoji == '👀' else 'ghost' }}"
+                    type="submit"
+                    name="reaction"
+                    value="👀"
+                    title="Взято в работу"
+                    aria-label="Поставить реакцию Взято в работу"
+                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👀' else 'false' }}"
+                  >👀</button>
+                  <button
+                    class="button small {{ 'primary' if item.bot_reaction_emoji == '👍' else 'ghost' }}"
+                    type="submit"
+                    name="reaction"
+                    value="👍"
+                    title="Принято"
+                    aria-label="Поставить реакцию Принято"
+                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👍' else 'false' }}"
+                  >👍</button>
+                  <button
+                    class="button small {{ 'primary' if item.bot_reaction_emoji == '🔥' else 'ghost' }}"
+                    type="submit"
+                    name="reaction"
+                    value="🔥"
+                    title="Особенно полезно"
+                    aria-label="Поставить реакцию Особенно полезно"
+                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '🔥' else 'false' }}"
+                  >🔥</button>
+                  {% if item.bot_reaction_emoji %}
+                    <button
+                      class="button small ghost"
+                      type="submit"
+                      name="reaction"
+                      value=""
+                    >Снять реакцию</button>
+                  {% endif %}
+                </div>
+              </form>
             </article>
           {% endfor %}
         </div>
