@@ -5365,6 +5365,111 @@ body.page-landing {
   font-size: 13px;
 }
 
+.broadcast-counter {
+  margin-top: -8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.broadcast-counter-error {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.broadcast-options,
+.broadcast-photo-field,
+.broadcast-reaction-builder {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid rgba(167, 238, 255, 0.14);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.broadcast-options {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.broadcast-options legend {
+  padding: 0 6px;
+}
+
+.broadcast-option,
+.broadcast-reaction-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.broadcast-option input,
+.broadcast-reaction-toggle input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--cyan);
+}
+
+.broadcast-photo-field,
+.broadcast-reaction-controls,
+.broadcast-reaction-list {
+  display: grid;
+  gap: 10px;
+}
+
+.broadcast-photo-field[hidden],
+.broadcast-reaction-controls[hidden],
+.broadcast-photo-preview[hidden],
+.broadcast-add-reaction[hidden],
+[data-broadcast-remove-reaction][hidden] {
+  display: none !important;
+}
+
+.broadcast-file-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.broadcast-photo-preview {
+  display: block;
+  width: min(100%, 460px);
+  max-height: 320px;
+  object-fit: contain;
+  border: 1px solid rgba(167, 238, 255, 0.14);
+  border-radius: var(--radius-md);
+  background: rgba(3, 9, 23, 0.45);
+}
+
+.broadcast-reaction-builder {
+  display: grid;
+  gap: 12px;
+}
+
+.broadcast-reaction-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.broadcast-reaction-row label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.broadcast-reaction-row .button {
+  min-height: 42px;
+}
+
+.broadcast-add-reaction {
+  justify-self: start;
+}
+
 .broadcast-targets-head {
   display: flex;
   justify-content: space-between;
@@ -5925,6 +6030,15 @@ body.page-landing {
   .broadcast-detail-summary,
   .broadcast-history {
     grid-template-columns: 1fr;
+  }
+
+  .broadcast-reaction-row {
+    grid-template-columns: minmax(72px, 0.35fr) minmax(150px, 1fr);
+  }
+
+  .broadcast-reaction-row .button {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 }
 

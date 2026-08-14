@@ -26,16 +26,24 @@
       </div>
 
       <div class="broadcast-grid">
-        <form class="broadcast-composer" method="post" action="/app/admin/broadcasts/send">
+        <form
+          class="broadcast-composer"
+          method="post"
+          action="/app/admin/broadcasts/send"
+          enctype="multipart/form-data"
+          data-broadcast-form
+        >
+          <input type="hidden" name="body" data-broadcast-compiled-body>
           <label class="broadcast-label" for="broadcast-body">Текст сообщения</label>
           <textarea
             id="broadcast-body"
-            name="body"
             class="admin-field-input admin-textarea broadcast-textarea"
             maxlength="3200"
             placeholder="Спасибо за использование Selara. Мы продолжаем развивать бота и будем рады вашей обратной связи."
             required
+            data-broadcast-body
           ></textarea>
+          <small class="broadcast-counter" data-broadcast-counter>Итог: 0 · лимит: 3200</small>
           <details class="broadcast-format-help">
             <summary>Всё форматирование этой формы (Telegram HTML)</summary>
             <div class="broadcast-format-help__content">
@@ -48,10 +56,75 @@
               <p><strong>Кастомный emoji:</strong> <code>&lt;tg-emoji emoji-id="5368324170671202286"&gt;👍&lt;/tg-emoji&gt;</code>.</p>
               <p><strong>Дата/время:</strong> <code>&lt;tg-time unix="1647531900" format="wDT"&gt;время&lt;/tg-time&gt;</code>.</p>
               <p>Символы <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code>, <code>&quot;</code> экранируются как <code>&amp;lt;</code>, <code>&amp;gt;</code>, <code>&amp;amp;</code>, <code>&amp;quot;</code>. Markdown вроде <code>**жирный**</code> не работает.</p>
-              <p>Реакции: <code>[reactions]</code>, 2–6 строк <code>👍 = Всё понятно</code>, затем <code>[/reactions]</code>.</p>
+              <p>Реакции: <code>[reactions]</code>, 2–6 строк <code>👍 = Всё понятно</code>, затем <code>[/reactions]</code>. Проще включить конструктор ниже.</p>
               <p>Лимиты: текст — 3200 символов; подпись фото — 1024; JPEG/PNG — до 10 МБ.</p>
             </div>
           </details>
+
+          <fieldset class="broadcast-options">
+            <legend class="broadcast-label">Формат публикации</legend>
+            <label class="broadcast-option">
+              <input type="radio" name="media_mode" value="text" checked data-broadcast-media-mode>
+              <span>Текст</span>
+            </label>
+            <label class="broadcast-option">
+              <input type="radio" name="media_mode" value="photo" data-broadcast-media-mode>
+              <span>Фото с подписью</span>
+            </label>
+          </fieldset>
+
+          <div class="broadcast-photo-field" data-broadcast-photo-field hidden>
+            <label class="broadcast-label" for="broadcast-photo">Фотография</label>
+            <input
+              id="broadcast-photo"
+              class="admin-field-input broadcast-file-input"
+              type="file"
+              name="photo"
+              accept="image/jpeg,image/png"
+              data-broadcast-photo-input
+            >
+            <p class="broadcast-note">JPEG или PNG до 10 МБ. Сумма сторон — до 10000 px, соотношение — не более 20:1.</p>
+            <img class="broadcast-photo-preview" alt="Предпросмотр фотографии рассылки" data-broadcast-photo-preview hidden>
+          </div>
+
+          <div class="broadcast-reaction-builder">
+            <label class="broadcast-reaction-toggle">
+              <input type="checkbox" data-broadcast-reactions-toggle>
+              <span>Собирать реакции</span>
+            </label>
+            <div class="broadcast-reaction-controls" data-broadcast-reaction-controls hidden>
+              <p class="broadcast-note">
+                В админских чатах бот включит реакции Telegram, в остальных создаст inline-кнопки. Расшифровка вариантов всегда добавляется в текст.
+              </p>
+              <div class="broadcast-reaction-list" data-broadcast-reaction-list>
+                <div class="broadcast-reaction-row" data-broadcast-reaction-row>
+                  <label>
+                    <span>Emoji</span>
+                    <input class="admin-field-input" name="reaction_emoji" value="👍" maxlength="32" data-broadcast-reaction-emoji>
+                  </label>
+                  <label>
+                    <span>Описание</span>
+                    <input class="admin-field-input" name="reaction_label" value="Всё понятно" maxlength="64" data-broadcast-reaction-label>
+                  </label>
+                  <button type="button" class="button ghost small" data-broadcast-remove-reaction hidden>Удалить</button>
+                </div>
+                <div class="broadcast-reaction-row" data-broadcast-reaction-row>
+                  <label>
+                    <span>Emoji</span>
+                    <input class="admin-field-input" name="reaction_emoji" value="👎" maxlength="32" data-broadcast-reaction-emoji>
+                  </label>
+                  <label>
+                    <span>Описание</span>
+                    <input class="admin-field-input" name="reaction_label" value="Не согласен" maxlength="64" data-broadcast-reaction-label>
+                  </label>
+                  <button type="button" class="button ghost small" data-broadcast-remove-reaction hidden>Удалить</button>
+                </div>
+              </div>
+              <button type="button" class="button ghost small broadcast-add-reaction" data-broadcast-add-reaction>
+                Добавить вариант
+              </button>
+            </div>
+          </div>
 
           <div class="broadcast-targets-head">
             <label class="broadcast-label">Чаты для этой отправки</label>
@@ -223,17 +296,204 @@
 {% block scripts %}
   <script>
     (() => {
+      const form = document.querySelector("[data-broadcast-form]");
+      if (!form) return;
+
       const list = document.getElementById("broadcast-target-list");
-      if (!list) return;
-      const checkboxes = () => Array.from(list.querySelectorAll('input[type="checkbox"][name="chat_ids"]'));
+      const chatCheckboxes = () => list
+        ? Array.from(list.querySelectorAll('input[type="checkbox"][name="chat_ids"]'))
+        : [];
       document.querySelectorAll("[data-broadcast-toggle]").forEach((button) => {
         button.addEventListener("click", () => {
           const mode = button.getAttribute("data-broadcast-toggle");
-          for (const input of checkboxes()) {
+          for (const input of chatCheckboxes()) {
             input.checked = mode === "all";
           }
         });
       });
+
+      const body = form.querySelector("[data-broadcast-body]");
+      const compiledBody = form.querySelector("[data-broadcast-compiled-body]");
+      const counter = form.querySelector("[data-broadcast-counter]");
+      const mediaModes = Array.from(form.querySelectorAll("[data-broadcast-media-mode]"));
+      const photoField = form.querySelector("[data-broadcast-photo-field]");
+      const photoInput = form.querySelector("[data-broadcast-photo-input]");
+      const photoPreview = form.querySelector("[data-broadcast-photo-preview]");
+      const reactionsToggle = form.querySelector("[data-broadcast-reactions-toggle]");
+      const reactionControls = form.querySelector("[data-broadcast-reaction-controls]");
+      const reactionList = form.querySelector("[data-broadcast-reaction-list]");
+      const addReaction = form.querySelector("[data-broadcast-add-reaction]");
+      let previewUrl = null;
+
+      const photoModeEnabled = () => mediaModes.some((input) => input.checked && input.value === "photo");
+      const reactionRows = () => Array.from(reactionList.querySelectorAll("[data-broadcast-reaction-row]"));
+
+      const escapeHtml = (value) => value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+
+      const reactionValues = () => reactionRows().map((row) => ({
+        emoji: row.querySelector("[data-broadcast-reaction-emoji]").value.trim(),
+        label: row.querySelector("[data-broadcast-reaction-label]").value.trim(),
+      }));
+
+      const compileBody = () => {
+        const source = body.value.trim();
+        if (!reactionsToggle.checked) {
+          return { source, rendered: source };
+        }
+        const values = reactionValues();
+        const rows = values.map(({ emoji, label }) => `${emoji} = ${label}`).join("\n");
+        const footer = values.map(({ emoji, label }) => `${emoji} — ${escapeHtml(label)}`).join("\n");
+        return {
+          source: `${source}\n\n[reactions]\n${rows}\n[/reactions]`,
+          rendered: `${source}\n\n<b>Реакции:</b>\n${footer}`,
+        };
+      };
+
+      const updateCounter = () => {
+        const limit = photoModeEnabled() ? 1024 : 3200;
+        const length = compileBody().rendered.length;
+        counter.textContent = `Итог после реакций: ${length} · лимит: ${limit}`;
+        counter.classList.toggle("broadcast-counter-error", length > limit);
+      };
+
+      const clearPhoto = () => {
+        photoInput.value = "";
+        photoInput.setCustomValidity("");
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+        photoPreview.removeAttribute("src");
+        photoPreview.hidden = true;
+      };
+
+      const updatePhotoMode = () => {
+        const enabled = photoModeEnabled();
+        photoField.hidden = !enabled;
+        photoInput.required = enabled;
+        if (!enabled) clearPhoto();
+        updateCounter();
+      };
+
+      const updateReactionControls = () => {
+        const enabled = reactionsToggle.checked;
+        reactionControls.hidden = !enabled;
+        for (const row of reactionRows()) {
+          row.querySelector("[data-broadcast-reaction-emoji]").required = enabled;
+          row.querySelector("[data-broadcast-reaction-label]").required = enabled;
+        }
+        updateCounter();
+      };
+
+      const updateReactionButtons = () => {
+        const rows = reactionRows();
+        for (const row of rows) {
+          row.querySelector("[data-broadcast-remove-reaction]").hidden = rows.length <= 2;
+        }
+        addReaction.hidden = rows.length >= 6;
+      };
+
+      const createReactionRow = () => {
+        const row = document.createElement("div");
+        row.className = "broadcast-reaction-row";
+        row.dataset.broadcastReactionRow = "";
+        row.innerHTML = `
+          <label>
+            <span>Emoji</span>
+            <input class="admin-field-input" name="reaction_emoji" value="🤔" maxlength="32" required data-broadcast-reaction-emoji>
+          </label>
+          <label>
+            <span>Описание</span>
+            <input class="admin-field-input" name="reaction_label" value="Есть вопросы" maxlength="64" required data-broadcast-reaction-label>
+          </label>
+          <button type="button" class="button ghost small" data-broadcast-remove-reaction>Удалить</button>
+        `;
+        reactionList.appendChild(row);
+        updateReactionButtons();
+        updateCounter();
+        row.querySelector("[data-broadcast-reaction-emoji]").focus();
+      };
+
+      mediaModes.forEach((input) => input.addEventListener("change", updatePhotoMode));
+      reactionsToggle.addEventListener("change", updateReactionControls);
+      body.addEventListener("input", () => {
+        body.setCustomValidity("");
+        updateCounter();
+      });
+      reactionList.addEventListener("input", updateCounter);
+      addReaction.addEventListener("click", () => {
+        if (reactionRows().length < 6) createReactionRow();
+      });
+      reactionList.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-broadcast-remove-reaction]");
+        if (!button || reactionRows().length <= 2) return;
+        button.closest("[data-broadcast-reaction-row]").remove();
+        updateReactionButtons();
+        updateCounter();
+      });
+
+      photoInput.addEventListener("change", () => {
+        photoInput.setCustomValidity("");
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
+        photoPreview.hidden = true;
+        const file = photoInput.files && photoInput.files[0];
+        if (!file) return;
+        if (!['image/jpeg', 'image/png'].includes(file.type)) {
+          photoInput.setCustomValidity("Выберите фотографию JPEG или PNG.");
+          photoInput.reportValidity();
+          return;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+          photoInput.setCustomValidity("Фотография должна быть не больше 10 МБ.");
+          photoInput.reportValidity();
+          return;
+        }
+        previewUrl = URL.createObjectURL(file);
+        photoPreview.src = previewUrl;
+        photoPreview.hidden = false;
+      });
+
+      form.addEventListener("submit", (event) => {
+        body.setCustomValidity("");
+        const source = body.value.trim();
+        if (reactionsToggle.checked && (source.includes("[reactions]") || source.includes("[/reactions]"))) {
+          event.preventDefault();
+          body.setCustomValidity("Не добавляйте блок [reactions] вручную, когда включён конструктор.");
+          body.reportValidity();
+          return;
+        }
+        const values = reactionValues();
+        if (reactionsToggle.checked) {
+          const emoji = values.map((item) => item.emoji);
+          if (new Set(emoji).size !== emoji.length) {
+            event.preventDefault();
+            body.setCustomValidity("Emoji в вариантах реакций не должны повторяться.");
+            body.reportValidity();
+            return;
+          }
+        }
+        const compiled = compileBody();
+        const limit = photoModeEnabled() ? 1024 : 3200;
+        if (compiled.rendered.length > limit) {
+          event.preventDefault();
+          body.setCustomValidity(`Итоговый текст длиннее ${limit} символов.`);
+          body.reportValidity();
+          return;
+        }
+        if (chatCheckboxes().every((input) => !input.checked)) {
+          event.preventDefault();
+          window.alert("Выберите хотя бы один чат для рассылки.");
+          return;
+        }
+        compiledBody.value = compiled.source;
+      });
+
+      updatePhotoMode();
+      updateReactionControls();
+      updateReactionButtons();
     })();
   </script>
 {% endblock %}

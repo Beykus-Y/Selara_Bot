@@ -382,8 +382,17 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("send_path", "expected_status"),
+    [
+        ("/api/admin/broadcasts/send", 200),
+        ("/app/admin/broadcasts/send", 303),
+    ],
+)
 async def test_photo_broadcast_uses_native_for_admin_inline_for_member_and_reuses_file_id(
     monkeypatch: pytest.MonkeyPatch,
+    send_path: str,
+    expected_status: int,
 ) -> None:
     settings = _settings()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -421,7 +430,7 @@ async def test_photo_broadcast_uses_native_for_admin_inline_for_member_and_reuse
     client.cookies.set(settings.admin_session_cookie_name, "hybrid-session")
     try:
         response = await client.post(
-            "/api/admin/broadcasts/send",
+            send_path,
             data={
                 "body": "Новость\n[reactions]\n👍 = Нравится\n👎 = Не нравится\n[/reactions]",
                 "media_mode": "photo",
@@ -429,12 +438,16 @@ async def test_photo_broadcast_uses_native_for_admin_inline_for_member_and_reuse
             },
             files={"photo": ("notice.png", photo.getvalue(), "image/png")},
         )
-        detail_response = await client.get(f"/api/admin/broadcasts/{response.json().get('broadcast_id', 0)}")
+        if send_path.startswith("/api/"):
+            broadcast_id = response.json().get("broadcast_id", 0)
+        else:
+            broadcast_id = int(response.headers["location"].split("/broadcasts/", 1)[1].split("?", 1)[0])
+        detail_response = await client.get(f"/api/admin/broadcasts/{broadcast_id}")
     finally:
         await client.aclose()
         await getattr(app.router, "shutdown", app.router._shutdown)()
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == expected_status, response.text
     assert detail_response.status_code == 200, detail_response.text
     assert detail_response.json()["page"]["anonymous_reaction_counts"] == []
     assert {item["reaction_mode"] for item in detail_response.json()["page"]["deliveries"]} == {"native", "inline"}

@@ -165,6 +165,19 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert 'action="/app/admin/request-backup"' in response.text
     assert "Системная рассылка" in response.text
     assert 'action="/app/admin/broadcasts/send"' in response.text
+    assert 'enctype="multipart/form-data"' in response.text
+    assert 'name="media_mode"' in response.text
+    assert 'value="text"' in response.text
+    assert 'value="photo"' in response.text
+    assert 'type="file"' in response.text
+    assert 'name="photo"' in response.text
+    assert 'accept="image/jpeg,image/png"' in response.text
+    assert 'data-broadcast-photo-field' in response.text
+    assert 'data-broadcast-reactions-toggle' in response.text
+    assert 'data-broadcast-reaction-list' in response.text
+    assert 'data-broadcast-add-reaction' in response.text
+    assert 'name="reaction_emoji"' in response.text
+    assert 'name="reaction_label"' in response.text
     assert 'name="chat_ids"' in response.text
 
 
