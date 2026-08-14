@@ -10,6 +10,8 @@ from typing import Literal
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from PIL import Image, UnidentifiedImageError
 
+from selara.domain.reactions import normalize_telegram_reaction_emoji
+
 ReactionMode = Literal["none", "native", "inline"]
 
 _BLOCK_OPEN = "[reactions]"
@@ -117,7 +119,8 @@ def parse_broadcast_source(source: str) -> ParsedBroadcast:
         emoji, label = (part.strip() for part in line.split("=", 1))
         if not _looks_like_standard_emoji(emoji):
             raise BroadcastFormatError(f"В строке {position} слева должен быть обычный emoji.")
-        if emoji in seen_emoji:
+        emoji_identity = normalize_telegram_reaction_emoji(emoji)
+        if emoji_identity in seen_emoji:
             raise BroadcastFormatError(f"Emoji {emoji} повторяется в блоке реакций.")
         if not label:
             raise BroadcastFormatError(f"У реакции {emoji} отсутствует описание.")
@@ -125,7 +128,7 @@ def parse_broadcast_source(source: str) -> ParsedBroadcast:
             raise BroadcastFormatError(
                 f"Описание реакции {emoji} длиннее {_MAX_LABEL_LENGTH} символов."
             )
-        seen_emoji.add(emoji)
+        seen_emoji.add(emoji_identity)
         options.append(BroadcastReactionOption(key=f"r{position}", emoji=emoji, label=label))
 
     footer = "<b>Реакции:</b>\n" + "\n".join(
@@ -150,8 +153,9 @@ def resolve_reaction_mode(
         return "inline"
     if available_reactions is None:
         return "native"
-    requested = {option.emoji for option in options}
-    return "native" if requested.issubset(set(available_reactions)) else "inline"
+    requested = {normalize_telegram_reaction_emoji(option.emoji) for option in options}
+    available = {normalize_telegram_reaction_emoji(emoji) for emoji in available_reactions}
+    return "native" if requested.issubset(available) else "inline"
 
 
 def build_inline_keyboard(

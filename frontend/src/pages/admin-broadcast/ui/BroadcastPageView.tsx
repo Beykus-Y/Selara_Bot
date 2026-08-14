@@ -111,10 +111,10 @@ export function BroadcastPageView({ data }: BroadcastPageViewProps) {
                 <article key={`${item.chat_title}-${item.user_label}-${item.option_key}-${idx}`} className="broadcast-reply-card">
                   <div className="broadcast-reply-head">
                     <div>
-                      <strong>{item.emoji} {item.user_label}</strong>
+                      <strong>{item.reaction_label} {item.user_label}</strong>
                       <p className="broadcast-reply-meta">{item.chat_title} · {item.reacted_at}</p>
                       <p className="broadcast-reply-meta">
-                        {broadcast.reaction_options.find((option) => option.key === item.option_key)?.label ?? item.option_key}
+                        {item.option_label ?? 'Другая реакция'}
                       </p>
                     </div>
                     <span className="broadcast-type-badge">{item.source}</span>
@@ -128,11 +128,12 @@ export function BroadcastPageView({ data }: BroadcastPageViewProps) {
           {anonymousCounts.length > 0 && (
             <div className="broadcast-reply-list">
               {anonymousCounts.map((item, idx) => (
-                <article key={`${item.chat_title}-${item.emoji}-${idx}`} className="broadcast-reply-card">
+                <article key={`${item.chat_title}-${item.reaction_type}-${item.reaction_value}-${idx}`} className="broadcast-reply-card">
                   <div className="broadcast-reply-head">
                     <div>
-                      <strong>{item.emoji} × {item.count}</strong>
+                      <strong>{item.reaction_label} × {item.count}</strong>
                       <p className="broadcast-reply-meta">{item.chat_title} · {item.observed_at}</p>
+                      {item.option_label && <p className="broadcast-reply-meta">{item.option_label}</p>}
                     </div>
                     <span className="broadcast-type-badge">анонимно</span>
                   </div>

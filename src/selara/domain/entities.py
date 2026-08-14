@@ -167,7 +167,9 @@ class AdminBroadcastReaction:
     chat_id: int
     chat_title: str | None
     source: str
-    option_key: str
+    option_key: str | None
+    reaction_type: str
+    reaction_value: str
     emoji: str
     user: UserSnapshot | None
     actor_chat_id: int | None
@@ -180,6 +182,9 @@ class AdminBroadcastReactionCount:
     delivery_id: int
     chat_id: int
     chat_title: str | None
+    option_key: str | None
+    reaction_type: str
+    reaction_value: str
     emoji: str
     count: int
     observed_at: datetime

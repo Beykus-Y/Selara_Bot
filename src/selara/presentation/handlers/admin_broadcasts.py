@@ -11,6 +11,11 @@ from aiogram.types import (
 )
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.domain.reactions import (
+    TelegramReactionTotal,
+    TelegramReactionValue,
+    normalize_telegram_reaction_emoji,
+)
 
 router = Router(name="admin_broadcast_reactions")
 
@@ -43,13 +48,23 @@ def _chat_snapshot(chat) -> ChatSnapshot:
     )
 
 
-def _emoji_reactions(reactions) -> set[str]:
-    return {
-        str(reaction.emoji)
-        for reaction in reactions
-        if str(getattr(getattr(reaction, "type", None), "value", getattr(reaction, "type", ""))) == "emoji"
-        and getattr(reaction, "emoji", None)
-    }
+def _reaction_value(reaction) -> TelegramReactionValue | None:
+    raw_type = getattr(reaction, "type", None)
+    reaction_type = str(getattr(raw_type, "value", raw_type) or "")
+    if reaction_type == "emoji":
+        display = str(getattr(reaction, "emoji", "") or "").strip()
+        value = normalize_telegram_reaction_emoji(display)
+        return TelegramReactionValue("emoji", value, display) if value else None
+    if reaction_type == "custom_emoji":
+        value = str(getattr(reaction, "custom_emoji_id", "") or "").strip()
+        return TelegramReactionValue("custom_emoji", value, "✨") if value else None
+    if reaction_type == "paid":
+        return TelegramReactionValue("paid", "paid", "⭐")
+    return None
+
+
+def _reaction_values(reactions) -> frozenset[TelegramReactionValue]:
+    return frozenset(value for reaction in reactions if (value := _reaction_value(reaction)) is not None)
 
 
 @router.callback_query(F.data.startswith("abr:"))
@@ -90,7 +105,7 @@ async def admin_broadcast_native_reaction(update: MessageReactionUpdated, activi
         user=_user_snapshot(update.user) if update.user is not None else None,
         actor_chat_id=int(update.actor_chat.id) if update.actor_chat is not None else None,
         telegram_message_id=int(update.message_id),
-        emojis=_emoji_reactions(update.new_reaction),
+        reactions=_reaction_values(update.new_reaction),
         reacted_at=update.date,
     )
 
@@ -100,16 +115,15 @@ async def admin_broadcast_native_reaction_count(
     update: MessageReactionCountUpdated,
     activity_repo,
 ) -> None:
-    counts: dict[str, int] = {}
+    reactions: list[TelegramReactionTotal] = []
     for item in update.reactions:
-        reaction = item.type
-        raw_type = getattr(reaction, "type", None)
-        if str(getattr(raw_type, "value", raw_type)) != "emoji" or not getattr(reaction, "emoji", None):
+        reaction = _reaction_value(item.type)
+        if reaction is None:
             continue
-        counts[str(reaction.emoji)] = max(0, int(item.total_count))
+        reactions.append(TelegramReactionTotal(reaction=reaction, count=max(0, int(item.total_count))))
     await activity_repo.replace_admin_broadcast_reaction_counts(
         chat_id=int(update.chat.id),
         telegram_message_id=int(update.message_id),
-        counts=counts,
+        reactions=reactions,
         observed_at=update.date,
     )

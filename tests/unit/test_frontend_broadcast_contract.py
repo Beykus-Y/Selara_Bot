@@ -34,3 +34,9 @@ def test_broadcast_details_expose_delivery_mode_and_reactors() -> None:
     assert "Реакции пользователей" in source
     assert "inline" in source
     assert "native" in source
+
+    fallback = (ROOT / "src/selara/web/templates/admin_broadcast_detail.html").read_text(encoding="utf-8")
+    assert "Ответы по вариантам" in fallback
+    assert "Другие реакции" in fallback
+    assert "custom_emoji" in fallback
+    assert "paid" in fallback

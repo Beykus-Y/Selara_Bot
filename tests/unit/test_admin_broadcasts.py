@@ -16,6 +16,7 @@ from selara.application.admin_broadcasts import (
     validate_broadcast_photo,
 )
 from selara.domain.entities import AdminBroadcastTarget, ChatSnapshot, UserSnapshot
+from selara.domain.reactions import TelegramReactionTotal, TelegramReactionValue
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import ChatModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
@@ -62,6 +63,7 @@ def test_message_without_reaction_block_remains_unchanged() -> None:
     [
         ("Текст\n[reactions]\n👍 = Да\n[/reactions]", "минимум 2"),
         ("Текст\n[reactions]\n👍 = Да\n👍 = Точно\n[/reactions]", "повторяется"),
+        ("Текст\n[reactions]\n❤ = Да\n❤️ = Точно\n[/reactions]", "повторяется"),
         ("Текст\n[reactions]\n👍 Да\n👎 = Нет\n[/reactions]", "emoji = описание"),
         ("Текст\n[reactions]\n👍 = Да\n👎 = Нет", "не закрыт"),
         ("Текст\n[/reactions]", "закрывающий"),
@@ -89,6 +91,18 @@ def test_native_mode_requires_admin_and_all_requested_reactions() -> None:
     assert resolve_reaction_mode(options=options, bot_is_admin=True, available_reactions={"👍", "👎", "🔥"}) == "native"
     assert resolve_reaction_mode(options=options, bot_is_admin=True, available_reactions={"👍"}) == "inline"
     assert resolve_reaction_mode(options=(), bot_is_admin=True, available_reactions=None) == "none"
+
+
+def test_native_mode_normalizes_emoji_presentation_selectors() -> None:
+    options = parse_broadcast_source(
+        "Текст\n[reactions]\n❤️ = Нравится\n👍 = Поддерживаю\n[/reactions]"
+    ).options
+
+    assert resolve_reaction_mode(
+        options=options,
+        bot_is_admin=True,
+        available_reactions={"❤", "👍"},
+    ) == "native"
 
 
 def test_inline_keyboard_uses_short_stable_callback_data() -> None:
@@ -252,9 +266,9 @@ async def test_native_reaction_snapshot_replaces_old_user_choices() -> None:
             repo = SqlAlchemyActivityRepository(session)
             broadcast = await repo.create_admin_broadcast(
                 body="Исходник",
-                rendered_body="Исходник\n\n<b>Реакции:</b>\n👍 — Да\n👎 — Нет",
+                rendered_body="Исходник\n\n<b>Реакции:</b>\n❤️ — Да\n👎 — Нет",
                 reaction_options=[
-                    {"key": "r1", "emoji": "👍", "label": "Да"},
+                    {"key": "r1", "emoji": "❤️", "label": "Да"},
                     {"key": "r2", "emoji": "👎", "label": "Нет"},
                 ],
                 active_since_days=3,
@@ -278,10 +292,43 @@ async def test_native_reaction_snapshot_replaces_old_user_choices() -> None:
                 chat=chat,
                 user=user,
                 telegram_message_id=9002,
-                emojis={"👍"},
+                emojis={"❤", "🔥"},
                 reacted_at=now,
             )
-            assert [item.option_key for item in await repo.list_admin_broadcast_reactions(broadcast_id=broadcast.id)] == ["r1"]
+            active = await repo.list_admin_broadcast_reactions(broadcast_id=broadcast.id)
+            assert {(item.emoji, item.option_key) for item in active} == {("❤", "r1"), ("🔥", None)}
+
+            assert await repo.replace_admin_broadcast_native_reactions(
+                chat=chat,
+                user=user,
+                telegram_message_id=9002,
+                reactions={
+                    TelegramReactionValue("custom_emoji", "5368324170671202286", "✨"),
+                    TelegramReactionValue("paid", "paid", "⭐"),
+                },
+                reacted_at=now,
+            )
+            active = await repo.list_admin_broadcast_reactions(broadcast_id=broadcast.id)
+            assert {
+                (item.reaction_type, item.reaction_value, item.option_key)
+                for item in active
+            } == {
+                ("custom_emoji", "5368324170671202286", None),
+                ("paid", "paid", None),
+            }
+
+            assert await repo.replace_admin_broadcast_native_reactions(
+                chat=chat,
+                user=user,
+                telegram_message_id=9002,
+                emojis={"🔥"},
+                reacted_at=now - timedelta(seconds=1),
+            )
+            active = await repo.list_admin_broadcast_reactions(broadcast_id=broadcast.id)
+            assert {(item.reaction_type, item.reaction_value) for item in active} == {
+                ("custom_emoji", "5368324170671202286"),
+                ("paid", "paid"),
+            }
 
             assert await repo.replace_admin_broadcast_native_reactions(
                 chat=chat,
@@ -304,7 +351,14 @@ async def test_native_reaction_snapshot_replaces_old_user_choices() -> None:
             assert await repo.replace_admin_broadcast_reaction_counts(
                 chat_id=chat.telegram_chat_id,
                 telegram_message_id=9002,
-                counts={"👍": 3, "👎": 1},
+                reactions=[
+                    TelegramReactionTotal(TelegramReactionValue("emoji", "❤", "❤"), 3),
+                    TelegramReactionTotal(
+                        TelegramReactionValue("custom_emoji", "5368324170671202286", "✨"),
+                        2,
+                    ),
+                    TelegramReactionTotal(TelegramReactionValue("paid", "paid", "⭐"), 1),
+                ],
                 observed_at=now,
             )
             assert await repo.replace_admin_broadcast_reaction_counts(
@@ -314,6 +368,13 @@ async def test_native_reaction_snapshot_replaces_old_user_choices() -> None:
                 observed_at=now - timedelta(seconds=1),
             )
             counts = await repo.list_admin_broadcast_reaction_counts(broadcast_id=broadcast.id)
-            assert {item.emoji: item.count for item in counts} == {"👍": 3, "👎": 1}
+            assert {
+                (item.reaction_type, item.reaction_value): (item.count, item.option_key)
+                for item in counts
+            } == {
+                ("emoji", "❤"): (3, "r1"),
+                ("custom_emoji", "5368324170671202286"): (2, None),
+                ("paid", "paid"): (1, None),
+            }
     finally:
         await engine.dispose()

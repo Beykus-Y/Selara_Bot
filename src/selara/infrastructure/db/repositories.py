@@ -1,6 +1,6 @@
 import hashlib
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
@@ -90,6 +90,12 @@ from selara.domain.entities import (
     UserChatOverview,
     UserChatProfile,
     UserSnapshot,
+)
+from selara.domain.reactions import (
+    TelegramReactionTotal,
+    TelegramReactionValue,
+    canonicalize_telegram_reaction,
+    normalize_telegram_reaction_emoji,
 )
 from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.db.achievement_metrics import (
@@ -5514,6 +5520,11 @@ class SqlAlchemyActivityRepository:
         if option is None:
             return "invalid"
 
+        reaction_value = normalize_telegram_reaction_emoji(str(option.get("emoji") or ""))
+        if not reaction_value:
+            return "invalid"
+        actor_key = f"user:{int(user.telegram_user_id)}"
+
         await self._upsert_user(user)
         existing_rows = (
             await self._session.execute(
@@ -5542,9 +5553,12 @@ class SqlAlchemyActivityRepository:
                     delivery_id=int(delivery_id),
                     source="inline",
                     option_key=option_key,
+                    reaction_type="emoji",
+                    reaction_value=reaction_value,
                     emoji=str(option.get("emoji") or "")[:64],
                     actor_user_id=int(user.telegram_user_id),
                     actor_chat_id=None,
+                    actor_key=actor_key,
                     active=True,
                     reacted_at=now,
                     updated_at=now,
@@ -5552,6 +5566,9 @@ class SqlAlchemyActivityRepository:
             )
         else:
             matching.active = True
+            matching.actor_key = actor_key
+            matching.reaction_type = "emoji"
+            matching.reaction_value = reaction_value
             matching.emoji = str(option.get("emoji") or "")[:64]
             matching.reacted_at = now
             matching.updated_at = now
@@ -5564,9 +5581,10 @@ class SqlAlchemyActivityRepository:
         chat: ChatSnapshot,
         user: UserSnapshot | None,
         telegram_message_id: int,
-        emojis: set[str],
         reacted_at: datetime,
         actor_chat_id: int | None = None,
+        reactions: Collection[TelegramReactionValue] | None = None,
+        emojis: set[str] | None = None,
     ) -> bool:
         delivery = (
             await self._session.execute(
@@ -5583,18 +5601,44 @@ class SqlAlchemyActivityRepository:
         broadcast = await self._session.get(AdminBroadcastModel, int(delivery.broadcast_id))
         if broadcast is None:
             return False
+        raw_observed = list(reactions or ())
+        raw_observed.extend(
+            TelegramReactionValue(
+                reaction_type="emoji",
+                value=normalize_telegram_reaction_emoji(emoji),
+                display=emoji,
+            )
+            for emoji in (emojis or set())
+            if normalize_telegram_reaction_emoji(emoji)
+        )
+        observed = {
+            (canonical.reaction_type, canonical.value): canonical
+            for reaction in raw_observed
+            if (canonical := canonicalize_telegram_reaction(reaction)) is not None
+        }
         option_by_emoji = {
-            str(option.get("emoji")): option
+            normalize_telegram_reaction_emoji(str(option.get("emoji") or "")): option
             for option in (broadcast.reaction_options_json or [])
             if isinstance(option, dict)
+            and normalize_telegram_reaction_emoji(str(option.get("emoji") or ""))
         }
-        selected = {emoji for emoji in emojis if emoji in option_by_emoji}
         await self._upsert_chat(chat)
         if user is not None:
             await self._upsert_user(user)
 
-        actor_filters = [AdminBroadcastReactionModel.actor_user_id == (int(user.telegram_user_id) if user else None)]
-        actor_filters.append(AdminBroadcastReactionModel.actor_chat_id == (int(actor_chat_id) if actor_chat_id is not None else None))
+        resolved_actor_chat_id = (
+            int(actor_chat_id) if user is None and actor_chat_id is not None else None
+        )
+        actor_key = (
+            f"user:{int(user.telegram_user_id)}"
+            if user is not None
+            else f"chat:{resolved_actor_chat_id}"
+        )
+        actor_filters = [
+            AdminBroadcastReactionModel.actor_user_id
+            == (int(user.telegram_user_id) if user else None)
+        ]
+        actor_filters.append(AdminBroadcastReactionModel.actor_chat_id == resolved_actor_chat_id)
         rows = (
             await self._session.execute(
                 select(AdminBroadcastReactionModel).where(
@@ -5605,28 +5649,34 @@ class SqlAlchemyActivityRepository:
             )
         ).scalars().all()
         now = _coerce_utc_datetime(reacted_at)
-        existing_by_key = {item.option_key: item for item in rows}
-        selected_keys = {str(option_by_emoji[emoji].get("key")) for emoji in selected}
+        if any(_coerce_utc_datetime(item.updated_at) > now for item in rows):
+            return True
+        existing_by_value = {(item.reaction_type, item.reaction_value): item for item in rows}
+        selected_values = set(observed)
         for item in rows:
-            item.active = item.option_key in selected_keys
+            item.active = (item.reaction_type, item.reaction_value) in selected_values
             item.updated_at = now
-        for emoji in selected:
-            option = option_by_emoji[emoji]
-            key = str(option.get("key"))
-            existing = existing_by_key.get(key)
+        for reaction in observed.values():
+            option = option_by_emoji.get(reaction.value) if reaction.reaction_type == "emoji" else None
+            option_key = str(option.get("key")) if option is not None else None
+            existing = existing_by_value.get((reaction.reaction_type, reaction.value))
             if existing is not None:
                 existing.active = True
-                existing.emoji = emoji
+                existing.option_key = option_key
+                existing.emoji = reaction.display[:64]
                 existing.reacted_at = now
                 continue
             self._session.add(
                 AdminBroadcastReactionModel(
                     delivery_id=int(delivery.id),
                     source="native",
-                    option_key=key,
-                    emoji=emoji,
+                    option_key=option_key,
+                    reaction_type=reaction.reaction_type,
+                    reaction_value=reaction.value[:128],
+                    emoji=reaction.display[:64],
                     actor_user_id=int(user.telegram_user_id) if user is not None else None,
-                    actor_chat_id=int(actor_chat_id) if actor_chat_id is not None else None,
+                    actor_chat_id=resolved_actor_chat_id,
+                    actor_key=actor_key,
                     active=True,
                     reacted_at=now,
                     updated_at=now,
@@ -5640,8 +5690,9 @@ class SqlAlchemyActivityRepository:
         *,
         chat_id: int,
         telegram_message_id: int,
-        counts: dict[str, int],
         observed_at: datetime,
+        reactions: Collection[TelegramReactionTotal] | None = None,
+        counts: dict[str, int] | None = None,
     ) -> bool:
         delivery = (
             await self._session.execute(
@@ -5655,6 +5706,28 @@ class SqlAlchemyActivityRepository:
         ).scalar_one_or_none()
         if delivery is None:
             return False
+        raw_observed = list(reactions or ())
+        raw_observed.extend(
+            TelegramReactionTotal(
+                reaction=TelegramReactionValue(
+                    reaction_type="emoji",
+                    value=normalize_telegram_reaction_emoji(emoji),
+                    display=emoji,
+                ),
+                count=max(0, int(count)),
+            )
+            for emoji, count in (counts or {}).items()
+            if normalize_telegram_reaction_emoji(emoji)
+        )
+        observed_by_value: dict[tuple[str, str], TelegramReactionTotal] = {}
+        for item in raw_observed:
+            canonical = canonicalize_telegram_reaction(item.reaction)
+            if canonical is not None:
+                identity = (canonical.reaction_type, canonical.value)
+                observed_by_value[identity] = TelegramReactionTotal(
+                    reaction=canonical,
+                    count=max(0, int(item.count)),
+                )
         now = _coerce_utc_datetime(observed_at)
         rows = (
             await self._session.execute(
@@ -5663,26 +5736,31 @@ class SqlAlchemyActivityRepository:
                 )
             )
         ).scalars().all()
-        by_emoji = {item.emoji: item for item in rows}
-        for emoji, existing in by_emoji.items():
-            if emoji not in counts and _coerce_utc_datetime(existing.observed_at) <= now:
+        if any(_coerce_utc_datetime(item.observed_at) > now for item in rows):
+            return True
+        by_value = {(item.reaction_type, item.reaction_value): item for item in rows}
+        for identity, existing in by_value.items():
+            if identity not in observed_by_value and _coerce_utc_datetime(existing.observed_at) <= now:
                 existing.count = 0
                 existing.observed_at = now
                 existing.updated_at = now
-        for emoji, count in counts.items():
-            safe_count = max(0, int(count))
-            existing = by_emoji.get(emoji)
+        for identity, total in observed_by_value.items():
+            safe_count = max(0, int(total.count))
+            existing = by_value.get(identity)
             if existing is None:
                 self._session.add(
                     AdminBroadcastReactionCountModel(
                         delivery_id=int(delivery.id),
-                        emoji=emoji[:64],
+                        reaction_type=total.reaction.reaction_type,
+                        reaction_value=total.reaction.value[:128],
+                        emoji=total.reaction.display[:64],
                         count=safe_count,
                         observed_at=now,
                         updated_at=now,
                     )
                 )
             elif _coerce_utc_datetime(existing.observed_at) <= now:
+                existing.emoji = total.reaction.display[:64]
                 existing.count = safe_count
                 existing.observed_at = now
                 existing.updated_at = now
@@ -5716,6 +5794,8 @@ class SqlAlchemyActivityRepository:
                 chat_title=delivery.chat_title_snapshot,
                 source=reaction.source,
                 option_key=reaction.option_key,
+                reaction_type=reaction.reaction_type,
+                reaction_value=reaction.reaction_value,
                 emoji=reaction.emoji,
                 user=self._to_user_snapshot(user_row) if user_row is not None else None,
                 actor_chat_id=int(reaction.actor_chat_id) if reaction.actor_chat_id is not None else None,
@@ -5730,24 +5810,58 @@ class SqlAlchemyActivityRepository:
         broadcast_id: int,
     ) -> list[AdminBroadcastReactionCount]:
         stmt = (
-            select(AdminBroadcastReactionCountModel, AdminBroadcastDeliveryModel)
-            .join(AdminBroadcastDeliveryModel, AdminBroadcastDeliveryModel.id == AdminBroadcastReactionCountModel.delivery_id)
-            .where(AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id))
-            .order_by(AdminBroadcastDeliveryModel.id.asc(), AdminBroadcastReactionCountModel.emoji.asc())
+            select(
+                AdminBroadcastReactionCountModel,
+                AdminBroadcastDeliveryModel,
+                AdminBroadcastModel,
+            )
+            .join(
+                AdminBroadcastDeliveryModel,
+                AdminBroadcastDeliveryModel.id
+                == AdminBroadcastReactionCountModel.delivery_id,
+            )
+            .join(
+                AdminBroadcastModel,
+                AdminBroadcastModel.id == AdminBroadcastDeliveryModel.broadcast_id,
+            )
+            .where(
+                AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id),
+                AdminBroadcastReactionCountModel.count > 0,
+            )
+            .order_by(
+                AdminBroadcastDeliveryModel.id.asc(),
+                AdminBroadcastReactionCountModel.reaction_type.asc(),
+                AdminBroadcastReactionCountModel.reaction_value.asc(),
+            )
         )
         rows = (await self._session.execute(stmt)).all()
-        return [
-            AdminBroadcastReactionCount(
-                broadcast_id=int(delivery.broadcast_id),
-                delivery_id=int(delivery.id),
-                chat_id=int(delivery.chat_id),
-                chat_title=delivery.chat_title_snapshot,
-                emoji=count_row.emoji,
-                count=max(0, int(count_row.count)),
-                observed_at=_coerce_utc_datetime(count_row.observed_at),
+        result: list[AdminBroadcastReactionCount] = []
+        for count_row, delivery, broadcast in rows:
+            option_by_value = {
+                normalize_telegram_reaction_emoji(str(option.get("emoji") or "")): option
+                for option in (broadcast.reaction_options_json or [])
+                if isinstance(option, dict)
+            }
+            option = (
+                option_by_value.get(count_row.reaction_value)
+                if count_row.reaction_type == "emoji"
+                else None
             )
-            for count_row, delivery in rows
-        ]
+            result.append(
+                AdminBroadcastReactionCount(
+                    broadcast_id=int(delivery.broadcast_id),
+                    delivery_id=int(delivery.id),
+                    chat_id=int(delivery.chat_id),
+                    chat_title=delivery.chat_title_snapshot,
+                    option_key=str(option.get("key")) if option is not None else None,
+                    reaction_type=count_row.reaction_type,
+                    reaction_value=count_row.reaction_value,
+                    emoji=count_row.emoji,
+                    count=max(0, int(count_row.count)),
+                    observed_at=_coerce_utc_datetime(count_row.observed_at),
+                )
+            )
+        return result
 
     async def mark_admin_broadcast_delivery_failed(
         self,

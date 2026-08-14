@@ -1645,7 +1645,14 @@ class AdminBroadcastReactionModel(Base):
         nullable=False,
     )
     source: Mapped[str] = mapped_column(String(16), nullable=False)
-    option_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    option_key: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reaction_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="emoji",
+        server_default="emoji",
+    )
+    reaction_value: Mapped[str] = mapped_column(String(128), nullable=False)
     emoji: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_user_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -1653,6 +1660,7 @@ class AdminBroadcastReactionModel(Base):
         nullable=True,
     )
     actor_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    actor_key: Mapped[str] = mapped_column(String(80), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     reacted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -1665,15 +1673,20 @@ class AdminBroadcastReactionModel(Base):
     __table_args__ = (
         CheckConstraint("source IN ('native', 'inline')", name="ck_admin_broadcast_reactions_source"),
         CheckConstraint(
+            "reaction_type IN ('emoji', 'custom_emoji', 'paid')",
+            name="ck_admin_broadcast_reactions_type",
+        ),
+        CheckConstraint(
             "actor_user_id IS NOT NULL OR actor_chat_id IS NOT NULL",
             name="ck_admin_broadcast_reactions_actor",
         ),
         UniqueConstraint(
             "delivery_id",
             "source",
-            "actor_user_id",
-            "option_key",
-            name="uq_admin_broadcast_reaction_user_option",
+            "actor_key",
+            "reaction_type",
+            "reaction_value",
+            name="uq_admin_broadcast_reaction_actor_value",
         ),
     )
 
@@ -1691,6 +1704,13 @@ class AdminBroadcastReactionCountModel(Base):
         ForeignKey("admin_broadcast_deliveries.id", ondelete="CASCADE"),
         nullable=False,
     )
+    reaction_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="emoji",
+        server_default="emoji",
+    )
+    reaction_value: Mapped[str] = mapped_column(String(128), nullable=False)
     emoji: Mapped[str] = mapped_column(String(64), nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1698,7 +1718,16 @@ class AdminBroadcastReactionCountModel(Base):
 
     __table_args__ = (
         CheckConstraint("count >= 0", name="ck_admin_broadcast_reaction_counts_nonnegative"),
-        UniqueConstraint("delivery_id", "emoji", name="uq_admin_broadcast_reaction_count_delivery_emoji"),
+        CheckConstraint(
+            "reaction_type IN ('emoji', 'custom_emoji', 'paid')",
+            name="ck_admin_broadcast_reaction_counts_type",
+        ),
+        UniqueConstraint(
+            "delivery_id",
+            "reaction_type",
+            "reaction_value",
+            name="uq_admin_broadcast_reaction_count_delivery_value",
+        ),
     )
 
 

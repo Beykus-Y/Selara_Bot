@@ -40,13 +40,22 @@ export type BroadcastReaction = {
   chat_title: string
   user_label: string
   source: 'native' | 'inline'
-  option_key: string
+  option_key: string | null
+  option_label: string | null
+  reaction_type: 'emoji' | 'custom_emoji' | 'paid'
+  reaction_value: string
+  reaction_label: string
   emoji: string
   reacted_at: string
 }
 
 export type BroadcastReactionCount = {
   chat_title: string
+  option_key: string | null
+  option_label: string | null
+  reaction_type: 'emoji' | 'custom_emoji' | 'paid'
+  reaction_value: string
+  reaction_label: string
   emoji: string
   count: number
   observed_at: string

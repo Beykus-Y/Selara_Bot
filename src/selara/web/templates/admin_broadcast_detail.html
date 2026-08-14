@@ -1,5 +1,15 @@
 {% extends "base.html" %}
 
+{% macro reaction_text(item) -%}
+  {% if item.reaction_type == "custom_emoji" -%}
+    {{ item.emoji }} Custom emoji <code>{{ item.reaction_value }}</code>
+  {%- elif item.reaction_type == "paid" -%}
+    {{ item.emoji }} Платная реакция
+  {%- else -%}
+    {{ item.emoji }}
+  {%- endif %}
+{%- endmacro %}
+
 {% block content %}
   <div class="panel">
     <div class="panel-head">
@@ -44,30 +54,65 @@
       <div class="section-head">
         <div>
           <h3>Реакции пользователей</h3>
-          <p>Inline-голоса и доступные персональные нативные реакции.</p>
+          <p>Все реакции, которые Telegram передал боту: обычные, custom_emoji и paid.</p>
         </div>
       </div>
       {% if reactions or anonymous_reaction_counts %}
-        <div class="broadcast-reply-list">
-          {% for item in reactions %}
-            <article class="broadcast-reply-card">
-              <div class="broadcast-reply-head">
-                <strong>{{ item.emoji }} {{ item.user_label }}</strong>
-                <span class="broadcast-type-badge">{{ item.source }}</span>
-              </div>
-              <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.reacted_at }}</p>
-            </article>
-          {% endfor %}
-          {% for item in anonymous_reaction_counts %}
-            <article class="broadcast-reply-card">
-              <div class="broadcast-reply-head">
-                <strong>{{ item.emoji }} × {{ item.count }}</strong>
-                <span class="broadcast-type-badge">анонимно</span>
-              </div>
-              <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.observed_at }}</p>
-            </article>
-          {% endfor %}
-        </div>
+        <h4>Ответы по вариантам</h4>
+        {% if configured_reactions or configured_reaction_counts %}
+          <div class="broadcast-reply-list">
+            {% for item in configured_reactions %}
+              <article class="broadcast-reply-card">
+                <div class="broadcast-reply-head">
+                  <strong>{{ reaction_text(item) }} {{ item.user_label }}</strong>
+                  <span class="broadcast-type-badge">{{ item.source }}</span>
+                </div>
+                <p class="broadcast-reply-meta">
+                  {{ item.option_label }} · {{ item.chat_title }} · {{ item.reacted_at }}
+                </p>
+              </article>
+            {% endfor %}
+            {% for item in configured_reaction_counts %}
+              <article class="broadcast-reply-card">
+                <div class="broadcast-reply-head">
+                  <strong>{{ reaction_text(item) }} × {{ item.count }}</strong>
+                  <span class="broadcast-type-badge">анонимно</span>
+                </div>
+                <p class="broadcast-reply-meta">
+                  {{ item.option_label }} · {{ item.chat_title }} · {{ item.observed_at }}
+                </p>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="broadcast-empty">По заданным вариантам пока нет реакций.</p>
+        {% endif %}
+
+        <h4>Другие реакции</h4>
+        {% if other_reactions or other_reaction_counts %}
+          <div class="broadcast-reply-list">
+            {% for item in other_reactions %}
+              <article class="broadcast-reply-card">
+                <div class="broadcast-reply-head">
+                  <strong>{{ reaction_text(item) }} {{ item.user_label }}</strong>
+                  <span class="broadcast-type-badge">{{ item.source }}</span>
+                </div>
+                <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.reacted_at }}</p>
+              </article>
+            {% endfor %}
+            {% for item in other_reaction_counts %}
+              <article class="broadcast-reply-card">
+                <div class="broadcast-reply-head">
+                  <strong>{{ reaction_text(item) }} × {{ item.count }}</strong>
+                  <span class="broadcast-type-badge">анонимно</span>
+                </div>
+                <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.observed_at }}</p>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="broadcast-empty">Других реакций пока нет.</p>
+        {% endif %}
       {% else %}
         <p class="broadcast-empty">Пока активных реакций нет.</p>
       {% endif %}

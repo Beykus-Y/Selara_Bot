@@ -7647,6 +7647,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return f"{compact[:217]}..."
         return f"[{message_type}]"
 
+    def _admin_broadcast_reaction_label(
+        *,
+        reaction_type: str,
+        reaction_value: str,
+        emoji: str,
+    ) -> str:
+        if reaction_type == "custom_emoji":
+            return f"{emoji} Custom emoji · {reaction_value}"
+        if reaction_type == "paid":
+            return f"{emoji} Платная реакция"
+        return emoji
+
     def _normalize_admin_broadcast_body(raw_value: str | None) -> str:
         value = (raw_value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         while "\n\n\n" in value:
@@ -8211,6 +8223,60 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         sent_count = sum(1 for item in deliveries if item.status == "sent")
         failed_count = sum(1 for item in deliveries if item.status == "failed")
         target_count = len(deliveries)
+        option_labels = {
+            str(option.get("key")): str(option.get("label") or "")
+            for option in broadcast.reaction_options
+            if isinstance(option, dict)
+        }
+        reaction_items = [
+            {
+                "chat_title": _admin_broadcast_chat_label(
+                    chat_id=item.chat_id,
+                    chat_type="group",
+                    chat_title=item.chat_title,
+                ),
+                "user_label": (
+                    user_label(item.user)
+                    if item.user is not None
+                    else f"Чат {item.actor_chat_id}"
+                ),
+                "emoji": item.emoji,
+                "reaction_type": item.reaction_type,
+                "reaction_value": item.reaction_value,
+                "reaction_label": _admin_broadcast_reaction_label(
+                    reaction_type=item.reaction_type,
+                    reaction_value=item.reaction_value,
+                    emoji=item.emoji,
+                ),
+                "source": item.source,
+                "option_key": item.option_key,
+                "option_label": option_labels.get(item.option_key or ""),
+                "reacted_at": format_datetime(item.reacted_at),
+            }
+            for item in reactions
+        ]
+        reaction_count_items = [
+            {
+                "chat_title": _admin_broadcast_chat_label(
+                    chat_id=item.chat_id,
+                    chat_type="group",
+                    chat_title=item.chat_title,
+                ),
+                "emoji": item.emoji,
+                "reaction_type": item.reaction_type,
+                "reaction_value": item.reaction_value,
+                "reaction_label": _admin_broadcast_reaction_label(
+                    reaction_type=item.reaction_type,
+                    reaction_value=item.reaction_value,
+                    emoji=item.emoji,
+                ),
+                "option_key": item.option_key,
+                "option_label": option_labels.get(item.option_key or ""),
+                "count": item.count,
+                "observed_at": format_datetime(item.observed_at),
+            }
+            for item in reaction_counts
+        ]
 
         return _render_template(
             "admin_broadcast_detail.html",
@@ -8273,32 +8339,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 }
                 for item in replies
             ],
-            reactions=[
-                {
-                    "chat_title": _admin_broadcast_chat_label(
-                        chat_id=item.chat_id,
-                        chat_type="group",
-                        chat_title=item.chat_title,
-                    ),
-                    "user_label": user_label(item.user) if item.user is not None else f"Чат {item.actor_chat_id}",
-                    "emoji": item.emoji,
-                    "source": item.source,
-                    "reacted_at": format_datetime(item.reacted_at),
-                }
-                for item in reactions
+            reactions=reaction_items,
+            anonymous_reaction_counts=reaction_count_items,
+            configured_reactions=[
+                item for item in reaction_items if item["option_key"] is not None
             ],
-            anonymous_reaction_counts=[
-                {
-                    "chat_title": _admin_broadcast_chat_label(
-                        chat_id=item.chat_id,
-                        chat_type="group",
-                        chat_title=item.chat_title,
-                    ),
-                    "emoji": item.emoji,
-                    "count": item.count,
-                    "observed_at": format_datetime(item.observed_at),
-                }
-                for item in reaction_counts
+            other_reactions=[item for item in reaction_items if item["option_key"] is None],
+            configured_reaction_counts=[
+                item for item in reaction_count_items if item["option_key"] is not None
+            ],
+            other_reaction_counts=[
+                item for item in reaction_count_items if item["option_key"] is None
             ],
         )
 
@@ -8939,6 +8990,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         sent_count = sum(1 for item in deliveries if item.status == "sent")
         failed_count = sum(1 for item in deliveries if item.status == "failed")
         target_count = len(deliveries)
+        option_labels = {
+            str(option.get("key")): str(option.get("label") or "")
+            for option in broadcast.reaction_options
+            if isinstance(option, dict)
+        }
 
         page: dict[str, object] = {
             "broadcast": {
@@ -9001,9 +9057,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         chat_type="group",
                         chat_title=item.chat_title,
                     ),
-                    "user_label": user_label(item.user) if item.user is not None else f"Чат {item.actor_chat_id}",
+                    "user_label": (
+                        user_label(item.user)
+                        if item.user is not None
+                        else f"Чат {item.actor_chat_id}"
+                    ),
                     "source": item.source,
                     "option_key": item.option_key,
+                    "option_label": option_labels.get(item.option_key or ""),
+                    "reaction_type": item.reaction_type,
+                    "reaction_value": item.reaction_value,
+                    "reaction_label": _admin_broadcast_reaction_label(
+                        reaction_type=item.reaction_type,
+                        reaction_value=item.reaction_value,
+                        emoji=item.emoji,
+                    ),
                     "emoji": item.emoji,
                     "reacted_at": format_datetime(item.reacted_at),
                 }
@@ -9015,6 +9083,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         chat_id=item.chat_id,
                         chat_type="group",
                         chat_title=item.chat_title,
+                    ),
+                    "option_key": item.option_key,
+                    "option_label": option_labels.get(item.option_key or ""),
+                    "reaction_type": item.reaction_type,
+                    "reaction_value": item.reaction_value,
+                    "reaction_label": _admin_broadcast_reaction_label(
+                        reaction_type=item.reaction_type,
+                        reaction_value=item.reaction_value,
+                        emoji=item.emoji,
                     ),
                     "emoji": item.emoji,
                     "count": item.count,
