@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +20,8 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _to_player_state(model: PlayerModel, *, total_primogems_override: int | None = None) -> PlayerState:
@@ -343,6 +343,20 @@ class GachaRepository:
         pull_id: int,
         sold_at: datetime,
     ) -> tuple[PlayerState, int, str, datetime]:
+        banner_stmt = select(PullHistoryModel.banner).where(
+            PullHistoryModel.id == pull_id,
+            PullHistoryModel.user_id == user_id,
+        )
+        banner_result = await self._session.execute(banner_stmt)
+        banner = banner_result.scalar_one_or_none()
+        if banner is None:
+            raise ValueError("Крутка не найдена.")
+
+        # Acquire the user/banner lock before loading ORM entities that the
+        # lock helper expires. Loading the entry first would leave it expired
+        # and make subsequent attribute access attempt implicit async I/O.
+        await self.lock_user_banner(user_id=user_id, banner=banner)
+
         stmt = (
             select(PullHistoryModel)
             .where(PullHistoryModel.id == pull_id, PullHistoryModel.user_id == user_id)
@@ -357,8 +371,6 @@ class GachaRepository:
         if entry.sold_at is not None:
             raise ValueError("Эта копия уже продана.")
 
-        await self.lock_user_banner(user_id=user_id, banner=entry.banner)
-
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
             raise ValueError("Игрок не найден.")
@@ -367,13 +379,13 @@ class GachaRepository:
             PlayerBannerWalletModel,
             {
                 "user_id": user_id,
-                "banner": entry.banner,
+                "banner": banner,
             },
         )
         if wallet is None:
             wallet = PlayerBannerWalletModel(
                 user_id=user_id,
-                banner=entry.banner,
+                banner=banner,
                 currency_balance=0,
             )
             self._session.add(wallet)
@@ -390,7 +402,7 @@ class GachaRepository:
         return (
             _to_player_state(player, total_primogems_override=int(wallet.currency_balance)),
             sale_price,
-            entry.banner,
+            banner,
             sold_at,
         )
 
