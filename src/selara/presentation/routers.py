@@ -5,6 +5,7 @@ from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
 from selara.presentation.handlers.aliases import router as aliases_router
+from selara.presentation.handlers.admin_broadcasts import router as admin_broadcasts_router
 from selara.presentation.handlers.chat_assistant import router as chat_assistant_router
 from selara.presentation.handlers.clans import router as clans_router
 from selara.presentation.handlers.economy import router as economy_router
@@ -63,6 +64,12 @@ def build_router(
     root.callback_query.outer_middleware(ChatSettingsMiddleware())
     root.callback_query.outer_middleware(ChatWriteLockMiddleware())
 
+    root.message_reaction.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    root.message_reaction.outer_middleware(DBSessionMiddleware(session_factory))
+
+    root.message_reaction_count.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    root.message_reaction_count.outer_middleware(DBSessionMiddleware(session_factory))
+
     root.inline_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.inline_query.outer_middleware(DBSessionMiddleware(session_factory))
 
@@ -72,6 +79,7 @@ def build_router(
     root.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
 
+    root.include_router(admin_broadcasts_router)
     root.include_router(message_archive_router)
     root.include_router(help_router)
     root.include_router(stats_router)

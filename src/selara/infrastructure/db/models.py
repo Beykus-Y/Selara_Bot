@@ -1549,6 +1549,11 @@ class AdminBroadcastModel(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     active_since_days: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3, server_default="3")
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    rendered_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reaction_options_json: Mapped[list[dict[str, str]] | None] = mapped_column(JSON, nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    media_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -1573,6 +1578,8 @@ class AdminBroadcastDeliveryModel(Base):
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reaction_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="none", server_default="none")
+    bot_member_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -1585,6 +1592,10 @@ class AdminBroadcastDeliveryModel(Base):
 
     __table_args__ = (
         CheckConstraint("status IN ('pending', 'sent', 'failed')", name="ck_admin_broadcast_deliveries_status"),
+        CheckConstraint(
+            "reaction_mode IN ('none', 'native', 'inline')",
+            name="ck_admin_broadcast_deliveries_reaction_mode",
+        ),
         UniqueConstraint("broadcast_id", "chat_id", name="uq_admin_broadcast_deliveries_broadcast_chat"),
     )
 
@@ -1622,6 +1633,73 @@ class AdminBroadcastReplyModel(Base):
 
 Index("idx_admin_broadcast_replies_delivery_sent", AdminBroadcastReplyModel.delivery_id, AdminBroadcastReplyModel.sent_at)
 Index("idx_admin_broadcast_replies_user_sent", AdminBroadcastReplyModel.reply_user_id, AdminBroadcastReplyModel.sent_at)
+
+
+class AdminBroadcastReactionModel(Base):
+    __tablename__ = "admin_broadcast_reactions"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    delivery_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("admin_broadcast_deliveries.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    option_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    emoji: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    actor_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    reacted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint("source IN ('native', 'inline')", name="ck_admin_broadcast_reactions_source"),
+        CheckConstraint(
+            "actor_user_id IS NOT NULL OR actor_chat_id IS NOT NULL",
+            name="ck_admin_broadcast_reactions_actor",
+        ),
+        UniqueConstraint(
+            "delivery_id",
+            "source",
+            "actor_user_id",
+            "option_key",
+            name="uq_admin_broadcast_reaction_user_option",
+        ),
+    )
+
+
+Index("idx_admin_broadcast_reactions_delivery_active", AdminBroadcastReactionModel.delivery_id, AdminBroadcastReactionModel.active)
+Index("idx_admin_broadcast_reactions_user", AdminBroadcastReactionModel.actor_user_id, AdminBroadcastReactionModel.updated_at)
+
+
+class AdminBroadcastReactionCountModel(Base):
+    __tablename__ = "admin_broadcast_reaction_counts"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    delivery_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("admin_broadcast_deliveries.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    emoji: Mapped[str] = mapped_column(String(64), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("count >= 0", name="ck_admin_broadcast_reaction_counts_nonnegative"),
+        UniqueConstraint("delivery_id", "emoji", name="uq_admin_broadcast_reaction_count_delivery_emoji"),
+    )
 
 
 class UserFeatureRequestModel(Base):

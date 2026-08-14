@@ -10,7 +10,7 @@ type BroadcastPageViewProps = {
 }
 
 export function BroadcastPageView({ data }: BroadcastPageViewProps) {
-  const { broadcast, deliveries, replies } = data
+  const { broadcast, deliveries, replies, reactions, anonymous_reaction_counts: anonymousCounts } = data
 
   return (
     <div className="broadcast-detail-page">
@@ -40,6 +40,11 @@ export function BroadcastPageView({ data }: BroadcastPageViewProps) {
             <span className="broadcast-stat-label">Ответов реплаем</span>
             <strong>{broadcast.reply_count}</strong>
             <small>собраны в базе и доступны ниже</small>
+          </article>
+          <article className="broadcast-stat-card">
+            <span className="broadcast-stat-label">Реакций</span>
+            <strong>{broadcast.reaction_count}</strong>
+            <small>персональных активных выборов</small>
           </article>
         </div>
 
@@ -78,6 +83,10 @@ export function BroadcastPageView({ data }: BroadcastPageViewProps) {
                   <div className="broadcast-delivery-info">
                     <span>message_id: <code>{item.telegram_message_id ?? '—'}</code></span>
                     <span>ответов: <code>{item.reply_count}</code></span>
+                    <span>
+                      реакции: <code>{item.reaction_mode}</code>
+                      {item.bot_member_status ? ` · статус бота: ${item.bot_member_status}` : ''}
+                    </span>
                     <span>дата: {item.sent_at}</span>
                   </div>
                   {item.error_text && (
@@ -88,6 +97,48 @@ export function BroadcastPageView({ data }: BroadcastPageViewProps) {
             </div>
           ) : (
             <p className="broadcast-empty">Записей о доставке пока нет.</p>
+          )}
+        </div>
+
+        <div className="broadcast-section">
+          <h3>Реакции пользователей</h3>
+          <p className="broadcast-section-subtitle">
+            inline гарантированно связан с пользователем; native зависит от данных, которые передал Telegram.
+          </p>
+          {reactions.length > 0 ? (
+            <div className="broadcast-reply-list">
+              {reactions.map((item, idx) => (
+                <article key={`${item.chat_title}-${item.user_label}-${item.option_key}-${idx}`} className="broadcast-reply-card">
+                  <div className="broadcast-reply-head">
+                    <div>
+                      <strong>{item.emoji} {item.user_label}</strong>
+                      <p className="broadcast-reply-meta">{item.chat_title} · {item.reacted_at}</p>
+                      <p className="broadcast-reply-meta">
+                        {broadcast.reaction_options.find((option) => option.key === item.option_key)?.label ?? item.option_key}
+                      </p>
+                    </div>
+                    <span className="broadcast-type-badge">{item.source}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="broadcast-empty">Пока активных реакций нет.</p>
+          )}
+          {anonymousCounts.length > 0 && (
+            <div className="broadcast-reply-list">
+              {anonymousCounts.map((item, idx) => (
+                <article key={`${item.chat_title}-${item.emoji}-${idx}`} className="broadcast-reply-card">
+                  <div className="broadcast-reply-head">
+                    <div>
+                      <strong>{item.emoji} × {item.count}</strong>
+                      <p className="broadcast-reply-meta">{item.chat_title} · {item.observed_at}</p>
+                    </div>
+                    <span className="broadcast-type-badge">анонимно</span>
+                  </div>
+                </article>
+              ))}
+            </div>
           )}
         </div>
 

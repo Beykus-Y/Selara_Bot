@@ -23,19 +23,25 @@ export async function adminRequestBackup(): Promise<string> {
   }
 }
 
-export async function adminSendBroadcast(body: string, chatIds: number[]): Promise<{ message: string; broadcast_id: number }> {
+export async function adminSendBroadcast(
+  body: string,
+  chatIds: number[],
+  mediaMode: 'text' | 'photo',
+  photo: File | null,
+): Promise<{ message: string; broadcast_id: number }> {
   try {
-    const form = new URLSearchParams()
+    const form = new FormData()
     form.set('body', body)
+    form.set('media_mode', mediaMode)
     for (const id of chatIds) {
       form.append('chat_ids', String(id))
     }
+    if (photo) form.set('photo', photo)
 
-    const { data } = await axios.post<AdminActionResponse>(resolveAppPath('/api/admin/broadcasts/send'), form.toString(), {
+    const { data } = await axios.post<AdminActionResponse>(resolveAppPath('/api/admin/broadcasts/send'), form, {
       withCredentials: true,
       headers: {
         Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
         'X-Requested-With': 'fetch',
       },
     })

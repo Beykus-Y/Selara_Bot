@@ -48,6 +48,8 @@ from selara.domain.entities import (
     AdminBroadcast,
     AdminBroadcastDelivery,
     AdminBroadcastOverview,
+    AdminBroadcastReaction,
+    AdminBroadcastReactionCount,
     AdminBroadcastReply,
     AdminBroadcastTarget,
     BotRole,
@@ -104,6 +106,8 @@ from selara.infrastructure.db.activity_batching import (
 from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
+    AdminBroadcastReactionCountModel,
+    AdminBroadcastReactionModel,
     AdminBroadcastReplyModel,
     ChatAchievementStatsModel,
     ChatActivityEventSyncStateModel,
@@ -5411,11 +5415,21 @@ class SqlAlchemyActivityRepository:
         self,
         *,
         body: str,
+        rendered_body: str | None = None,
+        reaction_options: Sequence[dict[str, str]] = (),
+        media_type: str | None = None,
+        media_file_id: str | None = None,
+        media_file_unique_id: str | None = None,
         active_since_days: int,
         created_by_user_id: int | None,
     ) -> AdminBroadcast:
         row = AdminBroadcastModel(
             body=body,
+            rendered_body=rendered_body or body,
+            reaction_options_json=[dict(option) for option in reaction_options] or None,
+            media_type=media_type,
+            media_file_id=media_file_id,
+            media_file_unique_id=media_file_unique_id,
             active_since_days=max(1, int(active_since_days)),
             created_by_user_id=int(created_by_user_id) if created_by_user_id is not None else None,
         )
@@ -5449,6 +5463,8 @@ class SqlAlchemyActivityRepository:
         *,
         delivery_id: int,
         telegram_message_id: int,
+        reaction_mode: str = "none",
+        bot_member_status: str | None = None,
         sent_at: datetime,
     ) -> bool:
         row = await self._session.get(AdminBroadcastDeliveryModel, int(delivery_id))
@@ -5456,11 +5472,282 @@ class SqlAlchemyActivityRepository:
             return False
         row.status = "sent"
         row.telegram_message_id = int(telegram_message_id)
+        row.reaction_mode = reaction_mode if reaction_mode in {"none", "native", "inline"} else "none"
+        row.bot_member_status = (bot_member_status or "").strip()[:32] or None
         row.error_text = None
         row.sent_at = _coerce_utc_datetime(sent_at)
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
+
+    async def toggle_admin_broadcast_inline_reaction(
+        self,
+        *,
+        delivery_id: int,
+        chat_id: int,
+        telegram_message_id: int,
+        user: UserSnapshot,
+        option_key: str,
+        reacted_at: datetime,
+    ) -> str:
+        row = (
+            await self._session.execute(
+                select(AdminBroadcastDeliveryModel, AdminBroadcastModel)
+                .join(AdminBroadcastModel, AdminBroadcastModel.id == AdminBroadcastDeliveryModel.broadcast_id)
+                .where(AdminBroadcastDeliveryModel.id == int(delivery_id))
+                .where(AdminBroadcastDeliveryModel.chat_id == int(chat_id))
+                .where(AdminBroadcastDeliveryModel.telegram_message_id == int(telegram_message_id))
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is None:
+            return "invalid"
+        delivery, broadcast = row
+        if delivery.status != "sent" or delivery.reaction_mode != "inline":
+            return "invalid"
+        option_map = {
+            str(option.get("key")): option
+            for option in (broadcast.reaction_options_json or [])
+            if isinstance(option, dict)
+        }
+        option = option_map.get(option_key)
+        if option is None:
+            return "invalid"
+
+        await self._upsert_user(user)
+        existing_rows = (
+            await self._session.execute(
+                select(AdminBroadcastReactionModel).where(
+                    AdminBroadcastReactionModel.delivery_id == int(delivery_id),
+                    AdminBroadcastReactionModel.source == "inline",
+                    AdminBroadcastReactionModel.actor_user_id == int(user.telegram_user_id),
+                )
+            )
+        ).scalars().all()
+        matching = next((item for item in existing_rows if item.option_key == option_key), None)
+        now = _coerce_utc_datetime(reacted_at)
+        if matching is not None and matching.active:
+            matching.active = False
+            matching.reacted_at = now
+            matching.updated_at = now
+            await self._session.flush()
+            return "removed"
+
+        for item in existing_rows:
+            item.active = False
+            item.updated_at = now
+        if matching is None:
+            self._session.add(
+                AdminBroadcastReactionModel(
+                    delivery_id=int(delivery_id),
+                    source="inline",
+                    option_key=option_key,
+                    emoji=str(option.get("emoji") or "")[:64],
+                    actor_user_id=int(user.telegram_user_id),
+                    actor_chat_id=None,
+                    active=True,
+                    reacted_at=now,
+                    updated_at=now,
+                )
+            )
+        else:
+            matching.active = True
+            matching.emoji = str(option.get("emoji") or "")[:64]
+            matching.reacted_at = now
+            matching.updated_at = now
+        await self._session.flush()
+        return "selected"
+
+    async def replace_admin_broadcast_native_reactions(
+        self,
+        *,
+        chat: ChatSnapshot,
+        user: UserSnapshot | None,
+        telegram_message_id: int,
+        emojis: set[str],
+        reacted_at: datetime,
+        actor_chat_id: int | None = None,
+    ) -> bool:
+        delivery = (
+            await self._session.execute(
+                select(AdminBroadcastDeliveryModel).where(
+                    AdminBroadcastDeliveryModel.chat_id == int(chat.telegram_chat_id),
+                    AdminBroadcastDeliveryModel.telegram_message_id == int(telegram_message_id),
+                    AdminBroadcastDeliveryModel.status == "sent",
+                    AdminBroadcastDeliveryModel.reaction_mode == "native",
+                ).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if delivery is None or (user is None and actor_chat_id is None):
+            return False
+        broadcast = await self._session.get(AdminBroadcastModel, int(delivery.broadcast_id))
+        if broadcast is None:
+            return False
+        option_by_emoji = {
+            str(option.get("emoji")): option
+            for option in (broadcast.reaction_options_json or [])
+            if isinstance(option, dict)
+        }
+        selected = {emoji for emoji in emojis if emoji in option_by_emoji}
+        await self._upsert_chat(chat)
+        if user is not None:
+            await self._upsert_user(user)
+
+        actor_filters = [AdminBroadcastReactionModel.actor_user_id == (int(user.telegram_user_id) if user else None)]
+        actor_filters.append(AdminBroadcastReactionModel.actor_chat_id == (int(actor_chat_id) if actor_chat_id is not None else None))
+        rows = (
+            await self._session.execute(
+                select(AdminBroadcastReactionModel).where(
+                    AdminBroadcastReactionModel.delivery_id == int(delivery.id),
+                    AdminBroadcastReactionModel.source == "native",
+                    *actor_filters,
+                )
+            )
+        ).scalars().all()
+        now = _coerce_utc_datetime(reacted_at)
+        existing_by_key = {item.option_key: item for item in rows}
+        selected_keys = {str(option_by_emoji[emoji].get("key")) for emoji in selected}
+        for item in rows:
+            item.active = item.option_key in selected_keys
+            item.updated_at = now
+        for emoji in selected:
+            option = option_by_emoji[emoji]
+            key = str(option.get("key"))
+            existing = existing_by_key.get(key)
+            if existing is not None:
+                existing.active = True
+                existing.emoji = emoji
+                existing.reacted_at = now
+                continue
+            self._session.add(
+                AdminBroadcastReactionModel(
+                    delivery_id=int(delivery.id),
+                    source="native",
+                    option_key=key,
+                    emoji=emoji,
+                    actor_user_id=int(user.telegram_user_id) if user is not None else None,
+                    actor_chat_id=int(actor_chat_id) if actor_chat_id is not None else None,
+                    active=True,
+                    reacted_at=now,
+                    updated_at=now,
+                )
+            )
+        await self._session.flush()
+        return True
+
+    async def replace_admin_broadcast_reaction_counts(
+        self,
+        *,
+        chat_id: int,
+        telegram_message_id: int,
+        counts: dict[str, int],
+        observed_at: datetime,
+    ) -> bool:
+        delivery = (
+            await self._session.execute(
+                select(AdminBroadcastDeliveryModel).where(
+                    AdminBroadcastDeliveryModel.chat_id == int(chat_id),
+                    AdminBroadcastDeliveryModel.telegram_message_id == int(telegram_message_id),
+                    AdminBroadcastDeliveryModel.status == "sent",
+                    AdminBroadcastDeliveryModel.reaction_mode == "native",
+                )
+            )
+        ).scalar_one_or_none()
+        if delivery is None:
+            return False
+        now = _coerce_utc_datetime(observed_at)
+        rows = (
+            await self._session.execute(
+                select(AdminBroadcastReactionCountModel).where(
+                    AdminBroadcastReactionCountModel.delivery_id == int(delivery.id)
+                )
+            )
+        ).scalars().all()
+        by_emoji = {item.emoji: item for item in rows}
+        for emoji, existing in by_emoji.items():
+            if emoji not in counts and _coerce_utc_datetime(existing.observed_at) <= now:
+                existing.count = 0
+                existing.observed_at = now
+                existing.updated_at = now
+        for emoji, count in counts.items():
+            safe_count = max(0, int(count))
+            existing = by_emoji.get(emoji)
+            if existing is None:
+                self._session.add(
+                    AdminBroadcastReactionCountModel(
+                        delivery_id=int(delivery.id),
+                        emoji=emoji[:64],
+                        count=safe_count,
+                        observed_at=now,
+                        updated_at=now,
+                    )
+                )
+            elif _coerce_utc_datetime(existing.observed_at) <= now:
+                existing.count = safe_count
+                existing.observed_at = now
+                existing.updated_at = now
+        await self._session.flush()
+        return True
+
+    async def list_admin_broadcast_reactions(
+        self,
+        *,
+        broadcast_id: int,
+        limit: int = 500,
+    ) -> list[AdminBroadcastReaction]:
+        stmt = (
+            select(AdminBroadcastReactionModel, AdminBroadcastDeliveryModel, UserModel)
+            .join(AdminBroadcastDeliveryModel, AdminBroadcastDeliveryModel.id == AdminBroadcastReactionModel.delivery_id)
+            .outerjoin(UserModel, UserModel.telegram_user_id == AdminBroadcastReactionModel.actor_user_id)
+            .where(
+                AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id),
+                AdminBroadcastReactionModel.active.is_(True),
+            )
+            .order_by(AdminBroadcastReactionModel.updated_at.desc(), AdminBroadcastReactionModel.id.desc())
+            .limit(max(1, min(int(limit), 1000)))
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            AdminBroadcastReaction(
+                id=int(reaction.id),
+                broadcast_id=int(delivery.broadcast_id),
+                delivery_id=int(delivery.id),
+                chat_id=int(delivery.chat_id),
+                chat_title=delivery.chat_title_snapshot,
+                source=reaction.source,
+                option_key=reaction.option_key,
+                emoji=reaction.emoji,
+                user=self._to_user_snapshot(user_row) if user_row is not None else None,
+                actor_chat_id=int(reaction.actor_chat_id) if reaction.actor_chat_id is not None else None,
+                reacted_at=_coerce_utc_datetime(reaction.reacted_at),
+            )
+            for reaction, delivery, user_row in rows
+        ]
+
+    async def list_admin_broadcast_reaction_counts(
+        self,
+        *,
+        broadcast_id: int,
+    ) -> list[AdminBroadcastReactionCount]:
+        stmt = (
+            select(AdminBroadcastReactionCountModel, AdminBroadcastDeliveryModel)
+            .join(AdminBroadcastDeliveryModel, AdminBroadcastDeliveryModel.id == AdminBroadcastReactionCountModel.delivery_id)
+            .where(AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id))
+            .order_by(AdminBroadcastDeliveryModel.id.asc(), AdminBroadcastReactionCountModel.emoji.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            AdminBroadcastReactionCount(
+                broadcast_id=int(delivery.broadcast_id),
+                delivery_id=int(delivery.id),
+                chat_id=int(delivery.chat_id),
+                chat_title=delivery.chat_title_snapshot,
+                emoji=count_row.emoji,
+                count=max(0, int(count_row.count)),
+                observed_at=_coerce_utc_datetime(count_row.observed_at),
+            )
+            for count_row, delivery in rows
+        ]
 
     async def mark_admin_broadcast_delivery_failed(
         self,
@@ -5476,6 +5763,21 @@ class SqlAlchemyActivityRepository:
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
+
+    async def set_admin_broadcast_media_file(
+        self,
+        *,
+        broadcast_id: int,
+        file_id: str,
+        file_unique_id: str | None,
+    ) -> bool:
+        row = await self._session.get(AdminBroadcastModel, int(broadcast_id))
+        if row is None or row.media_type != "photo":
+            return False
+        row.media_file_id = (file_id or "").strip() or None
+        row.media_file_unique_id = (file_unique_id or "").strip() or None
+        await self._session.flush()
+        return row.media_file_id is not None
 
     async def get_admin_broadcast(self, *, broadcast_id: int) -> AdminBroadcast | None:
         row = await self._session.get(AdminBroadcastModel, int(broadcast_id))
@@ -5528,7 +5830,7 @@ class SqlAlchemyActivityRepository:
         return [
             AdminBroadcastOverview(
                 id=int(row.id),
-                body=row.body,
+                body=row.rendered_body or row.body,
                 active_since_days=int(row.active_since_days),
                 created_by_user_id=int(row.created_by_user_id) if row.created_by_user_id is not None else None,
                 created_at=_coerce_utc_datetime(row.created_at),
@@ -6841,6 +7143,10 @@ class SqlAlchemyActivityRepository:
             active_since_days=int(row.active_since_days),
             created_by_user_id=int(row.created_by_user_id) if row.created_by_user_id is not None else None,
             created_at=_coerce_utc_datetime(row.created_at),
+            rendered_body=row.rendered_body,
+            reaction_options=tuple(row.reaction_options_json or ()),
+            media_type=row.media_type,
+            media_file_id=row.media_file_id,
         )
 
     @staticmethod
@@ -6860,6 +7166,8 @@ class SqlAlchemyActivityRepository:
             error_text=row.error_text,
             sent_at=_normalize_optional_datetime(row.sent_at),
             reply_count=max(0, int(reply_count)),
+            reaction_mode=row.reaction_mode,
+            bot_member_status=row.bot_member_status,
         )
 
     @staticmethod

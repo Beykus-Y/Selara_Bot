@@ -11,9 +11,10 @@ from html import escape, unescape
 from importlib import import_module
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -42,6 +43,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.achievements import get_achievement_catalog_from_settings
+from selara.application.admin_broadcasts import (
+    BroadcastFormatError,
+    ParsedBroadcast,
+    build_inline_keyboard,
+    parse_broadcast_source,
+    resolve_reaction_mode,
+    validate_broadcast_photo,
+)
 from selara.application.use_cases.economy.catalog import (
     localize_crop_code,
     localize_item_code,
@@ -146,6 +155,7 @@ _CHAT_HUB_MAX_ROWS = 500
 _MINIAPP_INIT_DATA_TTL_SECONDS = 3600
 _ADMIN_BROADCAST_ACTIVE_DAYS = 3
 _ADMIN_BROADCAST_BODY_LIMIT = 3200
+_ADMIN_BROADCAST_CAPTION_LIMIT = 1024
 _ADMIN_BROADCAST_ALLOWED_HTML_TAGS = frozenset(
     {
         "a",
@@ -158,14 +168,22 @@ _ADMIN_BROADCAST_ALLOWED_HTML_TAGS = frozenset(
         "ins",
         "pre",
         "s",
+        "span",
+        "strike",
         "strong",
+        "tg-emoji",
         "tg-spoiler",
+        "tg-time",
         "u",
     }
 )
 _ADMIN_BROADCAST_ALLOWED_HTML_ATTRIBUTES = {
     "a": frozenset({"href"}),
+    "blockquote": frozenset({"expandable"}),
     "code": frozenset({"class"}),
+    "span": frozenset({"class"}),
+    "tg-emoji": frozenset({"emoji-id"}),
+    "tg-time": frozenset({"unix", "format"}),
 }
 game_router_module = import_module("selara.presentation.handlers.game.router")
 logger = logging.getLogger(__name__)
@@ -903,12 +921,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         status_code: int,
         redirect: str | None = None,
         setting: dict[str, str] | None = None,
+        broadcast_id: int | None = None,
     ) -> JSONResponse:
         payload: dict[str, object] = {"ok": ok, "message": message}
         if redirect is not None:
             payload["redirect"] = redirect
         if setting is not None:
             payload["setting"] = setting
+        if broadcast_id is not None:
+            payload["broadcast_id"] = int(broadcast_id)
         return JSONResponse(content=payload, status_code=status_code)
 
     def _check_rate_limit(host: str, now: datetime) -> bool:
@@ -941,6 +962,27 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         payload = (await request.body()).decode("utf-8")
         parsed = parse_qs(payload, keep_blank_values=True)
         return {key: list(values) for key, values in parsed.items() if values}
+
+    async def _parse_admin_broadcast_form(
+        request: Request,
+    ) -> tuple[dict[str, list[str]], bytes | None, str | None, str | None]:
+        content_type = request.headers.get("content-type", "").lower()
+        if not content_type.startswith("multipart/form-data"):
+            return await _parse_form_lists(request), None, None, None
+        form = await request.form(max_files=1, max_fields=100, max_part_size=10 * 1024 * 1024)
+        values: dict[str, list[str]] = defaultdict(list)
+        photo_content: bytes | None = None
+        photo_filename: str | None = None
+        photo_content_type: str | None = None
+        for key, value in form.multi_items():
+            if hasattr(value, "read") and hasattr(value, "filename"):
+                if key == "photo" and getattr(value, "filename", None):
+                    photo_content = await value.read()
+                    photo_filename = str(value.filename)
+                    photo_content_type = str(getattr(value, "content_type", "") or "")
+                continue
+            values[str(key)].append(str(value))
+        return dict(values), photo_content, photo_filename, photo_content_type
 
     async def _load_user_from_request(session: AsyncSession, request: Request, *, touch: bool) -> UserSnapshot | None:
         token = request.cookies.get(settings.web_session_cookie_name)
@@ -7612,8 +7654,26 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return value
 
     def _validate_admin_broadcast_body(body: str) -> str | None:
+        unsupported_entities = {
+            match.group(1)
+            for match in re.finditer(r"&([A-Za-z][A-Za-z0-9]+);", body)
+            if match.group(1) not in {"amp", "gt", "lt", "quot"}
+        }
+        if unsupported_entities:
+            return (
+                "Telegram HTML поддерживает только именованные сущности &lt;, &gt;, &amp; и &quot; "
+                f"(не поддерживается: &{sorted(unsupported_entities)[0]};)."
+            )
+        # Telegram accepts the HTML boolean attribute `expandable`, while the
+        # strict XML parser used for validation requires an explicit value.
+        validation_body = re.sub(
+            r"<blockquote\s+expandable\s*>",
+            '<blockquote expandable="">',
+            body,
+            flags=re.IGNORECASE,
+        )
         try:
-            root = ElementTree.fromstring(f"<root>{body}</root>")
+            root = ElementTree.fromstring(f"<root>{validation_body}</root>")
         except ElementTree.ParseError:
             return (
                 "Некорректный Telegram HTML. Закройте все теги и экранируйте обычные символы "
@@ -7636,16 +7696,253 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             for attr_name, attr_value in normalized_attrs.items():
                 if attr_name not in allowed_attrs:
                     return f"Атрибут {attr_name} нельзя использовать в теге <{tag}>."
-                if not attr_value:
+                if not attr_value and not (tag == "blockquote" and attr_name == "expandable"):
                     return f"Атрибут {attr_name} в теге <{tag}> не должен быть пустым."
 
             if tag == "a" and "href" not in normalized_attrs:
                 return 'В теге <a> нужен href, например <a href="https://example.com">ссылка</a>.'
+            if tag == "a":
+                href = normalized_attrs.get("href", "")
+                scheme = urlsplit(href).scheme.lower()
+                if scheme not in {"http", "https", "tg", "mailto", "tel"}:
+                    return "Безопасные ссылки должны начинаться с https://, http://, tg://, mailto: или tel:."
+            if tag == "span" and normalized_attrs.get("class") != "tg-spoiler":
+                return 'Тег <span> разрешён только как <span class="tg-spoiler">.'
+            if tag == "blockquote" and "expandable" in normalized_attrs and normalized_attrs["expandable"]:
+                return "Атрибут expandable у <blockquote> не должен иметь значения."
+            if tag == "code" and "class" in normalized_attrs:
+                code_class = normalized_attrs["class"]
+                if not re.fullmatch(r"language-[A-Za-z0-9_+.-]{1,48}", code_class):
+                    return 'Язык блока кода задаётся как class="language-python".'
+            if tag == "tg-emoji":
+                emoji_id = normalized_attrs.get("emoji-id", "")
+                if not emoji_id.isdigit() or int(emoji_id) <= 0:
+                    return 'В <tg-emoji> нужен числовой emoji-id, например emoji-id="5368324170671202286".'
+            if tag == "tg-time":
+                unix = normalized_attrs.get("unix", "")
+                if not unix.lstrip("-").isdigit():
+                    return 'В <tg-time> нужен Unix timestamp, например unix="1647531900".'
+                time_format = normalized_attrs.get("format")
+                if time_format is not None and (not time_format or len(time_format) > 64):
+                    return "Атрибут format у <tg-time> должен содержать от 1 до 64 символов."
 
         return None
 
     def _render_admin_broadcast_message(body: str) -> str:
         return body
+
+    async def _resolve_admin_broadcast_delivery_mode(
+        bot: Bot,
+        *,
+        chat_id: int,
+        parsed: ParsedBroadcast,
+    ) -> tuple[str, str | None]:
+        if not parsed.options:
+            return "none", None
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
+            raw_status = getattr(member, "status", None)
+            status = str(getattr(raw_status, "value", raw_status) or "unknown")[:32]
+        except Exception:
+            logger.warning("Could not determine bot permissions for broadcast", extra={"chat_id": chat_id})
+            return "inline", "unknown"
+        is_admin = status in {"administrator", "creator"}
+        available_emojis: set[str] | None = None
+        if is_admin:
+            try:
+                chat = await bot.get_chat(chat_id)
+                available = getattr(chat, "available_reactions", None)
+                if available is not None:
+                    available_emojis = {
+                        str(getattr(item, "emoji"))
+                        for item in available
+                        if str(getattr(getattr(item, "type", None), "value", getattr(item, "type", ""))) == "emoji"
+                        and getattr(item, "emoji", None)
+                    }
+            except Exception:
+                logger.info("Could not read available reactions; using Telegram defaults", extra={"chat_id": chat_id})
+        mode = resolve_reaction_mode(
+            options=parsed.options,
+            bot_is_admin=is_admin,
+            available_reactions=available_emojis,
+        )
+        return mode, status
+
+    async def _deliver_admin_broadcast(
+        *,
+        bot: Bot,
+        broadcast,
+        deliveries,
+        parsed: ParsedBroadcast,
+        photo_content: bytes | None,
+        photo_filename: str | None,
+    ) -> tuple[int, int]:
+        sent_count = 0
+        failed_count = 0
+        reusable_photo_file_id: str | None = broadcast.media_file_id
+        for delivery in deliveries:
+            reaction_mode, member_status = await _resolve_admin_broadcast_delivery_mode(
+                bot,
+                chat_id=delivery.chat_id,
+                parsed=parsed,
+            )
+            reply_markup = (
+                build_inline_keyboard(delivery_id=delivery.id, options=parsed.options)
+                if reaction_mode == "inline"
+                else None
+            )
+            try:
+                if broadcast.media_type == "photo":
+                    photo = reusable_photo_file_id
+                    if photo is None:
+                        if photo_content is None:
+                            raise RuntimeError("photo_content_unavailable")
+                        photo = BufferedInputFile(photo_content, filename=photo_filename or "broadcast.jpg")
+                    sent_message = await bot.send_photo(
+                        chat_id=delivery.chat_id,
+                        photo=photo,
+                        caption=parsed.rendered_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+                else:
+                    sent_message = await bot.send_message(
+                        chat_id=delivery.chat_id,
+                        text=parsed.rendered_text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                        reply_markup=reply_markup,
+                    )
+            except Exception as exc:
+                failed_count += 1
+                logger.exception(
+                    "Admin broadcast send failed",
+                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
+                )
+                async with session_factory() as session:
+                    repo = SqlAlchemyActivityRepository(session)
+                    await repo.mark_admin_broadcast_delivery_failed(
+                        delivery_id=delivery.id,
+                        error_text=str(exc) or exc.__class__.__name__,
+                    )
+                    await session.commit()
+                continue
+
+            sent_count += 1
+            sent_at = getattr(sent_message, "date", None) or _now_utc()
+            photo_unique_id: str | None = None
+            if broadcast.media_type == "photo" and reusable_photo_file_id is None:
+                sent_photos = list(getattr(sent_message, "photo", None) or [])
+                if sent_photos:
+                    reusable_photo_file_id = str(sent_photos[-1].file_id)
+                    photo_unique_id = str(getattr(sent_photos[-1], "file_unique_id", "") or "") or None
+            async with session_factory() as session:
+                repo = SqlAlchemyActivityRepository(session)
+                await repo.mark_admin_broadcast_delivery_sent(
+                    delivery_id=delivery.id,
+                    telegram_message_id=int(sent_message.message_id),
+                    reaction_mode=reaction_mode,
+                    bot_member_status=member_status,
+                    sent_at=sent_at,
+                )
+                if reusable_photo_file_id is not None and broadcast.media_type == "photo":
+                    await repo.set_admin_broadcast_media_file(
+                        broadcast_id=broadcast.id,
+                        file_id=reusable_photo_file_id,
+                        file_unique_id=photo_unique_id,
+                    )
+                await session.commit()
+        return sent_count, failed_count
+
+    async def _execute_admin_broadcast(
+        request: Request,
+        *,
+        admin_user_id: int,
+    ) -> tuple[object | None, str, int]:
+        try:
+            form_lists, photo_content, photo_filename, photo_content_type = await _parse_admin_broadcast_form(request)
+        except Exception:
+            logger.exception("Could not parse broadcast form")
+            return None, "Не удалось прочитать форму рассылки.", 400
+        body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
+        try:
+            parsed = parse_broadcast_source(body)
+        except BroadcastFormatError as exc:
+            return None, str(exc), 400
+
+        media_mode = ((form_lists.get("media_mode") or [""])[0] or "text").strip().lower()
+        if media_mode not in {"text", "photo"}:
+            return None, "Неизвестный тип системной рассылки.", 400
+        if media_mode == "photo" and photo_content is None:
+            return None, "Для режима с фотографией выберите файл.", 400
+        if media_mode == "text" and photo_content is not None:
+            return None, "Файл приложен к текстовой рассылке. Выберите режим «Фото».", 400
+        if media_mode == "photo":
+            try:
+                validate_broadcast_photo(
+                    filename=photo_filename or "",
+                    content_type=photo_content_type or "",
+                    content=photo_content or b"",
+                )
+            except BroadcastFormatError as exc:
+                return None, str(exc), 400
+
+        rendered_limit = _ADMIN_BROADCAST_CAPTION_LIMIT if media_mode == "photo" else _ADMIN_BROADCAST_BODY_LIMIT
+        if len(parsed.rendered_text) > rendered_limit:
+            kind = "Подпись" if media_mode == "photo" else "Сообщение"
+            return None, f"{kind} слишком длинное после добавления реакций. Лимит: {rendered_limit} символов.", 400
+        html_error = _validate_admin_broadcast_body(parsed.rendered_text)
+        if html_error:
+            return None, html_error, 400
+
+        active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
+        selected_chat_ids = {
+            int(raw_value)
+            for raw_value in form_lists.get("chat_ids", [])
+            if raw_value.lstrip("-").isdigit()
+        }
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            targets = await repo.list_recent_active_group_chats(since=active_since)
+            targets = [item for item in targets if item.chat_id in selected_chat_ids]
+            if not targets:
+                await session.commit()
+                return None, "Не выбрано ни одного чата для рассылки.", 400
+            broadcast = await repo.create_admin_broadcast(
+                body=body,
+                rendered_body=parsed.rendered_text,
+                reaction_options=[
+                    {"key": option.key, "emoji": option.emoji, "label": option.label}
+                    for option in parsed.options
+                ],
+                media_type="photo" if media_mode == "photo" else None,
+                active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
+                created_by_user_id=admin_user_id,
+            )
+            deliveries = await repo.create_admin_broadcast_deliveries(
+                broadcast_id=broadcast.id,
+                targets=targets,
+            )
+            await session.commit()
+
+        sent_count, failed_count = await _deliver_admin_broadcast(
+            bot=await _get_game_bot(),
+            broadcast=broadcast,
+            deliveries=deliveries,
+            parsed=parsed,
+            photo_content=photo_content,
+            photo_filename=photo_filename,
+        )
+        logger.info(
+            "Admin broadcast completed",
+            extra={
+                "broadcast_id": broadcast.id,
+                "target_count": len(deliveries),
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+            },
+        )
+        return broadcast, f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}.", 200
 
     def _admin_broadcast_status_meta(status: str) -> tuple[str, str]:
         normalized = (status or "").strip().lower()
@@ -7872,121 +8169,20 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
             return _redirect("/app/admin/login")
 
-        form_lists = await _parse_form_lists(request)
-        body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
-        if not body:
-            redirect_path = _with_message("/app/admin", key="error", text="Введите текст системного сообщения.")
-            if prefers_json:
-                return _json_result(ok=False, message="Введите текст системного сообщения.", status_code=400, redirect=redirect_path)
-            return _redirect(redirect_path)
-        if len(body) > _ADMIN_BROADCAST_BODY_LIMIT:
-            redirect_path = _with_message(
-                "/app/admin",
-                key="error",
-                text=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
-            )
+        broadcast, summary_text, status_code = await _execute_admin_broadcast(
+            request,
+            admin_user_id=int(admin_user_id),
+        )
+        if broadcast is None:
+            redirect_path = _with_message("/app/admin", key="error", text=summary_text)
             if prefers_json:
                 return _json_result(
                     ok=False,
-                    message=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
-                    status_code=400,
+                    message=summary_text,
+                    status_code=status_code,
                     redirect=redirect_path,
                 )
             return _redirect(redirect_path)
-
-        html_error = _validate_admin_broadcast_body(body)
-        if html_error:
-            redirect_path = _with_message("/app/admin", key="error", text=html_error)
-            if prefers_json:
-                return _json_result(ok=False, message=html_error, status_code=400, redirect=redirect_path)
-            return _redirect(redirect_path)
-
-        active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
-        selected_chat_ids = {
-            int(raw_value)
-            for raw_value in form_lists.get("chat_ids", [])
-            if raw_value.lstrip("-").isdigit()
-        }
-        async with session_factory() as session:
-            activity_repo = SqlAlchemyActivityRepository(session)
-            targets = await activity_repo.list_recent_active_group_chats(since=active_since)
-            targets = [item for item in targets if item.chat_id in selected_chat_ids]
-            if not targets:
-                await session.commit()
-                redirect_path = _with_message(
-                    "/app/admin",
-                    key="error",
-                    text="Не выбрано ни одного чата для рассылки.",
-                )
-                if prefers_json:
-                    return _json_result(
-                        ok=False,
-                        message="Не выбрано ни одного чата для рассылки.",
-                        status_code=400,
-                        redirect=redirect_path,
-                    )
-                return _redirect(redirect_path)
-
-            broadcast = await activity_repo.create_admin_broadcast(
-                body=body,
-                active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
-                created_by_user_id=admin_user_id,
-            )
-            deliveries = await activity_repo.create_admin_broadcast_deliveries(
-                broadcast_id=broadcast.id,
-                targets=targets,
-            )
-            await session.commit()
-
-        bot = await _get_game_bot()
-        rendered_message = _render_admin_broadcast_message(body)
-        sent_count = 0
-        failed_count = 0
-        for delivery in deliveries:
-            try:
-                sent_message = await bot.send_message(
-                    chat_id=delivery.chat_id,
-                    text=rendered_message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as exc:
-                failed_count += 1
-                logger.exception(
-                    "Admin broadcast send failed",
-                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
-                )
-                async with session_factory() as session:
-                    activity_repo = SqlAlchemyActivityRepository(session)
-                    await activity_repo.mark_admin_broadcast_delivery_failed(
-                        delivery_id=delivery.id,
-                        error_text=str(exc) or exc.__class__.__name__,
-                    )
-                    await session.commit()
-                continue
-
-            sent_count += 1
-            sent_at = getattr(sent_message, "date", None) or _now_utc()
-            async with session_factory() as session:
-                activity_repo = SqlAlchemyActivityRepository(session)
-                await activity_repo.mark_admin_broadcast_delivery_sent(
-                    delivery_id=delivery.id,
-                    telegram_message_id=int(sent_message.message_id),
-                    sent_at=sent_at,
-                )
-                await session.commit()
-
-        logger.info(
-            "Admin broadcast completed",
-            extra={
-                "broadcast_id": broadcast.id,
-                "target_count": len(deliveries),
-                "sent_count": sent_count,
-                "failed_count": failed_count,
-            },
-        )
-
-        summary_text = f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}."
         redirect_path = _with_message(f"/app/admin/broadcasts/{broadcast.id}", key="flash", text=summary_text)
         if prefers_json:
             return _json_result(ok=True, message=summary_text, status_code=200, redirect=redirect_path)
@@ -8008,6 +8204,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             deliveries = await activity_repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
             replies = await activity_repo.list_admin_broadcast_replies(broadcast_id=broadcast_id)
+            reactions = await activity_repo.list_admin_broadcast_reactions(broadcast_id=broadcast_id)
+            reaction_counts = await activity_repo.list_admin_broadcast_reaction_counts(broadcast_id=broadcast_id)
             await session.commit()
 
         sent_count = sum(1 for item in deliveries if item.status == "sent")
@@ -8026,12 +8224,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "id": broadcast.id,
                 "created_at": format_datetime(broadcast.created_at),
                 "body": broadcast.body,
-                "message_preview_html": _render_admin_broadcast_message(broadcast.body),
+                "message_preview_html": _render_admin_broadcast_message(broadcast.rendered_body or broadcast.body),
+                "media_type": broadcast.media_type,
+                "reaction_options": list(broadcast.reaction_options),
                 "active_since_days": broadcast.active_since_days,
                 "target_count": target_count,
                 "sent_count": sent_count,
                 "failed_count": failed_count,
                 "reply_count": len(replies),
+                "reaction_count": len(reactions),
             },
             deliveries=[
                 {
@@ -8047,6 +8248,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "status_tone": _admin_broadcast_status_meta(item.status)[1],
                     "telegram_message_id": item.telegram_message_id,
                     "reply_count": item.reply_count,
+                    "reaction_mode": item.reaction_mode,
+                    "bot_member_status": item.bot_member_status,
                     "sent_at": format_datetime(item.sent_at),
                     "error_text": item.error_text,
                 }
@@ -8069,6 +8272,33 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     ),
                 }
                 for item in replies
+            ],
+            reactions=[
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "user_label": user_label(item.user) if item.user is not None else f"Чат {item.actor_chat_id}",
+                    "emoji": item.emoji,
+                    "source": item.source,
+                    "reacted_at": format_datetime(item.reacted_at),
+                }
+                for item in reactions
+            ],
+            anonymous_reaction_counts=[
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "emoji": item.emoji,
+                    "count": item.count,
+                    "observed_at": format_datetime(item.observed_at),
+                }
+                for item in reaction_counts
             ],
         )
 
@@ -8678,85 +8908,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if not _admin_auth_required(admin_user_id):
             return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
 
-        form_lists = await _parse_form_lists(request)
-        body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
-        if not body:
-            return _json_result(ok=False, message="Введите текст системного сообщения.", status_code=400)
-        if len(body) > _ADMIN_BROADCAST_BODY_LIMIT:
-            return _json_result(
-                ok=False,
-                message=f"Сообщение слишком длинное. Лимит: {_ADMIN_BROADCAST_BODY_LIMIT} символов.",
-                status_code=400,
-            )
-
-        html_error = _validate_admin_broadcast_body(body)
-        if html_error:
-            return _json_result(ok=False, message=html_error, status_code=400)
-
-        active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
-        selected_chat_ids = {
-            int(raw_value)
-            for raw_value in form_lists.get("chat_ids", [])
-            if raw_value.lstrip("-").isdigit()
-        }
-        async with session_factory() as session:
-            activity_repo = SqlAlchemyActivityRepository(session)
-            targets = await activity_repo.list_recent_active_group_chats(since=active_since)
-            targets = [item for item in targets if item.chat_id in selected_chat_ids]
-            if not targets:
-                await session.commit()
-                return _json_result(ok=False, message="Не выбрано ни одного чата для рассылки.", status_code=400)
-
-            broadcast = await activity_repo.create_admin_broadcast(
-                body=body,
-                active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
-                created_by_user_id=admin_user_id,
-            )
-            deliveries = await activity_repo.create_admin_broadcast_deliveries(
-                broadcast_id=broadcast.id,
-                targets=targets,
-            )
-            await session.commit()
-
-        bot = await _get_game_bot()
-        rendered_message = _render_admin_broadcast_message(body)
-        sent_count = 0
-        failed_count = 0
-        for delivery in deliveries:
-            try:
-                sent_message = await bot.send_message(
-                    chat_id=delivery.chat_id,
-                    text=rendered_message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as exc:
-                failed_count += 1
-                logger.exception(
-                    "Admin broadcast send failed",
-                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
-                )
-                async with session_factory() as session:
-                    activity_repo2 = SqlAlchemyActivityRepository(session)
-                    await activity_repo2.mark_admin_broadcast_delivery_failed(
-                        delivery_id=delivery.id,
-                        error_text=str(exc) or exc.__class__.__name__,
-                    )
-                    await session.commit()
-                continue
-
-            sent_count += 1
-            sent_at = getattr(sent_message, "date", None) or _now_utc()
-            async with session_factory() as session:
-                activity_repo2 = SqlAlchemyActivityRepository(session)
-                await activity_repo2.mark_admin_broadcast_delivery_sent(
-                    delivery_id=delivery.id,
-                    telegram_message_id=int(sent_message.message_id),
-                    sent_at=sent_at,
-                )
-                await session.commit()
-
-        summary_text = f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}."
+        broadcast, summary_text, status_code = await _execute_admin_broadcast(
+            request,
+            admin_user_id=int(admin_user_id),
+        )
+        if broadcast is None:
+            return _json_result(ok=False, message=summary_text, status_code=status_code)
         return _json_result(ok=True, message=summary_text, status_code=200, broadcast_id=broadcast.id)
 
     @app.get("/api/admin/broadcasts/{broadcast_id}")
@@ -8775,6 +8932,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             deliveries = await activity_repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
             replies = await activity_repo.list_admin_broadcast_replies(broadcast_id=broadcast_id)
+            reactions = await activity_repo.list_admin_broadcast_reactions(broadcast_id=broadcast_id)
+            reaction_counts = await activity_repo.list_admin_broadcast_reaction_counts(broadcast_id=broadcast_id)
             await session.commit()
 
         sent_count = sum(1 for item in deliveries if item.status == "sent")
@@ -8786,12 +8945,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "id": broadcast.id,
                 "created_at": format_datetime(broadcast.created_at),
                 "body": broadcast.body,
-                "message_preview_html": _render_admin_broadcast_message(broadcast.body),
+                "message_preview_html": _render_admin_broadcast_message(broadcast.rendered_body or broadcast.body),
+                "media_type": broadcast.media_type,
+                "reaction_options": list(broadcast.reaction_options),
                 "active_since_days": broadcast.active_since_days,
                 "target_count": target_count,
                 "sent_count": sent_count,
                 "failed_count": failed_count,
                 "reply_count": len(replies),
+                "reaction_count": len(reactions),
             },
             "deliveries": [
                 {
@@ -8807,6 +8969,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "status_tone": _admin_broadcast_status_meta(item.status)[1],
                     "telegram_message_id": item.telegram_message_id,
                     "reply_count": item.reply_count,
+                    "reaction_mode": item.reaction_mode,
+                    "bot_member_status": item.bot_member_status,
                     "sent_at": format_datetime(item.sent_at),
                     "error_text": item.error_text,
                 }
@@ -8829,6 +8993,34 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     ),
                 }
                 for item in replies
+            ],
+            "reactions": [
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "user_label": user_label(item.user) if item.user is not None else f"Чат {item.actor_chat_id}",
+                    "source": item.source,
+                    "option_key": item.option_key,
+                    "emoji": item.emoji,
+                    "reacted_at": format_datetime(item.reacted_at),
+                }
+                for item in reactions
+            ],
+            "anonymous_reaction_counts": [
+                {
+                    "chat_title": _admin_broadcast_chat_label(
+                        chat_id=item.chat_id,
+                        chat_type="group",
+                        chat_title=item.chat_title,
+                    ),
+                    "emoji": item.emoji,
+                    "count": item.count,
+                    "observed_at": format_datetime(item.observed_at),
+                }
+                for item in reaction_counts
             ],
         }
         return JSONResponse(content={"ok": True, "page": page}, status_code=200)

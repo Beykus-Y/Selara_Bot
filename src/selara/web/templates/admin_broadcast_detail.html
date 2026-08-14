@@ -41,6 +41,39 @@
     </section>
 
     <section class="broadcast-detail-section">
+      <div class="section-head">
+        <div>
+          <h3>Реакции пользователей</h3>
+          <p>Inline-голоса и доступные персональные нативные реакции.</p>
+        </div>
+      </div>
+      {% if reactions or anonymous_reaction_counts %}
+        <div class="broadcast-reply-list">
+          {% for item in reactions %}
+            <article class="broadcast-reply-card">
+              <div class="broadcast-reply-head">
+                <strong>{{ item.emoji }} {{ item.user_label }}</strong>
+                <span class="broadcast-type-badge">{{ item.source }}</span>
+              </div>
+              <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.reacted_at }}</p>
+            </article>
+          {% endfor %}
+          {% for item in anonymous_reaction_counts %}
+            <article class="broadcast-reply-card">
+              <div class="broadcast-reply-head">
+                <strong>{{ item.emoji }} × {{ item.count }}</strong>
+                <span class="broadcast-type-badge">анонимно</span>
+              </div>
+              <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.observed_at }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="broadcast-empty">Пока активных реакций нет.</p>
+      {% endif %}
+    </section>
+
+    <section class="broadcast-detail-section">
       <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
         <div>
           <h3 style="margin: 0;">Доставки</h3>

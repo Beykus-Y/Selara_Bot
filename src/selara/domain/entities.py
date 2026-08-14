@@ -108,6 +108,10 @@ class AdminBroadcast:
     active_since_days: int
     created_by_user_id: int | None
     created_at: datetime
+    rendered_body: str | None = None
+    reaction_options: tuple[dict[str, str], ...] = ()
+    media_type: str | None = None
+    media_file_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,7 @@ class AdminBroadcastOverview:
     sent_count: int
     failed_count: int
     reply_count: int
+    reaction_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,6 +140,8 @@ class AdminBroadcastDelivery:
     error_text: str | None
     sent_at: datetime | None
     reply_count: int = 0
+    reaction_mode: str = "none"
+    bot_member_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +157,32 @@ class AdminBroadcastReply:
     text: str | None
     caption: str | None
     sent_at: datetime
+
+
+@dataclass(frozen=True)
+class AdminBroadcastReaction:
+    id: int
+    broadcast_id: int
+    delivery_id: int
+    chat_id: int
+    chat_title: str | None
+    source: str
+    option_key: str
+    emoji: str
+    user: UserSnapshot | None
+    actor_chat_id: int | None
+    reacted_at: datetime
+
+
+@dataclass(frozen=True)
+class AdminBroadcastReactionCount:
+    broadcast_id: int
+    delivery_id: int
+    chat_id: int
+    chat_title: str | None
+    emoji: str
+    count: int
+    observed_at: datetime
 
 
 @dataclass(frozen=True)

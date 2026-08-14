@@ -36,12 +36,22 @@
             placeholder="Спасибо за использование Selara. Мы продолжаем развивать бота и будем рады вашей обратной связи."
             required
           ></textarea>
-          <p class="broadcast-note">
-            Поддерживается Telegram HTML: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>, <code>&lt;s&gt;</code>,
-            <code>&lt;code&gt;</code>, <code>&lt;pre&gt;</code>, <code>&lt;a href="..."&gt;</code>.
-            Markdown вроде <code>**жирный**</code> не работает. Если нужны символы <code>&lt;</code>, <code>&gt;</code> или <code>&amp;</code>
-            как текст, пишите <code>&amp;lt;</code>, <code>&amp;gt;</code> и <code>&amp;amp;</code>.
-          </p>
+          <details class="broadcast-format-help">
+            <summary>Всё форматирование этой формы (Telegram HTML)</summary>
+            <div class="broadcast-format-help__content">
+              <p><strong>Жирный:</strong> <code>&lt;b&gt;</code>, <code>&lt;strong&gt;</code>. <strong>Курсив:</strong> <code>&lt;i&gt;</code>, <code>&lt;em&gt;</code>.</p>
+              <p><strong>Подчёркивание:</strong> <code>&lt;u&gt;</code>, <code>&lt;ins&gt;</code>. <strong>Зачёркивание:</strong> <code>&lt;s&gt;</code>, <code>&lt;strike&gt;</code>, <code>&lt;del&gt;</code>.</p>
+              <p><strong>Спойлер:</strong> <code>&lt;tg-spoiler&gt;текст&lt;/tg-spoiler&gt;</code> или <code>&lt;span class="tg-spoiler"&gt;текст&lt;/span&gt;</code>.</p>
+              <p><strong>Ссылка:</strong> <code>&lt;a href="https://example.com"&gt;текст&lt;/a&gt;</code>; разрешены <code>https:</code>, <code>http:</code>, <code>tg:</code>, <code>mailto:</code>, <code>tel:</code>.</p>
+              <p><strong>Код:</strong> <code>&lt;code&gt;код&lt;/code&gt;</code>, <code>&lt;pre&gt;блок&lt;/pre&gt;</code>, язык — <code>&lt;pre&gt;&lt;code class="language-python"&gt;...&lt;/code&gt;&lt;/pre&gt;</code>.</p>
+              <p><strong>Цитата:</strong> <code>&lt;blockquote&gt;текст&lt;/blockquote&gt;</code>; сворачиваемая — <code>&lt;blockquote expandable&gt;текст&lt;/blockquote&gt;</code>.</p>
+              <p><strong>Кастомный emoji:</strong> <code>&lt;tg-emoji emoji-id="5368324170671202286"&gt;👍&lt;/tg-emoji&gt;</code>.</p>
+              <p><strong>Дата/время:</strong> <code>&lt;tg-time unix="1647531900" format="wDT"&gt;время&lt;/tg-time&gt;</code>.</p>
+              <p>Символы <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code>, <code>&quot;</code> экранируются как <code>&amp;lt;</code>, <code>&amp;gt;</code>, <code>&amp;amp;</code>, <code>&amp;quot;</code>. Markdown вроде <code>**жирный**</code> не работает.</p>
+              <p>Реакции: <code>[reactions]</code>, 2–6 строк <code>👍 = Всё понятно</code>, затем <code>[/reactions]</code>.</p>
+              <p>Лимиты: текст — 3200 символов; подпись фото — 1024; JPEG/PNG — до 10 МБ.</p>
+            </div>
+          </details>
 
           <div class="broadcast-targets-head">
             <label class="broadcast-label">Чаты для этой отправки</label>

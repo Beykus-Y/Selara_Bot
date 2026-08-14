@@ -54,6 +54,38 @@ class FakeBot:
         self.__class__.instances.append(self)
 
 
+class HybridFakeBot:
+    instances: list["HybridFakeBot"] = []
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.id = 123456
+        self.session = SimpleNamespace(close=AsyncMock())
+        self.get_chat_member = AsyncMock(side_effect=self._get_chat_member)
+        self.get_chat = AsyncMock(return_value=SimpleNamespace(available_reactions=None))
+        self.send_message = AsyncMock()
+        self.send_photo = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    message_id=9201,
+                    date=datetime(2026, 8, 14, 12, 1, tzinfo=timezone.utc),
+                    photo=[SimpleNamespace(file_id="cached-photo", file_unique_id="unique-photo")],
+                ),
+                SimpleNamespace(
+                    message_id=9202,
+                    date=datetime(2026, 8, 14, 12, 2, tzinfo=timezone.utc),
+                    photo=[SimpleNamespace(file_id="cached-photo", file_unique_id="unique-photo")],
+                ),
+            ]
+        )
+        self.__class__.instances.append(self)
+
+    @staticmethod
+    def _get_chat_member(*, chat_id: int, user_id: int):
+        del user_id
+        return SimpleNamespace(status="administrator" if chat_id == -1004001 else "member")
+
+
 @pytest.mark.asyncio
 async def test_admin_broadcast_send_creates_deliveries_and_tracks_replies(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings()
@@ -187,6 +219,19 @@ async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.Mo
     FakeBot.instances.clear()
     monkeypatch.setattr(web_app_module, "Bot", FakeBot)
 
+    rich_body = (
+        "<b>жирный</b> <strong>тоже жирный</strong> "
+        "<i>курсив</i> <em>тоже курсив</em> "
+        "<u>подчёркнутый</u> <ins>тоже подчёркнутый</ins> "
+        "<s>зачёркнутый</s> <strike>тоже зачёркнутый</strike> <del>ещё зачёркнутый</del> "
+        '<span class="tg-spoiler">спойлер</span> <tg-spoiler>ещё спойлер</tg-spoiler> '
+        '<a href="https://example.com">ссылка</a> '
+        '<tg-emoji emoji-id="5368324170671202286">👍</tg-emoji> '
+        '<tg-time unix="1647531900" format="wDT">время</tg-time> '
+        "<code>код</code> <pre><code class=\"language-python\">print(1)</code></pre> "
+        "<blockquote>цитата</blockquote> <blockquote expandable>скрытая цитата</blockquote>"
+    )
+
     app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
     transport = httpx.ASGITransport(app=app)
     client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -195,7 +240,7 @@ async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.Mo
         response = await client.post(
             "/app/admin/broadcasts/send",
             data={
-                "body": "<b>Бульбулятор</b>",
+                "body": rich_body,
                 "chat_ids": str(chat.telegram_chat_id),
             },
             follow_redirects=False,
@@ -206,14 +251,23 @@ async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.Mo
 
     assert response.status_code == 303
     assert len(FakeBot.instances) == 1
-    assert FakeBot.instances[0].send_message.await_args_list[0].kwargs["text"] == "<b>Бульбулятор</b>"
+    assert FakeBot.instances[0].send_message.await_args_list[0].kwargs["text"] == rich_body
 
     await engine.dispose()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid_body", "error_fragment"),
+    [
+        ("<b>Буль<b>ка барабу<code>лька<code>", "Некорректный Telegram HTML"),
+        ('<a href="javascript:alert(1)">нажми</a>', "Безопасные ссылки"),
+    ],
+)
 async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
     monkeypatch: pytest.MonkeyPatch,
+    invalid_body: str,
+    error_fragment: str,
 ) -> None:
     settings = _settings()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -252,7 +306,7 @@ async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
         response = await client.post(
             "/app/admin/broadcasts/send",
             data={
-                "body": "<b>Буль<b>ка барабу<code>лька<code>",
+                "body": invalid_body,
                 "chat_ids": str(chat.telegram_chat_id),
             },
             follow_redirects=False,
@@ -264,7 +318,7 @@ async def test_admin_broadcast_send_rejects_invalid_telegram_html_before_send(
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?error=")
     assert _location_query_value(response.headers["location"], "error") is not None
-    assert "Некорректный Telegram HTML" in (_location_query_value(response.headers["location"], "error") or "")
+    assert error_fragment in (_location_query_value(response.headers["location"], "error") or "")
     assert FakeBot.instances == []
 
     async with session_factory() as session:
@@ -323,5 +377,87 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
     assert response.status_code == 303
     assert _location_query_value(response.headers["location"], "error") == "Не выбрано ни одного чата для рассылки."
     assert FakeBot.instances == []
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_photo_broadcast_uses_native_for_admin_inline_for_member_and_reuses_file_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    admin_chat = ChatSnapshot(telegram_chat_id=-1004001, chat_type="supergroup", title="Admin chat")
+    member_chat = ChatSnapshot(telegram_chat_id=-1004002, chat_type="group", title="Member chat")
+    user = UserSnapshot(telegram_user_id=801, username="hybrid", first_name="Hybrid", last_name=None, is_bot=False)
+    async with session_factory() as session:
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        repo = SqlAlchemyActivityRepository(session)
+        await auth_repo.create_session(
+            admin_user_id=settings.admin_user_id,
+            session_token=digest_admin_session_token(secret=settings.resolved_web_auth_secret, token="hybrid-session"),
+            expires_at=now + timedelta(hours=2),
+            now=now,
+        )
+        await repo.upsert_activity(chat=admin_chat, user=user, event_at=now - timedelta(minutes=5))
+        await repo.upsert_activity(chat=member_chat, user=user, event_at=now - timedelta(minutes=10))
+        await session.commit()
+
+    from io import BytesIO
+    from PIL import Image
+
+    photo = BytesIO()
+    Image.new("RGB", (40, 30), "blue").save(photo, format="PNG")
+    HybridFakeBot.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", HybridFakeBot)
+    app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "hybrid-session")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={
+                "body": "Новость\n[reactions]\n👍 = Нравится\n👎 = Не нравится\n[/reactions]",
+                "media_mode": "photo",
+                "chat_ids": [str(admin_chat.telegram_chat_id), str(member_chat.telegram_chat_id)],
+            },
+            files={"photo": ("notice.png", photo.getvalue(), "image/png")},
+        )
+        detail_response = await client.get(f"/api/admin/broadcasts/{response.json().get('broadcast_id', 0)}")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200, response.text
+    assert detail_response.status_code == 200, detail_response.text
+    assert detail_response.json()["page"]["anonymous_reaction_counts"] == []
+    assert {item["reaction_mode"] for item in detail_response.json()["page"]["deliveries"]} == {"native", "inline"}
+    bot = HybridFakeBot.instances[0]
+    assert bot.send_photo.await_count == 2
+    first, second = bot.send_photo.await_args_list
+    assert first.kwargs["reply_markup"] is None
+    assert second.kwargs["reply_markup"].inline_keyboard[0][0].callback_data.startswith("abr:")
+    assert second.kwargs["photo"] == "cached-photo"
+    assert first.kwargs["caption"] == second.kwargs["caption"]
+    assert "<b>Реакции:</b>" in first.kwargs["caption"]
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        broadcasts = await repo.list_recent_admin_broadcasts(limit=1)
+        stored = await repo.get_admin_broadcast(broadcast_id=broadcasts[0].id)
+        deliveries = await repo.list_admin_broadcast_deliveries(broadcast_id=broadcasts[0].id)
+        assert stored is not None
+        assert stored.media_type == "photo"
+        assert stored.media_file_id == "cached-photo"
+        assert {item.chat_id: item.reaction_mode for item in deliveries} == {
+            admin_chat.telegram_chat_id: "native",
+            member_chat.telegram_chat_id: "inline",
+        }
 
     await engine.dispose()

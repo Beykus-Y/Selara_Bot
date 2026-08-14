@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
@@ -22,6 +22,13 @@ export function AdminPageView({ data }: AdminPageViewProps) {
   const queryClient = useQueryClient()
 
   const [broadcastBody, setBroadcastBody] = useState('')
+  const [mediaMode, setMediaMode] = useState<'text' | 'photo'>('text')
+  const [photo, setPhoto] = useState<File | null>(null)
+  const [reactionsEnabled, setReactionsEnabled] = useState(false)
+  const [reactionRows, setReactionRows] = useState([
+    { emoji: '👍', label: 'Всё понятно' },
+    { emoji: '👎', label: 'Не согласен' },
+  ])
   const [selectedChatIds, setSelectedChatIds] = useState<Set<number>>(
     new Set(data.recent_active_chats.filter((c) => c.checked).map((c) => c.chat_id)),
   )
@@ -40,12 +47,31 @@ export function AdminPageView({ data }: AdminPageViewProps) {
     onError: (err: Error) => setError(err.message),
   })
 
+  const photoPreview = useMemo(() => photo ? URL.createObjectURL(photo) : null, [photo])
+  useEffect(() => () => {
+    if (photoPreview) URL.revokeObjectURL(photoPreview)
+  }, [photoPreview])
+
+  const compiledBroadcastBody = useMemo(() => {
+    if (!reactionsEnabled) return broadcastBody.trim()
+    const rows = reactionRows.map((row) => `${row.emoji.trim()} = ${row.label.trim()}`).join('\n')
+    return `${broadcastBody.trim()}\n\n[reactions]\n${rows}\n[/reactions]`
+  }, [broadcastBody, reactionRows, reactionsEnabled])
+
   const broadcastMutation = useMutation({
-    mutationFn: () => adminSendBroadcast(broadcastBody, Array.from(selectedChatIds)),
+    mutationFn: () => {
+      if (selectedChatIds.size === 0) throw new Error('Выберите хотя бы один чат.')
+      if (mediaMode === 'photo' && !photo) throw new Error('Выберите фотографию.')
+      if (reactionsEnabled && reactionRows.some((row) => !row.emoji.trim() || !row.label.trim())) {
+        throw new Error('Заполните emoji и описание каждой реакции.')
+      }
+      return adminSendBroadcast(compiledBroadcastBody, Array.from(selectedChatIds), mediaMode, photo)
+    },
     onSuccess: (result) => {
       setFlash(result.message)
       setError(null)
       setBroadcastBody('')
+      setPhoto(null)
       void navigate(routes.adminBroadcast(result.broadcast_id))
     },
     onError: (err: Error) => setError(err.message),
@@ -126,10 +152,125 @@ export function AdminPageView({ data }: AdminPageViewProps) {
                   value={broadcastBody}
                   onChange={(e) => setBroadcastBody(e.target.value)}
                 />
+                <small className="broadcast-counter">
+                  Исходник: {compiledBroadcastBody.length} · лимит результата: {mediaMode === 'photo' ? 1024 : 3200}
+                </small>
               </div>
-              <p className="broadcast-note">
-                Поддерживается Telegram HTML: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>.
-              </p>
+              <details className="broadcast-format-help">
+                <summary>Всё форматирование этой формы (Telegram HTML)</summary>
+                <div className="broadcast-format-help__content">
+                  <p><strong>Жирный:</strong> <code>&lt;b&gt;текст&lt;/b&gt;</code> или <code>&lt;strong&gt;</code>.</p>
+                  <p><strong>Курсив:</strong> <code>&lt;i&gt;текст&lt;/i&gt;</code> или <code>&lt;em&gt;</code>.</p>
+                  <p><strong>Подчёркивание:</strong> <code>&lt;u&gt;текст&lt;/u&gt;</code> или <code>&lt;ins&gt;</code>.</p>
+                  <p><strong>Зачёркивание:</strong> <code>&lt;s&gt;</code>, <code>&lt;strike&gt;</code> или <code>&lt;del&gt;</code>.</p>
+                  <p>
+                    <strong>Спойлер:</strong> <code>&lt;tg-spoiler&gt;текст&lt;/tg-spoiler&gt;</code> или{' '}
+                    <code>&lt;span class=&quot;tg-spoiler&quot;&gt;текст&lt;/span&gt;</code>.
+                  </p>
+                  <p>
+                    <strong>Ссылка/упоминание:</strong>{' '}
+                    <code>&lt;a href=&quot;https://example.com&quot;&gt;ссылка&lt;/a&gt;</code> или{' '}
+                    <code>&lt;a href=&quot;tg://user?id=123&quot;&gt;пользователь&lt;/a&gt;</code>. Также разрешены{' '}
+                    <code>http:</code>, <code>mailto:</code> и <code>tel:</code>.
+                  </p>
+                  <p>
+                    <strong>Моноширинный текст:</strong> <code>&lt;code&gt;код&lt;/code&gt;</code>; блок —{' '}
+                    <code>&lt;pre&gt;код&lt;/pre&gt;</code>; язык —{' '}
+                    <code>&lt;pre&gt;&lt;code class=&quot;language-python&quot;&gt;...&lt;/code&gt;&lt;/pre&gt;</code>.
+                  </p>
+                  <p>
+                    <strong>Цитата:</strong> <code>&lt;blockquote&gt;текст&lt;/blockquote&gt;</code>; сворачиваемая —{' '}
+                    <code>&lt;blockquote expandable&gt;текст&lt;/blockquote&gt;</code>.
+                  </p>
+                  <p>
+                    <strong>Кастомный emoji:</strong>{' '}
+                    <code>&lt;tg-emoji emoji-id=&quot;5368324170671202286&quot;&gt;👍&lt;/tg-emoji&gt;</code>. Доступность зависит от
+                    Premium владельца бота или дополнительных username.
+                  </p>
+                  <p>
+                    <strong>Дата/время:</strong>{' '}
+                    <code>&lt;tg-time unix=&quot;1647531900&quot; format=&quot;wDT&quot;&gt;время&lt;/tg-time&gt;</code>.
+                  </p>
+                  <p>
+                    Обычные символы <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code> и <code>&quot;</code> пишутся как{' '}
+                    <code>&amp;lt;</code>, <code>&amp;gt;</code>, <code>&amp;amp;</code> и <code>&amp;quot;</code>. Markdown вроде{' '}
+                    <code>**жирный**</code> здесь не обрабатывается.
+                  </p>
+                  <p>
+                    Реакции вручную: <code>[reactions]</code>, затем 2–6 строк вида <code>👍 = Всё понятно</code>,
+                    затем <code>[/reactions]</code>. Проще включить конструктор ниже.
+                  </p>
+                  <p>
+                    Лимиты формы: текст — 3200 символов, подпись к фото — 1024 после добавления расшифровки реакций;
+                    JPEG/PNG — до 10 МБ.
+                  </p>
+                </div>
+              </details>
+
+              <fieldset className="broadcast-options">
+                <legend className="broadcast-label">Формат публикации</legend>
+                <label><input type="radio" checked={mediaMode === 'text'} onChange={() => setMediaMode('text')} /> Текст</label>
+                <label><input type="radio" checked={mediaMode === 'photo'} onChange={() => setMediaMode('photo')} /> Фото с подписью</label>
+              </fieldset>
+              {mediaMode === 'photo' && (
+                <div className="broadcast-photo-field">
+                  <label className="broadcast-label" htmlFor="broadcast-photo">JPEG или PNG, до 10 МБ</label>
+                  <input
+                    id="broadcast-photo"
+                    type="file"
+                    accept="image/jpeg,image/png"
+                    onChange={(event) => setPhoto(event.target.files?.[0] ?? null)}
+                  />
+                  {photoPreview && <img className="broadcast-photo-preview" src={photoPreview} alt="Предпросмотр рассылки" />}
+                </div>
+              )}
+
+              <div className="broadcast-reaction-builder">
+                <label className="broadcast-reaction-toggle">
+                  <input
+                    type="checkbox"
+                    checked={reactionsEnabled}
+                    onChange={(event) => setReactionsEnabled(event.target.checked)}
+                  />
+                  Собирать реакции
+                </label>
+                {reactionsEnabled && (
+                  <>
+                    <p className="broadcast-note">
+                      Будет добавлен блок <code>[reactions]</code>. В админских чатах используются реакции Telegram,
+                      в остальных — inline-кнопки.
+                    </p>
+                    {reactionRows.map((row, index) => (
+                      <div className="broadcast-reaction-row" key={index}>
+                        <input
+                          aria-label={`Emoji реакции ${index + 1}`}
+                          value={row.emoji}
+                          maxLength={32}
+                          onChange={(event) => setReactionRows((current) => current.map((item, itemIndex) => (
+                            itemIndex === index ? { ...item, emoji: event.target.value } : item
+                          )))}
+                        />
+                        <input
+                          aria-label={`Описание реакции ${index + 1}`}
+                          value={row.label}
+                          maxLength={64}
+                          onChange={(event) => setReactionRows((current) => current.map((item, itemIndex) => (
+                            itemIndex === index ? { ...item, label: event.target.value } : item
+                          )))}
+                        />
+                        {reactionRows.length > 2 && (
+                          <button type="button" className="button ghost small" onClick={() => setReactionRows((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Удалить</button>
+                        )}
+                      </div>
+                    ))}
+                    {reactionRows.length < 6 && (
+                      <button type="button" className="button ghost small" onClick={() => setReactionRows((current) => [...current, { emoji: '🤔', label: 'Есть вопросы' }])}>
+                        Добавить вариант
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
 
               <div>
                 <div className="broadcast-targets-head">
