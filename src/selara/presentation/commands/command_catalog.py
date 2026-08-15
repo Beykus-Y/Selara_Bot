@@ -359,6 +359,95 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
             "«гача скип» может дополнительно указывать @username — для кого выполняется скип.",
         ),
     ),
+    CommandSpec(
+        key="admin_role_definitions",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=("/roledefs", "/roletemplates"),
+        title_ru="Просмотр ролей и шаблонов",
+        description_ru=(
+            "/roledefs показывает роли, уже настроенные в этом чате. /roletemplates — "
+            "системные шаблоны ролей, из которых можно создавать кастомные."
+        ),
+        notes=("/roletemplates требует прав manage_role_templates.",),
+    ),
+    CommandSpec(
+        key="admin_role_assignment",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=('/roleadd "<роль|ранг>" [@user|id]', "/roleremove [@user|id]"),
+        title_ru="Назначение и снятие ролей",
+        description_ru=(
+            "Выдаёт или снимает роль бота у конкретного участника — по reply, @username или "
+            "id. Требует права manage_roles и достаточного ранга относительно цели."
+        ),
+        examples=('/roleadd "senior_admin" @username', "reply + /roleremove"),
+        notes=(
+            "Нельзя выдать себе роль выше своей, если вы не владелец.",
+            "Нельзя снять последнего владельца чата.",
+        ),
+    ),
+    CommandSpec(
+        key="admin_role_custom",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=(
+            '/rolecreate "<название>" ["шаблон"] [ранг]',
+            '/rolesettitle "<роль>" "<новое название>"',
+            '/rolesetrank "<роль>" <ранг>',
+            '/roleperms "<роль>" +permission -permission ...',
+            '/roledelete "<роль>"',
+        ),
+        title_ru="Кастомные роли",
+        description_ru=(
+            "Создаёт и настраивает роли сверх системных шаблонов: имя, ранг и точный набор "
+            "прав. Требует права manage_role_templates."
+        ),
+        examples=('/rolecreate "Модератор ивентов" "senior_admin" 15', '/roleperms "Модератор ивентов" +announce -manage_games'),
+    ),
+    CommandSpec(
+        key="admin_command_ranks",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=('/setrank "<команда>" "<ранг>"', "/ranks"),
+        title_ru="Ранги команд",
+        description_ru=(
+            "Задаёт минимальный ранг роли, необходимый для конкретной команды бота. /ranks "
+            "показывает текущий список — если он пуст, действуют стандартные правила доступа."
+        ),
+        examples=('/setrank "roleadd" "30"',),
+    ),
+    CommandSpec(
+        key="admin_aliases",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=(
+            '/setalias "стандартный триггер" "новый алиас" [--force]',
+            '/unalias "алиас"',
+            "/aliases",
+            "/aliasmode [aliases_if_exists|both|standard_only]",
+        ),
+        title_ru="Управление алиасами",
+        description_ru=(
+            "Позволяет переименовать стандартные текстовые триггеры под словарь конкретного "
+            "чата, удалить кастомный алиас и переключить режим их работы."
+        ),
+        examples=('/setalias "баланс" "кошель"', "/aliasmode both"),
+        notes=("/aliasmode без аргумента показывает текущий режим, не меняя его.",),
+    ),
+    CommandSpec(
+        key="admin_settings_tools",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=("/setcfg <key> <value>", "/facttest"),
+        title_ru="Инструменты настроек",
+        description_ru=(
+            "/setcfg меняет значение любой настройки чата напрямую по ключу. /facttest "
+            "показывает превью следующего автофакта, не дожидаясь расписания."
+        ),
+        examples=("/setcfg vote_daily_limit 30", "/setcfg actions_18_enabled true"),
+        notes=("Оба требуют права manage_settings.",),
+    ),
 )
 
 

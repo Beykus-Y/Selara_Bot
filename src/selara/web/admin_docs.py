@@ -6,6 +6,7 @@ from selara.core.chat_settings import CHAT_SETTINGS_KEYS
 from selara.core.roles import BOT_PERMISSIONS, SYSTEM_ROLE_TEMPLATES, permission_label_ru
 from selara.core.trigger_templates import build_trigger_template_variable_groups
 from selara.domain.entities import UserChatOverview
+from selara.presentation.commands.command_catalog import get_command_spec
 from selara.presentation.handlers.settings_common import (
     SETTINGS_GROUPS,
     setting_description_ru,
@@ -118,6 +119,13 @@ _FEATURE_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "title": "Переход в справку через ?",
                 "text": "У каждой настройки есть маленькая кнопка «?». Она ведёт сразу к нужному якорю в админ-документации, а при несохранённых изменениях сначала показывает список всех правок и предлагает сохранить их или перейти без сохранения.",
             },
+            {
+                "title": "То же самое через бота",
+                "text": (_settings_tools := get_command_spec("admin_settings_tools")).description_ru,
+                "commands": _settings_tools.syntax,
+                "examples": _settings_tools.examples,
+                "notes": _settings_tools.notes,
+            },
         ),
     },
     {
@@ -128,10 +136,27 @@ _FEATURE_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             {
                 "title": "Роли бота",
                 "text": "Раздел ролей показывает все доступные роли, их ранг и набор прав. Это база для разграничения админских возможностей внутри чата.",
+                "commands": get_command_spec("admin_role_definitions").syntax,
+                "notes": get_command_spec("admin_role_definitions").notes,
+            },
+            {
+                "title": "Назначение и снятие ролей",
+                "text": (_role_assign := get_command_spec("admin_role_assignment")).description_ru,
+                "commands": _role_assign.syntax,
+                "examples": _role_assign.examples,
+                "notes": _role_assign.notes,
+            },
+            {
+                "title": "Кастомные роли",
+                "text": (_role_custom := get_command_spec("admin_role_custom")).description_ru,
+                "commands": _role_custom.syntax,
+                "examples": _role_custom.examples,
             },
             {
                 "title": "Ранги команд",
                 "text": "Список рангов команд показывает, какая минимальная роль нужна для конкретной команды. Если список пуст, используются стандартные правила доступа.",
+                "commands": (_ranks_spec := get_command_spec("admin_command_ranks")).syntax,
+                "examples": _ranks_spec.examples,
             },
             {
                 "title": "Практический смысл",
@@ -147,6 +172,9 @@ _FEATURE_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             {
                 "title": "Добавление нового алиаса",
                 "text": "Источник должен быть стандартным текстовым триггером бота. Новый алиас помогает адаптировать команды под словарь конкретного сообщества.",
+                "commands": (_aliases_spec := get_command_spec("admin_aliases")).syntax,
+                "examples": _aliases_spec.examples,
+                "notes": _aliases_spec.notes,
             },
             {
                 "title": "Режим алиасов",

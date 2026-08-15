@@ -1,5 +1,6 @@
 from selara.core.chat_settings import CHAT_SETTINGS_KEYS
 from selara.core.roles import SYSTEM_ROLE_TEMPLATES
+from selara.presentation.commands.command_catalog import get_command_spec
 from selara.web.admin_docs import (
     build_admin_docs_context,
     build_roles_docs,
@@ -159,6 +160,27 @@ def test_admin_docs_broadcasts_and_maintenance_note_telegram_limits() -> None:
     }
     assert any("10 МБ" in note for note in items["Текст и медиа"]["notes"])
     assert any("50 МБ" in note for note in items["Ручной запрос backup"]["notes"])
+
+
+def test_admin_docs_admin_only_command_items_are_derived_from_the_catalog() -> None:
+    context = build_admin_docs_context(chat=None)
+    items = {
+        item["title"]: item
+        for section in context["docs_sections"]
+        for item in section["items"]
+    }
+
+    checks = {
+        "Роли бота": "admin_role_definitions",
+        "Назначение и снятие ролей": "admin_role_assignment",
+        "Кастомные роли": "admin_role_custom",
+        "Ранги команд": "admin_command_ranks",
+        "Добавление нового алиаса": "admin_aliases",
+        "То же самое через бота": "admin_settings_tools",
+    }
+    for title, key in checks.items():
+        spec = get_command_spec(key)
+        assert items[title]["commands"] == spec.syntax
 
 
 def test_admin_docs_context_includes_roles_docs() -> None:

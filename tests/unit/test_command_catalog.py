@@ -193,6 +193,28 @@ def test_gacha_notes_match_real_gating_code() -> None:
     assert GACHA_CURRENCY_PER_COIN_RATE == 10
 
 
+def test_admin_syntax_matches_real_aiogram_command_registrations() -> None:
+    real_commands = _real_aiogram_commands("moderation.py", "aliases.py", "settings.py")
+    assert real_commands, "sanity check: at least one Command() registration expected"
+
+    for spec in commands_for_category("admin"):
+        for syntax_entry in spec.syntax:
+            base = _base_command_word(syntax_entry)
+            assert base in real_commands, (
+                f"{spec.key}: '{syntax_entry}' claims /{base}, but no matching "
+                f"@router.message(Command(\"{base}\")) found in moderation.py/aliases.py/settings.py"
+            )
+
+
+def test_admin_commands_have_no_invented_natural_triggers() -> None:
+    # Every admin-only command checked directly against catalog.py's trigger
+    # maps was confirmed slash-only — verify that stays true rather than
+    # silently claiming a natural-language form that doesn't exist.
+    for spec in commands_for_category("admin"):
+        assert spec.natural_triggers == ()
+        assert spec.dispatch_kind == "slash"
+
+
 def test_misc_public_utility_natural_triggers_exist_in_the_real_trigger_maps() -> None:
     all_real_triggers = set(EXACT_TRIGGER_TO_COMMAND_KEY) | set(PREFIX_TRIGGER_TO_COMMAND_KEY)
     for key in ("misc_lastseen", "misc_public_service_commands"):
