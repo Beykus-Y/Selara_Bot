@@ -6899,9 +6899,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     ) -> tuple[dict[str, object] | None, str | None]:
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
+            if user is None:
+                await session.commit()
+                return None, _with_message("/login", key="error", text="Сессия истекла. Войдите снова.")
 
             chat: UserChatOverview | None = None
-            if user is not None and chat_id is not None:
+            if chat_id is not None:
                 activity_repo = SqlAlchemyActivityRepository(session)
                 admin_groups, activity_groups = await _collect_visible_groups(activity_repo, user_id=user.telegram_user_id)
                 visible_groups = _merge_visible_groups(admin_groups, activity_groups)
