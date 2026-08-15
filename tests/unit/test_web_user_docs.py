@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from selara.presentation.commands.catalog import build_social_action_docs
+from selara.presentation.handlers.settings_common import SETTING_META
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
 
@@ -112,6 +113,41 @@ def test_user_docs_items_carry_a_lowercased_search_text_covering_their_fields() 
                 assert trigger.lower() in search_text
             for example in item["examples"]:
                 assert example.lower() in search_text
+
+
+def test_user_docs_availability_badges_are_derived_from_setting_meta() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Понятные отметки доступности функции и требуемых прав": items gated by
+    # a chat setting must carry a "<label> по настройке" badge derived from
+    # SETTING_META (the settings single source), not a vague hand-typed
+    # "по настройкам" placeholder that doesn't say which setting.
+    expected = {
+        ("Экономика и предметы", "Панель экономики и базовый заработок"): ("economy_enabled",),
+        ("Экономика и предметы", "Ферма"): ("economy_enabled",),
+        ("Экономика и предметы", "Магазин, инвентарь и крафт"): ("economy_enabled", "craft_enabled"),
+        ("Экономика и предметы", "Рынок, переводы и аукцион"): ("economy_enabled", "auctions_enabled"),
+        ("Экономика и предметы", "Рост"): ("economy_enabled", "actions_18_enabled"),
+        ("Семья, титулы и имя", "Титулы"): ("titles_enabled", "economy_enabled"),
+        ("Семья, титулы и имя", "Усыновление, питомцы и семейное древо"): ("family_tree_enabled",),
+        ("Социальные действия и мемы", "18+ reply-действия"): ("actions_18_enabled",),
+    }
+
+    context = build_user_docs_context(chat=None)
+    items_by_key = {
+        (section["title"], item["title"]): item
+        for section in context["docs_sections"]
+        for item in section["items"]
+    }
+
+    for key, setting_keys in expected.items():
+        item = items_by_key[key]
+        for setting_key in setting_keys:
+            expected_badge = f"{SETTING_META[setting_key].short_ru} по настройке"
+            assert expected_badge in item["badges"], f"{key}: missing {expected_badge!r} in {item['badges']}"
+
+    # No item anywhere should still carry the old vague generic placeholder.
+    for item in items_by_key.values():
+        assert "по настройкам" not in item["badges"]
 
 
 def test_user_docs_template_renders_search_box_and_text_attributes() -> None:

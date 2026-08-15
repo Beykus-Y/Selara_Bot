@@ -4,6 +4,7 @@ from typing import Any
 
 from selara.domain.entities import UserChatOverview
 from selara.presentation.commands.catalog import build_social_action_docs
+from selara.presentation.handlers.settings_common import SETTING_META
 
 
 def _docs_item(
@@ -16,7 +17,13 @@ def _docs_item(
     examples: tuple[str, ...] = (),
     steps: tuple[str, ...] = (),
     notes: tuple[str, ...] = (),
+    requires_settings: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    # Availability markers derived from the single settings source (SETTING_META)
+    # instead of hand-typed badge text, so a doc item can't silently drift from
+    # the setting it actually depends on (see catalog.py's build_social_action_docs
+    # for the equivalent pattern applied to RP-actions).
+    badges = badges + tuple(f"{SETTING_META[key].short_ru} по настройке" for key in requires_settings)
     search_text = " ".join(
         (
             title,
@@ -250,7 +257,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             text=(
                 "Экономический профиль открывается через `/eco`. Дальше от него идут клики, ежедневка, лотерея, статья дня и профиль роста."
             ),
-            badges=("группа", "ЛС", "по настройкам"),
+            badges=("группа", "ЛС"),
             commands=(
                 "/eco [global|local]",
                 "/tap",
@@ -262,8 +269,8 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             triggers=("баланс", "тап", "дейлик", "лотерея", "рост", "профиль", "моя статья", "статья"),
             notes=(
                 "В личке `/eco local` имеет смысл только если для вас уже установлен local-контекст чата.",
-                "Режим экономики и доступность самих механик зависят от настроек конкретной группы.",
             ),
+            requires_settings=("economy_enabled",),
         ),
         _docs_item(
             "Ферма",
@@ -286,6 +293,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "/farm sell wheat 10",
                 "/farm upsize большой",
             ),
+            requires_settings=("economy_enabled",),
         ),
         _docs_item(
             "Магазин, инвентарь и крафт",
@@ -303,9 +311,9 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             ),
             triggers=("магазин", "инвентарь", "крафт"),
             notes=(
-                "Крафт может быть отключён настройками чата.",
                 "Названия предметов в командах можно писать как кодами, так и многими русскими алиасами.",
             ),
+            requires_settings=("economy_enabled", "craft_enabled"),
         ),
         _docs_item(
             "Рынок, переводы и аукцион",
@@ -331,19 +339,20 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "`/pay` можно сделать по `@username`, `user_id` или reply.",
                 "`/auction start` и `/auction cancel` требуют прав на управление настройками или аналогичного ранга команды.",
             ),
+            requires_settings=("economy_enabled", "auctions_enabled"),
         ),
         _docs_item(
             "Рост",
             text=(
                 "Команда `/growth` показывает профиль роста, стресс и доступные действия. Активное действие запускается отдельной командой."
             ),
-            badges=("группа", "ЛС", "18+ по настройке"),
+            badges=("группа", "ЛС"),
             commands=("/growth", "/growth do"),
             triggers=("рост", "профиль", "дрочка", "дрочить", "подрочить"),
             notes=(
-                "Само действие роста блокируется, если в чате выключен `actions_18_enabled`.",
                 "Команда без `do` открывает профиль и кнопки состояния.",
             ),
+            requires_settings=("economy_enabled", "actions_18_enabled"),
         ),
     ),
     _docs_section(
@@ -440,13 +449,10 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             text=(
                 "Титул показывает префикс рядом с вашим именем в пределах чата. Первая установка платная, дальше титул можно менять или снять."
             ),
-            badges=("группа", "экономика"),
+            badges=("группа",),
             commands=("/title", "/title buy <текст>", "/title set <текст>", "/title clear"),
             triggers=("титул",),
-            notes=(
-                "Титулы должны быть включены настройками чата.",
-                "Если экономика отключена, купить или поменять титул не получится.",
-            ),
+            requires_settings=("titles_enabled", "economy_enabled"),
         ),
         _docs_item(
             "Усыновление, питомцы и семейное древо",
@@ -454,14 +460,14 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "Семейные команды строят отдельный граф отношений: родители, дети, питомцы и супруги. "
                 "Создание связи подтверждается кнопками согласия."
             ),
-            badges=("группа", "reply", "по настройкам"),
+            badges=("группа", "reply"),
             commands=("/adopt @username", "/pet @username", "/family", "/family @username"),
             triggers=("усыновить", "стать питомцем", "семья"),
             examples=("reply + /adopt", "reply + /pet", "/family @username"),
             notes=(
-                "Если семейное древо отключено в чате, все три команды ответят отказом.",
                 "`/family` без аргумента показывает ваши связи, а с аргументом или reply — связи выбранного участника.",
             ),
+            requires_settings=("family_tree_enabled",),
         ),
     ),
     _docs_section(
@@ -490,15 +496,14 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
         ),
         _docs_item(
             "18+ reply-действия",
-            text=(
-                "Пикантные действия работают тем же способом, но отдельно завязаны на `actions_18_enabled`."
-            ),
-            badges=("reply", "группа", "18+ по настройке"),
+            text="Пикантные действия работают тем же способом, но отдельно завязаны на 18+ настройку.",
+            badges=("reply", "группа"),
             triggers=_SOCIAL_TRIGGERS_18_PLUS,
             examples=("reply + трахнуть", "reply + поиметь", "reply + отсосать"),
             notes=(
                 "Если 18+ выключен, бот покажет прямой отказ и подскажет, какая настройка отвечает за доступ.",
             ),
+            requires_settings=("actions_18_enabled",),
         ),
         _docs_item(
             "Объявления, подписка и чатовые мемы",
