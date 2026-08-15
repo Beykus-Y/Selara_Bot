@@ -13,6 +13,7 @@ def test_extract_social_action_basic_commands() -> None:
     assert _extract_social_action("сожги") == "burn"
     assert _extract_social_action("обнять") == "hug"
     assert _extract_social_action("поцеловать!") == "kiss"
+    assert _extract_social_action("отдаться") == "surrender"
 
 
 def test_extract_social_action_supports_imperative_aliases() -> None:
@@ -123,6 +124,7 @@ def test_extract_social_action_supports_expanded_action_set() -> None:
         "зажми": "trap",
         "завали": "floor",
         "разложи": "spread",
+        "отдайся": "surrender",
         "пусти по кругу": "gang",
         "оттрахай": "banghard",
         "засади": "shovein",
