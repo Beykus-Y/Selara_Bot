@@ -34,10 +34,11 @@
           <p class="panel-subtitle">Введите пароль администратора для доступа к панели управления.</p>
         </div>
       </div>
-      <form class="stack-form" method="post" action="/app/admin/login">
-        <label class="field">
+      <form class="stack-form" method="post" action="/app/admin/login" data-admin-login-form>
+        <label class="field" for="admin-login-password">
           <span>Пароль администратора</span>
           <input
+            id="admin-login-password"
             class="code-input"
             type="password"
             name="password"
@@ -46,10 +47,10 @@
             required
           >
         </label>
-        <button type="submit" class="button primary">Войти</button>
+        <button type="submit" class="button primary" data-admin-login-submit>Войти</button>
       </form>
       <p class="helper-text">
-        Пароль хранится в переменной окружения <code>ADMIN_PASSWORD</code>.
+        Несколько неверных попыток подряд временно блокируют вход с этого адреса.
       </p>
     </article>
 

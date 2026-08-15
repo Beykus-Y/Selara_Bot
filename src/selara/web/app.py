@@ -8559,6 +8559,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=request.query_params.get("error"),
                 authenticated=False,
             ),
+            extra_scripts=["admin-login.js"],
         )
 
     @app.post("/app/admin/login")

@@ -290,12 +290,25 @@
 
 #### 2.1. Admin login и shell
 
-- [ ] Обновить `admin_login.html`.
-- [ ] Сделать ясные состояния неверного пароля, истёкшей сессии и server error.
-- [ ] Проверить password manager, autocomplete, клавиатуру и mobile keyboard.
+- [x] Обновить `admin_login.html`. Исправлен реальный баг: `.login-side`/
+  `.login-side-card` не имели стилей, из-за чего на mobile текст боковых карточек
+  накладывался на заголовок формы (карточки — unstyled auto-колонка grid). Так как
+  `login.html` (обычный вход пользователя) использует те же классы, фикс общих
+  стилей в `server-ui-foundation.css` заодно чинит и его; это не заявленная задача
+  этого среза, но избежать нельзя — классы общие. Полный редизайн `login.html`
+  остаётся в этапе 4.
+- [x] Сделать ясные состояния неверного пароля, истёкшей сессии и server error. Уже
+  обеспечивалось общим banner-механизмом `base.html` (`flash`/`error`); проверено
+  screenshot-ами для неверного пароля и rate-limit.
+- [x] Проверить password manager, autocomplete, клавиатуру и mobile keyboard.
+  `autocomplete="current-password"`, `autofocus`, явный `<label for>` — уже было
+  корректно, подтверждено тестом. Добавлен submit guard от двойной отправки.
 - [~] Создать единый admin shell: навигация, текущий раздел, быстрые действия,
   responsive sidebar/drawer.
-- [ ] Не показывать потенциально чувствительные данные в глобальной навигации.
+- [x] Не показывать потенциально чувствительные данные в глобальной навигации. Уже
+  обеспечивалось (`_admin_layout_context(authenticated=False)`); подтверждено
+  существующим тестом `test_admin_login_page_has_public_navigation_only`. Также
+  убрано раскрытие имени переменной окружения `ADMIN_PASSWORD` в helper-тексте.
 
 #### 2.2. Главная админки
 
@@ -574,14 +587,14 @@ responsive → accessibility → visual review → TODO update.
 
 ## 8. Сводный прогресс
 
-**Общий прогресс roadmap: 19%.** Значение рассчитано как среднее завершение семи
+**Общий прогресс roadmap: 20%** (было 19%). Значение рассчитано как среднее завершение семи
 этапов; прогресс приоритетного этапа админки отслеживается отдельно.
 
 | Этап | Статус | Выполнено | Примечание |
 |---|---|---:|---|
 | 0. Baseline и проверки | `[~]` | 40% | Debt guards; ESLint/Stylelint; rendered admin HTMLHint fixture |
 | 1. Дизайн-система | `[~]` | 15% | Семантический base и page-specific CSS/JS foundation |
-| 2. Админка | `[~]` | 78% | Generic DB explorer в основном закрыт; остаются admin_login.html, поиск по списку таблиц и полная Playwright-матрица |
+| 2. Админка | `[~]` | 84% | admin_login.html закрыт (найден и исправлен mobile-баг наложения карточек); остаются admin shell WebKit/tablet, поиск по списку таблиц и полная Playwright-матрица |
 | 3. Документация | `[ ]` | 0% | После критичной части админки |
 | 4. Остальные страницы | `[ ]` | 0% | После админки и документации |
 | 5. Игры | `[ ]` | 0% | Высокий риск, выполнять последними |
@@ -608,6 +621,7 @@ responsive → accessibility → visual review → TODO update.
 
 | Дата | Исполнитель | Задача | Статус | Commit/проверки | Примечание |
 |---|---|---|---|---|---|
+| 2026-08-15 | Claude | Admin login: mobile-баг наложения карточек, submit guard, info hygiene | `[x]` | commit: pending; 888 unit; focused browser 6/6; ESLint; Stylelint; HTMLHint ×7; frontend build; 6 desktop/mobile/tablet/error/rate-limit/submit-guard screenshots | Найден реальный баг: `.login-side`/`.login-side-card` не имели CSS, из-за чего на mobile боковые карточки накладывались на текст формы (unstyled auto-колонка grid). Общий фикс в `server-ui-foundation.css` заодно чинит `login.html` (тот же shared markup) — вне заявленного объёма среза, но неизбежно из-за общих классов. Добавлен submit guard, убрано раскрытие `ADMIN_PASSWORD` в helper-тексте, добавлен `for`/`id` для HTMLHint. Прогресс этапа 2: 78% → 84%; общий прогресс roadmap: 19% → 20% |
 | 2026-08-15 | Claude | Generic DB explorer: пагинация, edit/delete safety, touch targets | `[x]` | commit: pending; 882 unit; focused route 11/11; focused browser 6/6; ESLint; Stylelint; HTMLHint ×6; frontend build; 7 desktop/mobile/tablet/dialog/empty screenshots | Исправлен краш и отрицательный offset при нечисловом `page`; urlencode-пагинация вместо ручной конкатенации; delete-диалог называет удаляемую запись и восстанавливает фокус на вызвавшую кнопку; destructive-warning + submit guard на edit; JS вынесен в `admin-table.js`; badge/touch-target/warning CSS — в новый `admin-table.css`, чтобы не расширять `panel.css` сверх baseline-лимита; добавлены sr-only labels для фильтров и `type="button"`/`for`/`id` по замечаниям HTMLHint. Поиск по списку таблиц на `admin.html` оставлен отдельным незакрытым пунктом ниже. |
 | 2026-08-15 | Codex | Журнал аудита чата: timeline/table hybrid | `[x]` | commit: pending; 874 unit; focused 50/50; audit Chromium 4/4; ESLint; Stylelint; HTMLHint ×4; frontend build; 8 desktop/mobile/tablet screenshots | Русские labels и категории; группировка по датам; URL-поиск/фильтры; раскрываемые event/action/actor/target ID без raw meta; безопасный DB error, empty/filtered/long/responsive states |
 | 2026-08-15 | Codex | Заявки пользователей: task-like workflow | `[x]` | commit: pending; 866 unit; focused 76/76; feedback Chromium 5/5; ESLint; Stylelint; HTMLHint ×3; frontend build; 8 desktop/mobile/tablet screenshots | URL-фильтр статуса, lifecycle/history, быстрый status update с сохранением фильтра/позиции, submit guard, empty/error/long/responsive states |
