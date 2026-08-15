@@ -935,7 +935,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "show_logout": True,
             "flash": flash,
             "error": error,
-            "extra_styles": ["docs-search.css"],
+            "extra_styles": ["docs-search.css", "docs-responsive.css"],
             "extra_scripts": ["docs-search.js"],
         }
 
@@ -957,7 +957,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "show_logout": True,
             "flash": flash,
             "error": error,
-            "extra_styles": ["docs-item-actions.css", "docs-search.css"],
+            "extra_styles": ["docs-item-actions.css", "docs-search.css", "docs-responsive.css"],
             "extra_scripts": ["docs-item-actions.js", "docs-search.js"],
         }
 

@@ -38,28 +38,31 @@
           Совпадений не найдено. Измените запрос.
         </p>
       </div>
-      <div class="docs-nav-stack">
-        <div class="docs-nav-group">
-          <strong>Разделы панели</strong>
-          <a href="#docs-trigger-types">Типы совпадения триггеров</a>
-          <a href="#docs-trigger-variables">Переменные шаблонов</a>
-          {% for section in docs_sections %}
-            <a href="#{{ section.anchor }}">{{ section.title }}</a>
-          {% endfor %}
+      <details class="docs-nav-toggle" open>
+        <summary>Все разделы</summary>
+        <div class="docs-nav-stack">
+          <div class="docs-nav-group">
+            <strong>Разделы панели</strong>
+            <a href="#docs-trigger-types">Типы совпадения триггеров</a>
+            <a href="#docs-trigger-variables">Переменные шаблонов</a>
+            {% for section in docs_sections %}
+              <a href="#{{ section.anchor }}">{{ section.title }}</a>
+            {% endfor %}
+          </div>
+          <div class="docs-nav-group">
+            <strong>Роли бота</strong>
+            {% for role in roles_docs %}
+              <a href="#{{ role.anchor }}">{{ role.title }}</a>
+            {% endfor %}
+          </div>
+          <div class="docs-nav-group">
+            <strong>Группы настроек</strong>
+            {% for section in settings_docs_sections %}
+              <a href="#{{ section.anchor }}">{{ section.title }}</a>
+            {% endfor %}
+          </div>
         </div>
-        <div class="docs-nav-group">
-          <strong>Роли бота</strong>
-          {% for role in roles_docs %}
-            <a href="#{{ role.anchor }}">{{ role.title }}</a>
-          {% endfor %}
-        </div>
-        <div class="docs-nav-group">
-          <strong>Группы настроек</strong>
-          {% for section in settings_docs_sections %}
-            <a href="#{{ section.anchor }}">{{ section.title }}</a>
-          {% endfor %}
-        </div>
-      </div>
+      </details>
     </aside>
 
     <div class="docs-content">

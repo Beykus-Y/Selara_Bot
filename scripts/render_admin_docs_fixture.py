@@ -31,7 +31,7 @@ def render() -> str:
         hero_title="Документация администратора",
         hero_subtitle="Полная справка по веб-панели: от входа и ролей до настроек, алиасов, смарт-триггеров, аудита и игровых разделов.",
         origin_chat={"href": "/app", "label": "кабинет"},
-        extra_styles=["docs-search.css"],
+        extra_styles=["docs-search.css", "docs-responsive.css"],
         extra_scripts=["docs-search.js"],
         docs_sections=[
             {

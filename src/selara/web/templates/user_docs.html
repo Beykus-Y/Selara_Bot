@@ -38,14 +38,16 @@
           Совпадений не найдено. Измените запрос.
         </p>
       </div>
-      <div class="docs-nav-stack">
-        <div class="docs-nav-group">
-          <strong>Разделы справки</strong>
-          {% for section in docs_sections %}
-            <a href="#{{ section.anchor }}">{{ section.title }}</a>
-          {% endfor %}
+      <details class="docs-nav-toggle" open>
+        <summary>Разделы справки</summary>
+        <div class="docs-nav-stack">
+          <div class="docs-nav-group">
+            {% for section in docs_sections %}
+              <a href="#{{ section.anchor }}">{{ section.title }}</a>
+            {% endfor %}
+          </div>
         </div>
-      </div>
+      </details>
     </aside>
 
     <div class="docs-content">

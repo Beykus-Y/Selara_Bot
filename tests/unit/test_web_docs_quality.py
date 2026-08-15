@@ -1,11 +1,10 @@
-"""Heading hierarchy and keyboard-reachability checks for the documentation
-pages (docs/WEB_UI_MODERNIZATION_TODO.md, stage 3 "Качество документации":
-"Проверить keyboard navigation, heading hierarchy, links и mobile layout.").
+"""Heading hierarchy, keyboard-reachability, and mobile-layout checks for the
+documentation pages (docs/WEB_UI_MODERNIZATION_TODO.md, stage 3 "Качество
+документации": "Проверить keyboard navigation, heading hierarchy, links и
+mobile layout." — and the follow-up adaptation slice that fixed the mobile
+`.docs-layout` overflow bug).
 
-Link validity is already covered by test_web_docs_anchors.py. Mobile layout
-is a known, already-documented pre-existing gap (`.docs-layout` has no
-mobile breakpoint) deliberately deferred to its own slice after stage 3 per
-the 2026-08-16 decision log entry — not re-litigated here.
+Link validity is already covered by test_web_docs_anchors.py.
 """
 
 from __future__ import annotations
@@ -65,6 +64,7 @@ async def _load(page, template_name: str, context: dict[str, object]) -> None:
     await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
     await page.add_style_tag(path=str(STATIC_DIR / "docs-item-actions.css"))
     await page.add_style_tag(path=str(STATIC_DIR / "docs-search.css"))
+    await page.add_style_tag(path=str(STATIC_DIR / "docs-responsive.css"))
     await page.add_script_tag(path=str(STATIC_DIR / "docs-item-actions.js"))
     await page.add_script_tag(path=str(STATIC_DIR / "docs-search.js"))
 
@@ -95,5 +95,50 @@ async def test_user_docs_search_copy_and_deep_link_are_keyboard_reachable() -> N
             # verified end-to-end rather than assuming it) triggers the copy flow.
             await copy_button.click()
             assert "is-copied" in (await copy_button.get_attribute("class") or "")
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("template_name", "context_factory", "viewport"),
+    [
+        ("user_docs.html", build_user_docs_context, {"width": 390, "height": 900}),
+        ("user_docs.html", build_user_docs_context, {"width": 820, "height": 1100}),
+        ("admin_docs.html", build_admin_docs_context, {"width": 390, "height": 900}),
+        ("admin_docs.html", build_admin_docs_context, {"width": 820, "height": 1100}),
+    ],
+)
+async def test_docs_layout_has_no_horizontal_overflow_on_mobile_and_tablet(
+    template_name: str, context_factory, viewport: dict[str, int]
+) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=viewport)
+        try:
+            await _load(page, template_name, context_factory(chat=None))
+            overflow = await page.evaluate(
+                "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+            )
+            assert not overflow, f"{template_name} at {viewport} overflows horizontally"
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_docs_nav_toggle_collapses_and_expands_on_mobile() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 390, "height": 900})
+        try:
+            await _load(page, "user_docs.html", build_user_docs_context(chat=None))
+            toggle = page.locator(".docs-nav-toggle")
+            summary = toggle.locator("summary")
+
+            assert await toggle.get_attribute("open") is not None
+            await summary.click()
+            assert await toggle.get_attribute("open") is None
+            await summary.click()
+            assert await toggle.get_attribute("open") is not None
         finally:
             await browser.close()

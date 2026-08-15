@@ -172,6 +172,16 @@ def test_admin_docs_reuses_the_shared_search_assets() -> None:
     assert "data-docs-search-card" in docs_source
 
 
+def test_docs_pages_have_a_mobile_responsive_layout() -> None:
+    docs_responsive_css = ROOT / "src" / "selara" / "web" / "static" / "docs-responsive.css"
+    assert docs_responsive_css.is_file()
+    assert len(docs_responsive_css.read_text(encoding="utf-8").splitlines()) <= 55
+
+    for template_name in ("user_docs.html", "admin_docs.html"):
+        docs_source = (TEMPLATE_DIR / template_name).read_text(encoding="utf-8")
+        assert 'class="docs-nav-toggle"' in docs_source
+
+
 def test_admin_feedback_and_slice_workflow_have_bounded_contracts() -> None:
     feedback_css = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.css"
     feedback_script = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.js"

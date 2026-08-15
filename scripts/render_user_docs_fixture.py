@@ -29,7 +29,7 @@ def render() -> str:
         error=None,
         body_classes="",
         navigation_label="Навигация документации",
-        extra_styles=["docs-item-actions.css", "docs-search.css"],
+        extra_styles=["docs-item-actions.css", "docs-search.css", "docs-responsive.css"],
         extra_scripts=["docs-item-actions.js", "docs-search.js"],
         hero_title="Документация пользователя",
         hero_subtitle="Полная памятка по пользовательским возможностям бота.",

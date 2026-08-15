@@ -1,0 +1,46 @@
+.docs-nav-toggle > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.docs-nav-toggle > summary::-webkit-details-marker {
+  display: none;
+}
+
+.docs-nav-toggle > summary::after {
+  content: "›";
+  flex: 0 0 auto;
+  font-size: 1.15rem;
+  color: var(--muted-strong);
+  transition: transform 140ms ease;
+}
+
+.docs-nav-toggle[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.docs-nav-toggle > summary:focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
+@media (width <= 980px) {
+  .docs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-nav {
+    position: static;
+  }
+}
