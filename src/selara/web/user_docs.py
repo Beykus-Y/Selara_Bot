@@ -183,43 +183,25 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
         "Игры",
         "Как запускать игровые лобби, где смотреть скрытую роль и как участвовать в конкретных режимах.",
         _docs_item(
-            "Запуск лобби",
-            text=(
-                "Команда `/game` открывает меню выбора. Если указать режим сразу, бот попробует создать лобби без дополнительных кликов."
-            ),
+            (_games_lobby := get_command_spec("games_lobby")).title_ru,
+            text=_games_lobby.description_ru,
             badges=("группа",),
-            commands=(
-                "/game",
-                "/game spy",
-                "/game whoami",
-                "/game mafia",
-                "/game dice",
-                "/game quiz",
-                "/game bredovukha",
-                "/game bunker",
-            ),
-            triggers=("игра",),
-            notes=(
-                "Для запуска нужен доступ `manage_games` в конкретном чате.",
-                "Для новых запусков доступны `spy`, `whoami`, `mafia`, `dice`, `quiz`, `bredovukha`, `bunker`.",
-                "Режим `number` больше не запускается заново, но может встретиться как уже идущая старая партия.",
-            ),
+            commands=_games_lobby.syntax,
+            triggers=_games_lobby.natural_triggers,
+            notes=_games_lobby.notes,
         ),
         _docs_item(
-            "Скрытая роль, карточка и ЛС",
-            text=(
-                "Игры со скрытой информацией присылают роль или личную карточку в приват. Если бот не может написать вам первым, роль вы не увидите."
-            ),
+            (_games_role := get_command_spec("games_role_reveal")).title_ru,
+            text=_games_role.description_ru,
             badges=("ЛС", "группа"),
-            commands=("/role [game_id]", "/start"),
+            commands=_games_role.syntax,
+            triggers=_games_role.natural_triggers,
             steps=(
                 "Перед первой партией откройте личный чат с ботом и нажмите Start.",
                 "Во время игры используйте `/role`, если нужно повторно посмотреть секретную роль или карточку.",
                 "Часть фаз `Мафии`, `Шпиона`, `Бункера` и `Кто я` сопровождается личными сообщениями и приватными кнопками.",
             ),
-            notes=(
-                "Если `/role` ничего не показывает, скорее всего у вас сейчас нет активной секретной роли или ЛС с ботом не открыт.",
-            ),
+            notes=_games_role.notes,
         ),
         _docs_item(
             "Как играть в «Кто я»",

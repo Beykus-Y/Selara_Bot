@@ -159,6 +159,18 @@ def test_user_docs_daily_article_command_is_derived_from_the_catalog() -> None:
         assert trigger in item["triggers"]
 
 
+def test_user_docs_games_items_are_derived_from_the_command_catalog() -> None:
+    context = build_user_docs_context(chat=None)
+    games_section = next(section for section in context["docs_sections"] if section["title"] == "Игры")
+    items_by_title = {item["title"]: item for item in games_section["items"]}
+
+    for key in ("games_lobby", "games_role_reveal"):
+        spec = get_command_spec(key)
+        item = items_by_title[spec.title_ru]
+        assert item["commands"] == spec.syntax
+        assert item["triggers"] == spec.natural_triggers
+
+
 def test_user_docs_availability_badges_are_derived_from_setting_meta() -> None:
     # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
     # "Понятные отметки доступности функции и требуемых прав": items gated by

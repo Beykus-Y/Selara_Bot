@@ -153,6 +153,47 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
             "кода, а не только грепа по Command(\"...\").",
         ),
     ),
+    CommandSpec(
+        key="games_lobby",
+        category="games",
+        dispatch_kind="both",
+        syntax=(
+            "/game",
+            "/game spy",
+            "/game whoami",
+            "/game mafia",
+            "/game dice",
+            "/game quiz",
+            "/game bredovukha",
+            "/game bunker",
+        ),
+        title_ru="Запуск лобби",
+        description_ru=(
+            "Команда /game открывает меню выбора. Если указать режим сразу, бот попробует "
+            "создать лобби без дополнительных кликов."
+        ),
+        natural_triggers=("игра",),
+        notes=(
+            "Для запуска нужен доступ manage_games в конкретном чате.",
+            "Для новых запусков доступны spy, whoami, mafia, dice, quiz, bredovukha, bunker.",
+            "Режим number больше не запускается заново, но может встретиться как уже идущая старая партия.",
+        ),
+    ),
+    CommandSpec(
+        key="games_role_reveal",
+        category="games",
+        dispatch_kind="both",
+        syntax=("/role [game_id]", "/start"),
+        title_ru="Скрытая роль, карточка и ЛС",
+        description_ru=(
+            "Игры со скрытой информацией присылают роль или личную карточку в приват. Если "
+            "бот не может написать вам первым, роль вы не увидите."
+        ),
+        natural_triggers=("роль", "старт"),
+        notes=(
+            "Если /role ничего не показывает, скорее всего у вас сейчас нет активной секретной роли или ЛС с ботом не открыт.",
+        ),
+    ),
 )
 
 

@@ -71,6 +71,28 @@ def test_economy_natural_triggers_exist_in_the_real_trigger_maps() -> None:
             )
 
 
+def test_games_syntax_matches_real_aiogram_command_registrations() -> None:
+    real_commands = _real_aiogram_commands("game/router.py")
+    assert real_commands, "sanity check: game/router.py should have at least one Command() registration"
+
+    for spec in commands_for_category("games"):
+        for syntax_entry in spec.syntax:
+            base = _base_command_word(syntax_entry)
+            assert base in real_commands, (
+                f"{spec.key}: '{syntax_entry}' claims /{base}, but no "
+                f"@router.message(Command(\"{base}\")) found in game/router.py"
+            )
+
+
+def test_games_natural_triggers_exist_in_the_real_trigger_maps() -> None:
+    all_real_triggers = set(EXACT_TRIGGER_TO_COMMAND_KEY) | set(PREFIX_TRIGGER_TO_COMMAND_KEY)
+    for spec in commands_for_category("games"):
+        for trigger in spec.natural_triggers:
+            assert trigger in all_real_triggers, (
+                f"{spec.key}: natural trigger {trigger!r} not found in catalog.py's trigger maps"
+            )
+
+
 def test_daily_article_is_dispatched_via_the_documented_regex_path() -> None:
     handler_source = (HANDLERS_DIR / "text_commands.py").read_text(encoding="utf-8")
     assert "_is_daily_article_command" in handler_source
