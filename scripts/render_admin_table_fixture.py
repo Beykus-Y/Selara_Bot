@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from selara.infrastructure.db.models import UserModel  # noqa: E402
 from selara.web.rendering import create_template_environment  # noqa: E402
+
+
+@dataclass
+class FixtureUser:
+    """Stand-in for UserModel — avoids pulling SQLAlchemy into the minimal
+    frontend CI job, which only installs Jinja2 to render HTML fixtures."""
+
+    telegram_user_id: int
+    username: str | None
+    first_name: str | None
+    last_name: str | None
+    is_bot: bool
+    subscription_exempt: bool
+    updated_at: datetime
 
 TOP_LINKS = [
     {"href": "/app/admin", "label": "Обзор", "variant": "ghost"},
@@ -18,11 +32,11 @@ TOP_LINKS = [
 ]
 
 
-def _users(count: int) -> list[UserModel]:
+def _users(count: int) -> list[FixtureUser]:
     rows = []
     for index in range(count):
         rows.append(
-            UserModel(
+            FixtureUser(
                 telegram_user_id=100 + index,
                 username=(
                     "ОченьДлинноеИмяПользователяБезПробеловForTestOverflow1234567890"
