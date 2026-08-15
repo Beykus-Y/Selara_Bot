@@ -287,69 +287,36 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
         "Пары и брак",
         "Как предложить отношения, какие действия доступны на каждой стадии и чем отличается пара от брака.",
         _docs_item(
-            "Как начать отношения",
-            text=(
-                "Сначала откройте `мои отношения` или `/relation`, а для брака отдельно доступен `мой брак`. "
-                "Предложение пары или брака отправляется через reply или `@username`, а подтверждение идёт кнопками."
-            ),
+            (_rel_start := get_command_spec("relationships_start")).title_ru,
+            text=_rel_start.description_ru,
             badges=("группа", "reply"),
-            commands=("/relation", "/pair @username", "/marry @username"),
-            triggers=(
-                "мои отношения",
-                "мой брак",
-                "браки",
-                "отношения",
-                "брак",
-                "пара",
-                "жениться",
-                "предложить встречаться",
-                "предложить брак",
-            ),
-            examples=(
-                "reply + /pair",
-                "reply + /marry",
-                "предложить встречаться @username",
-                "предложить брак @username",
-            ),
-            notes=(
-                "Срок ответа на предложение: 24 часа.",
-                "В `мои отношения` и `/relation` бот показывает текущий статус, партнёра, кулдауны и inline-кнопки действий.",
-                "`браки` показывает все активные браки беседы и их длительность.",
-            ),
+            commands=_rel_start.syntax,
+            triggers=_rel_start.natural_triggers,
+            examples=_rel_start.examples,
+            notes=_rel_start.notes,
         ),
         _docs_item(
-            "Действия стадии пары",
-            text=(
-                "Для пары доступны ежедневные или периодические действия, которые поднимают уровень отношений. "
-                "Часть из них есть только до брака."
-            ),
+            (_rel_pair := get_command_spec("relationships_pair_actions")).title_ru,
+            text=_rel_pair.description_ru,
             badges=("группа",),
-            commands=("/care", "/date", "/gift", "/support", "/flirt", "/surprise"),
-            triggers=("забота", "свидание", "подарок", "поддержка", "флирт", "сюрприз"),
-            notes=(
-                "`/flirt` и `/surprise` работают только на стадии пары.",
-                "Кулдаун на relation-действия составляет 30 минут, а точный остаток видно в `/relation`.",
-            ),
+            commands=_rel_pair.syntax,
+            triggers=_rel_pair.natural_triggers,
+            notes=_rel_pair.notes,
         ),
         _docs_item(
-            "После свадьбы",
-            text=(
-                "У брака остаётся базовый набор действий, но вместо флирта и сюрприза открываются собственные механики любви и клятвы."
-            ),
+            (_rel_marriage := get_command_spec("relationships_marriage_actions")).title_ru,
+            text=_rel_marriage.description_ru,
             badges=("группа",),
-            commands=("/love", "/care", "/date", "/gift", "/support", "/vow"),
-            triggers=("любовь", "забота", "свидание", "подарок", "поддержка", "клятва"),
-            notes=(
-                "`/love` и `/vow` доступны только в браке.",
-                "Если вы ответили reply не своему партнёру, бот отклонит действие.",
-            ),
+            commands=_rel_marriage.syntax,
+            triggers=_rel_marriage.natural_triggers,
+            notes=_rel_marriage.notes,
         ),
         _docs_item(
-            "Как завершить связь",
-            text="Пара и брак закрываются разными командами. После брака связь супруга также убирается из семейного графа.",
+            (_rel_end := get_command_spec("relationships_end")).title_ru,
+            text=_rel_end.description_ru,
             badges=("группа",),
-            commands=("/breakup", "/divorce"),
-            triggers=("расстаться", "развод"),
+            commands=_rel_end.syntax,
+            triggers=_rel_end.natural_triggers,
         ),
     ),
     _docs_section(
@@ -382,18 +349,22 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             requires_settings=("titles_enabled", "economy_enabled"),
         ),
         _docs_item(
-            "Усыновление, питомцы и семейное древо",
-            text=(
-                "Семейные команды строят отдельный граф отношений: родители, дети, питомцы и супруги. "
-                "Создание связи подтверждается кнопками согласия."
-            ),
+            (_family_tree := get_command_spec("family_adopt_pet_tree")).title_ru,
+            text=_family_tree.description_ru,
             badges=("группа", "reply"),
-            commands=("/adopt @username", "/pet @username", "/family", "/family @username"),
-            triggers=("усыновить", "стать питомцем", "семья"),
-            examples=("reply + /adopt", "reply + /pet", "/family @username"),
-            notes=(
-                "`/family` без аргумента показывает ваши связи, а с аргументом или reply — связи выбранного участника.",
-            ),
+            commands=_family_tree.syntax,
+            triggers=_family_tree.natural_triggers,
+            examples=_family_tree.examples,
+            notes=_family_tree.notes,
+            requires_settings=("family_tree_enabled",),
+        ),
+        _docs_item(
+            (_family_escape := get_command_spec("family_escape")).title_ru,
+            text=_family_escape.description_ru,
+            badges=("группа",),
+            commands=_family_escape.syntax,
+            triggers=_family_escape.natural_triggers,
+            notes=_family_escape.notes,
             requires_settings=("family_tree_enabled",),
         ),
     ),

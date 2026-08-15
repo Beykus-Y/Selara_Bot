@@ -194,6 +194,113 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
             "Если /role ничего не показывает, скорее всего у вас сейчас нет активной секретной роли или ЛС с ботом не открыт.",
         ),
     ),
+    CommandSpec(
+        key="relationships_start",
+        category="relationships",
+        dispatch_kind="both",
+        syntax=("/relation", "/pair @username", "/marry @username"),
+        title_ru="Как начать отношения",
+        description_ru=(
+            "Сначала откройте «мои отношения» или /relation, а для брака отдельно доступен "
+            "«мой брак». Предложение пары или брака отправляется через reply или @username, "
+            "а подтверждение идёт кнопками."
+        ),
+        natural_triggers=(
+            "мои отношения",
+            "мой брак",
+            "браки",
+            "отношения",
+            "брак",
+            "пара",
+            "жениться",
+            "предложить встречаться",
+            "предложить брак",
+        ),
+        examples=("reply + /pair", "reply + /marry", "предложить встречаться @username", "предложить брак @username"),
+        notes=(
+            "Срок ответа на предложение: 24 часа.",
+            "В «мои отношения» и /relation бот показывает текущий статус, партнёра, кулдауны и inline-кнопки действий.",
+            "«браки» показывает все активные браки беседы и их длительность.",
+        ),
+    ),
+    CommandSpec(
+        key="relationships_pair_actions",
+        category="relationships",
+        dispatch_kind="both",
+        syntax=("/care", "/date", "/gift", "/support", "/flirt", "/surprise"),
+        title_ru="Действия стадии пары",
+        description_ru=(
+            "Для пары доступны ежедневные или периодические действия, которые поднимают "
+            "уровень отношений. Часть из них есть только до брака."
+        ),
+        natural_triggers=("забота", "свидание", "подарок", "поддержка", "флирт", "сюрприз"),
+        notes=(
+            "/flirt и /surprise работают только на стадии пары.",
+            "Кулдаун на relation-действия составляет 30 минут, а точный остаток видно в /relation.",
+        ),
+    ),
+    CommandSpec(
+        key="relationships_marriage_actions",
+        category="relationships",
+        dispatch_kind="both",
+        syntax=("/love", "/care", "/date", "/gift", "/support", "/vow"),
+        title_ru="После свадьбы",
+        description_ru=(
+            "У брака остаётся базовый набор действий, но вместо флирта и сюрприза открываются "
+            "собственные механики любви и клятвы."
+        ),
+        natural_triggers=("любовь", "забота", "свидание", "подарок", "поддержка", "клятва"),
+        notes=(
+            "/love и /vow доступны только в браке.",
+            "Если вы ответили reply не своему партнёру, бот отклонит действие.",
+        ),
+    ),
+    CommandSpec(
+        key="relationships_end",
+        category="relationships",
+        dispatch_kind="both",
+        syntax=("/breakup", "/divorce"),
+        title_ru="Как завершить связь",
+        description_ru="Пара и брак закрываются разными командами. После брака связь супруга также убирается из семейного графа.",
+        natural_triggers=("расстаться", "развод"),
+    ),
+    CommandSpec(
+        key="family_adopt_pet_tree",
+        category="family",
+        dispatch_kind="both",
+        syntax=(
+            "/adopt @username",
+            "/adoptdaughter @username",
+            "/pet @username",
+            "/family",
+            "/family @username",
+        ),
+        title_ru="Усыновление, питомцы и семейное древо",
+        description_ru=(
+            "Семейные команды строят отдельный граф отношений: родители, дети, питомцы и "
+            "супруги. Создание связи подтверждается кнопками согласия."
+        ),
+        natural_triggers=("усыновить", "удочерить", "стать питомцем", "семья"),
+        examples=("reply + /adopt", "reply + /pet", "/family @username"),
+        notes=(
+            "/adopt усыновляет (роль «сын»), /adoptdaughter — удочеряет (роль «дочь») — единственная "
+            "разница между ними.",
+            "/family без аргумента показывает ваши связи, а с аргументом или reply — связи выбранного участника.",
+        ),
+    ),
+    CommandSpec(
+        key="family_escape",
+        category="family",
+        dispatch_kind="both",
+        syntax=("/escapefamily", "/escapepet"),
+        title_ru="Уйти из семьи",
+        description_ru=(
+            "Позволяет разорвать семейную связь: сбежать от родителя или перестать быть "
+            "чьим-то питомцем. Оба действия подтверждаются кнопкой и необратимы."
+        ),
+        natural_triggers=("сбежать из семьи", "сбежать от хозяина"),
+        notes=("/escapefamily доступна только если у вас есть родитель в этом чате.",),
+    ),
 )
 
 
