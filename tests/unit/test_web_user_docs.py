@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from selara.presentation.commands.catalog import build_social_action_docs
+from selara.presentation.commands.command_catalog import get_command_spec
 from selara.presentation.handlers.settings_common import SETTING_META
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
@@ -113,6 +114,49 @@ def test_user_docs_items_carry_a_lowercased_search_text_covering_their_fields() 
                 assert trigger.lower() in search_text
             for example in item["examples"]:
                 assert example.lower() in search_text
+
+
+def test_user_docs_economy_items_are_derived_from_the_command_catalog() -> None:
+    # Regression guard for the slash-command single-source project
+    # (docs/WEB_UI_MODERNIZATION_TODO.md, "Модель контента" — economy is
+    # category 1 of the staged rollout): economy card commands/triggers must
+    # equal command_catalog.py's spec exactly, not a hand-typed copy that can
+    # drift the way the RP-action lists did before today's earlier fix.
+    context = build_user_docs_context(chat=None)
+    economy_section = next(
+        section for section in context["docs_sections"] if section["title"] == "Экономика и предметы"
+    )
+    items_by_title = {item["title"]: item for item in economy_section["items"]}
+
+    for key in (
+        "economy_panel",
+        "economy_farm",
+        "economy_shop_inventory_craft",
+        "economy_market_transfer_auction",
+        "economy_growth",
+    ):
+        spec = get_command_spec(key)
+        item = items_by_title[spec.title_ru]
+        assert item["commands"] == spec.syntax
+        assert item["triggers"] == spec.natural_triggers
+
+
+def test_user_docs_daily_article_command_is_derived_from_the_catalog() -> None:
+    # misc_daily_article isn't its own card — /article was already documented
+    # inside the "Объявления..." grab-bag item (found while wiring the
+    # economy category: adding a separate card would have duplicated it).
+    # Only the article-specific fields are pulled from the catalog.
+    spec = get_command_spec("misc_daily_article")
+    context = build_user_docs_context(chat=None)
+    item = next(
+        item
+        for section in context["docs_sections"]
+        for item in section["items"]
+        if item["title"] == "Объявления, подписка и чатовые мемы"
+    )
+    assert item["commands"] == spec.syntax
+    for trigger in spec.natural_triggers:
+        assert trigger in item["triggers"]
 
 
 def test_user_docs_availability_badges_are_derived_from_setting_meta() -> None:

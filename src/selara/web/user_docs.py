@@ -4,6 +4,7 @@ from typing import Any
 
 from selara.domain.entities import UserChatOverview
 from selara.presentation.commands.catalog import build_social_action_docs
+from selara.presentation.commands.command_catalog import get_command_spec
 from selara.presentation.handlers.settings_common import SETTING_META
 
 
@@ -253,105 +254,49 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
         "Экономика и предметы",
         "Все пользовательские сценарии экономики: баланс, фарм, рынок, переводы, рост, лотерея и предметы.",
         _docs_item(
-            "Панель экономики и базовый заработок",
-            text=(
-                "Экономический профиль открывается через `/eco`. Дальше от него идут клики, ежедневка, лотерея, статья дня и профиль роста."
-            ),
+            (_eco_panel := get_command_spec("economy_panel")).title_ru,
+            text=_eco_panel.description_ru,
             badges=("группа", "ЛС"),
-            commands=(
-                "/eco [global|local]",
-                "/tap",
-                "/daily",
-                "/lottery [free|paid|item|status]",
-                "/article",
-                "/growth",
-            ),
-            triggers=("баланс", "тап", "дейлик", "лотерея", "рост", "профиль", "моя статья", "статья"),
-            notes=(
-                "В личке `/eco local` имеет смысл только если для вас уже установлен local-контекст чата.",
-            ),
+            commands=_eco_panel.syntax,
+            triggers=_eco_panel.natural_triggers,
+            notes=_eco_panel.notes,
             requires_settings=("economy_enabled",),
         ),
         _docs_item(
-            "Ферма",
-            text=(
-                "Ферма умеет показывать статус, сажать культуры, собирать урожай, продавать его и покупать апгрейды уровня и размера."
-            ),
+            (_eco_farm := get_command_spec("economy_farm")).title_ru,
+            text=_eco_farm.description_ru,
             badges=("группа", "ЛС"),
-            commands=(
-                "/farm",
-                "/farm plant <культура> [грядка]",
-                "/farm harvest <грядка>",
-                "/farm sell <культура> <кол-во>",
-                "/farm upfarm",
-                "/farm upsize <средний|большой>",
-            ),
-            triggers=("ферма",),
-            examples=(
-                "/farm plant wheat",
-                "/farm harvest 2",
-                "/farm sell wheat 10",
-                "/farm upsize большой",
-            ),
+            commands=_eco_farm.syntax,
+            triggers=_eco_farm.natural_triggers,
+            examples=_eco_farm.examples,
             requires_settings=("economy_enabled",),
         ),
         _docs_item(
-            "Магазин, инвентарь и крафт",
-            text=(
-                "Через магазин покупаются офферы, через инвентарь применяются предметы, а через крафт собираются новые вещи по рецептам."
-            ),
+            (_eco_shop := get_command_spec("economy_shop_inventory_craft")).title_ru,
+            text=_eco_shop.description_ru,
             badges=("группа", "ЛС"),
-            commands=(
-                "/shop",
-                "/shop buy <номер_оффера>",
-                "/inventory",
-                "/inventory use <предмет> [грядка]",
-                "/craft",
-                "/craft <recipe_code>",
-            ),
-            triggers=("магазин", "инвентарь", "крафт"),
-            notes=(
-                "Названия предметов в командах можно писать как кодами, так и многими русскими алиасами.",
-            ),
+            commands=_eco_shop.syntax,
+            triggers=_eco_shop.natural_triggers,
+            notes=_eco_shop.notes,
             requires_settings=("economy_enabled", "craft_enabled"),
         ),
         _docs_item(
-            "Рынок, переводы и аукцион",
-            text=(
-                "Игроки могут торговать друг с другом через рынок и прямые переводы. Аукцион живёт в группе: смотреть его может любой участник, "
-                "а запускать и отменять только роли с нужным доступом."
-            ),
+            (_eco_market := get_command_spec("economy_market_transfer_auction")).title_ru,
+            text=_eco_market.description_ru,
             badges=("группа",),
-            commands=(
-                "/market",
-                "/market sell <предмет> <кол-во> <цена>",
-                "/market buy <лот_id> <кол-во>",
-                "/market cancel <лот_id>",
-                "/pay @username 100",
-                "/auction",
-                "/auction start <item_code> <qty> <start_price> [minutes]",
-                "/auction cancel",
-                "/bid <сумма>",
-            ),
-            triggers=("рынок", "перевод"),
-            examples=("/pay 123456789 250", "reply + /pay 100", "/market sell crop:wheat 20 15", "/bid 5000"),
-            notes=(
-                "`/pay` можно сделать по `@username`, `user_id` или reply.",
-                "`/auction start` и `/auction cancel` требуют прав на управление настройками или аналогичного ранга команды.",
-            ),
+            commands=_eco_market.syntax,
+            triggers=_eco_market.natural_triggers,
+            examples=_eco_market.examples,
+            notes=_eco_market.notes,
             requires_settings=("economy_enabled", "auctions_enabled"),
         ),
         _docs_item(
-            "Рост",
-            text=(
-                "Команда `/growth` показывает профиль роста, стресс и доступные действия. Активное действие запускается отдельной командой."
-            ),
+            (_eco_growth := get_command_spec("economy_growth")).title_ru,
+            text=_eco_growth.description_ru,
             badges=("группа", "ЛС"),
-            commands=("/growth", "/growth do"),
-            triggers=("рост", "профиль", "дрочка", "дрочить", "подрочить"),
-            notes=(
-                "Команда без `do` открывает профиль и кнопки состояния.",
-            ),
+            commands=_eco_growth.syntax,
+            triggers=_eco_growth.natural_triggers,
+            notes=_eco_growth.notes,
             requires_settings=("economy_enabled", "actions_18_enabled"),
         ),
     ),
@@ -511,8 +456,16 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "Кроме строгих команд есть набор бытовых фраз: объявление с тегами, шипперинг, рандом «кто сегодня ...», статья дня и жмых для фото."
             ),
             badges=("группа", "текстовые фразы"),
-            commands=("/article",),
-            triggers=("объява", "рег", "анрег", "шипперим", "кто сегодня легенда", "моя статья", "статья", "жмых"),
+            commands=(_daily_article := get_command_spec("misc_daily_article")).syntax,
+            triggers=(
+                "объява",
+                "рег",
+                "анрег",
+                "шипперим",
+                "кто сегодня легенда",
+                *_daily_article.natural_triggers,
+                "жмых",
+            ),
             examples=(
                 'объява "Собираемся через 10 минут"',
                 "рег",

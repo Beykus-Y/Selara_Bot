@@ -570,6 +570,76 @@ dev-машине) и не блокирует остальной roadmap.
   готовыми небольшими каталогами, которые нужно было просто переиспользовать;
   здесь готового каталога slash-команд нет вообще). Многосрезовая задача,
   начата отдельно от остального Этапа 3 (adaptation-срез идёт параллельно).
+
+  **Разведка (2026-08-16, агентом)**: ~100–110 уникальных команд. Найдено
+  **три независимых механизма диспетчеризации**, не два, как предполагалось —
+  это меняет схему каталога:
+  1. aiogram `@router.message(Command("..."))` — 79 команд по прямому грепу
+     (`aliases.py` 4, `chat_assistant.py` 14, `private_panel.py` 1,
+     `relationships.py` 12, `settings.py` 5, `stats.py` 11, `economy.py` 13,
+     `help.py` 1, `moderation.py` 11, `text_commands.py` 2, `game/router.py` 3).
+  2. `catalog.py`'s `COMMAND_KEY_DEFAULT_SOURCE_TRIGGER`/`PREFIX_TRIGGER_TO_COMMAND_KEY`
+     (66 non-social ключей) — **только** через русские фразы;
+     `match_builtin_command()`/`resolve_text_command()` явно отклоняют текст,
+     начинающийся с `/` (`if normalized.startswith("/"): return None`), то
+     есть большинство этих ключей **не имеют slash-формы вообще**.
+  3. **Найден при проверке (не угадан)**: часть команд дispatch'ится через
+     отдельный ad-hoc regex-мэтчинг в обход обоих механизмов выше — например
+     `/article` работает через `r"^\s*/article(?:@[A-Za-z0-9_]+)?\s*$"` в
+     `resolver.py:249` + `_is_daily_article_command()` в `text_commands.py`,
+     а НЕ через `@router.message(Command("article"))` (такого нет вообще) и
+     НЕ дублируется в `COMMAND_KEY_DEFAULT_SOURCE_TRIGGER` с `/`-формой.
+     Первая попытка (до проверки regex) — посчитать `/article` в
+     `user_docs.py` ошибкой и удалить — была бы сама ошибкой; переписана
+     после того, как нашёлся реальный код диспетчеризации. Это значит: при
+     заполнении каталога **нельзя полагаться только на грep по
+     `Command("...")`** — часть команд обнаруживается только чтением
+     `resolver.py`/`text_commands.py` целиком.
+
+  **Схема** (`command_catalog.py`, новый модуль — `catalog.py` уже 1052
+  строки, отдельный файл по уже принятой в сессии конвенции): `CommandSpec`
+  с полями `key, category, syntax (tuple), title_ru, description_ru,
+  examples, natural_triggers, notes` — плюс `dispatch_kind: "slash" |
+  "natural_language" | "both"`, добавленное как урок из находки №3 выше,
+  чтобы не терять точность на масштабе.
+
+  **Найден отдельный реальный баг документации** (агентом, тот же класс, что
+  и RP-действия сегодня): вся **гача-механика** (`gachagive`, `gacha_pull`
+  → «гача генш», `gacha_profile` → «моя гача генш», `gacha_info` → «гача
+  инфо», `gacha_skip` → «гача скип генш») **не задокументирована нигде** — ни
+  в `help.py`, ни в `USER_GUIDE.md`/`ADMIN_GUIDE.md`, ни (предположительно)
+  в `user_docs.py`/`admin_docs.py`. Не исправлено в этом срезе — банеры и
+  механика пулов не изучены достаточно глубоко для точного описания, будет
+  закрыто в своей категории (`misc`/`gacha`) позже, не наспех.
+
+  **План по срезам** (категории из разведки, каждая — отдельный
+  срез/коммит/CI): (1) **[x] сделано** — `command_catalog.py` schema
+  (`CommandSpec` c `dispatch_kind: "slash"|"natural_language"|"both"`) +
+  категория **economy** (5 команд-групп, переиспользован уже верифицированный
+  текст из среза про availability badges, не переписан заново) +
+  `user_docs.py`'s economy-секция переключена на источник. По пути найден и
+  закрыт **дубль**, не баг отсутствия: `/article` уже был описан в карточке
+  «Объявления, подписка и чатовые мемы» — при первой попытке добавить ему
+  отдельную карточку получился бы дубль на странице; исправлено до коммита
+  (см. журнал работ). Также найдено (не угадано, а прочитано в коде): у бота
+  есть **третий механизм диспетчеризации** команд помимо aiogram `Command()`
+  и `catalog.py` — ad-hoc regex/прямая проверка фразы в самом хендлере
+  (`_is_daily_article_command()` в `text_commands.py` для `/article`), не
+  ловится грепом по `Command("...")`. Тесты
+  (`test_command_catalog.py`) verify каждый `syntax`/`natural_triggers` по
+  реальному коду (`economy.py`, `catalog.py`'s trigger maps), не только
+  внутреннюю согласованность каталога. (2) **games**; (3)
+  **family/relationships**; (4) **social/admin/moderation**; (5)
+  **settings/misc** (включая gacha — найдена агентом полностью
+  недокументированной нигде, требует отдельного изучения механики банеров
+  перед описанием); (6) `help.py` — не обязательно full-derive (лимит длины
+  Telegram-сообщения уже был причиной оставить RP-список в help.py выжимкой,
+  не полным дублем — тот же принцип, вероятно, применится и здесь: curated
+  highlight subset из каталога, а не 100+ строк); (7)
+  `USER_GUIDE.md`/`ADMIN_GUIDE.md` — решить, генерировать ли эти
+  markdown-файлы целиком или только reference-секцию по командам поверх
+  существующей prose (открытый вопрос дизайна, не решён заранее — будет
+  видно по объёму после (1)–(5)).
 - [x] Не хранить секретные admin procedures в публичном пользовательском разделе.
   Проверено построчным аудитом всех 671 строки `user_docs.py` против
   `docs/ADMIN_GUIDE.md`: админских команд управления (роли, настройки,
@@ -966,6 +1036,7 @@ responsive → accessibility → visual review → TODO update.
 
 | Дата | Исполнитель | Задача | Статус | Commit/проверки | Примечание |
 |---|---|---|---|---|---|
+| 2026-08-16 | Claude | Единый источник slash-команд: schema + категория economy (1 из 7 срезов плана) | `[~]` | commit: pending; 1041 unit (новые: `test_command_catalog.py` 5/5, +2 в `test_web_user_docs.py`); `git diff --check` | Новый `command_catalog.py`: `CommandSpec` с `dispatch_kind` (slash/natural_language/both) — добавлено после находки, что часть команд (`/article`) диспетчеризуется через третий, ad-hoc regex-путь в обход и aiogram `Command()`, и `catalog.py`, что не ловится простым грепом. 5 economy command-групп заполнены переиспользованием уже верифицированного текста из среза про availability badges (не переписаны с нуля). `user_docs.py`'s экономика переключена на источник. Найден и закрыт **дубль до коммита**: `/article` чуть не получил вторую карточку — уже был описан в «Объявления, подписка и чатовые мемы»; вместо новой карточки этот существующий item частично переключён на каталог (только commands/triggers для article, остальное — своё). Тесты verify syntax/triggers каталога против реального кода (`Command("...")` в `economy.py`, trigger maps в `catalog.py`), а не только внутреннюю согласованность. Осталось 6 из 7 срезов плана (games, family/relationships, social/admin/moderation, settings/misc+gacha, help.py, USER_GUIDE/ADMIN_GUIDE). |
 | 2026-08-16 | Claude | Этап 3: «Качество документации» закрыта, поиск добавлен в admin_docs, slash-команды помечены `[?]` | `[~]` | commit: 2e3b8f0; 1034 unit (новые: `test_web_docs_quality.py` 3/3, `test_web_admin_docs_browser.py` 1/1, +тесты search/determinism в `test_web_admin_docs.py`); ESLint/Stylelint (`docs-search.css` расширен); HTMLHint ×9; `git diff --check`; Playwright spot-check | Поиск добавлен на `admin_docs.html` (переиспользует `docs-search.css`/`.js` без изменений). **Найден и исправлен реальный баг** того же класса, что был у `.admin-table-card[hidden]` в прошлом срезе: `.docs-card{display:grid}` побеждал браузерный `[hidden]` — карточки, отфильтрованные поиском внутри частично совпадающей секции, оставались видимыми. Существующие Playwright-тесты поиска (написанные в прошлом срезе для user_docs) не ловили это, потому что проверяли только атрибут `[hidden]`, а не факт рендера — оба файла переведены на CSS-селектор `:visible`. Закрыты: heading hierarchy (без пропуска уровней на обеих страницах), keyboard navigation (реальный `.focus()` на поиске/копировании/deep-link), search index детерминированность и отсутствие защищённых данных (два вызова context-builder'а дают идентичный результат; реальный `chat_id`/`chat_title` не попадают в индекс). Slash-команды по разделам зафиксированы как `[?]` в журнале решений — объём (80–150+ команд, 904 строки в 3 файлах без готового каталога-источника) требует решения пользователя, пропущено без блокировки по его инструкции. Этап 3: ~31% → ~38%. Дальше: решение по slash-командам или сразу адаптация под mobile/tablet. |
 | 2026-08-16 | Claude | Этап 3: «Администраторская документация» закрыта полностью (5 из 5) | `[x]` | commit: 6147a52; 1027 unit (2 новых теста в `test_web_admin_docs.py`); HTMLHint ×9 (обновлён `render_admin_docs_fixture.py` с примером examples/notes); Playwright spot-check 3 карточек; `git diff --check` | Добавлены секции «Рассылки» (текст/медиа, реакции, аудитория с поиском, история доставки, submit guard) и «Обслуживание» (backup, обзор таблиц, edit/delete, «Технический режим») — контент сверен с реальным кодом композера и роутов, не придуман. Верифицирован (не изменён) уже рабочий deep-link `?` из карточек настроек в `chat.html` на anchor в `admin_docs.html` — новый сквозной тест `test_setting_field_doc_links_resolve_on_the_admin_docs_page`. Добавлены `examples`/`notes` в шаблон (переиспользуют существующие CSS-классы, новый CSS не понадобился): пары ❌/✅ с текстом ошибок настроек, процитированным дословно из `parse_chat_setting_value`; 2 факта об ограничениях Telegram, проверенных по коду (`admin-broadcast.js` 10 МБ фото, `backup.py` chunking на 45 МБ из-за лимита ~50 МБ). Этап 3: ~26% → ~31%. |
 | 2026-08-16 | Claude | Этап 3: отметки доступности функции/настроек — закрывает «Пользовательскую документацию» кроме responsive TOC | `[x]` | commit: 210bcb0; 1023 unit (новый тест в `test_web_user_docs.py`); ESLint/Stylelint/HTMLHint ×9 без изменений (переписан `render_user_docs_fixture.py`); Playwright spot-check; `git diff --check` | `_docs_item()` получил `requires_settings`, генерирующий бейджи `"<label> по настройке"` из единого источника `SETTING_META` вместо расплывчатых hand-typed плейсхолдеров («по настройкам» без указания какой). 8 бейджей на 6 карточек, все проверены по реальному коду хендлеров (`economy_enabled`/`craft_enabled`/`auctions_enabled`/`titles_enabled`/`family_tree_enabled`/`actions_18_enabled`), не угаданы. Сознательно пропущена «Кто я» — там 18+ гейтит только одну тему внутри игры, не всю карточку. Найден и исправлен CI-баг того же класса, что уже был у admin_docs: новый импорт `SETTING_META` в `user_docs.py` транзитивно тянет pydantic через `chat_settings.py`, `render_user_docs_fixture.py` пришлось переписать на ручную сборку контекста (проверено против Jinja2-only venv). Это закрывает весь раздел «Пользовательская документация» кроме намеренно отложенного responsive TOC/drawer (решение от 2026-08-16). Этап 3: ~22% → ~26%. |
