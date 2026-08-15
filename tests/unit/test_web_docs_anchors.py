@@ -15,7 +15,10 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
+from selara.core.chat_settings import default_chat_settings
+from selara.core.config import Settings
 from selara.web.admin_docs import build_admin_docs_context
+from selara.web.presenters import build_settings_sections
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
 
@@ -85,3 +88,35 @@ def test_admin_docs_anchors_are_unique_and_internal_links_resolve() -> None:
 def test_user_docs_anchors_are_unique_and_internal_links_resolve() -> None:
     html = _render("user_docs.html", build_user_docs_context(chat=None))
     _assert_anchors_are_sound(html, page_name="user_docs.html")
+
+
+def _settings() -> Settings:
+    return Settings.model_validate(
+        {
+            "BOT_TOKEN": "123456:TEST",
+            "DATABASE_URL": "postgresql+asyncpg://user:pass@localhost:5432/selara_test",
+            "BOT_USERNAME": "selara_test_bot",
+        }
+    )
+
+
+def test_setting_field_doc_links_resolve_on_the_admin_docs_page() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Администраторская документация": "Ссылки из полей админки ведут сразу
+    # к релевантному anchor." chat.html's setting cards link to
+    # "{admin_docs_url}#{item.doc_anchor}" (build_settings_sections in
+    # presenters.py); this proves every doc_anchor it generates is a real id
+    # on the rendered admin_docs.html page, not just that both sides happen
+    # to call the same setting_anchor() function.
+    defaults = default_chat_settings(_settings())
+    sections = build_settings_sections(current=defaults, defaults=defaults, editable=True)
+    doc_anchors = {item["doc_anchor"] for section in sections for item in section["items"]}
+    assert doc_anchors
+
+    admin_docs_html = _render("admin_docs.html", build_admin_docs_context(chat=None))
+    collector = _AnchorCollector()
+    collector.feed(admin_docs_html)
+    real_ids = set(collector.ids)
+
+    missing = doc_anchors - real_ids
+    assert not missing, f"setting doc_anchor targets missing from admin_docs.html: {sorted(missing)}"

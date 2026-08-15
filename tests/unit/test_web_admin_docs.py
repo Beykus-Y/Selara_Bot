@@ -73,6 +73,51 @@ def test_roles_docs_participant_has_no_permissions_listed() -> None:
     assert roles["participant"]["permissions"] is None
 
 
+def test_admin_docs_covers_broadcasts_and_maintenance() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Администраторская документация": "Настройки чата, роли, permissions,
+    # aliases, triggers, рассылки и обслуживание." — рассылки и обслуживание
+    # были единственными двумя темами из этого списка, для которых вообще не
+    # было ни одной секции в admin_docs.py.
+    context = build_admin_docs_context(chat=None)
+    titles = {section["title"] for section in context["docs_sections"]}
+    assert "Рассылки" in titles
+    assert "Обслуживание" in titles
+
+
+def test_admin_docs_settings_workflow_includes_erroneous_examples() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Администраторская документация": "Примеры включают ошибочные варианты
+    # и способы исправления." Errors quoted verbatim from
+    # core.chat_settings.parse_chat_setting_value, not invented.
+    context = build_admin_docs_context(chat=None)
+    items = {
+        item["title"]: item
+        for section in context["docs_sections"]
+        for item in section["items"]
+    }
+    examples = items["Подсказки по формату"]["examples"]
+    assert any("Значение должно быть целым числом" in example for example in examples)
+    assert any(example.startswith("❌") for example in examples)
+    assert any(example.startswith("✅") for example in examples)
+
+
+def test_admin_docs_broadcasts_and_maintenance_note_telegram_limits() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Администраторская документация": "Отображать ограничения Telegram
+    # рядом с соответствующими возможностями." Facts verified against real
+    # code: admin-broadcast.js's 10 MB client-side photo guard and
+    # infrastructure/backup.py's BACKUP_CHUNK_SIZE_BYTES chunking.
+    context = build_admin_docs_context(chat=None)
+    items = {
+        item["title"]: item
+        for section in context["docs_sections"]
+        for item in section["items"]
+    }
+    assert any("10 МБ" in note for note in items["Текст и медиа"]["notes"])
+    assert any("50 МБ" in note for note in items["Ручной запрос backup"]["notes"])
+
+
 def test_admin_docs_context_includes_roles_docs() -> None:
     context = build_admin_docs_context(chat=None)
     codes = {role["code"] for role in context["roles_docs"]}
