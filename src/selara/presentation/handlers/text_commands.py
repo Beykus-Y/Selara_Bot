@@ -56,6 +56,7 @@ from selara.presentation.auth import get_role_label_ru, has_command_access, has_
 from selara.presentation.commands.access import parse_command_rank_phrase, resolve_command_key_input
 from selara.presentation.commands.catalog import (
     COMMAND_KEYS_WITH_TAIL,
+    SOCIAL_ACTION_18_PLUS as _SOCIAL_ACTION_18_PLUS,
     SOCIAL_COMMAND_KEY_TO_ACTION,
     SOCIAL_TRIGGER_TO_COMMAND_KEY,
     match_builtin_command,
@@ -521,28 +522,6 @@ _SOCIAL_ACTION_CANONICAL: dict[str, str] = {
 _INLINE_RP_QUERY_ACTIONS: dict[str, str] = {
     **_SOCIAL_ACTION_ALIASES,
     **{action_key: action_key for action_key in _SOCIAL_ACTION_CANONICAL},
-}
-_SOCIAL_ACTION_18_PLUS: set[str] = {
-    "fuck",
-    "seduce",
-    "makeout",
-    "night",
-    "bend",
-    "kneel",
-    "undress",
-    "ravage",
-    "take",
-    "have",
-    "impale",
-    "trap",
-    "floor",
-    "spread",
-    "surrender",
-    "gang",
-    "banghard",
-    "shovein",
-    "suck",
-    "dickwave",
 }
 _SOCIAL_ACTION_REPLICA_TEMPLATES: tuple[str, ...] = (
     "💬 С репликой: «{replica}»",

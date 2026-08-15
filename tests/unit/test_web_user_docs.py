@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+from selara.presentation.commands.catalog import build_social_action_docs
 from selara.web.rendering import create_template_environment
 from selara.web.user_docs import build_user_docs_context
 
@@ -56,6 +57,36 @@ def test_user_docs_collection_fields_are_not_plain_strings() -> None:
             for field_name in ("badges", "commands", "triggers", "examples", "steps", "notes"):
                 value = item.get(field_name)
                 assert not isinstance(value, str), f"{item['title']}::{field_name} should be a collection, not a string"
+
+
+def _find_item(context: dict[str, Any], *, title: str) -> dict[str, Any]:
+    for section in context["docs_sections"]:
+        for item in section["items"]:
+            if item["title"] == title:
+                return item
+    raise AssertionError(f"docs item {title!r} not found")
+
+
+def test_user_docs_rp_action_lists_match_canonical_catalog_source() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3 "Модель
+    # контента": the RP-action trigger lists used to be hand-typed and had
+    # drifted (20 real actions were missing entirely, 4 more listed a
+    # non-canonical alternate trigger). They must now be derived from
+    # selara.presentation.commands.catalog.build_social_action_docs() so the
+    # docs page cannot silently fall out of sync with the bot again.
+    canonical = build_social_action_docs()
+    canonical_non_18 = {action.trigger for action in canonical if not action.is_18_plus}
+    canonical_18_plus = {action.trigger for action in canonical if action.is_18_plus}
+
+    context = build_user_docs_context(chat=None)
+    non_18_item = _find_item(context, title="Reply-действия без 18+")
+    plus_18_item = _find_item(context, title="18+ reply-действия")
+
+    assert set(non_18_item["triggers"]) == canonical_non_18
+    assert set(plus_18_item["triggers"]) == canonical_18_plus
+    assert len(non_18_item["triggers"]) == len(canonical_non_18)
+    assert len(plus_18_item["triggers"]) == len(canonical_18_plus)
+    assert not canonical_non_18 & canonical_18_plus
 
 
 def test_user_docs_template_renders_command_lists() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from selara.domain.entities import UserChatOverview
+from selara.presentation.commands.catalog import build_social_action_docs
 
 
 def _docs_item(
@@ -41,6 +42,13 @@ def _docs_section(
         "items": items,
     }
 
+
+# Single source for both RP-action trigger lists below — derived from
+# selara.presentation.commands.catalog so this page cannot drift out of sync
+# with the bot's actual command set or its actions_18_enabled gate.
+_SOCIAL_ACTION_DOCS = build_social_action_docs()
+_SOCIAL_TRIGGERS_NON_18 = tuple(action.trigger for action in _SOCIAL_ACTION_DOCS if not action.is_18_plus)
+_SOCIAL_TRIGGERS_18_PLUS = tuple(action.trigger for action in _SOCIAL_ACTION_DOCS if action.is_18_plus)
 
 _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
     _docs_section(
@@ -458,88 +466,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "Бот генерирует готовую RP-реплику и упоминания."
             ),
             badges=("reply", "группа"),
-            triggers=(
-                "шлепнуть",
-                "сжечь",
-                "убить",
-                "ударить",
-                "вмазать",
-                "въебать",
-                "отпиздить",
-                "отмудохать",
-                "запинать",
-                "оттаскать",
-                "скрутить",
-                "швырнуть",
-                "приложить",
-                "припечатать",
-                "протащить",
-                "настучать по голове",
-                "прижать к стене",
-                "схватить за шкирку",
-                "выкинуть в окно",
-                "спустить с лестницы",
-                "отправить в нокаут",
-                "дать подзатыльник",
-                "дать леща",
-                "навалять",
-                "вломить",
-                "размазать",
-                "разъебать",
-                "разнести",
-                "унизить",
-                "засмеять",
-                "захуесосить",
-                "забуллить",
-                "задоминировать",
-                "застроить",
-                "осадить",
-                "заткнуть",
-                "послать нахуй",
-                "выгнать",
-                "помурлыкать",
-                "потереться",
-                "поняшиться",
-                "похныкать в плечо",
-                "свернуться рядом",
-                "засопеть",
-                "поурчать",
-                "уткнуться",
-                "подлезть",
-                "приласкать",
-                "залипнуть на",
-                "обнять",
-                "поцеловать",
-                "пожать руку",
-                "дать пять",
-                "погладить",
-                "куснуть",
-                "пнуть",
-                "ущипнуть",
-                "прижать",
-                "наступить",
-                "пощекотать",
-                "ткнуть",
-                "сесть на",
-                "оттолкнуть",
-                "утешить",
-                "успокоить",
-                "защитить",
-                "поднять на руки",
-                "утащить",
-                "выпроводить",
-                "вышвернуть",
-                "подмигнуть",
-                "потанцевать",
-                "поклониться",
-                "подбодрить",
-                "угостить",
-                "похвалить",
-                "поздравить",
-                "укрыть",
-                "наругать",
-                "дать кулак",
-            ),
+            triggers=_SOCIAL_TRIGGERS_NON_18,
             examples=("reply + обнять", "reply + оттолкнуть", "reply + наругать"),
         ),
         _docs_item(
@@ -548,28 +475,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "Пикантные действия работают тем же способом, но отдельно завязаны на `actions_18_enabled`."
             ),
             badges=("reply", "группа", "18+ по настройке"),
-            triggers=(
-                "трахнуть",
-                "соблазнить",
-                "засосать",
-                "провести ночь с",
-                "нагнуть",
-                "поставить на колени",
-                "раздеть",
-                "выебать",
-                "взять",
-                "поиметь",
-                "насадить",
-                "зажать",
-                "завалить",
-                "разложить",
-                "отдаться",
-                "пустить по кругу",
-                "оттрахать",
-                "засадить",
-                "отсосать",
-                "минет",
-            ),
+            triggers=_SOCIAL_TRIGGERS_18_PLUS,
             examples=("reply + трахнуть", "reply + поиметь", "reply + отсосать"),
             notes=(
                 "Если 18+ выключен, бот покажет прямой отказ и подскажет, какая настройка отвечает за доступ.",

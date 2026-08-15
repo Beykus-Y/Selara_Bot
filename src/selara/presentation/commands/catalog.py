@@ -392,6 +392,35 @@ SOCIAL_COMMAND_KEY_TO_ACTION: dict[TextCommandKey, str] = {
     "social_dickwave": "dickwave",
 }
 
+# Action slugs (SOCIAL_COMMAND_KEY_TO_ACTION values) that are gated behind the
+# chat's `actions_18_enabled` setting. This is the runtime-authoritative 18+
+# marker used by text_commands._send_social_action; docs derive their 18+
+# grouping from it via build_social_action_docs() instead of hand-copying it.
+SOCIAL_ACTION_18_PLUS: frozenset[str] = frozenset(
+    {
+        "fuck",
+        "seduce",
+        "makeout",
+        "night",
+        "bend",
+        "kneel",
+        "undress",
+        "ravage",
+        "take",
+        "have",
+        "impale",
+        "trap",
+        "floor",
+        "spread",
+        "surrender",
+        "gang",
+        "banghard",
+        "shovein",
+        "suck",
+        "dickwave",
+    }
+)
+
 PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "+антирейд": "antiraid_on",
     "-антирейд": "antiraid_off",
@@ -628,6 +657,34 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "social_invitedance": "пригласить на танец",
     "social_dickwave": "поводить членом",
 }
+
+
+@dataclass(frozen=True)
+class SocialActionDoc:
+    command_key: TextCommandKey
+    trigger: str
+    is_18_plus: bool
+
+
+def build_social_action_docs() -> tuple[SocialActionDoc, ...]:
+    """Every social reply-action with its canonical trigger and 18+ flag.
+
+    Single source for the RP-action lists shown on the user docs page —
+    derived from COMMAND_KEY_DEFAULT_SOURCE_TRIGGER (canonical trigger),
+    SOCIAL_COMMAND_KEY_TO_ACTION (action slug) and SOCIAL_ACTION_18_PLUS
+    (runtime 18+ gate), so the docs cannot drift out of sync with the bot.
+    """
+
+    return tuple(
+        SocialActionDoc(
+            command_key=command_key,
+            trigger=trigger,
+            is_18_plus=SOCIAL_COMMAND_KEY_TO_ACTION[command_key] in SOCIAL_ACTION_18_PLUS,
+        )
+        for command_key, trigger in COMMAND_KEY_DEFAULT_SOURCE_TRIGGER.items()
+        if command_key.startswith("social_")
+    )
+
 
 COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "lastseen",
