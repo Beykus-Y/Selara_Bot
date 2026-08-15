@@ -935,6 +935,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "show_logout": True,
             "flash": flash,
             "error": error,
+            "extra_styles": ["docs-search.css"],
+            "extra_scripts": ["docs-search.js"],
         }
 
     def _user_docs_layout_context(chat_id: int | None, *, flash: str | None, error: str | None) -> dict[str, object]:

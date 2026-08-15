@@ -29,3 +29,11 @@
   color: var(--muted-strong);
   font-size: 13px;
 }
+
+/* .docs-card's own `display: grid` (panel.css) beats the UA `[hidden]`
+   rule at equal specificity, so a filtered-out card without a hidden
+   parent section stays visually rendered. Same bug class as
+   .admin-table-card[hidden] found earlier this session. */
+[data-docs-search-card][hidden] {
+  display: none;
+}

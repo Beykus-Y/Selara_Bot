@@ -96,7 +96,7 @@ async def test_search_filters_cards_and_hides_sections_with_no_matches() -> None
             search = page.locator("[data-docs-search-input]")
             await search.fill("уебать")
 
-            visible_cards = page.locator("[data-docs-search-card]:not([hidden])")
+            visible_cards = page.locator("[data-docs-search-card]:visible")
             assert await visible_cards.count() == 1
             assert "уебать" in (await visible_cards.first.inner_text()).lower()
 
@@ -122,12 +122,12 @@ async def test_search_shows_empty_state_for_no_matches_and_clears_on_reset() -> 
 
             await search.fill("совершенно-несуществующий-запрос-xyz")
             assert await empty_message.is_visible()
-            assert await page.locator("[data-docs-search-card]:not([hidden])").count() == 0
+            assert await page.locator("[data-docs-search-card]:visible").count() == 0
 
             await search.fill("")
             assert await empty_message.is_hidden()
             total_cards = await page.locator("[data-docs-search-card]").count()
-            visible_cards = await page.locator("[data-docs-search-card]:not([hidden])").count()
+            visible_cards = await page.locator("[data-docs-search-card]:visible").count()
             assert visible_cards == total_cards
         finally:
             await browser.close()

@@ -166,6 +166,12 @@ def test_user_docs_uses_bounded_search_assets() -> None:
     assert len(docs_search_script.read_text(encoding="utf-8").splitlines()) <= 60
 
 
+def test_admin_docs_reuses_the_shared_search_assets() -> None:
+    docs_source = (TEMPLATE_DIR / "admin_docs.html").read_text(encoding="utf-8")
+    assert "data-docs-search-input" in docs_source
+    assert "data-docs-search-card" in docs_source
+
+
 def test_admin_feedback_and_slice_workflow_have_bounded_contracts() -> None:
     feedback_css = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.css"
     feedback_script = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.js"

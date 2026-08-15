@@ -24,6 +24,20 @@
       <div class="panel-head">
         <h2>Навигация</h2>
       </div>
+      <div class="docs-search-box">
+        <label class="sr-only" for="admin-docs-search-input">Поиск по документации</label>
+        <input
+          id="admin-docs-search-input"
+          class="docs-search-input"
+          type="search"
+          placeholder="Настройка, раздел, слово из описания…"
+          autocomplete="off"
+          data-docs-search-input
+        >
+        <p class="docs-search-empty" role="status" hidden data-docs-search-empty>
+          Совпадений не найдено. Измените запрос.
+        </p>
+      </div>
       <div class="docs-nav-stack">
         <div class="docs-nav-group">
           <strong>Разделы панели</strong>
@@ -99,7 +113,7 @@
       </section>
 
       {% for section in docs_sections %}
-        <section class="panel docs-section" id="{{ section.anchor }}">
+        <section class="panel docs-section" id="{{ section.anchor }}" data-docs-search-section>
           <div class="panel-head">
             <div>
               <h2>{{ section.title }}</h2>
@@ -108,7 +122,7 @@
           </div>
           <div class="docs-card-grid">
             {% for item in section["items"] %}
-              <article class="docs-card">
+              <article class="docs-card" data-docs-search-card data-docs-search-text="{{ item.search_text }}">
                 <div class="docs-card-head">
                   <strong>{{ item.title }}</strong>
                 </div>

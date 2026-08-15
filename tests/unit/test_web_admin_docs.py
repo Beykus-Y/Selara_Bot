@@ -85,6 +85,49 @@ def test_admin_docs_covers_broadcasts_and_maintenance() -> None:
     assert "Обслуживание" in titles
 
 
+def test_admin_docs_items_carry_a_lowercased_search_text_covering_their_fields() -> None:
+    context = build_admin_docs_context(chat=None)
+    for section in context["docs_sections"]:
+        for item in section["items"]:
+            search_text = item["search_text"]
+            assert search_text == search_text.lower()
+            assert item["title"].lower() in search_text
+            assert item["text"].lower() in search_text
+            for example in item.get("examples", ()):
+                assert example.lower() in search_text
+            for note in item.get("notes", ()):
+                assert note.lower() in search_text
+
+
+def test_admin_docs_search_text_is_deterministic_and_holds_no_protected_data() -> None:
+    # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
+    # "Качество документации": "Search index строится детерминированно и не
+    # содержит защищённые данные." docs_sections is a static, hand-written
+    # tuple with no request-specific input beyond the optional `chat` used
+    # only for the unrelated "origin_chat" link, so two independent builds
+    # must be byte-identical and never mention a real chat_id/title.
+    first = build_admin_docs_context(chat=None)
+    second = build_admin_docs_context(chat=None)
+    assert first["docs_sections"] == second["docs_sections"]
+
+    from selara.domain.entities import UserChatOverview
+
+    chat = UserChatOverview(
+        chat_id=-100123456789,
+        chat_type="group",
+        chat_title="SECRET-CHAT-TITLE",
+        bot_role="owner",
+        message_count=None,
+        last_seen_at=None,
+    )
+    with_chat = build_admin_docs_context(chat=chat)
+    assert with_chat["docs_sections"] == first["docs_sections"]
+    for section in with_chat["docs_sections"]:
+        for item in section["items"]:
+            assert "secret-chat-title" not in item["search_text"]
+            assert "-100123456789" not in item["search_text"]
+
+
 def test_admin_docs_settings_workflow_includes_erroneous_examples() -> None:
     # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
     # "Администраторская документация": "Примеры включают ошибочные варианты

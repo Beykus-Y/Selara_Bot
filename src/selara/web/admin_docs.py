@@ -378,9 +378,23 @@ def build_settings_docs_sections() -> list[dict[str, Any]]:
     return sections
 
 
+def _with_search_text(item: dict[str, Any]) -> dict[str, Any]:
+    search_text = " ".join(
+        (item["title"], item["text"], *item.get("examples", ()), *item.get("notes", ()))
+    ).lower()
+    return {**item, "search_text": search_text}
+
+
+def build_docs_sections() -> list[dict[str, Any]]:
+    return [
+        {**dict(section), "items": tuple(_with_search_text(item) for item in section["items"])}
+        for section in _FEATURE_DOC_SECTIONS
+    ]
+
+
 def build_admin_docs_context(*, chat: UserChatOverview | None) -> dict[str, Any]:
     settings_sections = build_settings_docs_sections()
-    docs_sections = [dict(section) for section in _FEATURE_DOC_SECTIONS]
+    docs_sections = build_docs_sections()
     return {
         "page_title": "Selara • Документация администратора",
         "page_name": "admin-docs",
