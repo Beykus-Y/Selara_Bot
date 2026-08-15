@@ -1,144 +1,331 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <div class="panel">
-    <div class="panel-head">
+  <div class="panel archive-panel">
+    <header class="archive-page-head">
       <div>
-        <nav class="breadcrumb">
+        <nav class="breadcrumb" aria-label="Хлебные крошки">
           <a href="/app/admin">Админка</a>
-          <span class="breadcrumb-sep">/</span>
-          <span>{{ table_title }}</span>
+          <span class="breadcrumb-sep" aria-hidden="true">/</span>
+          <span>Архив сообщений</span>
         </nav>
-        <h2>{{ table_title }}</h2>
-        <p class="panel-subtitle">Только полезные поля без raw JSON. Записей: {{ total }}</p>
+        <h2>Архив сообщений</h2>
+        <p class="panel-subtitle">
+          Сохранённые входящие сообщения и снимки редакций. Это диагностический архив Selara, а не полная копия истории Telegram.
+        </p>
       </div>
-    </div>
+      <div class="archive-total" aria-label="Количество сообщений в выбранном чате">
+        <span>В выборке</span>
+        <strong>{{ total }}</strong>
+      </div>
+    </header>
 
-    <div class="admin-table-controls">
-      <form class="admin-search-form" method="get" action="/app/admin/table/{{ table_name }}" style="flex-wrap: wrap; gap: 8px;">
+    <form id="archive-filters" class="archive-filters" method="get" action="/app/admin/table/{{ table_name }}">
+      {% if active_chat %}
+        <input type="hidden" name="chat_id" value="{{ active_chat.chat_id }}">
+      {% endif %}
+      <div class="archive-filter-intro">
+        <div>
+          <span class="archive-kicker">Поиск в выбранном чате</span>
+          <p>Сочетайте поля — все активные условия применяются одновременно.</p>
+        </div>
+        {% if active_filter_count %}
+          <span class="archive-active-count">Активно: {{ active_filter_count }}</span>
+        {% endif %}
+      </div>
+      {% if filter_errors %}
+        <div class="archive-filter-errors" role="alert">
+          <strong>Проверьте параметры фильтра</strong>
+          <ul>
+            {% for filter_error in filter_errors %}
+              <li>{{ filter_error }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+      <label class="archive-filter archive-filter-wide" for="archive-text-filter">
+        <span>Поиск по тексту или подписи</span>
         <input
-          type="text"
-          name="chat_id"
-          placeholder="chat_id"
-          value="{{ filters_input.get('chat_id', '') }}"
+          id="archive-text-filter"
           class="admin-search-input"
-          style="min-width: 120px; flex: 1;"
-        >
-        <input
-          type="text"
-          name="user_id"
-          placeholder="user_id"
-          value="{{ filters_input.get('user_id', '') }}"
-          class="admin-search-input"
-          style="min-width: 120px; flex: 1;"
-        >
-        <input
-          type="text"
+          type="search"
           name="text"
-          placeholder="текст / подпись"
           value="{{ filters_input.get('text', '') }}"
-          class="admin-search-input"
-          style="min-width: 180px; flex: 2;"
+          placeholder="Слово или фраза"
         >
-        <select name="snapshot_kind" class="admin-search-input" style="min-width: 140px; flex: 1;">
-          <option value="" {% if not filters_input.get('snapshot_kind') %}selected{% endif %}>created / edited</option>
-          <option value="created" {% if filters_input.get('snapshot_kind') == 'created' %}selected{% endif %}>created</option>
-          <option value="edited" {% if filters_input.get('snapshot_kind') == 'edited' %}selected{% endif %}>edited</option>
-        </select>
-        <button type="submit" class="button primary">Найти</button>
-        {% if filters_input.get('chat_id') or filters_input.get('user_id') or filters_input.get('text') or filters_input.get('snapshot_kind') %}
-          <a href="/app/admin/table/{{ table_name }}" class="button ghost">Сбросить</a>
-        {% endif %}
-      </form>
-    </div>
-
-    <div class="table-wrapper">
-      <table class="admin-data-table">
-        <thead>
-          <tr>
-            <th>Когда</th>
-            <th>Чат</th>
-            <th>Автор</th>
-            <th>Тип</th>
-            <th>Сообщение</th>
-            <th>Reply</th>
-            <th class="admin-actions-col">Действия</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in rows %}
-            <tr>
-              <td>{{ row.snapshot_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC</td>
-              <td>
-                <strong>{{ row.chat_label }}</strong>
-                <div class="text-muted"><code>{{ row.chat_id }}</code></div>
-              </td>
-              <td>
-                <strong>{{ row.user_label }}</strong>
-                <div class="text-muted"><code>{{ row.user_id }}</code></div>
-              </td>
-              <td>
-                <strong>{{ row.snapshot_kind }}</strong>
-                <div class="text-muted">{{ row.message_type }}</div>
-              </td>
-              <td>
-                {% if row.message_preview|length > 180 %}
-                  <span title="{{ row.message_preview }}">{{ row.message_preview[:180] }}...</span>
-                {% else %}
-                  {{ row.message_preview }}
-                {% endif %}
-              </td>
-              <td>
-                {% if row.reply_preview %}
-                  {% if row.reply_preview|length > 180 %}
-                    <span title="{{ row.reply_preview }}">{{ row.reply_preview[:180] }}...</span>
-                  {% else %}
-                    {{ row.reply_preview }}
-                  {% endif %}
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td class="admin-actions-col">
-                <span class="admin-row-actions">
-                  <a class="button button-small ghost" href="{{ row.raw_href }}">raw</a>
-                </span>
-              </td>
-            </tr>
-          {% else %}
-            <tr>
-              <td colspan="7" class="text-center text-muted">Нет записей</td>
-            </tr>
+      </label>
+      <label class="archive-filter" for="archive-user-filter">
+        <span>ID автора</span>
+        <input
+          id="archive-user-filter"
+          class="admin-search-input"
+          type="text"
+          inputmode="numeric"
+          name="user_id"
+          value="{{ filters_input.get('user_id', '') }}"
+          placeholder="Например, 123456"
+        >
+      </label>
+      <label class="archive-filter" for="archive-type-filter">
+        <span>Тип сообщения</span>
+        <select id="archive-type-filter" name="message_type" class="admin-search-input">
+          <option value="" {% if not filters_input.get('message_type') %}selected{% endif %}>Все типы</option>
+          {% for message_type_option in archive_message_type_options %}
+            <option value="{{ message_type_option.value }}" {% if filters_input.get('message_type') == message_type_option.value %}selected{% endif %}>{{ message_type_option.label }}</option>
           {% endfor %}
-        </tbody>
-      </table>
-    </div>
-
-    {% if total > limit %}
-      <div class="admin-pagination">
-        {% set filter_params = namespace(str='') %}
-        {% for key, value in filters_input.items() %}
-          {% if value %}
-            {% set filter_params.str = filter_params.str + '&' + key + '=' + value %}
-          {% endif %}
-        {% endfor %}
-
-        {% if page > 1 %}
-          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page - 1 }}{{ filter_params.str }}">← Назад</a>
-        {% endif %}
-
-        <span class="pagination-info">
-          Страница {{ page }} из {{ ((total + limit - 1) / limit)|int }}
-        </span>
-
-        {% if page * limit < total %}
-          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page + 1 }}{{ filter_params.str }}">Вперёд →</a>
+        </select>
+      </label>
+      <label class="archive-filter" for="archive-kind-filter">
+        <span>Редакция</span>
+        <select id="archive-kind-filter" name="snapshot_kind" class="admin-search-input">
+          <option value="" {% if not filters_input.get('snapshot_kind') %}selected{% endif %}>Созданные и изменённые</option>
+          <option value="created" {% if filters_input.get('snapshot_kind') == 'created' %}selected{% endif %}>Созданные</option>
+          <option value="edited" {% if filters_input.get('snapshot_kind') == 'edited' %}selected{% endif %}>Изменённые</option>
+        </select>
+      </label>
+      <label class="archive-filter" for="archive-reply-filter">
+        <span>Ответ на сообщение</span>
+        <select id="archive-reply-filter" name="has_reply" class="admin-search-input">
+          <option value="" {% if not filters_input.get('has_reply') %}selected{% endif %}>Любые сообщения</option>
+          <option value="yes" {% if filters_input.get('has_reply') == 'yes' %}selected{% endif %}>Только с ответом</option>
+          <option value="no" {% if filters_input.get('has_reply') == 'no' %}selected{% endif %}>Только без ответа</option>
+        </select>
+      </label>
+      <label class="archive-filter" for="archive-date-from-filter">
+        <span>Дата от</span>
+        <input
+          id="archive-date-from-filter"
+          class="admin-search-input"
+          type="date"
+          name="date_from"
+          value="{{ filters_input.get('date_from', '') }}"
+        >
+      </label>
+      <label class="archive-filter" for="archive-date-to-filter">
+        <span>Дата до</span>
+        <input
+          id="archive-date-to-filter"
+          class="admin-search-input"
+          type="date"
+          name="date_to"
+          value="{{ filters_input.get('date_to', '') }}"
+        >
+      </label>
+      <div class="archive-filter-actions">
+        <button type="submit" class="button primary">Применить</button>
+        {% if active_filter_count %}
+          <a href="{{ filter_reset_href }}" class="button ghost">Сбросить</a>
         {% endif %}
       </div>
-    {% endif %}
+    </form>
 
-    <div class="admin-back-link">
-      <a href="/app/admin" class="button ghost">← К списку таблиц</a>
+    <div class="archive-layout archive-{% if chat_selected_explicitly %}conversation{% else %}picker{% endif %}-mode">
+      <aside class="archive-chat-rail" aria-labelledby="archive-chats-title">
+        <div class="archive-rail-head">
+          <div>
+            <span class="archive-kicker">Навигация</span>
+            <h3 id="archive-chats-title">Чаты</h3>
+          </div>
+          <span class="archive-count">{{ chat_summaries|length }}</span>
+        </div>
+        <a class="button ghost small archive-filter-jump" href="#archive-filters">Настроить фильтры</a>
+        {% if chat_summaries %}
+          <div class="archive-chat-list">
+            {% for chat in chat_summaries %}
+              <a
+                class="archive-chat-card{% if chat.active %} is-active{% endif %}"
+                href="{{ chat.href }}"
+                {% if chat.active %}aria-current="page"{% endif %}
+              >
+                <span class="archive-chat-avatar" aria-hidden="true">{{ chat.label[:1]|upper }}</span>
+                <span class="archive-chat-copy">
+                  <span class="archive-chat-line">
+                    <strong>{{ chat.label }}</strong>
+                    <time>{{ chat.last_time }}</time>
+                  </span>
+                  <span class="archive-chat-preview">{{ chat.last_preview }}</span>
+                  <span class="archive-chat-meta">
+                    <code>{{ chat.chat_id }}</code>
+                    <span>{{ chat.snapshot_count }} снимков в недавней выборке</span>
+                  </span>
+                </span>
+              </a>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="archive-empty">
+            <strong>Архив пока пуст</strong>
+            <p>Когда Selara сохранит входящие сообщения, чаты появятся здесь.</p>
+          </div>
+        {% endif %}
+      </aside>
+
+      <section class="archive-conversation" aria-labelledby="archive-conversation-title">
+        <div class="archive-mobile-actions">
+          <a class="button ghost small archive-mobile-back" href="{{ back_to_chats_href }}">← К чатам</a>
+          <a class="button ghost small" href="#archive-filters">Фильтры</a>
+        </div>
+        {% if active_chat %}
+          <header class="archive-conversation-head">
+            <div>
+              <span class="archive-kicker">Выбранный чат</span>
+              <h3 id="archive-conversation-title">{{ active_chat.label }}</h3>
+              <p><code>{{ active_chat.chat_id }}</code> · {{ active_chat.message_count }} снимков по текущим фильтрам</p>
+            </div>
+            <a class="button ghost small" href="/app/admin/table/messages?chat_id={{ active_chat.chat_id }}">Технический режим</a>
+          </header>
+
+          <div class="archive-scope-note">
+            <strong>Что здесь показано</strong>
+            <span>Только сохранённые входящие сообщения и их редакции. Исходящие сообщения бота пока не архивируются.</span>
+          </div>
+
+          {% if rows %}
+            <div class="archive-message-list">
+              {% set grouping = namespace(date='') %}
+              {% for row in rows %}
+                {% if row.date_label != grouping.date %}
+                  {% set grouping.date = row.date_label %}
+                  <div class="archive-date-separator"><span>{{ row.date_label }}</span></div>
+                {% endif %}
+                <article class="archive-message archive-author-{{ row.author_tone }}{% if row.grouped_with_previous %} is-continuation{% endif %}{% if row.grouped_with_next %} has-continuation{% endif %}">
+                  <header class="archive-message-head">
+                    {% if row.grouped_with_previous %}
+                      <span class="archive-visually-hidden">Продолжение сообщений автора {{ row.user_label }}, ID {{ row.user_id }}</span>
+                    {% else %}
+                      <span class="archive-author-dot" aria-hidden="true"></span>
+                      <strong>{{ row.user_label }}</strong>
+                      <code>{{ row.user_id }}</code>
+                    {% endif %}
+                    <time datetime="{{ row.snapshot_at.isoformat() }}">{{ row.time_label }}</time>
+                  </header>
+                  {% if row.reply_preview %}
+                    <blockquote class="archive-reply">{{ row.reply_preview }}</blockquote>
+                  {% endif %}
+                  {% if row.has_text %}
+                    <p class="archive-message-body">
+                      {%- if row.message_segments -%}
+                        {% for segment in row.message_segments %}{% if segment.match %}<mark class="archive-search-hit">{{ segment.text }}</mark>{% else %}{{ segment.text }}{% endif %}{% endfor %}
+                      {%- else -%}
+                        {{ row.message_preview }}
+                      {%- endif -%}
+                    </p>
+                  {% endif %}
+                  {% if row.media_info %}
+                    <div class="archive-media-fallback archive-media-card">
+                      <div class="archive-media-summary">
+                        <span class="archive-media-icon" aria-hidden="true">{{ row.media_info.icon }}</span>
+                        <div class="archive-media-copy">
+                          <strong>{{ row.media_info.title }}</strong>
+                          {% if row.media_info.facts %}
+                            <ul class="archive-media-facts" aria-label="Метаданные файла">
+                              {% for fact in row.media_info.facts %}
+                                <li class="archive-media-fact">{{ fact }}</li>
+                              {% endfor %}
+                            </ul>
+                          {% endif %}
+                          <small>Файл не загружается автоматически.</small>
+                        </div>
+                      </div>
+                      {% if row.media_info.preview_href|default(false) %}
+                        <div class="archive-photo-preview" data-archive-photo-preview data-state="idle">
+                          <button
+                            class="button ghost small archive-photo-load"
+                            type="button"
+                            data-archive-photo-load
+                            data-preview-url="{{ row.media_info.preview_href }}"
+                            data-preview-alt="Фото из архивного сообщения #{{ row.telegram_message_id }}"
+                          >Показать фото</button>
+                          <span class="archive-photo-status" data-archive-photo-status aria-live="polite">Загрузится только после нажатия.</span>
+                          <div class="archive-photo-frame" data-archive-photo-frame hidden></div>
+                        </div>
+                      {% elif row.media_info.preview_notice|default(false) %}
+                        <p class="archive-photo-notice">{{ row.media_info.preview_notice }}</p>
+                      {% endif %}
+                    </div>
+                  {% elif not row.has_text %}
+                    <div class="archive-media-fallback">
+                      <span class="archive-media-icon" aria-hidden="true">▧</span>
+                      <div class="archive-media-copy">
+                        <strong>{{ row.message_type_label }}</strong>
+                        <small>В архиве сохранены метаданные. Файл не загружается автоматически.</small>
+                      </div>
+                    </div>
+                  {% endif %}
+                  {% if row.edit_history %}
+                    <details class="archive-edit-history">
+                      <summary>
+                        <span>История редакций</span>
+                        <small>Снимков в выборке: {{ row.snapshot_count }}</small>
+                      </summary>
+                      <div class="archive-edit-version-list">
+                        {% for version in row.edit_history %}
+                          <section class="archive-edit-version" aria-label="{{ version.snapshot_kind_label }} в {{ version.time_label }}">
+                            <header>
+                              <strong>{{ version.snapshot_kind_label }}</strong>
+                              <time>{{ version.time_label }}</time>
+                            </header>
+                            {% if version.has_text %}
+                              <p>
+                                {%- if version.message_segments -%}
+                                  {% for segment in version.message_segments %}{% if segment.match %}<mark class="archive-search-hit">{{ segment.text }}</mark>{% else %}{{ segment.text }}{% endif %}{% endfor %}
+                                {%- else -%}
+                                  {{ version.message_preview }}
+                                {%- endif -%}
+                              </p>
+                            {% else %}
+                              <p class="archive-edit-media-label">
+                                {% if version.media_info %}{{ version.media_info.title }}{% else %}{{ version.message_type_label }}{% endif %}
+                                {% if version.media_info and version.media_info.facts %} · {{ version.media_info.facts|join(' · ') }}{% endif %}
+                                · содержимое сохранено в raw-снимке
+                              </p>
+                            {% endif %}
+                            <a href="{{ version.raw_href }}">Открыть raw-снимок #{{ version.id }}</a>
+                          </section>
+                        {% endfor %}
+                      </div>
+                    </details>
+                  {% endif %}
+                  <footer class="archive-message-foot">
+                    <span class="archive-type-badge">{{ row.message_type_label }}</span>
+                    {% if row.snapshot_kind == 'edited' %}
+                      <span class="archive-edited-badge">Изменено</span>
+                    {% endif %}
+                    <a href="{{ row.raw_href }}">Открыть raw-снимок</a>
+                  </footer>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="archive-empty archive-empty-conversation">
+              <strong>По этим фильтрам ничего не найдено</strong>
+              <p>Измените запрос или сбросьте фильтры, чтобы вернуть сообщения.</p>
+              <a href="{{ filter_reset_href }}" class="button ghost small">Сбросить фильтры</a>
+            </div>
+          {% endif %}
+
+          {% if previous_page_href or next_page_href %}
+            <nav class="archive-pagination" aria-label="Страницы архива">
+              {% if previous_page_href %}
+                <a class="button ghost" href="{{ previous_page_href }}">← Новее</a>
+              {% endif %}
+              <span>Показано сообщений: {{ shown_message_count }} · снимков в выборке: {{ total }}</span>
+              {% if next_page_href %}
+                <a class="button ghost" href="{{ next_page_href }}">Старее →</a>
+              {% endif %}
+            </nav>
+          {% endif %}
+        {% else %}
+          <div class="archive-empty archive-empty-conversation">
+            <strong>Выберите чат</strong>
+            <p>Список доступных диалогов находится слева.</p>
+          </div>
+        {% endif %}
+      </section>
+    </div>
+
+    <div class="admin-back-link archive-back-link">
+      <a href="/app/admin" class="button ghost">← В админку</a>
     </div>
   </div>
 {% endblock %}

@@ -13,6 +13,7 @@ from selara.core.config import Settings
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT
 from selara.domain.entities import (
     ActivityStats,
+    ChatAuditLogEntry,
     ChatActivitySummary,
     ChatRoleDefinition,
     ChatTextAliasUpsertResult,
@@ -59,6 +60,8 @@ class ChatHubState:
     daily_activity: list[dict[str, object]] = field(default_factory=list)
     richest_payload: dict[str, object] | None = None
     audit_log_calls: list[dict[str, object]] = field(default_factory=list)
+    audit_entries: list[ChatAuditLogEntry] = field(default_factory=list)
+    audit_error: Exception | None = None
     alias_upsert_calls: list[dict[str, object]] = field(default_factory=list)
     economy_account: object | None = None
     economy_farm: object | None = None
@@ -117,7 +120,9 @@ class FakeActivityRepo:
 
     async def list_audit_logs(self, *, chat_id: int, limit: int = 10):
         _ = chat_id, limit
-        return []
+        if self._state.audit_error is not None:
+            raise self._state.audit_error
+        return list(self._state.audit_entries)
 
     async def get_top(self, *, chat_id: int, limit: int):
         _ = chat_id, limit
@@ -240,6 +245,9 @@ class DummySession:
     async def commit(self) -> None:
         return None
 
+    async def rollback(self) -> None:
+        return None
+
     async def execute(self, stmt):
         raise AssertionError(f"Unexpected raw SQL execution in test: {stmt!r}")
 
@@ -340,6 +348,94 @@ def _leaderboard_item(user_id: int, name: str, *, username: str | None, activity
         last_seen_at=datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc),
         chat_display_name=None,
     )
+
+
+def _audit_entry(
+    entry_id: int,
+    action_code: str,
+    description: str,
+    *,
+    actor_user_id: int | None,
+    target_user_id: int | None = None,
+    created_at: datetime | None = None,
+) -> ChatAuditLogEntry:
+    return ChatAuditLogEntry(
+        id=entry_id,
+        chat_id=-1001,
+        actor_user_id=actor_user_id,
+        target_user_id=target_user_id,
+        action_code=action_code,
+        description=description,
+        meta_json={"private": "must-not-be-rendered"},
+        created_at=created_at or datetime(2026, 8, 15, 10, 30, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_audit_api_filters_groups_and_presents_events(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        audit_entries=[
+            _audit_entry(3, "web_setting_updated", "Обновлена настройка экономики.", actor_user_id=77),
+            _audit_entry(2, "captcha_failed_kick", "Пользователь удалён после капчи.", actor_user_id=None, target_user_id=404),
+            _audit_entry(
+                1,
+                "coins_transfer",
+                "Переведены монеты.",
+                actor_user_id=88,
+                target_user_id=99,
+                created_at=datetime(2026, 8, 14, 22, 0, tzinfo=timezone.utc),
+            ),
+        ],
+    )
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get(
+            "/api/chat/-1001/audit",
+            params={"category": "settings", "actor": "users", "q": "настройка"},
+        )
+
+    assert response.status_code == 200
+    page = response.json()["page"]
+    assert page["audit_total_count"] == 3
+    assert page["audit_shown_count"] == 1
+    assert page["audit_filters"] == {"q": "настройка", "category": "settings", "actor": "users"}
+    assert page["audit_filter_errors"] == []
+    assert len(page["audit_groups"]) == 1
+    row = page["audit_groups"][0]["rows"][0]
+    assert row["action"] == "web_setting_updated"
+    assert row["action_label"] == "Изменена настройка"
+    assert row["category_code"] == "settings"
+    assert row["actor_label"] == "Пользователь 77"
+    assert row["event_id"] == 3
+    assert "private" not in str(page)
+    assert page["extra_styles"] == ["audit.css"]
+
+
+@pytest.mark.asyncio
+async def test_chat_audit_recovers_from_invalid_filters_and_load_error(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        audit_error=RuntimeError("database secret must not leak"),
+    )
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get(
+            "/app/chat/-1001/audit",
+            params={"category": "../../bad", "actor": "robot"},
+        )
+
+    assert response.status_code == 200
+    assert "Не удалось загрузить журнал событий" in response.text
+    assert "Неизвестная категория" in response.text
+    assert "Неизвестный тип инициатора" in response.text
+    assert "database secret" not in response.text
 
 
 @pytest.mark.asyncio

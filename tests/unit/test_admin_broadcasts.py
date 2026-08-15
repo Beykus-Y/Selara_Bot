@@ -235,6 +235,8 @@ async def test_inline_vote_is_validated_toggleable_and_single_choice() -> None:
             assert [(item.source, item.option_key, item.user.telegram_user_id if item.user else None) for item in active] == [
                 ("inline", "r2", user.telegram_user_id)
             ]
+            overview = (await repo.list_recent_admin_broadcasts(limit=1))[0]
+            assert overview.reaction_count == 1
 
             assert await repo.toggle_admin_broadcast_inline_reaction(
                 delivery_id=delivery.id,
@@ -245,6 +247,8 @@ async def test_inline_vote_is_validated_toggleable_and_single_choice() -> None:
                 reacted_at=now,
             ) == "removed"
             assert await repo.list_admin_broadcast_reactions(broadcast_id=broadcast.id) == []
+            overview_after_remove = (await repo.list_recent_admin_broadcasts(limit=1))[0]
+            assert overview_after_remove.reaction_count == 0
     finally:
         await engine.dispose()
 

@@ -1,46 +1,143 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="hero">
-    <div class="hero-copy">
-      <span class="eyebrow">Журнал аудита</span>
-      <h1>{{ chat_title }}</h1>
-      <p class="lead">Хронология админских действий и событий бота в группе.</p>
-    </div>
-    <div class="hero-side">
-      <div class="hero-chip">ID чата {{ chat_id }}</div>
-      <div class="hero-chip">последние 200 событий</div>
-    </div>
-  </section>
-
-  <section class="panel section-tabs">
-    {% for link in chat_section_links %}
-      <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
-    {% endfor %}
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Лента событий</h2>
-        <p class="panel-subtitle">Свежие изменения настроек, триггеров, алиасов и действий бота в чате.</p>
+  <div class="audit-page" data-audit-page>
+    <section class="hero audit-hero">
+      <div class="hero-copy">
+        <span class="eyebrow">Журнал аудита</span>
+        <h1>{{ chat_title }}</h1>
+        <p class="lead">Хронология изменений, модерации и автоматических действий Selara в этом чате.</p>
       </div>
-    </div>
-    {% if audit_rows %}
-      <div class="list-stack">
-        {% for row in audit_rows %}
-          <div class="stat-row">
-            <div>
-              <strong>{{ row.action }}</strong>
-              <p>{{ row.description }}</p>
-              <p>инициатор: {{ row.actor }} • цель: {{ row.target }}</p>
-            </div>
-            <span>{{ row.when }}</span>
-          </div>
-        {% endfor %}
+      <div class="audit-hero-summary" aria-label="Сводка журнала">
+        <span><strong>{{ audit_total_count }}</strong> загружено</span>
+        <span><strong>{{ audit_shown_count }}</strong> показано</span>
+        <span><strong>{{ audit_system_count }}</strong> от системы</span>
       </div>
-    {% else %}
-      <p class="empty-text">Логи пока пусты.</p>
-    {% endif %}
-  </section>
+    </section>
+
+    <nav class="panel section-tabs audit-section-tabs" aria-label="Разделы чата">
+      {% for link in chat_section_links %}
+        <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+      {% endfor %}
+    </nav>
+
+    <section class="panel audit-filter-panel" aria-labelledby="audit-filter-title">
+      <div class="audit-section-heading">
+        <div>
+          <span class="audit-kicker">Поиск по событиям</span>
+          <h2 id="audit-filter-title">Найдите нужное изменение</h2>
+        </div>
+        {% if audit_filters.q or audit_filters.category != 'all' or audit_filters.actor != 'all' %}
+          <a class="button ghost audit-reset-link" href="{{ audit_reset_href }}">Сбросить фильтры</a>
+        {% endif %}
+      </div>
+
+      <form class="audit-filter-form" method="get" action="{{ audit_reset_href }}" role="search">
+        <label class="audit-search-field" for="audit-filter-query">
+          <span>Текст, код или ID участника</span>
+          <input id="audit-filter-query" type="search" name="q" value="{{ audit_filters.q }}" maxlength="120" placeholder="Например: капча, web_setting или 123456">
+        </label>
+        <label for="audit-filter-category">
+          <span>Категория</span>
+          <select id="audit-filter-category" name="category">
+            {% for option in audit_category_options %}
+              <option value="{{ option.value }}"{% if audit_filters.category == option.value %} selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label for="audit-filter-actor">
+          <span>Инициатор</span>
+          <select id="audit-filter-actor" name="actor">
+            {% for option in audit_actor_options %}
+              <option value="{{ option.value }}"{% if audit_filters.actor == option.value %} selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button class="button primary audit-filter-action" type="submit">Показать события</button>
+      </form>
+
+      {% if audit_filter_errors %}
+        <div class="audit-filter-errors" role="alert">
+          {% for message in audit_filter_errors %}<p>{{ message }}</p>{% endfor %}
+        </div>
+      {% endif %}
+    </section>
+
+    <section class="panel audit-stream" aria-labelledby="audit-stream-title">
+      <div class="audit-section-heading">
+        <div>
+          <span class="audit-kicker">Последние 200 событий</span>
+          <h2 id="audit-stream-title">Лента изменений</h2>
+          <p>Человекочитаемое описание остаётся главным, а исходный код и ID доступны по запросу.</p>
+        </div>
+        <span class="audit-shown-badge">{{ audit_shown_count }} из {{ audit_total_count }}</span>
+      </div>
+
+      {% if audit_load_error %}
+        <div class="audit-load-error" role="alert">
+          <strong>Журнал временно недоступен</strong>
+          <p>{{ audit_load_error }}</p>
+        </div>
+      {% endif %}
+
+      {% if audit_groups %}
+        <div class="audit-date-groups">
+          {% for group in audit_groups %}
+            <section class="audit-date-group" aria-labelledby="audit-date-{{ loop.index }}">
+              <header class="audit-date-heading">
+                <h3 id="audit-date-{{ loop.index }}">{{ group.date_label }}</h3>
+                <span>{{ group.rows|length }} {{ 'событие' if group.rows|length == 1 else 'события' if group.rows|length in [2, 3, 4] else 'событий' }}</span>
+              </header>
+              <ol class="audit-timeline">
+                {% for row in group.rows %}
+                  <li class="audit-event audit-event-{{ row.tone }}" data-audit-event>
+                    <div class="audit-event-time" aria-label="Время события {{ row.time_label }}">
+                      <span aria-hidden="true"></span>
+                      <time>{{ row.time_label }}</time>
+                    </div>
+                    <article class="audit-event-card">
+                      <header class="audit-event-header">
+                        <div>
+                          <span class="audit-event-category">{{ row.category_label }}</span>
+                          <h4>{{ row.action_label }}</h4>
+                        </div>
+                        <span class="audit-event-number">#{{ row.event_id }}</span>
+                      </header>
+                      <p class="audit-event-description">{{ row.description }}</p>
+                      <dl class="audit-event-participants">
+                        <div><dt>Инициатор</dt><dd>{{ row.actor_label }}</dd></div>
+                        {% if row.has_target %}<div><dt>Цель</dt><dd>{{ row.target_label }}</dd></div>{% endif %}
+                      </dl>
+                      <details class="audit-technical-details">
+                        <summary>Технические детали</summary>
+                        <dl>
+                          <div><dt>Код</dt><dd><code>{{ row.action }}</code></dd></div>
+                          <div><dt>Инициатор ID</dt><dd><code>{{ row.actor }}</code></dd></div>
+                          <div><dt>Цель ID</dt><dd><code>{{ row.target }}</code></dd></div>
+                          <div><dt>Событие</dt><dd><code>#{{ row.event_id }}</code></dd></div>
+                          <div><dt>Время UTC</dt><dd>{{ row.when }}</dd></div>
+                        </dl>
+                      </details>
+                    </article>
+                  </li>
+                {% endfor %}
+              </ol>
+            </section>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="audit-empty-state">
+          <span class="audit-empty-icon" aria-hidden="true">◇</span>
+          {% if audit_total_count and not audit_load_error %}
+            <h3 class="audit-empty-title">По фильтрам ничего не найдено</h3>
+            <p class="audit-empty-copy">Измените запрос, категорию или тип инициатора.</p>
+          {% else %}
+            <h3 class="audit-empty-title">Событий пока нет</h3>
+            <p class="audit-empty-copy">Новые изменения и действия бота появятся здесь автоматически.</p>
+          {% endif %}
+          <a class="button ghost" href="{{ audit_reset_href }}">Сбросить фильтры</a>
+        </div>
+      {% endif %}
+    </section>
+  </div>
 {% endblock %}

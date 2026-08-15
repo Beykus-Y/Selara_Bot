@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
@@ -14,6 +15,7 @@ from selara.infrastructure.db.models import (
     MarriageModel,
     MessageArchiveModel,
     UserChatActivityModel,
+    UserFeatureRequestModel,
     UserModel,
 )
 from selara.web import app as web_app_module
@@ -124,6 +126,518 @@ class QueueSessionFactory:
         return _Manager()
 
 
+class FakeArchivePhotoBot:
+    instances: list["FakeArchivePhotoBot"] = []
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.session = SimpleNamespace(close=AsyncMock())
+        self.download = AsyncMock(side_effect=self._download)
+        self.__class__.instances.append(self)
+
+    @staticmethod
+    async def _download(file_id: str, *, destination) -> object:
+        assert file_id == "photo-large"
+        destination.write(b"\xff\xd8archive-preview\xff\xd9")
+        return destination
+
+
+class FailingArchivePhotoBot(FakeArchivePhotoBot):
+    instances: list["FailingArchivePhotoBot"] = []
+
+    @staticmethod
+    async def _download(file_id: str, *, destination) -> object:
+        _ = file_id, destination
+        raise RuntimeError("Telegram file expired")
+
+
+@pytest.mark.parametrize(
+    ("message_type", "raw_message_json", "expected_title", "expected_facts"),
+    [
+        (
+            "photo",
+            {"photo": [{"width": 320, "height": 180, "file_size": 2048}]},
+            "Фото",
+            ["320×180", "2.0 КБ"],
+        ),
+        (
+            "document",
+            {
+                "document": {
+                    "file_name": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 2 * 1024 * 1024,
+                }
+            },
+            "Документ",
+            ["report.pdf", "application/pdf", "2.0 МБ"],
+        ),
+        (
+            "audio",
+            {"audio": {"title": "Track", "performer": "Artist", "duration": 125}},
+            "Аудио",
+            ["Artist — Track", "2:05"],
+        ),
+        (
+            "sticker",
+            {"sticker": {"emoji": "✨", "set_name": "Selara", "is_animated": True}},
+            "Стикер",
+            ["✨", "Набор: Selara", "Анимированный"],
+        ),
+    ],
+)
+def test_admin_archive_builds_safe_media_metadata(
+    message_type: str,
+    raw_message_json: dict[str, object],
+    expected_title: str,
+    expected_facts: list[str],
+) -> None:
+    media_info = web_app_module._admin_archive_media_info(
+        message_type=message_type,
+        raw_message_json=raw_message_json,
+    )
+
+    assert media_info is not None
+    assert media_info["title"] == expected_title
+    assert media_info["facts"] == expected_facts
+
+
+def test_admin_archive_does_not_create_media_card_for_plain_text() -> None:
+    assert (
+        web_app_module._admin_archive_media_info(
+            message_type="text",
+            raw_message_json={"text": "hello"},
+        )
+        is None
+    )
+
+
+def test_admin_archive_photo_reference_uses_largest_safe_photo_without_exposing_id() -> None:
+    raw_message_json = {
+        "photo": [
+            {"file_id": "photo-small", "width": 90, "height": 90, "file_size": 512},
+            {
+                "file_id": "photo-large",
+                "width": 1280,
+                "height": 720,
+                "file_size": 2048,
+            },
+        ]
+    }
+
+    reference = web_app_module._admin_archive_photo_reference(raw_message_json)
+    media_info = web_app_module._admin_archive_media_info(
+        message_type="photo",
+        raw_message_json=raw_message_json,
+    )
+
+    assert reference == {"file_id": "photo-large", "file_size": 2048}
+    assert media_info is not None
+    assert "photo-large" not in repr(media_info)
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_photo_endpoint_requires_admin_and_streams_private_image(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    photo = MessageArchiveModel(
+        id=31,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=7001,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="photo",
+        text=None,
+        caption="Preview",
+        raw_message_json={
+            "photo": [
+                {"file_id": "photo-small", "file_size": 512},
+                {"file_id": "photo-large", "file_size": 2048},
+            ]
+        },
+        snapshot_hash="photo-hash",
+        created_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+    )
+    authorized_session = FakeSession(records={(MessageArchiveModel, photo.id): photo})
+    unauthorized_session = FakeSession(records={(MessageArchiveModel, photo.id): photo})
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    FakeArchivePhotoBot.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", FakeArchivePhotoBot)
+
+    authorized_app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(authorized_session),
+    )
+    authorized_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=authorized_app),
+        base_url="http://testserver",
+    )
+    authorized_client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await authorized_client.get(f"/app/admin/archive/media/{photo.id}")
+    finally:
+        await authorized_client.aclose()
+        await getattr(authorized_app.router, "shutdown", authorized_app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert response.content == b"\xff\xd8archive-preview\xff\xd9"
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.headers["cache-control"] == "private, max-age=300"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert FakeArchivePhotoBot.instances[0].download.await_args.args == ("photo-large",)
+
+    unauthorized_app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(unauthorized_session),
+    )
+    unauthorized_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=unauthorized_app),
+        base_url="http://testserver",
+    )
+    try:
+        unauthorized = await unauthorized_client.get(
+            f"/app/admin/archive/media/{photo.id}"
+        )
+    finally:
+        await unauthorized_client.aclose()
+        await getattr(unauthorized_app.router, "shutdown", unauthorized_app.router._shutdown)()
+
+    assert unauthorized.status_code == 401
+    assert unauthorized_session.get_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_type", "raw_message_json", "bot_class", "expected_status"),
+    [
+        ("text", {"text": "not a photo"}, FakeArchivePhotoBot, 404),
+        (
+            "photo",
+            {"photo": [{"file_id": "photo-large", "file_size": 11 * 1024 * 1024}]},
+            FakeArchivePhotoBot,
+            413,
+        ),
+        (
+            "photo",
+            {"photo": [{"file_id": "photo-large", "file_size": 2048}]},
+            FailingArchivePhotoBot,
+            404,
+        ),
+    ],
+)
+async def test_admin_archive_photo_endpoint_rejects_unsafe_or_unavailable_media(
+    monkeypatch,
+    message_type: str,
+    raw_message_json: dict[str, object],
+    bot_class: type[FakeArchivePhotoBot],
+    expected_status: int,
+) -> None:
+    settings = _settings()
+    snapshot = MessageArchiveModel(
+        id=32,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=7002,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type=message_type,
+        text="not a photo" if message_type == "text" else None,
+        caption=None,
+        raw_message_json=raw_message_json,
+        snapshot_hash="unsafe-photo-hash",
+        created_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+    )
+    session = FakeSession(records={(MessageArchiveModel, snapshot.id): snapshot})
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    bot_class.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", bot_class)
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(session),
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    )
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(f"/app/admin/archive/media/{snapshot.id}")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == expected_status
+    if expected_status in {404, 413} and bot_class is FakeArchivePhotoBot:
+        assert bot_class.instances == []
+
+
+def test_admin_archive_cursor_round_trip_and_malformed_value() -> None:
+    snapshot_at = datetime(2026, 4, 8, 18, 25, 30, tzinfo=timezone.utc)
+
+    cursor = web_app_module._encode_admin_archive_cursor(
+        snapshot_at=snapshot_at,
+        snapshot_id=778,
+    )
+
+    assert web_app_module._decode_admin_archive_cursor(cursor) == (snapshot_at, 778)
+    assert web_app_module._decode_admin_archive_cursor("not-a-valid-cursor") is None
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [(1, "задача"), (2, "задачи"), (4, "задачи"), (5, "задач"), (11, "задач"), (21, "задача")],
+)
+def test_russian_plural_handles_admin_metric_edges(count: int, expected: str) -> None:
+    assert (
+        web_app_module._russian_plural(
+            count,
+            one="задача",
+            few="задачи",
+            many="задач",
+        )
+        == expected
+    )
+
+
+def test_admin_feature_request_presenter_builds_visible_lifecycle() -> None:
+    created_at = datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc)
+    done_at = datetime(2026, 8, 15, 11, 30, tzinfo=timezone.utc)
+    row = UserFeatureRequestModel(
+        id=41,
+        user_id=101,
+        title="Улучшить историю",
+        details="Показывать сообщения как диалог.",
+        status="done",
+        done_at=done_at,
+        created_at=created_at,
+        updated_at=done_at,
+    )
+
+    item = web_app_module._build_feature_request_item(
+        row=row,
+        author_label="Alice",
+    )
+
+    assert item["updated_at"] == web_app_module.format_datetime(done_at)
+    assert item["status_history"] == [
+        {
+            "label": "Заявка создана",
+            "time": web_app_module.format_datetime(created_at),
+            "tone": "neutral",
+        },
+        {
+            "label": "Отмечена как сделанная",
+            "time": web_app_module.format_datetime(done_at),
+            "tone": "done",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_feedback_filter_is_validated_and_applied(monkeypatch) -> None:
+    settings = _settings()
+    request_row = UserFeatureRequestModel(
+        id=41,
+        user_id=101,
+        title="Улучшить историю",
+        details="Показывать сообщения как диалог.",
+        status="open",
+        done_at=None,
+        created_at=datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
+    )
+    author = UserModel(
+        telegram_user_id=101,
+        username="alice",
+        first_name="Alice",
+        last_name=None,
+    )
+    filtered_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[(request_row, author)]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
+        ]
+    )
+    invalid_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(filtered_session, invalid_session),
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    )
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        filtered = await client.get("/app/admin?feedback_status=open")
+        invalid = await client.get("/app/admin?feedback_status=broken")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert filtered.status_code == 200
+    assert 'data-feedback-filter="open" aria-current="page"' in filtered.text
+    assert "Улучшить историю" in filtered.text
+    assert "user_feature_requests.status" in str(filtered_session.execute_calls[0])
+    assert invalid.status_code == 200
+    assert "Неизвестный фильтр заявок" in invalid.text
+    assert 'data-feedback-filter="all" aria-current="page"' in invalid.text
+
+
+@pytest.mark.asyncio
+async def test_admin_feedback_status_update_preserves_safe_filter_and_anchor(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    request_row = UserFeatureRequestModel(
+        id=41,
+        user_id=101,
+        title="Улучшить историю",
+        details="Показывать сообщения как диалог.",
+        status="open",
+        done_at=None,
+        created_at=datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc),
+    )
+    session = FakeSession(records={(UserFeatureRequestModel, 41): request_row})
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda current_session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(session),
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        follow_redirects=False,
+    )
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.post(
+            "/app/admin/feedback/41/status",
+            data={"status": "done", "feedback_status": "open"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/app/admin?feedback_status=open&flash=")
+    assert location.endswith("#feedback")
+    assert request_row.status == "done"
+    assert request_row.done_at is not None
+
+
+@pytest.mark.asyncio
+async def test_admin_login_page_has_public_navigation_only(monkeypatch) -> None:
+    settings = _settings()
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(None),
+    )
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(FakeSession()),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.get("/app/admin/login")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert 'action="/logout"' not in response.text
+    assert 'href="/app/admin"' not in response.text
+    assert 'href="/"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_page_has_shared_section_navigation(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(
+                rows=[(-1001001, "supergroup", "Test chat", datetime.now(timezone.utc))]
+            ),
+            FakeExecuteResult(rows=[]),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert 'aria-label="Разделы админки"' in response.text
+    assert 'href="/app/admin" aria-current="page"' in response.text
+    assert 'href="/app/admin#broadcasts"' in response.text
+    assert 'href="/app/admin/table/messages_compact"' in response.text
+    assert 'href="/app/admin#database"' in response.text
+    assert 'action="/app/admin/logout"' in response.text
+    assert response.text.count('action="/app/admin/logout"') == 1
+    assert 'action="/logout"' not in response.text
+    assert 'data-admin-overview' in response.text
+    assert 'href="#broadcasts"' in response.text
+    assert 'href="#feedback"' in response.text
+    assert 'href="/app/admin/table/chat_audit_logs"' in response.text
+    assert 'data-admin-backup-dialog' in response.text
+    assert 'src="/static/admin-overview.js"' in response.text
+    assert 'href="/static/admin-overview.css"' in response.text
+
+
 @pytest.mark.asyncio
 async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     settings = _settings()
@@ -132,7 +646,9 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
             FakeExecuteResult(rows=[]),
             FakeExecuteResult(scalar_value=0),
             FakeExecuteResult(scalar_value=0),
-            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(
+                rows=[(-1001001, "supergroup", "Test chat", datetime.now(timezone.utc))]
+            ),
             FakeExecuteResult(rows=[]),
         ]
     )
@@ -179,6 +695,18 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert 'name="reaction_emoji"' in response.text
     assert 'name="reaction_label"' in response.text
     assert 'name="chat_ids"' in response.text
+    assert 'data-broadcast-target-search' in response.text
+    assert 'data-broadcast-selected-count' in response.text
+    assert 'data-broadcast-form-error' in response.text
+    assert 'role="alert"' in response.text
+    assert 'data-broadcast-submit' in response.text
+    assert 'data-broadcast-live-preview' in response.text
+    assert 'data-broadcast-preview-body' in response.text
+    assert 'data-broadcast-preview-photo' in response.text
+    assert 'data-broadcast-confirm-dialog' in response.text
+    assert 'data-broadcast-confirm-submit' in response.text
+    assert 'data-broadcast-confirm-cancel' in response.text
+    assert 'src="/static/admin-broadcast.js"' in response.text
 
 
 @pytest.mark.asyncio
@@ -531,6 +1059,22 @@ async def test_admin_table_page_renders_messages_table_with_json_payload(monkeyp
 async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> None:
     settings = _settings()
     auth_session = FakeSession()
+    created_snapshot = MessageArchiveModel(
+        id=1,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=778,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 24),
+        sent_at=datetime(2026, 4, 8, 18, 24),
+        edited_at=None,
+        message_type="text",
+        text="draft answer",
+        caption=None,
+        raw_message_json={"message_id": 778, "text": "draft answer"},
+        snapshot_hash="hash-1",
+        created_at=datetime(2026, 4, 8, 18, 24),
+    )
     archived_message = MessageArchiveModel(
         id=2,
         chat_id=-100500,
@@ -555,10 +1099,55 @@ async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> No
         snapshot_hash="hash-2",
         created_at=datetime(2026, 4, 8, 18, 25),
     )
+    followup_message = MessageArchiveModel(
+        id=3,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=779,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 26),
+        sent_at=datetime(2026, 4, 8, 18, 26),
+        edited_at=None,
+        message_type="document",
+        text=None,
+        caption="follow-up report",
+        raw_message_json={
+            "message_id": 779,
+            "caption": "follow-up report",
+            "document": {
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 2 * 1024 * 1024,
+            },
+        },
+        snapshot_hash="hash-3",
+        created_at=datetime(2026, 4, 8, 18, 26),
+    )
+    delayed_message = MessageArchiveModel(
+        id=4,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=780,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 40),
+        sent_at=datetime(2026, 4, 8, 18, 40),
+        edited_at=None,
+        message_type="text",
+        text="later answer",
+        caption=None,
+        raw_message_json={"message_id": 780, "text": "later answer"},
+        snapshot_hash="hash-4",
+        created_at=datetime(2026, 4, 8, 18, 40),
+    )
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[archived_message]),
-            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[delayed_message, followup_message, archived_message, created_snapshot]
+            ),
+            FakeExecuteResult(
+                rows=[delayed_message, followup_message, archived_message, created_snapshot]
+            ),
+            FakeExecuteResult(scalar_value=4),
             FakeExecuteResult(
                 rows=[
                     UserModel(telegram_user_id=101, username="alice", first_name="Alice", last_name=None, is_bot=False),
@@ -591,17 +1180,379 @@ async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> No
         await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
-    assert "Архив сообщений · полезное" in response.text
+    assert "Архив сообщений" in response.text
     assert "Archive Chat" in response.text
     assert "Alice" in response.text
     assert "@bob" in response.text
     assert "original question" in response.text
     assert "raw_message_json" not in response.text
+    assert 'class="archive-layout' in response.text
+    assert 'class="archive-message' in response.text
+    assert 'class="admin-data-table"' not in response.text
+    assert response.text.count('class="archive-message archive-author-') == 3
+    assert 'class="archive-edit-history"' in response.text
+    assert "Снимков в выборке: 2" in response.text
+    assert "draft answer" in response.text
+    assert "/app/admin/table/messages?id=1" in response.text
+    assert response.text.count(" is-continuation") == 1
+    assert "follow-up report" in response.text
+    assert "report.pdf" in response.text
+    assert "application/pdf" in response.text
+    assert "2.0 МБ" in response.text
+    assert 'src="/static/admin-archive.js"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_applies_and_preserves_extended_filters(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    archived_message = MessageArchiveModel(
+        id=3,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=779,
+        snapshot_kind="edited",
+        snapshot_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 24, tzinfo=timezone.utc),
+        edited_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+        message_type="text",
+        text="answer text",
+        caption=None,
+        raw_message_json={
+            "message_id": 779,
+            "text": "answer text",
+            "reply_to_message": {"message_id": 778, "text": "question"},
+        },
+        snapshot_hash="hash-3",
+        created_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+    )
+    other_chat_message = MessageArchiveModel(
+        id=4,
+        chat_id=-100700,
+        user_id=202,
+        telegram_message_id=880,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="photo",
+        text=None,
+        caption="other chat",
+        raw_message_json={"message_id": 880, "caption": "other chat"},
+        snapshot_hash="hash-4",
+        created_at=datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[archived_message, other_chat_message]),
+            FakeExecuteResult(rows=[archived_message]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[
+                    ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat"),
+                    ChatModel(telegram_chat_id=-100700, type="supergroup", title="Other Chat"),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={
+                "chat_id": "-100500",
+                "user_id": "101",
+                "text": "answer",
+                "date_from": "2026-04-01",
+                "date_to": "2026-04-09",
+                "message_type": "text",
+                "snapshot_kind": "edited",
+                "has_reply": "yes",
+            },
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert 'name="date_from"' in response.text
+    assert 'value="2026-04-01"' in response.text
+    assert 'name="date_to"' in response.text
+    assert 'value="2026-04-09"' in response.text
+    assert 'option value="text" selected' in response.text
+    assert 'option value="video_note"' in response.text
+    assert 'option value="yes" selected' in response.text
+    assert '<mark class="archive-search-hit">answer</mark> text' in response.text
+    assert (
+        'href="/app/admin/table/messages_compact?chat_id=-100700&amp;user_id=101'
+        '&amp;text=answer&amp;date_from=2026-04-01&amp;date_to=2026-04-09'
+        '&amp;message_type=text&amp;snapshot_kind=edited&amp;has_reply=yes"'
+    ) in response.text
+
+    filtered_statement = str(data_session.execute_calls[1])
+    assert "messages.snapshot_at >=" in filtered_statement
+    assert "messages.snapshot_at <" in filtered_statement
+    assert "messages.message_type" in filtered_statement
+    assert "messages.raw_message_json" in filtered_statement
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_reports_malformed_filter_values(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={
+                "page": "not-a-page",
+                "chat_id": "not-a-chat",
+                "user_id": "not-a-user",
+                "date_from": "2026-99-99",
+                "date_to": "also-not-a-date",
+                "message_type": "totally_unknown",
+                "snapshot_kind": "unknown",
+                "has_reply": "perhaps",
+                "before": "broken-cursor",
+            },
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert 'class="archive-filter-errors" role="alert"' in response.text
+    assert "ID чата должен быть целым числом" in response.text
+    assert "ID автора должен быть целым числом" in response.text
+    assert "Начальная дата имеет неверный формат" in response.text
+    assert "Конечная дата имеет неверный формат" in response.text
+    assert "Неизвестный тип сообщения" in response.text
+    assert "Неизвестный вид снимка" in response.text
+    assert "Неизвестный фильтр ответов" in response.text
+    assert "Ссылка на предыдущую страницу устарела или повреждена" in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_uses_stable_cursor_pagination(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    first_snapshot_at = datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc)
+    archived_messages = [
+        MessageArchiveModel(
+            id=index + 1,
+            chat_id=-100500,
+            user_id=101,
+            telegram_message_id=1000 + index,
+            snapshot_kind="created",
+            snapshot_at=first_snapshot_at - timedelta(minutes=index),
+            sent_at=first_snapshot_at - timedelta(minutes=index),
+            edited_at=None,
+            message_type="text",
+            text=f"message {index}",
+            caption=None,
+            raw_message_json={"message_id": 1000 + index, "text": f"message {index}"},
+            snapshot_hash=f"hash-{index}",
+            created_at=first_snapshot_at - timedelta(minutes=index),
+        )
+        for index in range(51)
+    ]
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[archived_messages[0]]),
+            FakeExecuteResult(rows=archived_messages),
+            FakeExecuteResult(scalar_value=120),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={"chat_id": "-100500"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert response.text.count('class="archive-message archive-author-') == 50
+    assert "before=" in response.text
+    assert "Старее →" in response.text
+    assert "page=2" not in response.text
+    assert "Показано сообщений: 50" in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_applies_cursor_boundary_and_builds_newer_link(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    boundary_at = datetime(2026, 4, 8, 18, 0, tzinfo=timezone.utc)
+    older_message = MessageArchiveModel(
+        id=40,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=1040,
+        snapshot_kind="created",
+        snapshot_at=boundary_at - timedelta(minutes=1),
+        sent_at=boundary_at - timedelta(minutes=1),
+        edited_at=None,
+        message_type="text",
+        text="older message",
+        caption=None,
+        raw_message_json={"message_id": 1040, "text": "older message"},
+        snapshot_hash="hash-older",
+        created_at=boundary_at - timedelta(minutes=1),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[older_message]),
+            FakeExecuteResult(rows=[older_message]),
+            FakeExecuteResult(scalar_value=120),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    cursor = web_app_module._encode_admin_archive_cursor(
+        snapshot_at=boundary_at,
+        snapshot_id=41,
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={"chat_id": "-100500", "before": cursor},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "← Новее" in response.text
+    assert "after=" in response.text
+    filtered_statement = str(data_session.execute_calls[1])
+    assert "messages.snapshot_at <" in filtered_statement
+    assert "messages.id <" in filtered_statement
+
+
+@pytest.mark.asyncio
+async def test_admin_table_edit_page_requires_admin_session() -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.get(
+            "/app/admin/table/marriages/edit?id=2",
+            follow_redirects=False,
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/app/admin/login"
+    assert auth_session.get_calls == []
 
 
 @pytest.mark.asyncio
 async def test_admin_table_edit_page_reads_record_id_from_query(monkeypatch) -> None:
     settings = _settings()
+    auth_session = FakeSession()
     marriage = MarriageModel(
         id=2,
         user_low_id=10,
@@ -637,10 +1588,11 @@ async def test_admin_table_edit_page_reads_record_id_from_query(monkeypatch) -> 
 
     app = web_app_module.create_web_app(
         settings=settings,
-        session_factory=QueueSessionFactory(data_session),
+        session_factory=QueueSessionFactory(auth_session, data_session),
     )
     transport = httpx.ASGITransport(app=app)
     client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
     try:
         response = await client.get("/app/admin/table/marriages/edit?id=2")
     finally:

@@ -292,19 +292,46 @@ def test_audit_template_renders_rows() -> None:
         error=None,
         chat_title="Test Chat",
         chat_id=123,
-        audit_rows=[
+        chat_section_links=[],
+        audit_total_count=1,
+        audit_shown_count=1,
+        audit_system_count=0,
+        audit_filters={"q": "", "category": "all", "actor": "all"},
+        audit_filter_errors=[],
+        audit_load_error=None,
+        audit_category_options=[{"value": "all", "label": "Все события"}],
+        audit_actor_options=[{"value": "all", "label": "Все инициаторы"}],
+        audit_reset_href="/app/chat/123/audit",
+        audit_groups=[
             {
-                "when": "2026-03-08 10:00 UTC",
-                "action": "web_setting_updated",
-                "description": "Обновлена настройка.",
-                "actor": "1",
-                "target": "—",
+                "date_label": "8 марта 2026",
+                "rows": [
+                    {
+                        "event_id": 1,
+                        "when": "08.03.2026 10:00 UTC",
+                        "time_label": "10:00",
+                        "action": "web_setting_updated",
+                        "action_label": "Изменена настройка",
+                        "category_code": "settings",
+                        "category_label": "Настройки",
+                        "tone": "info",
+                        "description": "Обновлена настройка.",
+                        "actor": "1",
+                        "actor_label": "Пользователь 1",
+                        "target": "—",
+                        "target_label": "Без цели",
+                        "has_target": False,
+                    }
+                ],
             }
         ],
     )
 
-    assert "Лента событий" in html
+    assert 'data-audit-page' in html
+    assert "8 марта 2026" in html
+    assert "Изменена настройка" in html
     assert "web_setting_updated" in html
+    assert "Технические детали" in html
 
 
 def test_games_template_renders_active_cards() -> None:

@@ -84,6 +84,79 @@ _TRIGGER_TEMPLATE_QUICK_NAMES: tuple[str, ...] = (
     "{date}",
     "{time}",
 )
+_AUDIT_MONTHS_RU = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+AUDIT_CATEGORY_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "all", "label": "Все категории"},
+    {"value": "settings", "label": "Настройки"},
+    {"value": "moderation", "label": "Модерация"},
+    {"value": "economy", "label": "Экономика"},
+    {"value": "social", "label": "Социальное"},
+    {"value": "system", "label": "Система"},
+    {"value": "other", "label": "Другое"},
+)
+AUDIT_ACTOR_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "all", "label": "Все инициаторы"},
+    {"value": "users", "label": "Пользователи"},
+    {"value": "system", "label": "Система"},
+)
+_AUDIT_CATEGORY_LABELS = {
+    item["value"]: item["label"]
+    for item in AUDIT_CATEGORY_OPTIONS
+    if item["value"] != "all"
+}
+_AUDIT_ACTION_LABELS = {
+    "web_setting_updated": "Изменена настройка",
+    "web_alias_saved": "Сохранён алиас",
+    "web_alias_deleted": "Удалён алиас",
+    "web_trigger_saved": "Сохранён триггер",
+    "web_trigger_deleted": "Удалён триггер",
+    "admin_record_updated": "Изменена запись",
+    "admin_record_deleted": "Удалена запись",
+    "antiraid_enabled": "Антирейд включён",
+    "antiraid_disabled": "Антирейд выключен",
+    "antiraid_join_ban": "Заблокирован участник рейда",
+    "antiraid_retro_ban": "Применена ретро-блокировка",
+    "captcha_started": "Запущена проверка капчей",
+    "captcha_passed": "Капча пройдена",
+    "captcha_failed_kick": "Удалён после капчи",
+    "captcha_timeout_kick": "Удалён по тайм-ауту капчи",
+    "chat_locked": "Чат заблокирован",
+    "chat_unlocked": "Чат разблокирован",
+    "persona_replaced": "Назначен образ",
+    "persona_cleared": "Снят образ",
+    "rest_granted": "Выдан рест",
+    "rest_revoked": "Рест снят",
+    "auction_start": "Запущен аукцион",
+    "auction_bid": "Сделана ставка",
+    "auction_cancel": "Аукцион отменён",
+    "auction_finalized": "Аукцион завершён",
+    "coins_transfer": "Перевод монет",
+    "relationship_rejected": "Отношения отклонены",
+    "relationship_cancelled": "Отношения отменены",
+    "marriage_divorce": "Брак расторгнут",
+    "service_join_deleted": "Удалено событие входа",
+    "service_leave_deleted": "Удалено событие выхода",
+    "leave_notification_sent": "Отправлено уведомление о выходе",
+    "title_set": "Установлен титул",
+    "title_clear": "Титул снят",
+    "iris_import": "Импортированы данные Iris",
+    "profile_award_add": "Добавлена награда профиля",
+    "profile_award_remove": "Удалена награда профиля",
+    "profile_desc_set": "Обновлено описание профиля",
+}
 
 
 def format_datetime(value: datetime | None) -> str:
@@ -395,19 +468,126 @@ def build_alias_mode_setting(*, current_mode: str, editable: bool) -> dict[str, 
     }
 
 
-def build_audit_rows(entries: list[ChatAuditLogEntry]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def _audit_category(action_code: str) -> str:
+    if action_code.startswith(("web_setting_", "web_alias_", "web_trigger_", "title_")):
+        return "settings"
+    if action_code.startswith(("antiraid_", "captcha_", "persona_", "rest_", "admin_record_")) or action_code in {
+        "chat_locked",
+        "chat_unlocked",
+    }:
+        return "moderation"
+    if action_code.startswith(("auction_", "coins_", "economy_", "market_")):
+        return "economy"
+    if action_code.startswith(("relationship_", "marriage_")) or action_code in {
+        "care",
+        "date",
+        "flirt",
+        "gift",
+        "love",
+        "support",
+        "surprise",
+        "vow",
+    }:
+        return "social"
+    if action_code.startswith(("service_", "profile_")) or action_code in {
+        "leave_notification_sent",
+        "iris_import",
+    }:
+        return "system"
+    return "other"
+
+
+def _audit_tone(action_code: str, category_code: str) -> str:
+    if any(marker in action_code for marker in ("ban", "kick", "failed", "deleted", "clear", "locked")):
+        return "danger"
+    if any(marker in action_code for marker in ("timeout", "cancel", "rejected", "revoked", "disabled")):
+        return "warning"
+    if any(marker in action_code for marker in ("passed", "granted", "saved", "set", "unlocked", "transfer", "finalized")):
+        return "success"
+    if category_code in {"settings", "system"}:
+        return "info"
+    return "neutral"
+
+
+def _audit_date_label(value: datetime) -> str:
+    utc_value = value.astimezone(_UTC)
+    return f"{utc_value.day} {_AUDIT_MONTHS_RU[utc_value.month - 1]} {utc_value.year}"
+
+
+def build_audit_rows(entries: list[ChatAuditLogEntry]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
     for entry in entries:
+        category_code = _audit_category(entry.action_code)
+        actor = str(entry.actor_user_id) if entry.actor_user_id is not None else "system"
+        target = str(entry.target_user_id) if entry.target_user_id is not None else "—"
         rows.append(
             {
+                "event_id": entry.id,
                 "when": format_datetime(entry.created_at),
+                "date_label": _audit_date_label(entry.created_at),
+                "time_label": entry.created_at.astimezone(_UTC).strftime("%H:%M"),
                 "action": entry.action_code,
+                "action_label": _AUDIT_ACTION_LABELS.get(entry.action_code, "Другое событие"),
+                "category_code": category_code,
+                "category_label": _AUDIT_CATEGORY_LABELS[category_code],
+                "tone": _audit_tone(entry.action_code, category_code),
                 "description": entry.description,
-                "actor": str(entry.actor_user_id) if entry.actor_user_id is not None else "system",
-                "target": str(entry.target_user_id) if entry.target_user_id is not None else "—",
+                "actor": actor,
+                "actor_label": "Система" if actor == "system" else f"Пользователь {actor}",
+                "target": target,
+                "target_label": "Без цели" if target == "—" else f"Пользователь {target}",
+                "has_target": target != "—",
             }
         )
     return rows
+
+
+def filter_audit_rows(
+    rows: list[dict[str, object]],
+    *,
+    query: str,
+    category: str,
+    actor: str,
+) -> list[dict[str, object]]:
+    normalized_query = query.casefold()
+    filtered: list[dict[str, object]] = []
+    for row in rows:
+        if category != "all" and row["category_code"] != category:
+            continue
+        if actor == "system" and row["actor"] != "system":
+            continue
+        if actor == "users" and row["actor"] == "system":
+            continue
+        if normalized_query:
+            searchable = " ".join(
+                str(row[key])
+                for key in (
+                    "action",
+                    "action_label",
+                    "category_label",
+                    "description",
+                    "actor",
+                    "actor_label",
+                    "target",
+                    "target_label",
+                )
+            ).casefold()
+            if normalized_query not in searchable:
+                continue
+        filtered.append(row)
+    return filtered
+
+
+def group_audit_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    groups: list[dict[str, object]] = []
+    by_date: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        date_label = str(row["date_label"])
+        if date_label not in by_date:
+            by_date[date_label] = []
+            groups.append({"date_label": date_label, "rows": by_date[date_label]})
+        by_date[date_label].append(row)
+    return groups
 
 
 def build_settings_sections(

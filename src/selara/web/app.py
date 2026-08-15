@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import logging
@@ -14,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from aiogram import Bot
+from aiogram.enums import ContentType
 from aiogram.types import BufferedInputFile, ReactionTypeEmoji
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -130,6 +133,8 @@ from selara.presentation.handlers.settings_common import (
 )
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.presenters import (
+    AUDIT_ACTOR_OPTIONS,
+    AUDIT_CATEGORY_OPTIONS,
     build_achievement_rows,
     build_alias_mode_setting,
     build_alias_rows,
@@ -144,7 +149,9 @@ from selara.web.presenters import (
     build_trigger_rows,
     build_trigger_template_examples,
     build_trigger_template_quick_rows,
+    filter_audit_rows,
     format_datetime,
+    group_audit_rows,
     user_label,
 )
 from selara.web.rendering import create_template_environment
@@ -194,6 +201,240 @@ _ADMIN_BROADCAST_ALLOWED_HTML_ATTRIBUTES = {
 }
 game_router_module = import_module("selara.presentation.handlers.game.router")
 logger = logging.getLogger(__name__)
+
+_ADMIN_ARCHIVE_MEDIA_PRESENTATION = {
+    "photo": ("Фото", "▧"),
+    "sticker": ("Стикер", "◇"),
+    "animation": ("Анимация", "▶"),
+    "video": ("Видео", "▶"),
+    "video_note": ("Видеосообщение", "◉"),
+    "document": ("Документ", "▤"),
+    "audio": ("Аудио", "♫"),
+    "voice": ("Голосовое", "◖"),
+}
+_ADMIN_ARCHIVE_PHOTO_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _encode_admin_archive_cursor(*, snapshot_at: datetime, snapshot_id: int) -> str:
+    normalized_at = (
+        snapshot_at.replace(tzinfo=timezone.utc)
+        if snapshot_at.tzinfo is None
+        else snapshot_at.astimezone(timezone.utc)
+    )
+    payload = f"{normalized_at.isoformat(timespec='microseconds')}|{int(snapshot_id)}"
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_admin_archive_cursor(value: str) -> tuple[datetime, int] | None:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.b64decode(
+            f"{value}{padding}",
+            altchars=b"-_",
+            validate=True,
+        ).decode("utf-8")
+        raw_datetime, raw_id = decoded.rsplit("|", 1)
+        snapshot_at = datetime.fromisoformat(raw_datetime)
+        snapshot_id = int(raw_id)
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if snapshot_id <= 0:
+        return None
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+    return snapshot_at.astimezone(timezone.utc), snapshot_id
+
+
+def _admin_archive_file_size(value: object) -> str | None:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    if size < 0:
+        return None
+    if size < 1024:
+        return f"{size} Б"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} КБ"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} МБ"
+    return f"{size / (1024 * 1024 * 1024):.1f} ГБ"
+
+
+def _admin_archive_duration(value: object) -> str | None:
+    try:
+        seconds = max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _russian_plural(value: int, *, one: str, few: str, many: str) -> str:
+    remainder100 = abs(value) % 100
+    remainder10 = remainder100 % 10
+    if remainder10 == 1 and remainder100 != 11:
+        return one
+    if 2 <= remainder10 <= 4 and not 12 <= remainder100 <= 14:
+        return few
+    return many
+
+
+def _feature_request_status_meta(
+    *,
+    status: str,
+    done_at: datetime | None,
+) -> dict[str, object]:
+    if status == "done":
+        return {
+            "code": "done",
+            "label": "Сделано",
+            "note": (
+                f"Отмечено {format_datetime(done_at)}"
+                if done_at is not None
+                else "Отмечено админом"
+            ),
+            "is_done": True,
+        }
+    return {
+        "code": "open",
+        "label": "Не сделано",
+        "note": "Ожидает решения",
+        "is_done": False,
+    }
+
+
+def _build_feature_request_item(
+    *,
+    row: UserFeatureRequestModel,
+    author_label: str | None = None,
+) -> dict[str, object]:
+    status_meta = _feature_request_status_meta(
+        status=row.status,
+        done_at=row.done_at,
+    )
+    created_at = format_datetime(row.created_at)
+    updated_at = format_datetime(row.updated_at)
+    status_history: list[dict[str, str]] = [
+        {"label": "Заявка создана", "time": created_at, "tone": "neutral"}
+    ]
+    if row.status == "done":
+        status_history.append(
+            {
+                "label": "Отмечена как сделанная",
+                "time": format_datetime(row.done_at or row.updated_at),
+                "tone": "done",
+            }
+        )
+    else:
+        status_history.append(
+            {
+                "label": "Ожидает решения",
+                "time": f"обновлено {updated_at}",
+                "tone": "open",
+            }
+        )
+    return {
+        "id": int(row.id),
+        "title": row.title,
+        "details": row.details,
+        "status_code": status_meta["code"],
+        "status_label": status_meta["label"],
+        "status_note": status_meta["note"],
+        "is_done": status_meta["is_done"],
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "done_at": format_datetime(row.done_at) if row.done_at is not None else None,
+        "author_label": author_label,
+        "status_history": status_history,
+    }
+
+
+def _admin_archive_photo_reference(
+    raw_message_json: dict[str, object] | None,
+) -> dict[str, object] | None:
+    payload = raw_message_json if isinstance(raw_message_json, dict) else {}
+    photo_sizes = payload.get("photo")
+    if not isinstance(photo_sizes, list):
+        return None
+    for item in reversed(photo_sizes):
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("file_id") or "").strip()
+        if not file_id:
+            continue
+        try:
+            file_size = int(item["file_size"]) if item.get("file_size") is not None else None
+        except (TypeError, ValueError):
+            file_size = None
+        return {
+            "file_id": file_id,
+            "file_size": file_size if file_size is None or file_size >= 0 else None,
+        }
+    return None
+
+
+def _admin_archive_media_info(
+    *,
+    message_type: str,
+    raw_message_json: dict[str, object] | None,
+) -> dict[str, object] | None:
+    presentation = _ADMIN_ARCHIVE_MEDIA_PRESENTATION.get(message_type)
+    if presentation is None:
+        return None
+
+    payload = raw_message_json if isinstance(raw_message_json, dict) else {}
+    raw_media: object = payload.get(message_type)
+    if message_type == "photo":
+        photo_sizes = raw_media if isinstance(raw_media, list) else []
+        raw_media = next(
+            (item for item in reversed(photo_sizes) if isinstance(item, dict)),
+            {},
+        )
+    media = raw_media if isinstance(raw_media, dict) else {}
+    facts: list[str] = []
+
+    def add_fact(value: object) -> None:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in facts:
+            facts.append(normalized)
+
+    if message_type == "sticker":
+        add_fact(media.get("emoji"))
+        if media.get("set_name"):
+            add_fact(f"Набор: {media['set_name']}")
+        if media.get("is_animated"):
+            add_fact("Анимированный")
+        elif media.get("is_video"):
+            add_fact("Видео-стикер")
+    elif message_type == "audio":
+        performer = str(media.get("performer") or "").strip()
+        title = str(media.get("title") or "").strip()
+        if performer and title:
+            add_fact(f"{performer} — {title}")
+        else:
+            add_fact(title or performer)
+        add_fact(media.get("file_name"))
+    else:
+        add_fact(media.get("file_name"))
+
+    width = media.get("width")
+    height = media.get("height")
+    if width is not None and height is not None:
+        add_fact(f"{width}×{height}")
+    add_fact(media.get("mime_type"))
+    duration = _admin_archive_duration(media.get("duration"))
+    if duration is not None:
+        add_fact(duration)
+    file_size = _admin_archive_file_size(media.get("file_size"))
+    if file_size is not None:
+        add_fact(file_size)
+
+    title, icon = presentation
+    return {"title": title, "icon": icon, "facts": facts}
 
 
 def _chat_hub_mode(raw_value: str | None) -> str:
@@ -635,47 +876,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "error": error,
         }
 
-    def _feature_request_status_meta(*, status: str, done_at: datetime | None) -> dict[str, object]:
-        if status == "done":
-            return {
-                "code": "done",
-                "label": "Сделано",
-                "note": (
-                    f"Отмечено {format_datetime(done_at)}"
-                    if done_at is not None
-                    else "Отмечено админом"
-                ),
-                "is_done": True,
-            }
-        return {
-            "code": "open",
-            "label": "Не сделано",
-            "note": "Ожидает решения",
-            "is_done": False,
-        }
-
-    def _build_feature_request_item(
-        *,
-        row: UserFeatureRequestModel,
-        author_label: str | None = None,
-    ) -> dict[str, object]:
-        status_meta = _feature_request_status_meta(status=row.status, done_at=row.done_at)
-        return {
-            "id": int(row.id),
-            "title": row.title,
-            "details": row.details,
-            "status_code": status_meta["code"],
-            "status_label": status_meta["label"],
-            "status_note": status_meta["note"],
-            "is_done": status_meta["is_done"],
-            "created_at": format_datetime(row.created_at),
-            "done_at": format_datetime(row.done_at) if row.done_at is not None else None,
-            "author_label": author_label,
-        }
-
     async def _load_admin_feature_request_items(
         session: AsyncSession,
         *,
+        status: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, object]]:
         stmt = (
@@ -684,6 +888,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             .order_by((UserFeatureRequestModel.status == "done").asc(), UserFeatureRequestModel.created_at.desc())
             .limit(limit)
         )
+        if status in {"open", "done"}:
+            stmt = stmt.where(UserFeatureRequestModel.status == status)
         rows = (await session.execute(stmt)).all()
         items: list[dict[str, object]] = []
         for feature_request, author in rows:
@@ -6783,6 +6989,23 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         chat_id: int,
         request: Request,
     ) -> tuple[dict[str, object] | None, str | None]:
+        audit_query = (request.query_params.get("q") or "").strip()
+        audit_category = (request.query_params.get("category") or "all").strip().lower()
+        audit_actor = (request.query_params.get("actor") or "all").strip().lower()
+        filter_errors: list[str] = []
+        if len(audit_query) > 120:
+            audit_query = audit_query[:120]
+            filter_errors.append("Поисковый запрос сокращён до 120 символов.")
+        valid_categories = {item["value"] for item in AUDIT_CATEGORY_OPTIONS}
+        if audit_category not in valid_categories:
+            filter_errors.append("Неизвестная категория — показаны события всех категорий.")
+            audit_category = "all"
+        valid_actors = {item["value"] for item in AUDIT_ACTOR_OPTIONS}
+        if audit_actor not in valid_actors:
+            filter_errors.append("Неизвестный тип инициатора — показаны события всех инициаторов.")
+            audit_actor = "all"
+
+        audit_load_error: str | None = None
         async with session_factory() as session:
             user = await _load_user_from_request(session, request, touch=True)
             if user is None:
@@ -6802,24 +7025,45 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat=chat,
                 user=user,
             )
-            entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=200)
-            await session.commit()
+            try:
+                entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=200)
+            except Exception:
+                logger.exception("Failed to load chat audit log", extra={"chat_id": chat_id})
+                entries = []
+                audit_load_error = "Не удалось загрузить журнал событий. Попробуйте обновить страницу."
+                await session.rollback()
+            else:
+                await session.commit()
+
+        all_audit_rows = build_audit_rows(entries)
+        visible_audit_rows = filter_audit_rows(
+            all_audit_rows,
+            query=audit_query,
+            category=audit_category,
+            actor=audit_actor,
+        )
 
         page_context: dict[str, object] = {
-            "page_title": f"Selara Audit • {chat.chat_title or chat.chat_id}",
+            "page_title": f"Selara • Журнал аудита • {chat.chat_title or chat.chat_id}",
             "page_name": "audit",
             "chat_id": chat.chat_id,
             "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
-            "audit_rows": [
-                {
-                    "when": format_datetime(entry.created_at),
-                    "action": entry.action_code,
-                    "description": entry.description,
-                    "actor": str(entry.actor_user_id) if entry.actor_user_id is not None else "system",
-                    "target": str(entry.target_user_id) if entry.target_user_id is not None else "—",
-                }
-                for entry in entries
-            ],
+            "extra_styles": ["audit.css"],
+            "audit_rows": visible_audit_rows,
+            "audit_groups": group_audit_rows(visible_audit_rows),
+            "audit_total_count": len(all_audit_rows),
+            "audit_shown_count": len(visible_audit_rows),
+            "audit_system_count": sum(row["actor"] == "system" for row in all_audit_rows),
+            "audit_filters": {
+                "q": audit_query,
+                "category": audit_category,
+                "actor": audit_actor,
+            },
+            "audit_filter_errors": filter_errors,
+            "audit_load_error": audit_load_error,
+            "audit_category_options": [dict(item) for item in AUDIT_CATEGORY_OPTIONS],
+            "audit_actor_options": [dict(item) for item in AUDIT_ACTOR_OPTIONS],
+            "audit_reset_href": f"/app/chat/{chat.chat_id}/audit",
             "chat_section_links": _build_chat_section_links(
                 chat.chat_id,
                 active="audit",
@@ -7572,14 +7816,45 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _admin_invalid_form_value
         return raw_value
 
-    def _admin_layout_context(*, flash: str | None, error: str | None) -> dict[str, object]:
+    def _admin_layout_context(
+        *,
+        flash: str | None,
+        error: str | None,
+        active: str = "overview",
+        authenticated: bool = True,
+    ) -> dict[str, object]:
+        if not authenticated:
+            return {
+                "top_links": _top_links(("/", "На главную", "ghost")),
+                "show_logout": False,
+                "flash": flash,
+                "error": error,
+                "body_classes": "ui-admin-login",
+                "navigation_label": "Навигация страницы входа",
+            }
+
+        nav_items = (
+            ("overview", "/app/admin", "Обзор"),
+            ("broadcasts", "/app/admin#broadcasts", "Рассылки"),
+            ("history", "/app/admin/table/messages_compact", "История"),
+            ("database", "/app/admin#database", "База данных"),
+        )
         return {
-            "top_links": _top_links(
-                ("/app/admin", "Админка", "subtle"),
-            ),
+            "top_links": [
+                {
+                    "href": href,
+                    "label": label,
+                    "variant": "subtle" if key == active else "ghost",
+                    "current": key == active,
+                }
+                for key, href, label in nav_items
+            ],
             "show_logout": True,
+            "logout_action": "/app/admin/logout",
             "flash": flash,
             "error": error,
+            "body_classes": "ui-admin-shell",
+            "navigation_label": "Разделы админки",
         }
 
     def _compact_message_text(row: MessageArchiveModel) -> str:
@@ -7587,6 +7862,66 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if value:
             return value
         return f"[{row.message_type}]"
+
+    def _admin_archive_highlight_segments(
+        value: str,
+        query: str,
+    ) -> list[dict[str, object]]:
+        if not query:
+            return [{"text": value, "match": False}]
+
+        pattern = re.compile(re.escape(query), flags=re.IGNORECASE)
+        segments: list[dict[str, object]] = []
+        cursor = 0
+        for match in pattern.finditer(value):
+            if match.start() > cursor:
+                segments.append({"text": value[cursor : match.start()], "match": False})
+            segments.append({"text": match.group(0), "match": True})
+            cursor = match.end()
+        if cursor < len(value):
+            segments.append({"text": value[cursor:], "match": False})
+        return segments or [{"text": value, "match": False}]
+
+    def _admin_archive_date_label(value: datetime) -> str:
+        month_names = (
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        )
+        return f"{value.day} {month_names[value.month - 1]} {value.year}"
+
+    def _admin_archive_message_type_label(message_type: str) -> str:
+        return {
+            "text": "Текст",
+            "photo": "Фото",
+            "video": "Видео",
+            "animation": "Анимация",
+            "document": "Документ",
+            "audio": "Аудио",
+            "voice": "Голосовое",
+            "sticker": "Стикер",
+            "video_note": "Видеосообщение",
+            "contact": "Контакт",
+            "poll": "Опрос",
+            "location": "Геопозиция",
+            "venue": "Место",
+            "dice": "Кубик",
+            "game": "Игра",
+            "paid_media": "Платное медиа",
+            "live_photo": "Живое фото",
+            "story": "История",
+            "checklist": "Чек-лист",
+            "unknown": "Неизвестный тип",
+        }.get(message_type, message_type.replace("_", " ").capitalize())
 
     def _compact_reply_summary(raw_message_json: dict[str, object] | None) -> str | None:
         if not isinstance(raw_message_json, dict):
@@ -7971,6 +8306,40 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return "Ошибка", "warn"
         return "Ожидание", "muted"
 
+    def _admin_broadcast_summary_meta(
+        *,
+        target_count: int,
+        sent_count: int,
+        failed_count: int,
+    ) -> tuple[str, str]:
+        target = max(0, int(target_count))
+        sent = max(0, int(sent_count))
+        failed = max(0, int(failed_count))
+        pending = max(0, target - sent - failed)
+        if target == 0:
+            return "Без получателей", "muted"
+        if sent == target:
+            return "Завершено", "ok"
+        if failed == target:
+            return "Не доставлено", "danger"
+        if pending > 0:
+            return "В процессе", "muted"
+        return "Выполнено частично", "warn"
+
+    def _admin_broadcast_delivery_percent(*, target_count: int, sent_count: int) -> int:
+        target = max(0, int(target_count))
+        if target == 0:
+            return 0
+        return min(100, round(max(0, int(sent_count)) * 100 / target))
+
+    def _admin_broadcast_reaction_mode_label(mode: str) -> str:
+        normalized = (mode or "").strip().lower()
+        if normalized == "native":
+            return "Нативные реакции"
+        if normalized == "inline":
+            return "Inline-кнопки"
+        return "Без реакций"
+
     async def _execute_admin_broadcast_reply_reaction(
         request: Request,
         *,
@@ -8043,6 +8412,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.get("/app/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
+        feedback_status_raw = (
+            request.query_params.get("feedback_status") or "all"
+        ).strip().lower()
+        feedback_filter_error = None
+        if feedback_status_raw not in {"all", "open", "done"}:
+            feedback_status = "all"
+            feedback_filter_error = (
+                "Неизвестный фильтр заявок — показаны все последние заявки."
+            )
+        else:
+            feedback_status = feedback_status_raw
         async with session_factory() as session:
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
             if not _admin_auth_required(admin_user_id):
@@ -8050,7 +8430,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect("/app/admin/login")
 
             activity_repo = SqlAlchemyActivityRepository(session)
-            feedback_requests = await _load_admin_feature_request_items(session)
+            feedback_requests = await _load_admin_feature_request_items(
+                session,
+                status=feedback_status if feedback_status != "all" else None,
+            )
             open_feedback_count = (
                 await session.execute(
                     select(func.count())
@@ -8064,6 +8447,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             recent_broadcasts = await activity_repo.list_recent_admin_broadcasts(limit=8)
             await session.commit()
 
+        table_sections = _admin_table_sections()
+        attention_broadcast_count = sum(
+            1 for item in recent_broadcasts if int(item.failed_count or 0) > 0
+        )
+        attention_task_count = int(open_feedback_count or 0) + attention_broadcast_count
         return _render_template(
             "admin.html",
             page_title="Selara • Админ-панель",
@@ -8072,12 +8460,45 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
             ),
-            table_sections=_admin_table_sections(),
+            extra_styles=[
+                "admin-overview.css",
+                "admin-feedback.css",
+                "admin-broadcast.css",
+            ],
+            extra_scripts=[
+                "admin-overview.js",
+                "admin-feedback.js",
+                "admin-broadcast.js",
+            ],
+            table_sections=table_sections,
+            admin_table_count=sum(len(section["tables"]) for section in table_sections),
             admin_user_id=admin_user_id,
             feedback_requests=feedback_requests,
+            feedback_status=feedback_status,
+            feedback_filter_error=feedback_filter_error,
             open_feedback_count=int(open_feedback_count or 0),
+            attention_broadcast_count=attention_broadcast_count,
+            attention_summary=(
+                f"{attention_task_count} "
+                + _russian_plural(
+                    attention_task_count,
+                    one="задача требует внимания",
+                    few="задачи требуют внимания",
+                    many="задач требуют внимания",
+                )
+            ),
+            recent_broadcast_count=len(recent_broadcasts),
             broadcast_active_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
             recent_active_chat_count=recent_active_chat_count,
+            broadcast_audience_status=(
+                f"{recent_active_chat_count} "
+                + _russian_plural(
+                    recent_active_chat_count,
+                    one="чат доступен",
+                    few="чата доступны",
+                    many="чатов доступны",
+                )
+            ),
             recent_active_chats=[
                 {
                     "chat_id": item.chat_id,
@@ -8100,6 +8521,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "sent_count": item.sent_count,
                     "failed_count": item.failed_count,
                     "reply_count": item.reply_count,
+                    "reaction_count": item.reaction_count,
+                    "delivery_percent": _admin_broadcast_delivery_percent(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                    ),
+                    "status_label": _admin_broadcast_summary_meta(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                        failed_count=item.failed_count,
+                    )[0],
+                    "status_tone": _admin_broadcast_summary_meta(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                        failed_count=item.failed_count,
+                    )[1],
                 }
                 for item in recent_broadcasts
             ],
@@ -8121,6 +8557,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             **_admin_layout_context(
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
+                authenticated=False,
             ),
         )
 
@@ -8279,6 +8716,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.get("/app/admin/broadcasts/{broadcast_id}", response_class=HTMLResponse)
     async def admin_broadcast_detail(request: Request, broadcast_id: int):
+        delivery_status_raw = (
+            request.query_params.get("delivery_status") or "all"
+        ).strip().lower()
+        delivery_filter_error = None
+        if delivery_status_raw not in {"all", "sent", "failed", "pending"}:
+            delivery_filter_error = (
+                "Неизвестный фильтр доставок — показаны все получатели."
+            )
+            delivery_status = "all"
+        else:
+            delivery_status = delivery_status_raw
+
         async with session_factory() as session:
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
             if not _admin_auth_required(admin_user_id):
@@ -8300,6 +8749,36 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         sent_count = sum(1 for item in deliveries if item.status == "sent")
         failed_count = sum(1 for item in deliveries if item.status == "failed")
         target_count = len(deliveries)
+        pending_count = max(0, target_count - sent_count - failed_count)
+        delivery_counts = {
+            "all": target_count,
+            "sent": sent_count,
+            "failed": failed_count,
+            "pending": pending_count,
+        }
+        visible_deliveries = (
+            deliveries
+            if delivery_status == "all"
+            else [item for item in deliveries if item.status == delivery_status]
+        )
+        filter_labels = {
+            "all": "Все",
+            "sent": "Доставлено",
+            "failed": "Ошибки",
+            "pending": "Ожидают",
+        }
+        delivery_filters = []
+        for value in ("all", "sent", "failed", "pending"):
+            query = "" if value == "all" else f"?{urlencode({'delivery_status': value})}"
+            delivery_filters.append(
+                {
+                    "value": value,
+                    "label": filter_labels[value],
+                    "count": delivery_counts[value],
+                    "current": value == delivery_status,
+                    "href": f"/app/admin/broadcasts/{broadcast.id}{query}#deliveries",
+                }
+            )
         option_labels = {
             str(option.get("key")): str(option.get("label") or "")
             for option in broadcast.reaction_options
@@ -8354,6 +8833,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             }
             for item in reaction_counts
         ]
+        summary_label, summary_tone = _admin_broadcast_summary_meta(
+            target_count=target_count,
+            sent_count=sent_count,
+            failed_count=failed_count,
+        )
+        anonymous_reaction_total = sum(item.count for item in reaction_counts)
 
         return _render_template(
             "admin_broadcast_detail.html",
@@ -8362,20 +8847,33 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             **_admin_layout_context(
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
+                active="broadcasts",
             ),
+            extra_styles=["admin-broadcast-detail.css"],
             broadcast={
                 "id": broadcast.id,
                 "created_at": format_datetime(broadcast.created_at),
                 "body": broadcast.body,
                 "message_preview_html": _render_admin_broadcast_message(broadcast.rendered_body or broadcast.body),
                 "media_type": broadcast.media_type,
+                "media_type_label": (
+                    "Фото" if broadcast.media_type == "photo" else None
+                ),
                 "reaction_options": list(broadcast.reaction_options),
                 "active_since_days": broadcast.active_since_days,
                 "target_count": target_count,
                 "sent_count": sent_count,
                 "failed_count": failed_count,
+                "pending_count": pending_count,
                 "reply_count": len(replies),
                 "reaction_count": len(reactions),
+                "anonymous_reaction_total": anonymous_reaction_total,
+                "delivery_percent": _admin_broadcast_delivery_percent(
+                    target_count=target_count,
+                    sent_count=sent_count,
+                ),
+                "status_label": summary_label,
+                "status_tone": summary_tone,
             },
             deliveries=[
                 {
@@ -8392,12 +8890,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "telegram_message_id": item.telegram_message_id,
                     "reply_count": item.reply_count,
                     "reaction_mode": item.reaction_mode,
+                    "reaction_mode_label": _admin_broadcast_reaction_mode_label(
+                        item.reaction_mode
+                    ),
                     "bot_member_status": item.bot_member_status,
                     "sent_at": format_datetime(item.sent_at),
                     "error_text": item.error_text,
                 }
-                for item in deliveries
+                for item in visible_deliveries
             ],
+            shown_delivery_count=len(visible_deliveries),
+            delivery_status=delivery_status,
+            delivery_filters=delivery_filters,
+            delivery_filter_error=delivery_filter_error,
             replies=[
                 {
                     "id": item.id,
@@ -8499,9 +9004,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             form = await _parse_form(request)
             new_status = str(form.get("status", "")).strip().lower()
+            feedback_status = str(form.get("feedback_status", "all")).strip().lower()
+            if feedback_status not in {"all", "open", "done"}:
+                feedback_status = "all"
+            return_path = (
+                f"/app/admin?feedback_status={feedback_status}"
+                if feedback_status != "all"
+                else "/app/admin"
+            )
             if new_status not in {"open", "done"}:
                 await session.commit()
-                redirect_path = _with_message("/app/admin", key="error", text="Неизвестный статус заявки.")
+                redirect_path = _with_message(
+                    return_path,
+                    key="error",
+                    text="Неизвестный статус заявки.",
+                ) + "#feedback"
                 if prefers_json:
                     return _json_result(ok=False, message="Неизвестный статус заявки.", status_code=400, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -8509,7 +9026,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             row = await session.get(UserFeatureRequestModel, request_id)
             if row is None:
                 await session.commit()
-                redirect_path = _with_message("/app/admin", key="error", text="Заявка не найдена.")
+                redirect_path = _with_message(
+                    return_path,
+                    key="error",
+                    text="Заявка не найдена.",
+                ) + "#feedback"
                 if prefers_json:
                     return _json_result(ok=False, message="Заявка не найдена.", status_code=404, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -8519,10 +9040,62 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         message = "Заявка отмечена как сделанная." if new_status == "done" else "Заявка возвращена в открытые."
-        redirect_path = _with_message("/app/admin", key="flash", text=message)
+        redirect_path = _with_message(
+            return_path,
+            key="flash",
+            text=message,
+        ) + "#feedback"
         if prefers_json:
             return _json_result(ok=True, message=message, status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
+
+    @app.get("/app/admin/archive/media/{snapshot_id}")
+    async def admin_archive_photo_preview(request: Request, snapshot_id: int):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return Response(
+                    status_code=401,
+                    headers={"Cache-Control": "private, no-store"},
+                )
+            snapshot = await session.get(MessageArchiveModel, snapshot_id)
+            await session.commit()
+
+        if snapshot is None or snapshot.message_type != "photo":
+            return Response(status_code=404)
+        reference = _admin_archive_photo_reference(snapshot.raw_message_json)
+        if reference is None:
+            return Response(status_code=404)
+        known_size = reference.get("file_size")
+        if isinstance(known_size, int) and known_size > _ADMIN_ARCHIVE_PHOTO_PREVIEW_MAX_BYTES:
+            return Response(status_code=413)
+
+        try:
+            source = BytesIO()
+            await (await _get_game_bot()).download(
+                str(reference["file_id"]),
+                destination=source,
+            )
+            content = source.getvalue()
+        except Exception:
+            logger.exception(
+                "Failed to load Telegram photo for admin archive preview",
+                extra={"snapshot_id": snapshot_id},
+            )
+            return Response(status_code=404)
+        if len(content) > _ADMIN_ARCHIVE_PHOTO_PREVIEW_MAX_BYTES:
+            return Response(status_code=413)
+        if not content:
+            return Response(status_code=404)
+        return Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/app/admin/table/{table_name}", response_class=HTMLResponse)
     async def admin_table_page(request: Request, table_name: str):
@@ -8539,28 +9112,105 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
 
         if table_name == "messages_compact":
-            page = max(1, int(request.query_params.get("page", 1)))
+            try:
+                page = max(1, int(request.query_params.get("page", 1)))
+            except (TypeError, ValueError):
+                page = 1
             limit = 50
             chat_id_filter_raw = (request.query_params.get("chat_id") or "").strip()
             user_id_filter_raw = (request.query_params.get("user_id") or "").strip()
             text_filter = (request.query_params.get("text") or "").strip()
+            date_from_filter_raw = (request.query_params.get("date_from") or "").strip()
+            date_to_filter_raw = (request.query_params.get("date_to") or "").strip()
+            message_type_filter = (request.query_params.get("message_type") or "").strip().lower()
             snapshot_kind_filter = (request.query_params.get("snapshot_kind") or "").strip().lower()
+            has_reply_filter = (request.query_params.get("has_reply") or "").strip().lower()
+            filter_errors: list[str] = []
+            before_cursor_raw = (request.query_params.get("before") or "").strip()
+            after_cursor_raw = (request.query_params.get("after") or "").strip()
+            before_cursor = (
+                _decode_admin_archive_cursor(before_cursor_raw) if before_cursor_raw else None
+            )
+            after_cursor = (
+                _decode_admin_archive_cursor(after_cursor_raw) if after_cursor_raw else None
+            )
+            if before_cursor_raw and before_cursor is None:
+                filter_errors.append("Ссылка на предыдущую страницу устарела или повреждена.")
+            if after_cursor_raw and after_cursor is None:
+                filter_errors.append("Ссылка на следующую страницу устарела или повреждена.")
+            if before_cursor is not None and after_cursor is not None:
+                filter_errors.append("Одновременно можно использовать только один курсор архива.")
+                before_cursor = None
+                after_cursor = None
+
+            allowed_message_types = {
+                str(content_type.value)
+                for content_type in ContentType
+                if content_type is not ContentType.ANY
+            }
+            if message_type_filter and message_type_filter not in allowed_message_types:
+                filter_errors.append("Неизвестный тип сообщения — фильтр по типу не применён.")
+                message_type_filter = ""
+            if snapshot_kind_filter and snapshot_kind_filter not in {"created", "edited"}:
+                filter_errors.append("Неизвестный вид снимка — фильтр по редакции не применён.")
+                snapshot_kind_filter = ""
+            if has_reply_filter and has_reply_filter not in {"yes", "no"}:
+                filter_errors.append("Неизвестный фильтр ответов — выберите вариант из списка.")
+                has_reply_filter = ""
+
+            date_from_filter: date | None = None
+            date_to_filter: date | None = None
+            if date_from_filter_raw:
+                try:
+                    date_from_filter = date.fromisoformat(date_from_filter_raw)
+                except ValueError:
+                    filter_errors.append("Начальная дата имеет неверный формат.")
+            if date_to_filter_raw:
+                try:
+                    date_to_filter = date.fromisoformat(date_to_filter_raw)
+                except ValueError:
+                    filter_errors.append("Конечная дата имеет неверный формат.")
+            if (
+                date_from_filter is not None
+                and date_to_filter is not None
+                and date_from_filter > date_to_filter
+            ):
+                filter_errors.append("Начальная дата не может быть позже конечной.")
+                date_from_filter = None
+                date_to_filter = None
+
+            selected_chat_id: int | None = None
+            if chat_id_filter_raw:
+                try:
+                    selected_chat_id = int(chat_id_filter_raw)
+                except ValueError:
+                    filter_errors.append("ID чата должен быть целым числом.")
+
+            user_id_filter: int | None = None
+            if user_id_filter_raw:
+                try:
+                    user_id_filter = int(user_id_filter_raw)
+                except ValueError:
+                    filter_errors.append("ID автора должен быть целым числом.")
 
             async with session_factory() as session:
+                navigation_stmt = (
+                    select(MessageArchiveModel)
+                    .order_by(MessageArchiveModel.snapshot_at.desc(), MessageArchiveModel.id.desc())
+                    .limit(250)
+                )
+                navigation_rows = (await session.execute(navigation_stmt)).scalars().all()
+                if selected_chat_id is None and navigation_rows:
+                    selected_chat_id = int(navigation_rows[0].chat_id)
+
                 stmt = select(MessageArchiveModel)
                 count_stmt = select(func.count()).select_from(MessageArchiveModel)
                 filters = []
 
-                if chat_id_filter_raw:
-                    try:
-                        filters.append(MessageArchiveModel.chat_id == int(chat_id_filter_raw))
-                    except ValueError:
-                        pass
-                if user_id_filter_raw:
-                    try:
-                        filters.append(MessageArchiveModel.user_id == int(user_id_filter_raw))
-                    except ValueError:
-                        pass
+                if selected_chat_id is not None:
+                    filters.append(MessageArchiveModel.chat_id == selected_chat_id)
+                if user_id_filter is not None:
+                    filters.append(MessageArchiveModel.user_id == user_id_filter)
                 if text_filter:
                     filters.append(
                         or_(
@@ -8568,19 +9218,85 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             MessageArchiveModel.caption.ilike(f"%{text_filter}%"),
                         )
                     )
+                if date_from_filter is not None:
+                    filters.append(
+                        MessageArchiveModel.snapshot_at
+                        >= datetime.combine(date_from_filter, datetime.min.time(), tzinfo=timezone.utc)
+                    )
+                if date_to_filter is not None:
+                    filters.append(
+                        MessageArchiveModel.snapshot_at
+                        < datetime.combine(
+                            date_to_filter + timedelta(days=1),
+                            datetime.min.time(),
+                            tzinfo=timezone.utc,
+                        )
+                    )
+                if message_type_filter:
+                    filters.append(MessageArchiveModel.message_type == message_type_filter)
                 if snapshot_kind_filter in {"created", "edited"}:
                     filters.append(MessageArchiveModel.snapshot_kind == snapshot_kind_filter)
+                if has_reply_filter:
+                    reply_value = MessageArchiveModel.raw_message_json["reply_to_message"]
+                    filters.append(
+                        reply_value.is_not(None)
+                        if has_reply_filter == "yes"
+                        else reply_value.is_(None)
+                    )
 
                 if filters:
                     stmt = stmt.where(and_(*filters))
                     count_stmt = count_stmt.where(and_(*filters))
 
-                stmt = stmt.order_by(MessageArchiveModel.snapshot_at.desc(), MessageArchiveModel.id.desc()).limit(limit).offset((page - 1) * limit)
-                rows = (await session.execute(stmt)).scalars().all()
+                if before_cursor is not None:
+                    cursor_at, cursor_id = before_cursor
+                    stmt = stmt.where(
+                        or_(
+                            MessageArchiveModel.snapshot_at < cursor_at,
+                            and_(
+                                MessageArchiveModel.snapshot_at == cursor_at,
+                                MessageArchiveModel.id < cursor_id,
+                            ),
+                        )
+                    )
+                elif after_cursor is not None:
+                    cursor_at, cursor_id = after_cursor
+                    stmt = stmt.where(
+                        or_(
+                            MessageArchiveModel.snapshot_at > cursor_at,
+                            and_(
+                                MessageArchiveModel.snapshot_at == cursor_at,
+                                MessageArchiveModel.id > cursor_id,
+                            ),
+                        )
+                    )
+
+                if after_cursor is not None:
+                    stmt = stmt.order_by(
+                        MessageArchiveModel.snapshot_at.asc(),
+                        MessageArchiveModel.id.asc(),
+                    )
+                else:
+                    stmt = stmt.order_by(
+                        MessageArchiveModel.snapshot_at.desc(),
+                        MessageArchiveModel.id.desc(),
+                    )
+                if before_cursor is None and after_cursor is None and page > 1:
+                    stmt = stmt.offset((page - 1) * limit)
+                stmt = stmt.limit(limit + 1)
+
+                loaded_rows = (await session.execute(stmt)).scalars().all()
+                has_extra_row = len(loaded_rows) > limit
+                rows = list(loaded_rows[:limit])
+                if after_cursor is not None:
+                    rows.reverse()
                 total = int((await session.execute(count_stmt)).scalar() or 0)
 
                 user_ids = sorted({int(row.user_id) for row in rows})
-                chat_ids = sorted({int(row.chat_id) for row in rows})
+                chat_ids = sorted(
+                    {int(row.chat_id) for row in navigation_rows}
+                    | ({selected_chat_id} if selected_chat_id is not None else set())
+                )
                 user_rows = (
                     await session.execute(select(UserModel).where(UserModel.telegram_user_id.in_(user_ids)))
                 ).scalars().all() if user_ids else []
@@ -8591,43 +9307,239 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 chat_labels = {int(row.telegram_chat_id): _admin_chat_reference_label(row) for row in chat_rows}
                 await session.commit()
 
-            compact_rows = [
+            base_path = "/app/admin/table/messages_compact"
+            preserved_filters = {
+                "user_id": user_id_filter_raw,
+                "text": text_filter,
+                "date_from": date_from_filter_raw,
+                "date_to": date_to_filter_raw,
+                "message_type": message_type_filter,
+                "snapshot_kind": snapshot_kind_filter,
+                "has_reply": has_reply_filter,
+            }
+
+            def archive_href(
+                *,
+                chat_id: int | None,
+                before: str | None = None,
+                after: str | None = None,
+                include_filters: bool = True,
+            ) -> str:
+                params: dict[str, str] = {}
+                if chat_id is not None:
+                    params["chat_id"] = str(chat_id)
+                if include_filters:
+                    params.update({key: value for key, value in preserved_filters.items() if value})
+                if before:
+                    params["before"] = before
+                elif after:
+                    params["after"] = after
+                return f"{base_path}?{urlencode(params)}" if params else base_path
+
+            navigation_by_chat: dict[int, dict[str, object]] = {}
+            for row in navigation_rows:
+                chat_id = int(row.chat_id)
+                summary = navigation_by_chat.get(chat_id)
+                if summary is None:
+                    navigation_by_chat[chat_id] = {
+                        "chat_id": chat_id,
+                        "last_preview": _compact_message_text(row),
+                        "last_time": row.snapshot_at.strftime("%H:%M"),
+                        "snapshot_count": 1,
+                    }
+                else:
+                    summary["snapshot_count"] = int(summary["snapshot_count"]) + 1
+
+            if selected_chat_id is not None and selected_chat_id not in navigation_by_chat:
+                navigation_by_chat[selected_chat_id] = {
+                    "chat_id": selected_chat_id,
+                    "last_preview": _compact_message_text(rows[0]) if rows else "Нет сообщений в текущей выборке",
+                    "last_time": rows[0].snapshot_at.strftime("%H:%M") if rows else "—",
+                    "snapshot_count": len(rows),
+                }
+
+            chat_summaries = [
                 {
+                    **summary,
+                    "label": chat_labels.get(chat_id, f"chat:{chat_id}"),
+                    "active": chat_id == selected_chat_id,
+                    "href": archive_href(chat_id=chat_id),
+                }
+                for chat_id, summary in navigation_by_chat.items()
+            ]
+
+            def compact_snapshot(row: MessageArchiveModel) -> dict[str, object]:
+                message_preview = _compact_message_text(row)
+                media_info = _admin_archive_media_info(
+                    message_type=row.message_type,
+                    raw_message_json=row.raw_message_json,
+                )
+                if media_info is not None and row.message_type == "photo":
+                    media_info = dict(media_info)
+                    photo_reference = _admin_archive_photo_reference(
+                        row.raw_message_json
+                    )
+                    if photo_reference is not None:
+                        photo_size = photo_reference.get("file_size")
+                        if (
+                            isinstance(photo_size, int)
+                            and photo_size > _ADMIN_ARCHIVE_PHOTO_PREVIEW_MAX_BYTES
+                        ):
+                            media_info["preview_notice"] = (
+                                "Preview недоступен: фото больше 10 МБ."
+                            )
+                        else:
+                            media_info["preview_href"] = (
+                                f"/app/admin/archive/media/{int(row.id)}"
+                            )
+                return {
                     "id": int(row.id),
+                    "telegram_message_id": int(row.telegram_message_id),
                     "snapshot_at": row.snapshot_at,
-                    "chat_id": int(row.chat_id),
-                    "chat_label": chat_labels.get(int(row.chat_id), f"chat:{int(row.chat_id)}"),
+                    "date_label": _admin_archive_date_label(row.snapshot_at),
+                    "time_label": row.snapshot_at.strftime("%H:%M"),
                     "user_id": int(row.user_id),
                     "user_label": user_labels.get(int(row.user_id), f"user:{int(row.user_id)}"),
+                    "author_tone": abs(int(row.user_id)) % 6,
                     "snapshot_kind": row.snapshot_kind,
+                    "snapshot_kind_label": (
+                        "Исходный снимок" if row.snapshot_kind == "created" else "Редакция"
+                    ),
                     "message_type": row.message_type,
-                    "message_preview": _compact_message_text(row),
+                    "message_type_label": _admin_archive_message_type_label(row.message_type),
+                    "message_preview": message_preview,
+                    "message_segments": _admin_archive_highlight_segments(
+                        message_preview,
+                        text_filter,
+                    ),
+                    "has_text": bool((row.text or row.caption or "").strip()),
                     "reply_preview": _compact_reply_summary(row.raw_message_json),
+                    "media_info": media_info,
                     "raw_href": f"/app/admin/table/messages?id={int(row.id)}",
                 }
-                for row in rows
-            ]
+
+            grouped_snapshots: list[dict[str, object]] = []
+            snapshots_by_message: dict[tuple[int, int], dict[str, object]] = {}
+            for row in rows:
+                message_key = (int(row.chat_id), int(row.telegram_message_id))
+                snapshot = compact_snapshot(row)
+                message_group = snapshots_by_message.get(message_key)
+                if message_group is None:
+                    snapshot["edit_history"] = []
+                    snapshot["snapshot_count"] = 1
+                    snapshots_by_message[message_key] = snapshot
+                    grouped_snapshots.append(snapshot)
+                    continue
+
+                edit_history = message_group["edit_history"]
+                if isinstance(edit_history, list):
+                    edit_history.append(snapshot)
+                message_group["snapshot_count"] = int(message_group["snapshot_count"]) + 1
+
+            for message_group in grouped_snapshots:
+                edit_history = message_group["edit_history"]
+                if isinstance(edit_history, list):
+                    edit_history.reverse()
+
+            compact_rows = list(reversed(grouped_snapshots))
+            previous_message: dict[str, object] | None = None
+            for compact_row in compact_rows:
+                compact_row["grouped_with_previous"] = False
+                compact_row["grouped_with_next"] = False
+                if previous_message is not None:
+                    previous_at = previous_message["snapshot_at"]
+                    current_at = compact_row["snapshot_at"]
+                    close_in_time = (
+                        isinstance(previous_at, datetime)
+                        and isinstance(current_at, datetime)
+                        and timedelta(0) <= current_at - previous_at <= timedelta(minutes=5)
+                    )
+                    if (
+                        compact_row["user_id"] == previous_message["user_id"]
+                        and compact_row["date_label"] == previous_message["date_label"]
+                        and close_in_time
+                    ):
+                        compact_row["grouped_with_previous"] = True
+                        previous_message["grouped_with_next"] = True
+                previous_message = compact_row
+
+            has_newer_page = (
+                has_extra_row if after_cursor is not None else bool(before_cursor or page > 1)
+            )
+            has_older_page = True if after_cursor is not None else has_extra_row
+            previous_page_href = None
+            next_page_href = None
+            if rows and has_newer_page:
+                previous_page_href = archive_href(
+                    chat_id=selected_chat_id,
+                    after=_encode_admin_archive_cursor(
+                        snapshot_at=rows[0].snapshot_at,
+                        snapshot_id=int(rows[0].id),
+                    ),
+                )
+            if rows and has_older_page:
+                next_page_href = archive_href(
+                    chat_id=selected_chat_id,
+                    before=_encode_admin_archive_cursor(
+                        snapshot_at=rows[-1].snapshot_at,
+                        snapshot_id=int(rows[-1].id),
+                    ),
+                )
+
+            active_chat = None
+            if selected_chat_id is not None:
+                active_chat = {
+                    "chat_id": selected_chat_id,
+                    "label": chat_labels.get(selected_chat_id, f"chat:{selected_chat_id}"),
+                    "message_count": total,
+                }
 
             return _render_template(
                 "admin_messages_compact.html",
-                page_title="Selara • Архив сообщений · полезное",
+                page_title="Selara • Архив сообщений",
                 page_name="admin_messages_compact",
                 **_admin_layout_context(
                     flash=request.query_params.get("flash"),
                     error=request.query_params.get("error"),
+                    active="history",
                 ),
+                extra_styles=["admin-archive.css"],
+                extra_scripts=["admin-archive.js"],
                 table_name=table_name,
-                table_title=_admin_table_title(table_name),
+                table_title="Архив сообщений",
                 rows=compact_rows,
+                chat_summaries=chat_summaries,
+                active_chat=active_chat,
+                chat_selected_explicitly=bool(chat_id_filter_raw and selected_chat_id is not None),
                 page=page,
                 total=total,
                 limit=limit,
+                filter_reset_href=archive_href(chat_id=selected_chat_id, include_filters=False),
+                back_to_chats_href=archive_href(chat_id=None),
+                previous_page_href=previous_page_href,
+                next_page_href=next_page_href,
+                shown_message_count=len(compact_rows),
                 filters_input={
-                    "chat_id": chat_id_filter_raw,
                     "user_id": user_id_filter_raw,
                     "text": text_filter,
+                    "date_from": date_from_filter_raw,
+                    "date_to": date_to_filter_raw,
+                    "message_type": message_type_filter,
                     "snapshot_kind": snapshot_kind_filter,
+                    "has_reply": has_reply_filter,
                 },
+                filter_errors=filter_errors,
+                active_filter_count=sum(bool(value) for value in preserved_filters.values()),
+                archive_message_type_options=[
+                    {
+                        "value": message_type,
+                        "label": _admin_archive_message_type_label(message_type),
+                    }
+                    for message_type in sorted(
+                        allowed_message_types,
+                        key=lambda item: _admin_archive_message_type_label(item).casefold(),
+                    )
+                ],
             )
 
         page = int(request.query_params.get("page", 1))
@@ -8711,6 +9623,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             **_admin_layout_context(
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
+                active="database",
             ),
             table_name=table_name,
             table_title=_admin_table_title(table_name),
@@ -8726,6 +9639,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     @app.get("/app/admin/table/{table_name}/edit")
     async def admin_table_edit_page(request: Request, table_name: str):
         """Страница редактирования записи."""
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
@@ -8756,6 +9675,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             **_admin_layout_context(
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
+                active="database",
             ),
             table_name=table_name,
             table_title=_admin_table_title(table_name),
@@ -8960,9 +9880,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             recent_broadcasts = await activity_repo.list_recent_admin_broadcasts(limit=8)
             await session.commit()
 
+        table_sections = _admin_table_sections()
         page: dict[str, object] = {
             "admin_user_id": admin_user_id,
             "open_feedback_count": int(open_feedback_count or 0),
+            "attention_broadcast_count": sum(
+                1 for item in recent_broadcasts if int(item.failed_count or 0) > 0
+            ),
+            "recent_broadcast_count": len(recent_broadcasts),
+            "admin_table_count": sum(
+                len(section["tables"]) for section in table_sections
+            ),
             "feedback_requests": feedback_requests,
             "broadcast_active_days": _ADMIN_BROADCAST_ACTIVE_DAYS,
             "recent_active_chat_count": recent_active_chat_count,
@@ -8988,10 +9916,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "sent_count": item.sent_count,
                     "failed_count": item.failed_count,
                     "reply_count": item.reply_count,
+                    "reaction_count": item.reaction_count,
+                    "delivery_percent": _admin_broadcast_delivery_percent(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                    ),
+                    "status_label": _admin_broadcast_summary_meta(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                        failed_count=item.failed_count,
+                    )[0],
+                    "status_tone": _admin_broadcast_summary_meta(
+                        target_count=item.target_count,
+                        sent_count=item.sent_count,
+                        failed_count=item.failed_count,
+                    )[1],
                 }
                 for item in recent_broadcasts
             ],
-            "table_sections": _admin_table_sections(),
+            "table_sections": table_sections,
         }
         return JSONResponse(content={"ok": True, "page": page}, status_code=200)
 

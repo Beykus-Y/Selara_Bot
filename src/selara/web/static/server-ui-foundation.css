@@ -1,0 +1,155 @@
+/*
+ * Shared accessibility and responsive shell for the incremental server UI refresh.
+ * Page-specific components stay outside this file so it remains a small foundation.
+ */
+
+.skip-link {
+  position: fixed;
+  top: 0;
+  left: 12px;
+  z-index: 1000;
+  max-width: calc(100vw - 24px);
+  padding: 10px 16px;
+  border: 2px solid var(--cyan);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(calc(-100% - 12px));
+  transition: transform 140ms ease;
+}
+
+.skip-link:focus-visible {
+  transform: translateY(12px);
+}
+
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 3px;
+}
+
+#main-content:focus {
+  outline: none;
+}
+
+.top-actions .button[aria-current="page"] {
+  border-color: rgb(88 216 255 / 50%);
+  color: #fff;
+  background:
+    linear-gradient(180deg, rgb(88 216 255 / 20%), rgb(124 144 255 / 12%));
+  box-shadow: 0 0 0 1px rgb(88 216 255 / 8%) inset;
+}
+
+.ui-admin-shell .shell {
+  padding-top: max(24px, env(safe-area-inset-top));
+  padding-right: max(24px, env(safe-area-inset-right));
+  padding-left: max(24px, env(safe-area-inset-left));
+}
+
+.ui-admin-shell .topbar {
+  top: 0;
+  border-color: rgb(88 216 255 / 18%);
+  background: rgb(5 11 22 / 90%);
+}
+
+.ui-admin-shell .top-actions {
+  min-width: 0;
+}
+
+.ui-admin-shell [id] {
+  scroll-margin-top: 118px;
+}
+
+@media (width <= 980px) {
+  .ui-admin-shell .topbar {
+    position: relative;
+    top: auto;
+  }
+}
+
+@media (width <= 760px) {
+  .ui-admin-shell .shell {
+    width: 100%;
+    padding-right: max(14px, env(safe-area-inset-right));
+    padding-bottom: max(56px, env(safe-area-inset-bottom));
+    padding-left: max(14px, env(safe-area-inset-left));
+  }
+
+  .ui-admin-shell .topbar {
+    position: relative;
+    top: auto;
+    display: grid;
+    gap: 10px;
+    margin-bottom: 18px;
+    padding: 10px;
+    border-radius: 18px;
+  }
+
+  .ui-admin-shell .brand {
+    min-height: 44px;
+    padding: 4px 8px;
+  }
+
+  .ui-admin-shell .top-actions {
+    display: flex;
+    width: 100%;
+    padding: 2px 2px 6px;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+    scroll-snap-type: inline proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ui-admin-shell .top-actions > * {
+    flex: 0 0 auto;
+    scroll-snap-align: start;
+  }
+
+  .ui-admin-shell .top-actions .button {
+    min-height: 44px;
+    padding-inline: 15px;
+  }
+
+  .ui-admin-shell .panel {
+    min-width: 0;
+    padding: 18px 10px;
+    border-radius: 20px;
+  }
+
+  .ui-admin-shell .admin-user-info {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (width <= 420px) {
+  .ui-admin-shell .brand small {
+    display: none;
+  }
+
+  .ui-admin-shell .broadcast-panel {
+    margin-inline: -8px;
+    padding: 16px 6px;
+    border-right: 0;
+    border-left: 0;
+    border-radius: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

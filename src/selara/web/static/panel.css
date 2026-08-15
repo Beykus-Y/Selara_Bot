@@ -80,14 +80,14 @@ a {
   text-decoration: none;
 }
 
-main a:not(.button):not(.brand):not(.list-card) {
+main a:not(.button):not(.brand):not(.list-card):not(.archive-chat-card):not(.ui-link-plain) {
   color: var(--cyan-soft);
   text-decoration: underline;
   text-decoration-color: rgba(88, 216, 255, 0.24);
   text-underline-offset: 0.2em;
 }
 
-main a:not(.button):not(.brand):not(.list-card):hover {
+main a:not(.button):not(.brand):not(.list-card):not(.archive-chat-card):not(.ui-link-plain):hover {
   text-decoration-color: currentColor;
 }
 

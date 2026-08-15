@@ -11,165 +11,226 @@
 {%- endmacro %}
 
 {% block content %}
-  <div class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Рассылка #{{ broadcast.id }}</h2>
-        <p class="panel-subtitle">История доставки и ответы пользователей реплаем на системное сообщение.</p>
+  <div class="panel broadcast-detail-page">
+    <header class="broadcast-detail-hero">
+      <div class="broadcast-detail-title">
+        <a class="broadcast-detail-back" href="/app/admin#broadcasts">← Все рассылки</a>
+        <span class="broadcast-detail-kicker">Системная рассылка</span>
+        <h1>Рассылка #{{ broadcast.id }}</h1>
+        <p>Доставка, ответы и реакции собраны в одном операционном представлении.</p>
       </div>
-      <a class="button ghost" href="/app/admin">Назад в админку</a>
-    </div>
+      <div class="broadcast-history-status broadcast-status-{{ broadcast.status_tone }}">
+        <span aria-hidden="true"></span>
+        {{ broadcast.status_label }}
+      </div>
+    </header>
 
-    <div class="broadcast-detail-summary">
-      <article class="broadcast-stat-card">
-        <span class="broadcast-stat-label">Создано</span>
+    <nav class="broadcast-section-nav" aria-label="Разделы рассылки">
+      <a class="ui-link-plain" href="#message-preview">Сообщение</a>
+      <a class="ui-link-plain" href="#deliveries">Доставки</a>
+      <a class="ui-link-plain" href="#reactions">Реакции</a>
+      <a class="ui-link-plain" href="#responses">Ответы</a>
+    </nav>
+
+    <div class="broadcast-detail-summary" aria-label="Сводка рассылки">
+      <article class="broadcast-detail-metric">
+        <span>Создано</span>
         <strong>{{ broadcast.created_at }}</strong>
         <small>активные чаты за {{ broadcast.active_since_days }} дня</small>
       </article>
-      <article class="broadcast-stat-card">
-        <span class="broadcast-stat-label">Доставлено</span>
+      <article class="broadcast-detail-metric">
+        <span>Доставлено</span>
         <strong>{{ broadcast.sent_count }} / {{ broadcast.target_count }}</strong>
-        <small>ошибок: {{ broadcast.failed_count }}</small>
+        <progress
+          value="{{ broadcast.sent_count }}"
+          max="{{ broadcast.target_count if broadcast.target_count else 1 }}"
+          aria-label="Доставлено {{ broadcast.delivery_percent }} процентов"
+        >{{ broadcast.delivery_percent }}%</progress>
+        <small>ошибок: {{ broadcast.failed_count }} · ожидают: {{ broadcast.pending_count }}</small>
       </article>
-      <article class="broadcast-stat-card">
-        <span class="broadcast-stat-label">Ответов реплаем</span>
+      <article class="broadcast-detail-metric">
+        <span>Ответы реплаем</span>
         <strong>{{ broadcast.reply_count }}</strong>
-        <small>собраны в базе и доступны ниже</small>
+        <small>прямые ответы пользователей</small>
+      </article>
+      <article class="broadcast-detail-metric">
+        <span>Реакции</span>
+        <strong>{{ broadcast.reaction_count }}</strong>
+        <small>с авторами · Telegram totals: {{ broadcast.anonymous_reaction_total }}</small>
       </article>
     </div>
 
-    <section class="broadcast-detail-section">
-      <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
+    <section id="message-preview" class="broadcast-detail-section broadcast-preview-section">
+      <header class="broadcast-section-head">
         <div>
-          <h3 style="margin: 0;">Как выглядело сообщение</h3>
-          <p class="panel-subtitle" style="margin: 4px 0 0;">Отправлялось в HTML-формате от имени бота.</p>
+          <span class="broadcast-section-kicker">Отправленный контент</span>
+          <h2>Как выглядело сообщение</h2>
         </div>
-      </div>
-      <div class="broadcast-preview-box">
-        {{ broadcast.message_preview_html | safe }}
+        <small>HTML Telegram · безопасный preview</small>
+      </header>
+      <div class="broadcast-message-preview">
+        {% if broadcast.media_type %}
+          <div class="broadcast-message-media">
+            <span aria-hidden="true">▧</span>
+            <div>
+              <strong>{{ broadcast.media_type_label or broadcast.media_type }}</strong>
+              <small>Сохранён Telegram file reference; файл повторно не загружается.</small>
+            </div>
+          </div>
+        {% endif %}
+        <div class="broadcast-message-copy">{{ broadcast.message_preview_html | safe }}</div>
+        {% if broadcast.reaction_options %}
+          <div class="broadcast-message-reactions" aria-label="Заданные варианты реакций">
+            {% for option in broadcast.reaction_options %}
+              <span class="broadcast-message-reaction">
+                <b>{{ option.emoji }}</b>
+                {{ option.label }}
+              </span>
+            {% endfor %}
+          </div>
+        {% endif %}
       </div>
     </section>
 
-    <section class="broadcast-detail-section">
-      <div class="section-head">
+    <section id="deliveries" class="broadcast-detail-section">
+      <header class="broadcast-section-head">
         <div>
-          <h3>Реакции пользователей</h3>
-          <p>Все реакции, которые Telegram передал боту: обычные, custom_emoji и paid.</p>
+          <span class="broadcast-section-kicker">Получатели</span>
+          <h2>Доставки</h2>
+          <p>Показана {{ shown_delivery_count }} из {{ broadcast.target_count }} доставок.</p>
         </div>
-      </div>
-      {% if reactions or anonymous_reaction_counts %}
-        <h4>Ответы по вариантам</h4>
-        {% if configured_reactions or configured_reaction_counts %}
-          <div class="broadcast-reply-list">
-            {% for item in configured_reactions %}
-              <article class="broadcast-reply-card">
-                <div class="broadcast-reply-head">
-                  <strong>{{ reaction_text(item) }} {{ item.user_label }}</strong>
-                  <span class="broadcast-type-badge">{{ item.source }}</span>
-                </div>
-                <p class="broadcast-reply-meta">
-                  {{ item.option_label }} · {{ item.chat_title }} · {{ item.reacted_at }}
-                </p>
-              </article>
-            {% endfor %}
-            {% for item in configured_reaction_counts %}
-              <article class="broadcast-reply-card">
-                <div class="broadcast-reply-head">
-                  <strong>{{ reaction_text(item) }} × {{ item.count }}</strong>
-                  <span class="broadcast-type-badge">анонимно</span>
-                </div>
-                <p class="broadcast-reply-meta">
-                  {{ item.option_label }} · {{ item.chat_title }} · {{ item.observed_at }}
-                </p>
-              </article>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="broadcast-empty">По заданным вариантам пока нет реакций.</p>
-        {% endif %}
-
-        <h4>Другие реакции</h4>
-        {% if other_reactions or other_reaction_counts %}
-          <div class="broadcast-reply-list">
-            {% for item in other_reactions %}
-              <article class="broadcast-reply-card">
-                <div class="broadcast-reply-head">
-                  <strong>{{ reaction_text(item) }} {{ item.user_label }}</strong>
-                  <span class="broadcast-type-badge">{{ item.source }}</span>
-                </div>
-                <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.reacted_at }}</p>
-              </article>
-            {% endfor %}
-            {% for item in other_reaction_counts %}
-              <article class="broadcast-reply-card">
-                <div class="broadcast-reply-head">
-                  <strong>{{ reaction_text(item) }} × {{ item.count }}</strong>
-                  <span class="broadcast-type-badge">анонимно</span>
-                </div>
-                <p class="broadcast-reply-meta">{{ item.chat_title }} · {{ item.observed_at }}</p>
-              </article>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="broadcast-empty">Других реакций пока нет.</p>
-        {% endif %}
-      {% else %}
-        <p class="broadcast-empty">Пока активных реакций нет.</p>
+      </header>
+      <nav class="broadcast-delivery-filters" aria-label="Фильтр доставок">
+        {% for item in delivery_filters %}
+          <a
+            class="broadcast-delivery-filter ui-link-plain{% if item.current %} is-current{% endif %}"
+            href="{{ item.href }}"
+            {% if item.current %}aria-current="page"{% endif %}>{{ item.label }} <span>{{ item.count }}</span></a>
+        {% endfor %}
+      </nav>
+      {% if delivery_filter_error %}
+        <p class="broadcast-filter-error" role="status">{{ delivery_filter_error }}</p>
       {% endif %}
-    </section>
-
-    <section class="broadcast-detail-section">
-      <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
-        <div>
-          <h3 style="margin: 0;">Доставки</h3>
-          <p class="panel-subtitle" style="margin: 4px 0 0;">Каждый чат, который попал в рассылку.</p>
-        </div>
-      </div>
       {% if deliveries %}
         <div class="broadcast-delivery-list">
           {% for item in deliveries %}
-            <article class="broadcast-delivery-card broadcast-delivery-{{ item.status_code }}">
-              <div class="broadcast-delivery-head">
+            <article
+              class="broadcast-delivery-card broadcast-delivery-{{ item.status_code }}"
+              data-delivery-status="{{ item.status_code }}"
+            >
+              <header class="broadcast-delivery-head">
                 <div>
                   <strong>{{ item.chat_title }}</strong>
-                  <p class="feedback-meta">chat_id={{ item.chat_id }} · активность: {{ item.last_activity_at }}</p>
+                  <small>chat_id={{ item.chat_id }}</small>
                 </div>
-                <span class="broadcast-delivery-status broadcast-delivery-status-{{ item.status_tone }}">{{ item.status_label }}</span>
-              </div>
-              <div class="broadcast-delivery-meta">
-                <span>message_id: <code>{{ item.telegram_message_id if item.telegram_message_id is not none else "—" }}</code></span>
-                <span>ответов: <code>{{ item.reply_count }}</code></span>
-                <span>дата: {{ item.sent_at }}</span>
-              </div>
+                <span class="broadcast-delivery-status broadcast-delivery-status-{{ item.status_tone }}">
+                  {{ item.status_label }}
+                </span>
+              </header>
+              <dl class="broadcast-delivery-facts">
+                <div><dt>Активность</dt><dd>{{ item.last_activity_at }}</dd></div>
+                <div><dt>Отправлено</dt><dd>{{ item.sent_at }}</dd></div>
+                <div><dt>Message ID</dt><dd><code>{{ item.telegram_message_id if item.telegram_message_id is not none else "—" }}</code></dd></div>
+                <div><dt>Ответов</dt><dd>{{ item.reply_count }}</dd></div>
+                <div><dt>Реакции</dt><dd>{{ item.reaction_mode_label }}</dd></div>
+                {% if item.bot_member_status %}
+                  <div><dt>Статус бота</dt><dd>{{ item.bot_member_status }}</dd></div>
+                {% endif %}
+              </dl>
               {% if item.error_text %}
-                <p class="broadcast-error-text">{{ item.error_text }}</p>
+                <p class="broadcast-error-text"><strong>Причина:</strong> {{ item.error_text }}</p>
               {% endif %}
             </article>
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty-text">Записей о доставке пока нет.</p>
+        <div class="broadcast-detail-empty">
+          <strong>В этой категории доставок нет</strong>
+          <p>Выберите другой статус, чтобы увидеть получателей.</p>
+        </div>
       {% endif %}
     </section>
 
-    <section class="broadcast-detail-section">
-      <div class="panel-head" style="padding: 0; margin-bottom: 12px;">
+    <section id="reactions" class="broadcast-detail-section">
+      <header class="broadcast-section-head">
         <div>
-          <h3 style="margin: 0;">Ответы реплаем</h3>
-          <p class="panel-subtitle" style="margin: 4px 0 0;">Сохраняются только прямые ответы на сообщение рассылки.</p>
+          <span class="broadcast-section-kicker">Обратная связь</span>
+          <h2>Реакции пользователей</h2>
+          <p>Обычные, inline, custom_emoji и paid реакции, которые Telegram передал боту.</p>
         </div>
-      </div>
+      </header>
+      {% if reactions or anonymous_reaction_counts %}
+        <div class="broadcast-reaction-group">
+          <h3>Ответы по вариантам</h3>
+          {% if configured_reactions or configured_reaction_counts %}
+            <div class="broadcast-reaction-list">
+              {% for item in configured_reactions %}
+                <article class="broadcast-reaction-card">
+                  <header><strong>{{ reaction_text(item) }}</strong><span>{{ item.source }}</span></header>
+                  <p>{{ item.option_label }}</p>
+                  <small>{{ item.user_label }} · {{ item.chat_title }} · {{ item.reacted_at }}</small>
+                </article>
+              {% endfor %}
+              {% for item in configured_reaction_counts %}
+                <article class="broadcast-reaction-card">
+                  <header><strong>{{ reaction_text(item) }} × {{ item.count }}</strong><span>анонимно</span></header>
+                  <p>{{ item.option_label }}</p>
+                  <small>{{ item.chat_title }} · {{ item.observed_at }}</small>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="broadcast-detail-empty">По заданным вариантам пока нет реакций.</p>
+          {% endif %}
+        </div>
+        <div class="broadcast-reaction-group">
+          <h3>Другие реакции</h3>
+          {% if other_reactions or other_reaction_counts %}
+            <div class="broadcast-reaction-list">
+              {% for item in other_reactions %}
+                <article class="broadcast-reaction-card">
+                  <header><strong>{{ reaction_text(item) }}</strong><span>{{ item.source }}</span></header>
+                  <small>{{ item.user_label }} · {{ item.chat_title }} · {{ item.reacted_at }}</small>
+                </article>
+              {% endfor %}
+              {% for item in other_reaction_counts %}
+                <article class="broadcast-reaction-card">
+                  <header><strong>{{ reaction_text(item) }} × {{ item.count }}</strong><span>анонимно</span></header>
+                  <small>{{ item.chat_title }} · {{ item.observed_at }}</small>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="broadcast-detail-empty">Других реакций пока нет.</p>
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="broadcast-detail-empty">
+          <strong>Активных реакций пока нет</strong>
+          <p>Они появятся здесь после событий Telegram.</p>
+        </div>
+      {% endif %}
+    </section>
+
+    <section id="responses" class="broadcast-detail-section">
+      <header class="broadcast-section-head">
+        <div>
+          <span class="broadcast-section-kicker">Прямые ответы</span>
+          <h2>Ответы реплаем</h2>
+          <p>Сохраняются только ответы непосредственно на сообщение рассылки.</p>
+        </div>
+      </header>
       {% if replies %}
-        <div class="broadcast-reply-list">
+        <div class="broadcast-response-list">
           {% for item in replies %}
-            <article class="broadcast-reply-card">
-              <div class="broadcast-reply-head">
+            <article class="broadcast-response-card">
+              <header class="broadcast-reply-head">
                 <div>
                   <strong>{{ item.user_label }}</strong>
-                  <p class="feedback-meta">{{ item.chat_title }} · {{ item.sent_at }}</p>
+                  <small>{{ item.chat_title }} · {{ item.sent_at }}</small>
                 </div>
-                <span class="badge">{{ item.message_type }}</span>
-              </div>
+                <span class="broadcast-type-badge">{{ item.message_type }}</span>
+              </header>
               <p class="broadcast-reply-preview">{{ item.preview }}</p>
               <form
                 class="broadcast-reply-reaction-form"
@@ -179,57 +240,18 @@
                 <div class="broadcast-reply-reaction-status">
                   {% if item.bot_reaction_emoji %}
                     <strong>Реакция бота: {{ item.bot_reaction_display or item.bot_reaction_emoji }}</strong>
-                    {% if item.bot_reaction_updated_at %}
-                      <small>обновлено {{ item.bot_reaction_updated_at }}</small>
-                    {% endif %}
+                    {% if item.bot_reaction_updated_at %}<small>обновлено {{ item.bot_reaction_updated_at }}</small>{% endif %}
                   {% else %}
                     <span>Отметить ответ от имени бота</span>
                   {% endif %}
                 </div>
-                <div class="broadcast-reply-reaction-actions">
-                  <button
-                    class="button small {{ 'primary' if item.bot_reaction_emoji == '❤' else 'ghost' }}"
-                    type="submit"
-                    name="reaction"
-                    value="❤️"
-                    title="Прочитано"
-                    aria-label="Поставить реакцию Прочитано"
-                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '❤' else 'false' }}"
-                  >❤️</button>
-                  <button
-                    class="button small {{ 'primary' if item.bot_reaction_emoji == '👀' else 'ghost' }}"
-                    type="submit"
-                    name="reaction"
-                    value="👀"
-                    title="Взято в работу"
-                    aria-label="Поставить реакцию Взято в работу"
-                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👀' else 'false' }}"
-                  >👀</button>
-                  <button
-                    class="button small {{ 'primary' if item.bot_reaction_emoji == '👍' else 'ghost' }}"
-                    type="submit"
-                    name="reaction"
-                    value="👍"
-                    title="Принято"
-                    aria-label="Поставить реакцию Принято"
-                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👍' else 'false' }}"
-                  >👍</button>
-                  <button
-                    class="button small {{ 'primary' if item.bot_reaction_emoji == '🔥' else 'ghost' }}"
-                    type="submit"
-                    name="reaction"
-                    value="🔥"
-                    title="Особенно полезно"
-                    aria-label="Поставить реакцию Особенно полезно"
-                    aria-pressed="{{ 'true' if item.bot_reaction_emoji == '🔥' else 'false' }}"
-                  >🔥</button>
+                <div class="broadcast-reply-reaction-actions" aria-label="Реакция бота на ответ">
+                  <button class="button small {{ 'primary' if item.bot_reaction_emoji == '❤' else 'ghost' }}" type="submit" name="reaction" value="❤️" title="Прочитано" aria-label="Поставить реакцию Прочитано" aria-pressed="{{ 'true' if item.bot_reaction_emoji == '❤' else 'false' }}">❤️</button>
+                  <button class="button small {{ 'primary' if item.bot_reaction_emoji == '👀' else 'ghost' }}" type="submit" name="reaction" value="👀" title="Взято в работу" aria-label="Поставить реакцию Взято в работу" aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👀' else 'false' }}">👀</button>
+                  <button class="button small {{ 'primary' if item.bot_reaction_emoji == '👍' else 'ghost' }}" type="submit" name="reaction" value="👍" title="Принято" aria-label="Поставить реакцию Принято" aria-pressed="{{ 'true' if item.bot_reaction_emoji == '👍' else 'false' }}">👍</button>
+                  <button class="button small {{ 'primary' if item.bot_reaction_emoji == '🔥' else 'ghost' }}" type="submit" name="reaction" value="🔥" title="Особенно полезно" aria-label="Поставить реакцию Особенно полезно" aria-pressed="{{ 'true' if item.bot_reaction_emoji == '🔥' else 'false' }}">🔥</button>
                   {% if item.bot_reaction_emoji %}
-                    <button
-                      class="button small ghost"
-                      type="submit"
-                      name="reaction"
-                      value=""
-                    >Снять реакцию</button>
+                    <button class="button small ghost broadcast-reaction-clear" type="submit" name="reaction" value="">Снять реакцию</button>
                   {% endif %}
                 </div>
               </form>
@@ -237,7 +259,10 @@
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty-text">Пока никто не ответил реплаем на эту рассылку.</p>
+        <div class="broadcast-detail-empty">
+          <strong>Ответов пока нет</strong>
+          <p>Новые прямые ответы появятся здесь автоматически.</p>
+        </div>
       {% endif %}
     </section>
   </div>

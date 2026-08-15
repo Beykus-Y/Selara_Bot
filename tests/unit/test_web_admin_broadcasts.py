@@ -340,6 +340,86 @@ async def test_admin_can_set_replace_and_clear_bot_reaction_on_broadcast_reply(
 
 
 @pytest.mark.asyncio
+async def test_admin_broadcast_detail_filters_deliveries_and_preserves_full_summary() -> None:
+    settings = _settings()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        repo = SqlAlchemyActivityRepository(session)
+        await auth_repo.create_session(
+            admin_user_id=settings.admin_user_id,
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret,
+                token="broadcast-filter-session",
+            ),
+            expires_at=now + timedelta(hours=2),
+            now=now,
+        )
+        broadcast = await repo.create_admin_broadcast(
+            body="Проверка фильтров",
+            rendered_body="<b>Проверка фильтров</b>",
+            reaction_options=[{"key": "r1", "emoji": "👍", "label": "Понятно"}],
+            media_type="photo",
+            active_since_days=3,
+            created_by_user_id=settings.admin_user_id,
+        )
+        deliveries = await repo.create_admin_broadcast_deliveries(
+            broadcast_id=broadcast.id,
+            targets=[
+                AdminBroadcastTarget(-1006101, "supergroup", "Успешный чат", now),
+                AdminBroadcastTarget(-1006102, "group", "Чат с ошибкой", now),
+                AdminBroadcastTarget(-1006103, "group", "Ожидающий чат", now),
+            ],
+        )
+        await repo.mark_admin_broadcast_delivery_sent(
+            delivery_id=deliveries[0].id,
+            telegram_message_id=9601,
+            reaction_mode="native",
+            bot_member_status="administrator",
+            sent_at=now,
+        )
+        await repo.mark_admin_broadcast_delivery_failed(
+            delivery_id=deliveries[1].id,
+            error_text="CHAT_WRITE_FORBIDDEN",
+        )
+        await session.commit()
+
+    app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "broadcast-filter-session")
+    try:
+        failed = await client.get(
+            f"/app/admin/broadcasts/{broadcast.id}?delivery_status=failed"
+        )
+        malformed = await client.get(
+            f"/app/admin/broadcasts/{broadcast.id}?delivery_status=unknown"
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert failed.status_code == 200
+    assert failed.text.count('data-delivery-status="failed"') == 1
+    assert 'data-delivery-status="sent"' not in failed.text
+    assert 'data-delivery-status="pending"' not in failed.text
+    assert "Показана 1 из 3 доставок" in failed.text
+    assert 'aria-current="page">Ошибки' in failed.text
+    assert "Доставлено" in failed.text
+    assert "1 / 3" in failed.text
+    assert malformed.status_code == 200
+    assert "Неизвестный фильтр доставок" in malformed.text
+    assert malformed.text.count("data-delivery-status=") == 3
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_admin_broadcast_send_accepts_telegram_html(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

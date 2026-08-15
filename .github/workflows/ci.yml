@@ -103,7 +103,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install server UI fixture renderer
+        run: python -m pip install "Jinja2>=3.1.4,<4"
+
       - name: Lint frontend
+        env:
+          SELARA_PYTHON: python
         run: npm run lint
 
       - name: Build frontend

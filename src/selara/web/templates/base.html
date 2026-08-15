@@ -5,8 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page_title }}</title>
   <link rel="stylesheet" href="{{ static_url('panel.css') }}">
+  <link rel="stylesheet" href="{{ static_url('server-ui-foundation.css') }}">
+  {% for stylesheet in extra_styles|default([]) %}
+    <link rel="stylesheet" href="{{ static_url(stylesheet) }}">
+  {% endfor %}
+  {% block styles %}{% endblock %}
 </head>
-<body class="page-{{ page_name }}">
+<body class="page-{{ page_name }} {{ body_classes|default('') }}">
+  <a class="skip-link" href="#main-content">К содержимому</a>
   <div class="bg-layer bg-stars"></div>
   <div class="bg-layer bg-glow bg-glow-a"></div>
   <div class="bg-layer bg-glow bg-glow-b"></div>
@@ -16,7 +22,7 @@
     <div class="bg-layer bg-party-confetti"></div>
   {% endif %}
 
-  <main class="shell">
+  <main id="main-content" class="shell" tabindex="-1">
     <header class="topbar">
       <a class="brand" href="{{ home_href|default('/app') }}">
         <span class="brand-mark"></span>
@@ -25,12 +31,12 @@
           <small>{{ brand_subtitle|default('игровой центр' if page_name == 'games' else 'веб-панель') }}</small>
         </span>
       </a>
-      <nav class="top-actions">
-        {% for link in top_links %}
-          <a class="button {{ link.variant }}" href="{{ link.href }}">{{ link.label }}</a>
+      <nav class="top-actions" aria-label="{{ navigation_label|default('Основная навигация') }}">
+        {% for link in top_links|default([]) %}
+          <a class="button {{ link.variant }}" href="{{ link.href }}"{% if link.current|default(false) %} aria-current="page"{% endif %}>{{ link.label }}</a>
         {% endfor %}
-        {% if show_logout %}
-          <form method="post" action="/logout">
+        {% if show_logout|default(false) %}
+          <form method="post" action="{{ logout_action|default('/logout') }}">
             <button type="submit" class="button ghost">Выйти</button>
           </form>
         {% endif %}
@@ -38,15 +44,18 @@
     </header>
 
     {% if flash %}
-      <div class="banner banner-ok">{{ flash }}</div>
+      <div class="banner banner-ok" role="status">{{ flash }}</div>
     {% endif %}
     {% if error %}
-      <div class="banner banner-error">{{ error }}</div>
+      <div class="banner banner-error" role="alert">{{ error }}</div>
     {% endif %}
 
     {% block content %}{% endblock %}
   </main>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  {% for script in extra_scripts|default([]) %}
+    <script type="module" src="{{ static_url(script) }}"></script>
+  {% endfor %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

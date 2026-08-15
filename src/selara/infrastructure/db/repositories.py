@@ -5927,6 +5927,21 @@ class SqlAlchemyActivityRepository:
             .group_by(AdminBroadcastDeliveryModel.broadcast_id)
             .subquery()
         )
+        reaction_stats_sq = (
+            select(
+                AdminBroadcastDeliveryModel.broadcast_id.label("broadcast_id"),
+                func.count(AdminBroadcastReactionModel.id).label("reaction_count"),
+            )
+            .select_from(AdminBroadcastDeliveryModel)
+            .join(
+                AdminBroadcastReactionModel,
+                AdminBroadcastReactionModel.delivery_id
+                == AdminBroadcastDeliveryModel.id,
+            )
+            .where(AdminBroadcastReactionModel.active.is_(True))
+            .group_by(AdminBroadcastDeliveryModel.broadcast_id)
+            .subquery()
+        )
         stmt = (
             select(
                 AdminBroadcastModel,
@@ -5934,9 +5949,14 @@ class SqlAlchemyActivityRepository:
                 func.coalesce(delivery_stats_sq.c.sent_count, 0),
                 func.coalesce(delivery_stats_sq.c.failed_count, 0),
                 func.coalesce(reply_stats_sq.c.reply_count, 0),
+                func.coalesce(reaction_stats_sq.c.reaction_count, 0),
             )
             .outerjoin(delivery_stats_sq, delivery_stats_sq.c.broadcast_id == AdminBroadcastModel.id)
             .outerjoin(reply_stats_sq, reply_stats_sq.c.broadcast_id == AdminBroadcastModel.id)
+            .outerjoin(
+                reaction_stats_sq,
+                reaction_stats_sq.c.broadcast_id == AdminBroadcastModel.id,
+            )
             .order_by(AdminBroadcastModel.created_at.desc(), AdminBroadcastModel.id.desc())
             .limit(normalized_limit)
         )
@@ -5952,8 +5972,9 @@ class SqlAlchemyActivityRepository:
                 sent_count=int(sent_count or 0),
                 failed_count=int(failed_count or 0),
                 reply_count=int(reply_count or 0),
+                reaction_count=int(reaction_count or 0),
             )
-            for row, target_count, sent_count, failed_count, reply_count in rows
+            for row, target_count, sent_count, failed_count, reply_count, reaction_count in rows
         ]
 
     async def list_admin_broadcast_deliveries(
