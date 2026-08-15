@@ -127,6 +127,26 @@
                   <strong>{{ item.title }}</strong>
                 </div>
                 <p>{{ item.text }}</p>
+                {% if item.get("commands") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Команды</span>
+                    <ul class="docs-bullet-list docs-code-list">
+                      {% for command in item["commands"] %}
+                        <li><code>{{ command }}</code></li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
+                {% if item.get("triggers") %}
+                  <div class="docs-card-block">
+                    <span class="docs-card-label">Триггеры</span>
+                    <ul class="docs-bullet-list docs-code-list">
+                      {% for trigger in item["triggers"] %}
+                        <li><code>{{ trigger }}</code></li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
                 {% if item.get("examples") %}
                   <div class="docs-card-block">
                     <span class="docs-card-label">Частые ошибки</span>

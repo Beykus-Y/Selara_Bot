@@ -160,6 +160,39 @@ def test_misc_public_utility_syntax_matches_real_aiogram_command_registrations()
             assert base in real_commands, f"{spec}: '{syntax_entry}' claims /{base}, not found"
 
 
+def test_gacha_natural_triggers_use_real_banner_aliases() -> None:
+    from selara.presentation.commands.resolver import _GACHA_BANNER_ALIASES
+
+    spec = get_command_spec("misc_gacha")
+    assert spec.syntax == (), "gacha has no aiogram/regex slash form — must not claim one"
+
+    real_aliases = set(_GACHA_BANNER_ALIASES)
+    for trigger in spec.natural_triggers:
+        words = trigger.split()
+        # every trigger is "гача <banner>" / "моя гача <banner>" / "гача скип <banner>",
+        # except the banner-less "гача инфо"
+        if trigger == "гача инфо":
+            continue
+        banner_word = words[-1]
+        assert banner_word in real_aliases, f"{trigger!r} uses unknown banner alias {banner_word!r}"
+
+
+def test_gacha_notes_match_real_gating_code() -> None:
+    resolver_source = (
+        Path(__file__).resolve().parents[2] / "src/selara/presentation/commands/resolver.py"
+    ).read_text(encoding="utf-8")
+    text_commands_source = (HANDLERS_DIR / "text_commands.py").read_text(encoding="utf-8")
+
+    assert "_parse_gacha_command" in resolver_source
+    assert "GACHA_CURRENCY_PER_COIN_RATE" in text_commands_source
+    assert "_require_channel_subscription" in text_commands_source
+    assert "gacha_enabled" in text_commands_source
+
+    from selara.application.use_cases.gacha import GACHA_CURRENCY_PER_COIN_RATE
+
+    assert GACHA_CURRENCY_PER_COIN_RATE == 10
+
+
 def test_misc_public_utility_natural_triggers_exist_in_the_real_trigger_maps() -> None:
     all_real_triggers = set(EXACT_TRIGGER_TO_COMMAND_KEY) | set(PREFIX_TRIGGER_TO_COMMAND_KEY)
     for key in ("misc_lastseen", "misc_public_service_commands"):

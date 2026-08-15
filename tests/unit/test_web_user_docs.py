@@ -212,6 +212,20 @@ def test_user_docs_misc_public_utility_items_are_derived_from_the_command_catalo
         assert item["triggers"] == spec.natural_triggers
 
 
+def test_user_docs_gacha_card_is_derived_from_the_catalog_and_covers_the_feature() -> None:
+    # Regression guard for the gacha docs gap found by an earlier survey:
+    # gacha was undocumented in help.py, USER_GUIDE.md, ADMIN_GUIDE.md, and
+    # user_docs.py alike before this slice.
+    spec = get_command_spec("misc_gacha")
+    context = build_user_docs_context(chat=None)
+    games_section = next(section for section in context["docs_sections"] if section["title"] == "Игры")
+    item = next(item for item in games_section["items"] if item["title"] == spec.title_ru)
+
+    assert item["triggers"] == spec.natural_triggers
+    assert item["examples"] == spec.examples
+    assert item["notes"] == spec.notes
+
+
 def test_user_docs_availability_badges_are_derived_from_setting_meta() -> None:
     # Regression guard for docs/WEB_UI_MODERNIZATION_TODO.md stage 3
     # "Понятные отметки доступности функции и требуемых прав": items gated by

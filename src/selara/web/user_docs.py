@@ -225,6 +225,14 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "В `Мафии` и `Шпионе` ключевые действия и роль приходят в личку.",
             ),
         ),
+        _docs_item(
+            (_gacha := get_command_spec("misc_gacha")).title_ru,
+            text=_gacha.description_ru,
+            badges=("группа", "текстовые фразы"),
+            triggers=_gacha.natural_triggers,
+            examples=_gacha.examples,
+            notes=_gacha.notes,
+        ),
     ),
     _docs_section(
         "user-docs-economy",

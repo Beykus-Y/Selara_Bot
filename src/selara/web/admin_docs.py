@@ -380,7 +380,14 @@ def build_settings_docs_sections() -> list[dict[str, Any]]:
 
 def _with_search_text(item: dict[str, Any]) -> dict[str, Any]:
     search_text = " ".join(
-        (item["title"], item["text"], *item.get("examples", ()), *item.get("notes", ()))
+        (
+            item["title"],
+            item["text"],
+            *item.get("commands", ()),
+            *item.get("triggers", ()),
+            *item.get("examples", ()),
+            *item.get("notes", ()),
+        )
     ).lower()
     return {**item, "search_text": search_text}
 
