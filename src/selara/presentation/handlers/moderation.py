@@ -18,6 +18,7 @@ from selara.core.roles import (
     SYSTEM_ROLE_BY_CODE,
     SYSTEM_ROLE_TEMPLATES,
     normalize_assigned_role_code,
+    permissions_text_ru,
 )
 from selara.domain.entities import BotRole, ModerationAction, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
@@ -67,15 +68,6 @@ _PERSONA_GRANT_PATTERN = re.compile(r"^\s*выдать\s+образ\b(?P<body>[\
 _PERSONA_CLEAR_PATTERN = re.compile(r"^\s*снять\s+образ(?:\s+(?P<target>[\s\S]+))?\s*$", re.IGNORECASE)
 _PERSONA_LIST_PATTERN = re.compile(r"^\s*образы\s*$", re.IGNORECASE)
 _PERSONA_CONFLICT_TTL = timedelta(minutes=15)
-_PERMISSION_LABELS_RU: dict[str, str] = {
-    "manage_roles": "управление ролями",
-    "manage_settings": "управление настройками",
-    "manage_games": "управление играми",
-    "moderate_users": "модерация пользователей",
-    "announce": "объявления",
-    "manage_command_access": "доступ команд",
-    "manage_role_templates": "шаблоны и кастомные роли",
-}
 _ROLE_ACTION_TO_COMMAND_KEY: dict[str, str] = {
     "promote": "roleadd",
     "demote": "roleremove",
@@ -347,9 +339,7 @@ def _parse_shlex_args(raw_args: str) -> list[str] | None:
 
 
 def _permissions_to_text(permissions: tuple[str, ...]) -> str:
-    if not permissions:
-        return "нет прав"
-    return ", ".join(_PERMISSION_LABELS_RU.get(permission, permission) for permission in permissions)
+    return permissions_text_ru(permissions)
 
 
 def _format_role_definition_line(*, role_code: str, title_ru: str, rank: int, permissions: tuple[str, ...], is_system: bool) -> str:

@@ -89,6 +89,27 @@ SYSTEM_ROLE_BY_TEMPLATE_KEY: dict[str, RoleTemplate] = {
     item.template_key: item for item in SYSTEM_ROLE_TEMPLATES
 }
 
+PERMISSION_LABELS_RU: dict[BotPermissionName, str] = {
+    PERM_MANAGE_ROLES: "управление ролями",
+    PERM_MANAGE_SETTINGS: "управление настройками",
+    PERM_MANAGE_GAMES: "управление играми",
+    PERM_MODERATE_USERS: "модерация пользователей",
+    PERM_ANNOUNCE: "объявления",
+    PERM_MANAGE_COMMAND_ACCESS: "доступ к командам",
+    PERM_MANAGE_ROLE_TEMPLATES: "шаблоны и кастомные роли",
+}
+
+
+def permission_label_ru(permission: BotPermissionName) -> str:
+    return PERMISSION_LABELS_RU.get(permission, permission.replace("_", " "))
+
+
+def permissions_text_ru(permissions: "tuple[BotPermissionName, ...] | list[BotPermissionName] | frozenset[BotPermissionName]") -> str:
+    if not permissions:
+        return "нет прав"
+    return ", ".join(permission_label_ru(permission) for permission in permissions)
+
+
 ROLE_TEMPLATE_ALIASES: dict[str, str] = {
     "participant": "participant",
     "участник": "participant",

@@ -34,6 +34,12 @@
           {% endfor %}
         </div>
         <div class="docs-nav-group">
+          <strong>Роли бота</strong>
+          {% for role in roles_docs %}
+            <a href="#{{ role.anchor }}">{{ role.title }}</a>
+          {% endfor %}
+        </div>
+        <div class="docs-nav-group">
           <strong>Группы настроек</strong>
           {% for section in settings_docs_sections %}
             <a href="#{{ section.anchor }}">{{ section.title }}</a>
@@ -112,6 +118,38 @@
           </div>
         </section>
       {% endfor %}
+
+      {% if roles_docs %}
+        <section class="panel docs-section docs-settings-section" id="docs-roles-table">
+          <div class="docs-section-banner">
+            <div>
+              <span class="eyebrow docs-eyebrow">Справочник ролей</span>
+              <h2>Роли, ранги и права</h2>
+              <p class="panel-subtitle">Актуальный список ролей бота от старших к младшим, взятый напрямую из кода — здесь не может разойтись с реальным поведением.</p>
+            </div>
+            <div class="docs-section-stat">
+              <strong>{{ roles_docs|length }}</strong>
+              <span>системных ролей</span>
+            </div>
+          </div>
+          <div class="docs-card-grid">
+            {% for role in roles_docs %}
+              <article class="docs-card" id="{{ role.anchor }}">
+                <div class="docs-card-head">
+                  <strong>{{ role.title }}</strong>
+                  <code>{{ role.code }}</code>
+                </div>
+                <p class="helper-text">Ранг: {{ role.rank }}</p>
+                {% if role.permissions %}
+                  <p>Права: {{ role.permissions|join(', ') }}</p>
+                {% else %}
+                  <p>Прав нет — доступны только обычные пользовательские команды.</p>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+      {% endif %}
 
       {% for section in settings_docs_sections %}
         <section class="panel docs-section docs-settings-section" id="{{ section.anchor }}">

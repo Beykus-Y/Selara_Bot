@@ -7,6 +7,7 @@ from selara.application.dto import RepStats
 from selara.application.use_cases.economy.growth import effective_growth_stress_pct
 from selara.application.use_cases.economy.results import EconomyDashboard
 from selara.core.chat_settings import CHAT_SETTINGS_KEYS, ChatSettings
+from selara.core.roles import permission_label_ru, permissions_text_ru
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.core.trigger_templates import build_trigger_template_variable_rows
 from selara.domain.entities import (
@@ -41,15 +42,6 @@ from selara.presentation.game_state import GAME_DEFINITIONS, GAME_LAUNCHABLE_KIN
 from selara.web.admin_docs import setting_anchor, trigger_match_type_label_ru
 
 _UTC = timezone.utc
-_PERMISSION_LABELS_RU: dict[str, str] = {
-    "manage_roles": "управление ролями",
-    "manage_settings": "управление настройками",
-    "manage_games": "управление играми",
-    "moderate_users": "модерация пользователей",
-    "announce": "объявления",
-    "manage_command_access": "доступ к командам",
-    "manage_role_templates": "шаблоны и кастомные роли",
-}
 _ECONOMY_MODE_LABELS_RU: dict[str, str] = {
     "global": "общая",
     "local": "по группе",
@@ -163,16 +155,6 @@ def format_datetime(value: datetime | None) -> str:
     if value is None:
         return "нет"
     return value.astimezone(_UTC).strftime("%d.%m.%Y %H:%M UTC")
-
-
-def permission_label_ru(permission: str) -> str:
-    return _PERMISSION_LABELS_RU.get(permission, permission.replace("_", " "))
-
-
-def permissions_text_ru(permissions: tuple[str, ...] | list[str]) -> str:
-    if not permissions:
-        return "нет прав"
-    return ", ".join(permission_label_ru(permission) for permission in permissions)
 
 
 def economy_mode_label_ru(value: str) -> str:

@@ -273,11 +273,32 @@ def test_admin_docs_template_renders_trigger_variables() -> None:
         ],
         docs_sections=[],
         settings_docs_sections=[],
+        roles_docs=[
+            {
+                "anchor": "role-co_owner",
+                "code": "co_owner",
+                "title": "Совладелец",
+                "rank": 30,
+                "permissions": ["управление ролями", "объявления"],
+            },
+            {
+                "anchor": "role-participant",
+                "code": "participant",
+                "title": "Участник",
+                "rank": 0,
+                "permissions": None,
+            },
+        ],
     )
 
     assert "Переменные шаблонов" in html
     assert "{user}" in html
     assert "{actor}, {sender}" in html
+    assert 'id="role-co_owner"' in html
+    assert "Совладелец" in html
+    assert "Ранг: 30" in html
+    assert "управление ролями, объявления" in html
+    assert "Прав нет" in html
 
 
 def test_audit_template_renders_rows() -> None:

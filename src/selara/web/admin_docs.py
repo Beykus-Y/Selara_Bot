@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from selara.core.chat_settings import CHAT_SETTINGS_KEYS
+from selara.core.roles import BOT_PERMISSIONS, SYSTEM_ROLE_TEMPLATES, permission_label_ru
 from selara.core.trigger_templates import build_trigger_template_variable_groups
 from selara.domain.entities import UserChatOverview
 from selara.presentation.handlers.settings_common import (
@@ -231,6 +232,26 @@ def setting_anchor(key: str) -> str:
     return f"setting-{key}"
 
 
+def role_anchor(role_code: str) -> str:
+    return f"role-{role_code}"
+
+
+def build_roles_docs() -> list[dict[str, Any]]:
+    return [
+        {
+            "anchor": role_anchor(role.role_code),
+            "code": role.role_code,
+            "title": role.title_ru,
+            "rank": role.rank,
+            "permissions": [
+                permission_label_ru(perm) for perm in BOT_PERMISSIONS if perm in role.permissions
+            ]
+            or None,
+        }
+        for role in sorted(SYSTEM_ROLE_TEMPLATES, key=lambda item: item.rank, reverse=True)
+    ]
+
+
 def trigger_match_type_label_ru(value: str) -> str:
     return TRIGGER_MATCH_TYPE_LABELS_RU.get(value, value)
 
@@ -309,6 +330,7 @@ def build_admin_docs_context(*, chat: UserChatOverview | None) -> dict[str, Any]
         "trigger_match_types": build_trigger_match_types(),
         "trigger_template_variable_groups": build_trigger_template_variable_groups(),
         "settings_docs_sections": settings_sections,
+        "roles_docs": build_roles_docs(),
         "origin_chat": (
             {
                 "href": f"/app/chat/{chat.chat_id}",

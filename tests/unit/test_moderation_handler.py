@@ -499,3 +499,17 @@ async def test_persona_conflict_callback_replaces_owner(monkeypatch: pytest.Monk
     assert request_id not in moderation._PENDING_PERSONA_CONFLICTS
     assert "теперь закреплён" in query.message.edit_text.await_args.args[0]
     query.answer.assert_awaited_once_with("Готово")
+
+
+def test_permissions_to_text_matches_web_docs_wording() -> None:
+    # Regression guard: this handler used to keep its own copy of permission
+    # labels with "доступ команд" (missing "к"), diverging from the Web UI's
+    # "доступ к командам" for the exact same permission. Both now resolve
+    # through selara.core.roles.permissions_text_ru, so they can't drift again.
+    from selara.core.roles import PERM_MANAGE_COMMAND_ACCESS, permission_label_ru
+
+    assert moderation._permissions_to_text(("manage_command_access",)) == permission_label_ru(
+        PERM_MANAGE_COMMAND_ACCESS
+    )
+    assert "доступ к командам" in moderation._permissions_to_text(("manage_command_access",))
+    assert moderation._permissions_to_text(()) == "нет прав"
