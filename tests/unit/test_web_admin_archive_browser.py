@@ -11,11 +11,21 @@ TEMPLATE_DIR = ROOT / "src/selara/web/templates"
 STATIC_DIR = ROOT / "src/selara/web/static"
 
 
-def _render_archive(*, selected_explicitly: bool) -> str:
+def _render_archive(
+    *,
+    selected_explicitly: bool,
+    active_filter_count: int = 0,
+    highlight_id: int | None = None,
+    rows: list[dict] | None = None,
+    total: int | None = None,
+    shown_message_count: int | None = None,
+) -> str:
     environment = create_template_environment(template_dir=TEMPLATE_DIR)
     return environment.get_template("admin_messages_compact.html").render(
         page_title="Selara test archive",
         page_name="admin_messages_compact",
+        active_filter_count=active_filter_count,
+        highlight_id=highlight_id,
         top_links=[
             {"href": "/app/admin", "label": "Обзор", "variant": "ghost"},
             {"href": "/app/admin#broadcasts", "label": "Рассылки", "variant": "ghost"},
@@ -35,10 +45,10 @@ def _render_archive(*, selected_explicitly: bool) -> str:
         extra_scripts=["admin-archive.js"],
         table_name="messages_compact",
         table_title="Архив сообщений",
-        total=4,
+        total=4 if total is None else total,
         page=1,
         limit=50,
-        shown_message_count=3,
+        shown_message_count=3 if shown_message_count is None else shown_message_count,
         filters_input={"user_id": "", "text": "", "snapshot_kind": ""},
         filter_reset_href="/app/admin/table/messages_compact?chat_id=-100500",
         back_to_chats_href="/app/admin/table/messages_compact",
@@ -66,7 +76,7 @@ def _render_archive(*, selected_explicitly: bool) -> str:
                 "href": "/app/admin/table/messages_compact?chat_id=-100700",
             },
         ],
-        rows=[
+        rows=rows if rows is not None else [
             {
                 "id": 1,
                 "date_label": "8 апреля 2026",
@@ -328,6 +338,67 @@ async def test_archive_mobile_uses_list_then_conversation_flow(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reduced_motion", [False, True])
+async def test_archive_jump_target_scrolls_highlights_and_focuses(reduced_motion: bool) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 1440, "height": 700})
+        try:
+            if reduced_motion:
+                await page.emulate_media(reduced_motion="reduce")
+            await page.set_content(_render_archive(selected_explicitly=True, highlight_id=3))
+            await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
+            await page.add_script_tag(path=str(STATIC_DIR / "admin-archive.js"), type="module")
+
+            target = page.locator("#archive-msg-3")
+            await target.wait_for(state="visible")
+            assert "is-jump-target" in (await target.get_attribute("class") or "")
+            assert await page.evaluate("document.activeElement.id") == "archive-msg-3"
+            await page.wait_for_timeout(400)
+            assert await target.evaluate(
+                "element => { const r = element.getBoundingClientRect(); "
+                "return r.top >= 0 && r.bottom <= window.innerHeight; }"
+            )
+            await page.wait_for_timeout(2700)
+            assert "is-jump-target" not in (await target.get_attribute("class") or "")
+            assert not await page.evaluate(
+                "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+            )
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_context_jump_link_visible_only_with_active_filters() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 1440, "height": 900})
+        try:
+            await page.set_content(
+                _render_archive(selected_explicitly=True, active_filter_count=1)
+            )
+            await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
+
+            links = page.locator(".archive-context-jump")
+            assert await links.count() == 3
+            assert await links.first.get_attribute("href") == "/app/admin/archive/jump/1"
+
+            await page.set_content(
+                _render_archive(selected_explicitly=True, active_filter_count=0)
+            )
+            await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
+            assert await page.locator(".archive-context-jump").count() == 0
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_archive_tablet_portrait_prioritizes_the_conversation() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -354,5 +425,62 @@ async def test_archive_tablet_portrait_prioritizes_the_conversation() -> None:
             assert not await page.evaluate(
                 "document.documentElement.scrollWidth > document.documentElement.clientWidth"
             )
+        finally:
+            await browser.close()
+
+
+def _many_message_rows(count: int) -> list[dict]:
+    return [
+        {
+            "id": index,
+            "date_label": "8 апреля 2026",
+            "time_label": f"{9 + index % 12:02d}:{(index * 3) % 60:02d}",
+            "snapshot_at": datetime(2026, 4, 8, 9 + index % 12, (index * 3) % 60),
+            "user_id": 100 + (index % 5),
+            "user_label": f"@user{index % 5}",
+            "author_tone": index % 6,
+            "snapshot_kind": "created",
+            "message_type": "text",
+            "message_type_label": "Текст",
+            "message_preview": f"Сообщение номер {index} для проверки длинной ленты архива.",
+            "has_text": True,
+            "reply_preview": None,
+            "raw_href": f"/app/admin/table/messages?id={index}",
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])
+async def test_archive_long_feed_paginates_without_overflow(viewport: dict[str, int]) -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=viewport)
+        try:
+            rows = _many_message_rows(50)
+            await page.set_content(
+                _render_archive(
+                    selected_explicitly=True,
+                    rows=rows,
+                    total=137,
+                    shown_message_count=50,
+                )
+            )
+            await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
+
+            assert await page.locator(".archive-message").count() == 50
+            assert await page.get_by_text("Показано сообщений: 50").is_visible()
+            assert await page.get_by_text("снимков в выборке: 137").is_visible()
+            pagination = page.locator(".archive-pagination")
+            assert await pagination.get_by_role("link", name="Старее →").is_visible()
+            assert not await page.evaluate(
+                "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+            )
+            last_message = page.locator(".archive-message").last
+            await last_message.scroll_into_view_if_needed()
+            assert await last_message.is_visible()
         finally:
             await browser.close()

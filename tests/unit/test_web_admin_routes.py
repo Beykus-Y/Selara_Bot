@@ -639,6 +639,60 @@ async def test_admin_page_has_shared_section_navigation(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_overview_renders_error_and_flash_banners(monkeypatch) -> None:
+    settings = _settings()
+
+    def _auth_session() -> FakeSession:
+        return FakeSession(
+            execute_results=[
+                FakeExecuteResult(rows=[]),
+                FakeExecuteResult(scalar_value=0),
+                FakeExecuteResult(scalar_value=0),
+                FakeExecuteResult(rows=[]),
+                FakeExecuteResult(rows=[]),
+            ]
+        )
+
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    error_app = web_app_module.create_web_app(
+        settings=settings, session_factory=QueueSessionFactory(_auth_session())
+    )
+    error_transport = httpx.ASGITransport(app=error_app)
+    error_client = httpx.AsyncClient(transport=error_transport, base_url="http://testserver")
+    error_client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        error_response = await error_client.get("/app/admin", params={"error": "Не удалось выполнить операцию."})
+    finally:
+        await error_client.aclose()
+        await getattr(error_app.router, "shutdown", error_app.router._shutdown)()
+
+    assert error_response.status_code == 200
+    assert 'class="banner banner-error" role="alert"' in error_response.text
+    assert "Не удалось выполнить операцию." in error_response.text
+
+    flash_app = web_app_module.create_web_app(
+        settings=settings, session_factory=QueueSessionFactory(_auth_session())
+    )
+    flash_transport = httpx.ASGITransport(app=flash_app)
+    flash_client = httpx.AsyncClient(transport=flash_transport, base_url="http://testserver")
+    flash_client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        flash_response = await flash_client.get("/app/admin", params={"flash": "Операция выполнена."})
+    finally:
+        await flash_client.aclose()
+        await getattr(flash_app.router, "shutdown", flash_app.router._shutdown)()
+
+    assert flash_response.status_code == 200
+    assert 'class="banner banner-ok" role="status"' in flash_response.text
+    assert "Операция выполнена." in flash_response.text
+
+
+@pytest.mark.asyncio
 async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     settings = _settings()
     auth_session = FakeSession(
@@ -707,6 +761,10 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert 'data-broadcast-confirm-submit' in response.text
     assert 'data-broadcast-confirm-cancel' in response.text
     assert 'src="/static/admin-broadcast.js"' in response.text
+    assert 'data-table-search-input' in response.text
+    assert 'data-table-search-card' in response.text
+    assert 'data-table-search-text="чаты chats"' in response.text
+    assert 'src="/static/admin-table-search.js"' in response.text
 
 
 @pytest.mark.asyncio
@@ -1636,6 +1694,314 @@ async def test_admin_archive_applies_cursor_boundary_and_builds_newer_link(monke
 
 
 @pytest.mark.asyncio
+async def test_admin_archive_jump_endpoint_requires_admin(monkeypatch) -> None:
+    settings = _settings()
+    unauthorized_session = FakeSession()
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(None),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(unauthorized_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    try:
+        response = await client.get("/app/admin/archive/jump/1")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    assert urlsplit(response.headers["location"]).path == "/app/admin/login"
+    assert unauthorized_session.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_jump_endpoint_redirects_to_computed_page_and_highlight(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    target = MessageArchiveModel(
+        id=42,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=900,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="text",
+        text="target message",
+        caption=None,
+        raw_message_json={"message_id": 900, "text": "target message"},
+        snapshot_hash="hash-target",
+        created_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+    )
+    data_session = FakeSession(
+        records={(MessageArchiveModel, target.id): target},
+        execute_results=[FakeExecuteResult(scalar_value=1)],
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(f"/app/admin/archive/jump/{target.id}")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert urlsplit(location).path == "/app/admin/table/messages_compact"
+    assert _location_query_value(location, "chat_id") == "-100500"
+    assert _location_query_value(location, "page") == "1"
+    assert _location_query_value(location, "highlight") == "42"
+    rank_statement = str(data_session.execute_calls[0])
+    assert "messages.chat_id" in rank_statement
+    assert "messages.snapshot_at >" in rank_statement
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_jump_endpoint_computes_later_page_for_older_message(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    target = MessageArchiveModel(
+        id=43,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=901,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="text",
+        text="older target",
+        caption=None,
+        raw_message_json={"message_id": 901, "text": "older target"},
+        snapshot_hash="hash-older-target",
+        created_at=datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    data_session = FakeSession(
+        records={(MessageArchiveModel, target.id): target},
+        execute_results=[FakeExecuteResult(scalar_value=57)],
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(f"/app/admin/archive/jump/{target.id}")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    assert _location_query_value(response.headers["location"], "page") == "2"
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_jump_endpoint_missing_message_redirects_with_error(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    data_session = FakeSession()
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/archive/jump/999")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert urlsplit(location).path == "/app/admin/table/messages_compact"
+    assert _location_query_value(location, "error") == "Сообщение не найдено в архиве."
+    assert data_session.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_highlight_param_renders_jump_target_and_context_link(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    message = MessageArchiveModel(
+        id=55,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=950,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="text",
+        text="findable answer",
+        caption=None,
+        raw_message_json={"message_id": 950, "text": "findable answer"},
+        snapshot_hash="hash-findable",
+        created_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={"chat_id": "-100500", "text": "findable", "highlight": "55"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert 'id="archive-msg-55"' in response.text
+    assert 'data-message-id="55"' in response.text
+    assert 'tabindex="-1"' in response.text
+    assert 'data-archive-highlight-target="55"' in response.text
+    assert (
+        'href="/app/admin/archive/jump/55" class="button ghost small archive-context-jump"'
+        in response.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_context_jump_link_hidden_without_active_filters(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    message = MessageArchiveModel(
+        id=56,
+        chat_id=-100500,
+        user_id=101,
+        telegram_message_id=951,
+        snapshot_kind="created",
+        snapshot_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        sent_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+        edited_at=None,
+        message_type="text",
+        text="plain answer",
+        caption=None,
+        raw_message_json={"message_id": 951, "text": "plain answer"},
+        snapshot_hash="hash-plain",
+        created_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+    )
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={"chat_id": "-100500"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "archive-context-jump" not in response.text
+    assert 'data-archive-highlight-target' not in response.text
+
+
+@pytest.mark.asyncio
 async def test_admin_table_edit_page_requires_admin_session() -> None:
     settings = _settings()
     auth_session = FakeSession()
@@ -1857,3 +2223,81 @@ async def test_admin_request_backup_calls_runtime_backup(monkeypatch) -> None:
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?flash=")
     backup_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_shows_empty_state_when_no_chats_archived(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/messages_compact")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "Архив пока пуст" in response.text
+    assert "Выберите чат" in response.text
+    assert 'class="archive-message' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_shows_filtered_empty_state_with_reset_link(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(rows=[]),
+            FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(
+                rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get(
+            "/app/admin/table/messages_compact",
+            params={"chat_id": "-100500", "text": "текст которого точно нет"},
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "По этим фильтрам ничего не найдено" in response.text
+    assert "Сбросить фильтры" in response.text
+    assert 'href="/app/admin/table/messages_compact?chat_id=-100500"' in response.text

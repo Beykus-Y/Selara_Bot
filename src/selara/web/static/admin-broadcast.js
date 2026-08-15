@@ -19,7 +19,14 @@ const initBroadcastComposer = () => {
   const targetSearch = form.querySelector("[data-broadcast-target-search]");
   const selectedCount = form.querySelector("[data-broadcast-selected-count]");
   const formError = form.querySelector("[data-broadcast-form-error]");
+  const formErrorTargets = {
+    message: form.querySelector("[data-broadcast-message-error]") || formError,
+    media: form.querySelector("[data-broadcast-media-error]") || formError,
+    audience: form.querySelector("[data-broadcast-audience-error]") || formError,
+    general: formError,
+  };
   const submitButton = form.querySelector("[data-broadcast-submit]");
+  const submitButtonDefaultText = submitButton.textContent;
   const previewMessage = document.querySelector("[data-broadcast-preview-message]");
   const previewEmpty = document.querySelector("[data-broadcast-preview-empty]");
   const previewBody = document.querySelector("[data-broadcast-preview-body]");
@@ -173,14 +180,23 @@ const initBroadcastComposer = () => {
   };
 
   const hideFormError = () => {
-    formError.hidden = true;
-    formError.textContent = "";
+    for (const target of new Set(Object.values(formErrorTargets))) {
+      target.hidden = true;
+      target.textContent = "";
+    }
   };
 
-  const showFormError = (message) => {
-    formError.textContent = message;
-    formError.hidden = false;
-    formError.focus({ preventScroll: true });
+  const showFormError = (message, field) => {
+    const target = formErrorTargets[field] || formErrorTargets.general;
+    target.textContent = message;
+    target.hidden = false;
+    target.focus({ preventScroll: true });
+  };
+
+  const resetSubmitButton = () => {
+    form.dataset.submitting = "false";
+    submitButton.disabled = false;
+    submitButton.textContent = submitButtonDefaultText;
   };
 
   const updateCounter = () => {
@@ -368,10 +384,10 @@ const initBroadcastComposer = () => {
       event.preventDefault();
       return;
     }
+    event.preventDefault();
     const source = body.value.trim();
     if (reactionsToggle.checked && (source.includes("[reactions]") || source.includes("[/reactions]"))) {
-      event.preventDefault();
-      showFormError("Не добавляйте блок [reactions] вручную, когда включён конструктор.");
+      showFormError("Не добавляйте блок [reactions] вручную, когда включён конструктор.", "media");
       body.focus();
       return;
     }
@@ -379,27 +395,23 @@ const initBroadcastComposer = () => {
     if (reactionsToggle.checked) {
       const emoji = values.map((item) => item.emoji);
       if (new Set(emoji).size !== emoji.length) {
-        event.preventDefault();
-        showFormError("Emoji в вариантах реакций не должны повторяться.");
+        showFormError("Emoji в вариантах реакций не должны повторяться.", "media");
         return;
       }
     }
     const compiled = compileBody();
     const limit = photoModeEnabled() ? 1024 : 3200;
     if (compiled.rendered.length > limit) {
-      event.preventDefault();
-      showFormError(`Итоговый текст длиннее ${limit} символов.`);
+      showFormError(`Итоговый текст длиннее ${limit} символов.`, photoModeEnabled() ? "media" : "message");
       body.focus();
       return;
     }
     if (chatCheckboxes().every((input) => !input.checked)) {
-      event.preventDefault();
-      showFormError("Выберите хотя бы один чат для рассылки.");
+      showFormError("Выберите хотя бы один чат для рассылки.", "audience");
       return;
     }
     compiledBody.value = compiled.source;
     if (!confirmationGranted) {
-      event.preventDefault();
       openConfirmation();
       return;
     }
@@ -407,6 +419,30 @@ const initBroadcastComposer = () => {
     form.dataset.submitting = "true";
     submitButton.disabled = true;
     submitButton.textContent = "Отправка…";
+
+    fetch("/api/admin/broadcasts/send", {
+      method: "POST",
+      body: new FormData(form),
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (data && data.ok) {
+          window.location.href = data.redirect || "/app/admin";
+          return;
+        }
+        if (response.status === 401 && data && data.redirect) {
+          window.location.href = data.redirect;
+          return;
+        }
+        showFormError((data && data.message) || "Не удалось отправить рассылку.", data ? data.field : undefined);
+        resetSubmitButton();
+      })
+      .catch(() => {
+        showFormError("Сеть недоступна. Проверьте соединение и попробуйте ещё раз.");
+        resetSubmitButton();
+      });
   });
 
   updatePhotoMode();

@@ -55,6 +55,23 @@ class FakeBot:
         self.__class__.instances.append(self)
 
 
+class PartiallyFailingBot:
+    """Second chat raises, simulating a Telegram delivery failure (blocked bot, rate limit, etc.)."""
+
+    instances: list["PartiallyFailingBot"] = []
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.session = SimpleNamespace(close=AsyncMock())
+        self.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=9301, date=datetime(2026, 4, 11, 12, 1, tzinfo=timezone.utc)),
+                RuntimeError("Forbidden: bot was blocked by the user"),
+            ]
+        )
+        self.__class__.instances.append(self)
+
+
 class HybridFakeBot:
     instances: list["HybridFakeBot"] = []
 
@@ -612,6 +629,182 @@ async def test_admin_broadcast_send_with_no_selected_chats_returns_error(monkeyp
     await engine.dispose()
 
 
+async def _seeded_broadcast_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    session_token: str,
+    chat_id: int = -1006001,
+    title: str = "Field Chat",
+    bot_class: type = FakeBot,
+):
+    settings = _settings()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    chat = ChatSnapshot(telegram_chat_id=chat_id, chat_type="group", title=title)
+    user = UserSnapshot(
+        telegram_user_id=abs(chat_id) + 1, username="fielduser", first_name="Field", last_name=None, is_bot=False
+    )
+    async with session_factory() as session:
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        activity_repo = SqlAlchemyActivityRepository(session)
+        await auth_repo.create_session(
+            admin_user_id=settings.admin_user_id,
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret, token=session_token
+            ),
+            expires_at=now + timedelta(hours=2),
+            now=now,
+        )
+        await activity_repo.upsert_activity(chat=chat, user=user, event_at=now - timedelta(hours=1))
+        await session.commit()
+
+    bot_class.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", bot_class)
+    app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, session_token)
+    return client, engine, chat.telegram_chat_id
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_missing_photo_reports_media_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-media-1")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "Без файла", "media_mode": "photo", "chat_ids": str(chat_id)},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["field"] == "media"
+    assert payload["message"] == "Для режима с фотографией выберите файл."
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_photo_in_text_mode_reports_media_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-media-2")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "Текстовый режим", "media_mode": "text", "chat_ids": str(chat_id)},
+            files={"photo": ("notice.png", b"\x89PNG\r\n", "image/png")},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["field"] == "media"
+    assert payload["message"] == 'Файл приложен к текстовой рассылке. Выберите режим «Фото».'
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_manual_reactions_syntax_error_reports_message_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-message-1")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "Текст\n[reactions]\nсломано\n[/reactions]", "chat_ids": str(chat_id)},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["field"] == "message"
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_text_too_long_reports_message_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-message-2")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "д" * 3300, "chat_ids": str(chat_id)},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["field"] == "message"
+    assert "3200 символов" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_no_chats_selected_reports_audience_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, engine, _chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-audience-1")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "Никому"},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["field"] == "audience"
+    assert payload["message"] == "Не выбрано ни одного чата для рассылки."
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_invalid_html_reports_message_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-message-3")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "<b>незакрыт", "chat_ids": str(chat_id)},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["field"] == "message"
+    assert "Некорректный Telegram HTML" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_api_success_has_no_field_and_includes_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, engine, chat_id = await _seeded_broadcast_client(monkeypatch, session_token="admin-session-success-1")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={"body": "Успешная рассылка", "chat_ids": str(chat_id)},
+        )
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert "field" not in payload
+    redirect_url = payload["redirect"]
+    assert redirect_url.startswith(f"/app/admin/broadcasts/{payload['broadcast_id']}?flash=")
+    assert _location_query_value(redirect_url, "flash") == "Рассылка завершена: доставлено 1, ошибок 0."
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("send_path", "expected_status"),
@@ -703,5 +896,73 @@ async def test_photo_broadcast_uses_native_for_admin_inline_for_member_and_reuse
             admin_chat.telegram_chat_id: "native",
             member_chat.telegram_chat_id: "inline",
         }
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_send_reports_partial_telegram_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    reachable_chat = ChatSnapshot(telegram_chat_id=-1007001, chat_type="group", title="Reachable")
+    blocked_chat = ChatSnapshot(telegram_chat_id=-1007002, chat_type="group", title="Blocked")
+    user = UserSnapshot(telegram_user_id=901, username="failure", first_name="Failure", last_name=None, is_bot=False)
+
+    async with session_factory() as session:
+        auth_repo = SqlAlchemyAdminAuthRepository(session)
+        activity_repo = SqlAlchemyActivityRepository(session)
+        await auth_repo.create_session(
+            admin_user_id=settings.admin_user_id,
+            session_token=digest_admin_session_token(
+                secret=settings.resolved_web_auth_secret, token="admin-session-failure"
+            ),
+            expires_at=now + timedelta(hours=2),
+            now=now,
+        )
+        await activity_repo.upsert_activity(chat=reachable_chat, user=user, event_at=now - timedelta(hours=1))
+        await activity_repo.upsert_activity(chat=blocked_chat, user=user, event_at=now - timedelta(hours=2))
+        await session.commit()
+
+    PartiallyFailingBot.instances.clear()
+    monkeypatch.setattr(web_app_module, "Bot", PartiallyFailingBot)
+
+    app = web_app_module.create_web_app(settings=settings, session_factory=session_factory)
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session-failure")
+    try:
+        response = await client.post(
+            "/api/admin/broadcasts/send",
+            data={
+                "body": "Проверка частичного сбоя",
+                "chat_ids": [str(reachable_chat.telegram_chat_id), str(blocked_chat.telegram_chat_id)],
+            },
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["message"] == "Рассылка завершена: доставлено 1, ошибок 1."
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        broadcast = await repo.get_admin_broadcast(broadcast_id=payload["broadcast_id"])
+        deliveries = await repo.list_admin_broadcast_deliveries(broadcast_id=payload["broadcast_id"])
+        assert broadcast is not None
+        statuses = {item.chat_id: item.status for item in deliveries}
+        assert statuses[reachable_chat.telegram_chat_id] == "sent"
+        assert statuses[blocked_chat.telegram_chat_id] == "failed"
+        assert sum(1 for item in deliveries if item.status == "sent") == 1
+        assert sum(1 for item in deliveries if item.status == "failed") == 1
 
     await engine.dispose()

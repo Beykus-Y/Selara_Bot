@@ -1135,6 +1135,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         redirect: str | None = None,
         setting: dict[str, str] | None = None,
         broadcast_id: int | None = None,
+        field: str | None = None,
     ) -> JSONResponse:
         payload: dict[str, object] = {"ok": ok, "message": message}
         if redirect is not None:
@@ -1143,6 +1144,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             payload["setting"] = setting
         if broadcast_id is not None:
             payload["broadcast_id"] = int(broadcast_id)
+        if field is not None:
+            payload["field"] = field
         return JSONResponse(content=payload, status_code=status_code)
 
     def _check_rate_limit(host: str, now: datetime) -> bool:
@@ -8212,25 +8215,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         request: Request,
         *,
         admin_user_id: int,
-    ) -> tuple[object | None, str, int]:
+    ) -> tuple[object | None, str, int, str | None]:
         try:
             form_lists, photo_content, photo_filename, photo_content_type = await _parse_admin_broadcast_form(request)
         except Exception:
             logger.exception("Could not parse broadcast form")
-            return None, "Не удалось прочитать форму рассылки.", 400
+            return None, "Не удалось прочитать форму рассылки.", 400, None
         body = _normalize_admin_broadcast_body((form_lists.get("body") or [""])[0])
         try:
             parsed = parse_broadcast_source(body)
         except BroadcastFormatError as exc:
-            return None, str(exc), 400
+            return None, str(exc), 400, "message"
 
         media_mode = ((form_lists.get("media_mode") or [""])[0] or "text").strip().lower()
         if media_mode not in {"text", "photo"}:
-            return None, "Неизвестный тип системной рассылки.", 400
+            return None, "Неизвестный тип системной рассылки.", 400, "media"
         if media_mode == "photo" and photo_content is None:
-            return None, "Для режима с фотографией выберите файл.", 400
+            return None, "Для режима с фотографией выберите файл.", 400, "media"
         if media_mode == "text" and photo_content is not None:
-            return None, "Файл приложен к текстовой рассылке. Выберите режим «Фото».", 400
+            return None, "Файл приложен к текстовой рассылке. Выберите режим «Фото».", 400, "media"
         if media_mode == "photo":
             try:
                 validate_broadcast_photo(
@@ -8239,15 +8242,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     content=photo_content or b"",
                 )
             except BroadcastFormatError as exc:
-                return None, str(exc), 400
+                return None, str(exc), 400, "media"
 
         rendered_limit = _ADMIN_BROADCAST_CAPTION_LIMIT if media_mode == "photo" else _ADMIN_BROADCAST_BODY_LIMIT
         if len(parsed.rendered_text) > rendered_limit:
             kind = "Подпись" if media_mode == "photo" else "Сообщение"
-            return None, f"{kind} слишком длинное после добавления реакций. Лимит: {rendered_limit} символов.", 400
+            length_field = "media" if media_mode == "photo" else "message"
+            return None, f"{kind} слишком длинное после добавления реакций. Лимит: {rendered_limit} символов.", 400, length_field
         html_error = _validate_admin_broadcast_body(parsed.rendered_text)
         if html_error:
-            return None, html_error, 400
+            return None, html_error, 400, "message"
 
         active_since = _now_utc() - timedelta(days=_ADMIN_BROADCAST_ACTIVE_DAYS)
         selected_chat_ids = {
@@ -8261,7 +8265,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             targets = [item for item in targets if item.chat_id in selected_chat_ids]
             if not targets:
                 await session.commit()
-                return None, "Не выбрано ни одного чата для рассылки.", 400
+                return None, "Не выбрано ни одного чата для рассылки.", 400, "audience"
             broadcast = await repo.create_admin_broadcast(
                 body=body,
                 rendered_body=parsed.rendered_text,
@@ -8296,7 +8300,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "failed_count": failed_count,
             },
         )
-        return broadcast, f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}.", 200
+        return broadcast, f"Рассылка завершена: доставлено {sent_count}, ошибок {failed_count}.", 200, None
 
     def _admin_broadcast_status_meta(status: str) -> tuple[str, str]:
         normalized = (status or "").strip().lower()
@@ -8464,11 +8468,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "admin-overview.css",
                 "admin-feedback.css",
                 "admin-broadcast.css",
+                "admin-table-search.css",
             ],
             extra_scripts=[
                 "admin-overview.js",
                 "admin-feedback.js",
                 "admin-broadcast.js",
+                "admin-table-search.js",
             ],
             table_sections=table_sections,
             admin_table_count=sum(len(section["tables"]) for section in table_sections),
@@ -8696,7 +8702,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
             return _redirect("/app/admin/login")
 
-        broadcast, summary_text, status_code = await _execute_admin_broadcast(
+        broadcast, summary_text, status_code, error_field = await _execute_admin_broadcast(
             request,
             admin_user_id=int(admin_user_id),
         )
@@ -8708,6 +8714,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     message=summary_text,
                     status_code=status_code,
                     redirect=redirect_path,
+                    field=error_field,
                 )
             return _redirect(redirect_path)
         redirect_path = _with_message(f"/app/admin/broadcasts/{broadcast.id}", key="flash", text=summary_text)
@@ -9050,6 +9057,48 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _json_result(ok=True, message=message, status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
 
+    @app.get("/app/admin/archive/jump/{snapshot_id}")
+    async def admin_archive_jump_to_message(request: Request, snapshot_id: int):
+        """Показать сообщение в полном контексте диалога, без активных фильтров."""
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            if not _admin_auth_required(admin_user_id):
+                await session.commit()
+                return _redirect("/app/admin/login")
+
+            snapshot = await session.get(MessageArchiveModel, snapshot_id)
+            if snapshot is None:
+                await session.commit()
+                return _redirect(
+                    _with_message(
+                        "/app/admin/table/messages_compact",
+                        key="error",
+                        text="Сообщение не найдено в архиве.",
+                    )
+                )
+
+            rank_stmt = select(func.count()).select_from(MessageArchiveModel).where(
+                MessageArchiveModel.chat_id == snapshot.chat_id,
+                or_(
+                    MessageArchiveModel.snapshot_at > snapshot.snapshot_at,
+                    and_(
+                        MessageArchiveModel.snapshot_at == snapshot.snapshot_at,
+                        MessageArchiveModel.id >= snapshot.id,
+                    ),
+                ),
+            )
+            rank = int((await session.execute(rank_stmt)).scalar() or 1)
+            await session.commit()
+
+        archive_limit = 50
+        page = max(1, (rank + archive_limit - 1) // archive_limit)
+        params = {
+            "chat_id": str(int(snapshot.chat_id)),
+            "page": str(page),
+            "highlight": str(int(snapshot.id)),
+        }
+        return _redirect(f"/app/admin/table/messages_compact?{urlencode(params)}")
+
     @app.get("/app/admin/archive/media/{snapshot_id}")
     async def admin_archive_photo_preview(request: Request, snapshot_id: int):
         async with session_factory() as session:
@@ -9118,6 +9167,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             except (TypeError, ValueError):
                 page = 1
             limit = 50
+            highlight_raw = (request.query_params.get("highlight") or "").strip()
+            try:
+                highlight_id = int(highlight_raw) if highlight_raw else None
+            except ValueError:
+                highlight_id = None
             chat_id_filter_raw = (request.query_params.get("chat_id") or "").strip()
             user_id_filter_raw = (request.query_params.get("user_id") or "").strip()
             text_filter = (request.query_params.get("text") or "").strip()
@@ -9519,6 +9573,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 back_to_chats_href=archive_href(chat_id=None),
                 previous_page_href=previous_page_href,
                 next_page_href=next_page_href,
+                highlight_id=highlight_id,
                 shown_message_count=len(compact_rows),
                 filters_input={
                     "user_id": user_id_filter_raw,
@@ -10058,13 +10113,26 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if not _admin_auth_required(admin_user_id):
             return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
 
-        broadcast, summary_text, status_code = await _execute_admin_broadcast(
+        broadcast, summary_text, status_code, error_field = await _execute_admin_broadcast(
             request,
             admin_user_id=int(admin_user_id),
         )
         if broadcast is None:
-            return _json_result(ok=False, message=summary_text, status_code=status_code)
-        return _json_result(ok=True, message=summary_text, status_code=200, broadcast_id=broadcast.id)
+            return _json_result(
+                ok=False,
+                message=summary_text,
+                status_code=status_code,
+                field=error_field,
+            )
+        return _json_result(
+            ok=True,
+            message=summary_text,
+            status_code=200,
+            broadcast_id=broadcast.id,
+            redirect=_with_message(
+                f"/app/admin/broadcasts/{broadcast.id}", key="flash", text=summary_text
+            ),
+        )
 
     @app.post(
         "/api/admin/broadcasts/{broadcast_id}/replies/{reply_id}/reaction"

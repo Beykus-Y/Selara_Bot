@@ -45,8 +45,8 @@ def main() -> None:
         navigation_label="Разделы админки",
         flash=None,
         error=None,
-        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css"],
-        extra_scripts=["admin-overview.js", "admin-feedback.js", "admin-broadcast.js"],
+        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css", "admin-table-search.css"],
+        extra_scripts=["admin-overview.js", "admin-feedback.js", "admin-broadcast.js", "admin-table-search.js"],
         admin_user_id=77,
         open_feedback_count=1,
         attention_broadcast_count=1,
@@ -88,7 +88,21 @@ def main() -> None:
         feedback_requests=[],
         feedback_status="all",
         feedback_filter_error=None,
-        table_sections=[],
+        table_sections=[
+            {
+                "title": "Активность и пользователи",
+                "tables": [
+                    ("chats", "Чаты"),
+                    ("users", "Пользователи"),
+                ],
+            },
+            {
+                "title": "Экономика",
+                "tables": [
+                    ("economy_items", "Предметы экономики"),
+                ],
+            },
+        ],
     )
     sys.stdout.write(html)
 

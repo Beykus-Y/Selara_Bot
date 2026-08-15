@@ -401,6 +401,20 @@
   text-wrap: pretty;
 }
 
+.admin-backup-error {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgb(255 156 169 / 24%);
+  border-radius: 12px;
+  color: #ffd5db;
+  background: rgb(255 156 169 / 8%);
+  font-size: 0.86rem;
+}
+
+.admin-backup-error[hidden] {
+  display: none;
+}
+
 .admin-backup-actions {
   display: flex;
   gap: 10px;

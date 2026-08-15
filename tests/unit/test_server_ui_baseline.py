@@ -126,11 +126,18 @@ def test_admin_overview_uses_bounded_page_specific_assets() -> None:
     overview_css = ROOT / "src" / "selara" / "web" / "static" / "admin-overview.css"
     overview_script = ROOT / "src" / "selara" / "web" / "static" / "admin-overview.js"
 
+    table_search_script = ROOT / "src" / "selara" / "web" / "static" / "admin-table-search.js"
+    table_search_css = ROOT / "src" / "selara" / "web" / "static" / "admin-table-search.css"
+
     assert "data-admin-overview" in admin_source
     assert overview_css.is_file()
     assert len(overview_css.read_text(encoding="utf-8").splitlines()) <= 520
     assert overview_script.is_file()
     assert len(overview_script.read_text(encoding="utf-8").splitlines()) <= 100
+    assert table_search_script.is_file()
+    assert len(table_search_script.read_text(encoding="utf-8").splitlines()) <= 60
+    assert table_search_css.is_file()
+    assert len(table_search_css.read_text(encoding="utf-8").splitlines()) <= 60
 
 
 def test_admin_feedback_and_slice_workflow_have_bounded_contracts() -> None:

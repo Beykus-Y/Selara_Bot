@@ -124,6 +124,7 @@
             <h2 id="admin-backup-title">Запросить новый backup?</h2>
             <p>Бот сформирует свежую резервную копию и отправит её в настроенный Telegram-чат. Операция может занять некоторое время.</p>
           </div>
+          <p class="admin-backup-error" role="alert" tabindex="-1" hidden data-admin-backup-error></p>
           <div class="admin-backup-actions">
             <button class="button ghost" type="button" data-admin-backup-cancel>Отмена</button>
             <button class="button primary" type="submit" data-admin-backup-submit>Запросить backup</button>
@@ -186,6 +187,7 @@
                 <p>Лимиты: текст — 3200 символов; подпись фото — 1024; JPEG/PNG — до 10 МБ.</p>
               </div>
             </details>
+            <p class="broadcast-form-error" role="alert" tabindex="-1" hidden data-broadcast-message-error></p>
           </section>
 
           <section class="broadcast-form-section" aria-labelledby="broadcast-format-heading">
@@ -264,6 +266,7 @@
               </button>
             </div>
             </div>
+            <p class="broadcast-form-error" role="alert" tabindex="-1" hidden data-broadcast-media-error></p>
           </section>
 
           <section class="broadcast-form-section" aria-labelledby="broadcast-audience-heading">
@@ -312,6 +315,7 @@
           {% else %}
             <p class="empty-text">Пока нет чатов, подходящих под фильтр активности.</p>
           {% endif %}
+            <p class="broadcast-form-error" role="alert" tabindex="-1" hidden data-broadcast-audience-error></p>
           </section>
 
           <dialog
@@ -501,9 +505,15 @@
                   </ol>
                 </details>
 
-                <form method="post" action="/app/admin/feedback/{{ item.id }}/status" data-feedback-status-form>
+                <form
+                  method="post"
+                  action="/app/admin/feedback/{{ item.id }}/status"
+                  data-feedback-status-form
+                  data-feedback-status-api="/api/admin/feedback/{{ item.id }}/status"
+                >
                   <input type="hidden" name="status" value="{{ 'open' if item.is_done else 'done' }}">
                   <input type="hidden" name="feedback_status" value="{{ feedback_status }}">
+                  <p class="admin-feedback-item-error" role="alert" tabindex="-1" hidden data-feedback-item-error></p>
                   <button type="submit" class="button {{ 'ghost' if item.is_done else 'primary' }}">
                     {{ 'Вернуть в работу' if item.is_done else 'Отметить сделанной' }}
                   </button>
@@ -527,26 +537,52 @@
       {% endif %}
     </section>
 
+    <div class="admin-table-search">
+      <label class="sr-only" for="admin-table-search-input">Поиск по таблицам</label>
+      <input
+        id="admin-table-search-input"
+        class="admin-search-input"
+        type="search"
+        placeholder="Имя или ключ таблицы"
+        autocomplete="off"
+        data-table-search-input
+      >
+      <p class="admin-table-search-empty" role="status" hidden data-table-search-empty>
+        Совпадений не найдено. Измените запрос.
+      </p>
+    </div>
+
     {% for section in table_sections %}
-      <section class="admin-secondary-section" id="{% if loop.first %}database{% else %}database-section-{{ loop.index }}{% endif %}">
-        <div class="panel-head admin-secondary-section-head">
-          <div>
-            <h3>{{ section.title }}</h3>
-            <p class="panel-subtitle">{{ section.tables|length }} таблиц</p>
+      <section
+        class="admin-secondary-section"
+        id="{% if loop.first %}database{% else %}database-section-{{ loop.index }}{% endif %}"
+        data-table-search-section
+      >
+        <details class="admin-secondary-details" open data-table-search-details>
+          <summary class="panel-head admin-secondary-section-head">
+            <div>
+              <h3>{{ section.title }}</h3>
+              <p class="panel-subtitle">{{ section.tables|length }} таблиц</p>
+            </div>
+          </summary>
+          <div class="admin-tables-grid">
+            {% for table_key, table_title in section.tables %}
+              <a
+                class="admin-table-card"
+                href="/app/admin/table/{{ table_key }}"
+                data-table-search-card
+                data-table-search-text="{{ (table_title ~ ' ' ~ table_key)|lower }}"
+              >
+                <span class="admin-table-icon">📊</span>
+                <div class="admin-table-info">
+                  <strong>{{ table_title }}</strong>
+                  <small>{{ table_key }}</small>
+                </div>
+                <span class="admin-table-arrow">→</span>
+              </a>
+            {% endfor %}
           </div>
-        </div>
-        <div class="admin-tables-grid">
-          {% for table_key, table_title in section.tables %}
-            <a class="admin-table-card" href="/app/admin/table/{{ table_key }}">
-              <span class="admin-table-icon">📊</span>
-              <div class="admin-table-info">
-                <strong>{{ table_title }}</strong>
-                <small>{{ table_key }}</small>
-              </div>
-              <span class="admin-table-arrow">→</span>
-            </a>
-          {% endfor %}
-        </div>
+        </details>
       </section>
     {% endfor %}
 

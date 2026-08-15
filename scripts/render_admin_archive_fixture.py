@@ -43,6 +43,8 @@ def render(*, selected_explicitly: bool = True) -> str:
         limit=50,
         shown_message_count=4,
         filters_input={"user_id": "", "text": "", "snapshot_kind": ""},
+        active_filter_count=1,
+        highlight_id=2,
         filter_reset_href="/app/admin/table/messages_compact?chat_id=-100500",
         back_to_chats_href="/app/admin/table/messages_compact",
         previous_page_href=None,

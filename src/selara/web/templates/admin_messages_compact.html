@@ -181,14 +181,19 @@
           </div>
 
           {% if rows %}
-            <div class="archive-message-list">
+            <div class="archive-message-list"{% if highlight_id %} data-archive-highlight-target="{{ highlight_id }}"{% endif %}>
               {% set grouping = namespace(date='') %}
               {% for row in rows %}
                 {% if row.date_label != grouping.date %}
                   {% set grouping.date = row.date_label %}
                   <div class="archive-date-separator"><span>{{ row.date_label }}</span></div>
                 {% endif %}
-                <article class="archive-message archive-author-{{ row.author_tone }}{% if row.grouped_with_previous %} is-continuation{% endif %}{% if row.grouped_with_next %} has-continuation{% endif %}">
+                <article
+                  id="archive-msg-{{ row.id }}"
+                  data-message-id="{{ row.id }}"
+                  tabindex="-1"
+                  class="archive-message archive-author-{{ row.author_tone }}{% if row.grouped_with_previous %} is-continuation{% endif %}{% if row.grouped_with_next %} has-continuation{% endif %}"
+                >
                   <header class="archive-message-head">
                     {% if row.grouped_with_previous %}
                       <span class="archive-visually-hidden">Продолжение сообщений автора {{ row.user_label }}, ID {{ row.user_id }}</span>
@@ -290,6 +295,9 @@
                     <span class="archive-type-badge">{{ row.message_type_label }}</span>
                     {% if row.snapshot_kind == 'edited' %}
                       <span class="archive-edited-badge">Изменено</span>
+                    {% endif %}
+                    {% if active_filter_count %}
+                      <a href="/app/admin/archive/jump/{{ row.id }}" class="button ghost small archive-context-jump">Показать в контексте</a>
                     {% endif %}
                     <a href="{{ row.raw_href }}">Открыть raw-снимок</a>
                   </footer>

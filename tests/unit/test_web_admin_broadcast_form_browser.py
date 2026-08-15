@@ -26,7 +26,7 @@ def _render_admin_page(*, with_history: bool = False) -> str:
         navigation_label="Разделы админки",
         flash=None,
         error=None,
-        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css"],
+        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css", "admin-table-search.css"],
         extra_scripts=["admin-overview.js", "admin-feedback.js", "admin-broadcast.js"],
         admin_user_id=77,
         open_feedback_count=0,
@@ -77,6 +77,25 @@ def _render_admin_page(*, with_history: bool = False) -> str:
     )
 
 
+async def _goto_admin_page(page, *, with_history: bool = False) -> None:
+    """Navigate to a fake same-origin URL serving the admin page.
+
+    A plain `page.set_content()` leaves the page at `about:blank`, which has an
+    opaque origin — relative `fetch()` calls (used by the real broadcast submit
+    flow) fail immediately with a URL-parse TypeError before any request is even
+    dispatched, so `page.route()` interception never sees them. Serving the
+    same markup from a routed fake HTTP origin gives `fetch("/api/...")` a real
+    base to resolve against, so it can be intercepted normally.
+    """
+    html = _render_admin_page(with_history=with_history)
+
+    async def serve_page(route):
+        await route.fulfill(status=200, content_type="text/html", body=html)
+
+    await page.route("http://selara.test/admin", serve_page)
+    await page.goto("http://selara.test/admin")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])
 async def test_server_admin_broadcast_history_card_is_operational_and_responsive(
@@ -92,6 +111,7 @@ async def test_server_admin_broadcast_history_card_is_operational_and_responsive
             await page.add_style_tag(path=str(STATIC_DIR / "admin-overview.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-feedback.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-broadcast.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-table-search.css"))
 
             card = page.locator(".broadcast-history-card")
             assert await card.count() == 1
@@ -112,7 +132,7 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.set_content(_render_admin_page())
+            await _goto_admin_page(page)
             await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
             form = page.locator("[data-broadcast-form]")
             photo_field = form.locator("[data-broadcast-photo-field]")
@@ -154,10 +174,19 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
             await form.evaluate(
                 """form => form.addEventListener('submit', event => {
                     if (form.dataset.submitting !== 'true') return;
-                    event.preventDefault();
                     window.submittedBroadcastBody = form.querySelector('[data-broadcast-compiled-body]').value;
                 })"""
             )
+
+            async def handle_send(route):
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body='{"ok": false, "message": "не важно для этого теста"}',
+                )
+
+            await page.route("**/api/admin/broadcasts/send", handle_send)
+
             await form.locator('button[type="submit"]').click()
             confirm_dialog = form.locator("[data-broadcast-confirm-dialog]")
             assert await confirm_dialog.is_visible()
@@ -219,19 +248,24 @@ async def test_server_admin_broadcast_confirmation_can_cancel_and_submit_once() 
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.set_content(_render_admin_page())
+            await _goto_admin_page(page)
             await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
             form = page.locator("[data-broadcast-form]")
             submit = form.locator("[data-broadcast-submit]")
             dialog = form.locator("[data-broadcast-confirm-dialog]")
             await form.locator("[data-broadcast-body]").fill("Проверка перед отправкой")
-            await form.evaluate(
-                """form => form.addEventListener('submit', event => {
-                    if (form.dataset.submitting !== 'true') return;
-                    event.preventDefault();
-                    window.confirmedSubmitCount = (window.confirmedSubmitCount || 0) + 1;
-                })"""
-            )
+
+            request_count = {"value": 0}
+
+            async def handle_send(route):
+                request_count["value"] += 1
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body='{"ok": false, "message": "Telegram временно недоступен.", "field": null}',
+                )
+
+            await page.route("**/api/admin/broadcasts/send", handle_send)
 
             await submit.click()
             assert await dialog.is_visible()
@@ -242,14 +276,99 @@ async def test_server_admin_broadcast_confirmation_can_cancel_and_submit_once() 
             await dialog.locator("[data-broadcast-confirm-cancel]").click()
             assert await dialog.is_hidden()
             assert await submit.evaluate("element => element === document.activeElement")
-            assert not await page.evaluate("Boolean(window.confirmedSubmitCount)")
+            assert request_count["value"] == 0
 
             await submit.click()
             await dialog.locator("[data-broadcast-confirm-submit]").click()
             assert await dialog.is_hidden()
-            assert await page.evaluate("window.confirmedSubmitCount") == 1
-            assert await submit.is_disabled()
-            assert await submit.inner_text() == "Отправка…"
+
+            general_error = form.locator("[data-broadcast-form-error]")
+            await general_error.wait_for(state="visible")
+            assert await general_error.inner_text() == "Telegram временно недоступен."
+            assert request_count["value"] == 1
+            assert not await submit.is_disabled()
+            assert await submit.inner_text() == "Отправить в активные чаты"
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_server_admin_broadcast_server_error_binds_to_message_block_and_keeps_state() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await _goto_admin_page(page)
+            await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
+            form = page.locator("[data-broadcast-form]")
+            submit = form.locator("[data-broadcast-submit]")
+            dialog = form.locator("[data-broadcast-confirm-dialog]")
+            body = form.locator("[data-broadcast-body]")
+            await body.fill("<b>незакрытый тег")
+
+            async def handle_send(route):
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body=(
+                        '{"ok": false, "field": "message", '
+                        '"message": "Некорректный Telegram HTML. Закройте все теги."}'
+                    ),
+                )
+
+            await page.route("**/api/admin/broadcasts/send", handle_send)
+
+            await submit.click()
+            await dialog.locator("[data-broadcast-confirm-submit]").click()
+
+            message_error = form.locator("[data-broadcast-message-error]")
+            await message_error.wait_for(state="visible")
+            assert await message_error.inner_text() == "Некорректный Telegram HTML. Закройте все теги."
+            assert await form.locator("[data-broadcast-media-error]").is_hidden()
+            assert await form.locator("[data-broadcast-audience-error]").is_hidden()
+            assert await form.locator("[data-broadcast-form-error]").is_hidden()
+            # No page reload happened — the composed text is still in the field.
+            assert await body.input_value() == "<b>незакрытый тег"
+            assert not await submit.is_disabled()
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_server_admin_broadcast_server_error_binds_to_media_block() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await _goto_admin_page(page)
+            await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
+            form = page.locator("[data-broadcast-form]")
+            submit = form.locator("[data-broadcast-submit]")
+            dialog = form.locator("[data-broadcast-confirm-dialog]")
+            await form.locator("[data-broadcast-body]").fill("Фото без файла")
+            await form.locator('input[name="media_mode"][value="photo"]').check()
+            # The photo input has a native `required` attribute in this mode; this test
+            # exercises the server-side error path, so bypass native constraint validation
+            # (which would otherwise silently block the submit event before it fires).
+            await form.evaluate("form => { form.noValidate = true; }")
+
+            async def handle_send(route):
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body='{"ok": false, "field": "media", "message": "Для режима с фотографией выберите файл."}',
+                )
+
+            await page.route("**/api/admin/broadcasts/send", handle_send)
+
+            await submit.click()
+            await dialog.locator("[data-broadcast-confirm-submit]").click()
+
+            media_error = form.locator("[data-broadcast-media-error]")
+            await media_error.wait_for(state="visible")
+            assert await media_error.inner_text() == "Для режима с фотографией выберите файл."
+            assert await form.locator("[data-broadcast-message-error]").is_hidden()
+            assert await form.locator("[data-broadcast-form-error]").is_hidden()
         finally:
             await browser.close()
 
@@ -275,14 +394,15 @@ async def test_server_admin_broadcast_audience_search_and_inline_validation() ->
             await form.locator("[data-broadcast-body]").fill("Проверка")
             await form.locator("[data-broadcast-submit]").click()
 
-            form_error = form.locator("[data-broadcast-form-error]")
-            assert await form_error.is_visible()
-            assert await form_error.inner_text() == "Выберите хотя бы один чат для рассылки."
+            audience_error = form.locator("[data-broadcast-audience-error]")
+            assert await audience_error.is_visible()
+            assert await audience_error.inner_text() == "Выберите хотя бы один чат для рассылки."
+            assert await form.locator("[data-broadcast-form-error]").is_hidden()
             assert not await form.locator("[data-broadcast-submit]").is_disabled()
 
             await form.locator('[data-broadcast-toggle="all"]').click()
             assert await selected_count.inner_text() == "Выбрано: 2 из 2"
-            assert await form_error.is_hidden()
+            assert await audience_error.is_hidden()
         finally:
             await browser.close()
 
@@ -299,6 +419,7 @@ async def test_server_admin_shell_is_keyboard_and_mobile_safe() -> None:
             await page.add_style_tag(path=str(STATIC_DIR / "admin-overview.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-feedback.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-broadcast.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-table-search.css"))
             await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
 
             has_page_overflow = await page.evaluate(
@@ -356,6 +477,7 @@ async def test_broadcast_confirm_and_preview_fit_supported_viewports(
             await page.add_style_tag(path=str(STATIC_DIR / "admin-overview.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-feedback.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-broadcast.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-table-search.css"))
             await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
 
             form = page.locator("[data-broadcast-form]")

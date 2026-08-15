@@ -104,3 +104,24 @@ for (const preview of document.querySelectorAll("[data-archive-photo-preview]"))
     button.addEventListener("click", () => loadArchivePhoto(preview, button));
   }
 }
+
+function scrollToHighlightedArchiveMessage() {
+  const list = document.querySelector("[data-archive-highlight-target]");
+  if (!list) {
+    return;
+  }
+  const targetId = list.dataset.archiveHighlightTarget;
+  const target = document.getElementById(`archive-msg-${targetId}`);
+  if (!target) {
+    return;
+  }
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  target.scrollIntoView({ block: "center", behavior: reducedMotion ? "auto" : "smooth" });
+  target.classList.add("is-jump-target");
+  target.focus({ preventScroll: true });
+  window.setTimeout(() => {
+    target.classList.remove("is-jump-target");
+  }, 2600);
+}
+
+scrollToHighlightedArchiveMessage();

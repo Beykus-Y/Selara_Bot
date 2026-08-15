@@ -107,7 +107,8 @@
   background: rgb(88 216 255 / 10%);
 }
 
-.admin-feedback-filter-error {
+.admin-feedback-filter-error,
+.admin-feedback-item-error {
   margin: 0;
   padding: 11px 13px;
   border: 1px solid rgb(255 156 169 / 24%);
@@ -115,6 +116,14 @@
   color: #ffd5db;
   background: rgb(255 156 169 / 8%);
   font-size: 0.86rem;
+}
+
+.admin-feedback-item-error {
+  margin-bottom: 10px;
+}
+
+.admin-feedback-item-error[hidden] {
+  display: none;
 }
 
 .admin-feedback-task-list {

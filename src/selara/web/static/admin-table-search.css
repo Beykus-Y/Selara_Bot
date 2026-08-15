@@ -1,0 +1,53 @@
+.admin-table-search {
+  display: grid;
+  gap: 6px;
+  margin-top: 28px;
+  max-width: 360px;
+}
+
+.admin-table-search-empty {
+  margin: 0;
+  color: var(--muted-strong);
+}
+
+.admin-table-search-empty[hidden] {
+  display: none;
+}
+
+/* .admin-table-card declares its own `display: flex` in panel.css, which
+   otherwise beats the UA `[hidden]{display:none}` rule at equal specificity. */
+.admin-table-card[hidden] {
+  display: none;
+}
+
+.admin-secondary-details > summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.admin-secondary-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-secondary-details > summary::after {
+  content: "›";
+  flex: 0 0 auto;
+  margin-top: 2px;
+  font-size: 1.15rem;
+  color: var(--muted-strong);
+  transition: transform 140ms ease;
+}
+
+.admin-secondary-details[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.admin-secondary-details > summary:focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 3px;
+  border-radius: 8px;
+}

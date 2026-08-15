@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -59,7 +60,7 @@ def _render_feedback(
         navigation_label="Разделы админки",
         flash=None,
         error=None,
-        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css"],
+        extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css", "admin-table-search.css"],
         extra_scripts=["admin-overview.js", "admin-feedback.js", "admin-broadcast.js"],
         admin_user_id=77,
         open_feedback_count=2,
@@ -87,6 +88,34 @@ async def _mount(page, *, status: str = "all", empty: bool = False) -> None:
         "admin-overview.css",
         "admin-feedback.css",
         "admin-broadcast.css",
+        "admin-table-search.css",
+    ):
+        await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
+    await page.add_script_tag(path=str(STATIC_DIR / "admin-feedback.js"), type="module")
+
+
+async def _goto_feedback(page, *, status: str = "all", empty: bool = False) -> None:
+    """Same as `_mount`, but served from a routed same-origin URL.
+
+    A plain `page.set_content()` page lives at `about:blank`, which has an
+    opaque origin — relative `fetch()` calls (used by the real status-update
+    flow) fail immediately with a URL-parse TypeError before any request is
+    dispatched, so `page.route()` interception never sees them.
+    """
+    html = _render_feedback(status=status, empty=empty)
+
+    async def serve_page(route):
+        await route.fulfill(status=200, content_type="text/html", body=html)
+
+    await page.route("http://selara.test/admin", serve_page)
+    await page.goto("http://selara.test/admin")
+    for stylesheet in (
+        "panel.css",
+        "server-ui-foundation.css",
+        "admin-overview.css",
+        "admin-feedback.css",
+        "admin-broadcast.css",
+        "admin-table-search.css",
     ):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
     await page.add_script_tag(path=str(STATIC_DIR / "admin-feedback.js"), type="module")
@@ -136,13 +165,59 @@ async def test_admin_feedback_submit_is_guarded_against_double_click() -> None:
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page(viewport={"width": 390, "height": 844})
         try:
-            await _mount(page)
+            await _goto_feedback(page)
             form = page.locator("[data-feedback-status-form]").first
-            await form.evaluate("element => element.addEventListener('submit', event => event.preventDefault())")
+            request_count = {"value": 0}
+
+            async def handle_status(route):
+                request_count["value"] += 1
+                # Never resolves within the test's lifetime — keeps the button
+                # in its "submitting" state so the disabled check below can't race.
+                await asyncio.sleep(5)
+                await route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+
+            await page.route("**/api/admin/feedback/*/status", handle_status)
             button = form.locator("button")
+            # A disabled button is not Playwright-actionable, so the click itself
+            # already proves the guard: a second dispatched click cannot land.
             await button.click()
             assert await button.is_disabled()
             assert await button.inner_text() == "Обновляем…"
+            await button.dispatch_event("click")
+            assert request_count["value"] == 1
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_feedback_status_error_shows_inline_and_keeps_other_items() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 1440, "height": 900})
+        try:
+            await _goto_feedback(page)
+            tasks = page.locator(".admin-feedback-task")
+            first_form = tasks.nth(0).locator("[data-feedback-status-form]")
+            second_form = tasks.nth(1).locator("[data-feedback-status-form]")
+
+            async def handle_status(route):
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body='{"ok": false, "message": "Заявка уже обновлена другим администратором."}',
+                )
+
+            await page.route("**/api/admin/feedback/*/status", handle_status)
+
+            await first_form.locator("button").click()
+
+            first_error = first_form.locator("[data-feedback-item-error]")
+            await first_error.wait_for(state="visible")
+            assert await first_error.inner_text() == "Заявка уже обновлена другим администратором."
+            assert await second_form.locator("[data-feedback-item-error]").is_hidden()
+            # No page reload happened — button re-enabled with its original text.
+            assert not await first_form.locator("button").is_disabled()
+            assert await tasks.count() == 3
         finally:
             await browser.close()
 

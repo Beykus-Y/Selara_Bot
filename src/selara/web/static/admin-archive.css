@@ -579,6 +579,28 @@
   margin-left: auto;
 }
 
+.archive-context-jump {
+  flex-shrink: 0;
+  color: var(--cyan-soft);
+}
+
+.archive-message.is-jump-target {
+  outline: 2px solid var(--cyan-soft);
+  outline-offset: 2px;
+  background: linear-gradient(145deg, rgb(46 92 128 / 55%), rgb(20 46 78 / 70%));
+  animation: archive-jump-flash 2.4s ease-out;
+}
+
+@keyframes archive-jump-flash {
+  0% {
+    background: rgb(125 216 255 / 40%);
+  }
+
+  100% {
+    background: linear-gradient(145deg, rgb(46 92 128 / 55%), rgb(20 46 78 / 70%));
+  }
+}
+
 .archive-type-badge,
 .archive-edited-badge {
   padding: 4px 8px;
