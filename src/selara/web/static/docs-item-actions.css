@@ -1,0 +1,56 @@
+.docs-code-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.docs-clip-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgb(124 144 255 / 18%);
+  background: rgb(124 144 255 / 6%);
+  color: var(--muted-strong);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.docs-clip-button:hover,
+.docs-clip-button:focus-visible {
+  background: rgb(124 144 255 / 14%);
+  border-color: rgb(124 144 255 / 32%);
+  color: var(--text);
+}
+
+.docs-clip-button.is-copied {
+  border-color: rgb(88 216 255 / 32%);
+  background: rgb(88 216 255 / 14%);
+  color: var(--cyan-soft);
+}
+
+.docs-item-anchor {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.docs-item-anchor:hover,
+.docs-item-anchor:focus-visible {
+  opacity: 1;
+  background: rgb(124 144 255 / 12%);
+  color: var(--cyan-soft);
+}

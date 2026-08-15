@@ -89,6 +89,68 @@ def test_user_docs_rp_action_lists_match_canonical_catalog_source() -> None:
     assert not canonical_non_18 & canonical_18_plus
 
 
+def test_user_docs_items_have_stable_unique_deep_link_anchors() -> None:
+    context = build_user_docs_context(chat=None)
+    all_anchors: list[str] = []
+    for section in context["docs_sections"]:
+        for index, item in enumerate(section["items"], start=1):
+            expected = f"{section['anchor']}-item-{index}"
+            assert item["anchor"] == expected
+            all_anchors.append(item["anchor"])
+
+    assert len(all_anchors) == len(set(all_anchors))
+
+
+def test_user_docs_items_carry_a_lowercased_search_text_covering_their_fields() -> None:
+    context = build_user_docs_context(chat=None)
+    for section in context["docs_sections"]:
+        for item in section["items"]:
+            search_text = item["search_text"]
+            assert search_text == search_text.lower()
+            assert item["title"].lower() in search_text
+            for trigger in item["triggers"]:
+                assert trigger.lower() in search_text
+            for example in item["examples"]:
+                assert example.lower() in search_text
+
+
+def test_user_docs_template_renders_search_box_and_text_attributes() -> None:
+    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
+    environment = create_template_environment(template_dir=template_dir)
+
+    context = build_user_docs_context(chat=None)
+    html = environment.get_template("user_docs.html").render(
+        top_links=[],
+        show_logout=False,
+        flash=None,
+        error=None,
+        **context,
+    )
+
+    assert "data-docs-search-input" in html
+    assert "data-docs-search-section" in html
+    assert 'data-docs-search-text="' in html
+    assert "трахнуть" in html.lower()
+
+
+def test_user_docs_template_renders_copy_buttons_and_deep_links() -> None:
+    template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
+    environment = create_template_environment(template_dir=template_dir)
+
+    context = build_user_docs_context(chat=None)
+    html = environment.get_template("user_docs.html").render(
+        top_links=[],
+        show_logout=False,
+        flash=None,
+        error=None,
+        **context,
+    )
+
+    assert 'data-copy-text="reply + /pair"' in html
+    assert 'class="docs-item-anchor"' in html
+    assert "docs-clip-button" in html
+
+
 def test_user_docs_template_renders_command_lists() -> None:
     template_dir = Path(__file__).resolve().parents[2] / "src" / "selara" / "web" / "templates"
     environment = create_template_environment(template_dir=template_dir)

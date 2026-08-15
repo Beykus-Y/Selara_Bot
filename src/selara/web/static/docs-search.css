@@ -1,0 +1,31 @@
+.docs-search-box {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 20px;
+}
+
+.docs-search-input {
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-ui);
+  width: 100%;
+}
+
+.docs-search-input:focus {
+  outline: none;
+  border-color: var(--cyan);
+}
+
+.docs-search-empty {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 13px;
+}

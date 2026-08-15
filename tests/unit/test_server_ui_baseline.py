@@ -140,6 +140,32 @@ def test_admin_overview_uses_bounded_page_specific_assets() -> None:
     assert len(table_search_css.read_text(encoding="utf-8").splitlines()) <= 60
 
 
+def test_user_docs_uses_bounded_copy_and_deep_link_assets() -> None:
+    docs_source = (TEMPLATE_DIR / "user_docs.html").read_text(encoding="utf-8")
+    docs_actions_css = ROOT / "src" / "selara" / "web" / "static" / "docs-item-actions.css"
+    docs_actions_script = ROOT / "src" / "selara" / "web" / "static" / "docs-item-actions.js"
+
+    assert "docs-clip-button" in docs_source
+    assert "docs-item-anchor" in docs_source
+    assert docs_actions_css.is_file()
+    assert len(docs_actions_css.read_text(encoding="utf-8").splitlines()) <= 60
+    assert docs_actions_script.is_file()
+    assert len(docs_actions_script.read_text(encoding="utf-8").splitlines()) <= 60
+
+
+def test_user_docs_uses_bounded_search_assets() -> None:
+    docs_source = (TEMPLATE_DIR / "user_docs.html").read_text(encoding="utf-8")
+    docs_search_css = ROOT / "src" / "selara" / "web" / "static" / "docs-search.css"
+    docs_search_script = ROOT / "src" / "selara" / "web" / "static" / "docs-search.js"
+
+    assert "data-docs-search-input" in docs_source
+    assert "data-docs-search-card" in docs_source
+    assert docs_search_css.is_file()
+    assert len(docs_search_css.read_text(encoding="utf-8").splitlines()) <= 40
+    assert docs_search_script.is_file()
+    assert len(docs_search_script.read_text(encoding="utf-8").splitlines()) <= 60
+
+
 def test_admin_feedback_and_slice_workflow_have_bounded_contracts() -> None:
     feedback_css = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.css"
     feedback_script = ROOT / "src" / "selara" / "web" / "static" / "admin-feedback.js"

@@ -4018,6 +4018,7 @@ select option[disabled] {
 
 .docs-section,
 .docs-setting-card,
+.docs-card,
 #docs-trigger-types {
   scroll-margin-top: 148px;
 }

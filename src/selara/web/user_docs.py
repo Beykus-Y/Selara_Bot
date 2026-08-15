@@ -17,6 +17,18 @@ def _docs_item(
     steps: tuple[str, ...] = (),
     notes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    search_text = " ".join(
+        (
+            title,
+            text,
+            *badges,
+            *commands,
+            *triggers,
+            *examples,
+            *steps,
+            *notes,
+        )
+    ).lower()
     return {
         "title": title,
         "text": text,
@@ -26,6 +38,7 @@ def _docs_item(
         "examples": examples,
         "steps": steps,
         "notes": notes,
+        "search_text": search_text,
     }
 
 
@@ -35,11 +48,17 @@ def _docs_section(
     summary: str,
     *items: dict[str, Any],
 ) -> dict[str, Any]:
+    # Deep-linkable per-item anchor, e.g. "user-docs-social-item-3". Stable as
+    # long as items keep their position within the section; reordering items
+    # changes their link, same tradeoff as heading-based anchors elsewhere.
+    numbered_items = [
+        {**item, "anchor": f"{anchor}-item-{index}"} for index, item in enumerate(items, start=1)
+    ]
     return {
         "anchor": anchor,
         "title": title,
         "summary": summary,
-        "items": items,
+        "items": numbered_items,
     }
 
 

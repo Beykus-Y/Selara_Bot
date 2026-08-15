@@ -24,6 +24,20 @@
       <div class="panel-head">
         <h2>Навигация</h2>
       </div>
+      <div class="docs-search-box">
+        <label class="sr-only" for="docs-search-input">Поиск по документации</label>
+        <input
+          id="docs-search-input"
+          class="docs-search-input"
+          type="search"
+          placeholder="Команда, триггер, слово из описания…"
+          autocomplete="off"
+          data-docs-search-input
+        >
+        <p class="docs-search-empty" role="status" hidden data-docs-search-empty>
+          Совпадений не найдено. Измените запрос.
+        </p>
+      </div>
       <div class="docs-nav-stack">
         <div class="docs-nav-group">
           <strong>Разделы справки</strong>
@@ -36,7 +50,7 @@
 
     <div class="docs-content">
       {% for section in docs_sections %}
-        <section class="panel docs-section" id="{{ section.anchor }}">
+        <section class="panel docs-section" id="{{ section.anchor }}" data-docs-search-section>
           <div class="panel-head">
             <div>
               <h2>{{ section.title }}</h2>
@@ -45,7 +59,12 @@
           </div>
           <div class="docs-card-grid">
             {% for item in section["items"] %}
-              <article class="docs-card">
+              <article
+                class="docs-card"
+                id="{{ item.anchor }}"
+                data-docs-search-card
+                data-docs-search-text="{{ item.search_text }}"
+              >
                 <div class="docs-card-head">
                   <div class="docs-card-title-stack">
                     <strong>{{ item.title }}</strong>
@@ -57,6 +76,7 @@
                       </div>
                     {% endif %}
                   </div>
+                  <a class="docs-item-anchor" href="#{{ item.anchor }}" aria-label="Прямая ссылка на «{{ item.title }}»">#</a>
                 </div>
                 <p class="docs-copy">{{ item.text }}</p>
 
@@ -87,7 +107,10 @@
                     <span class="docs-card-label">Примеры</span>
                     <ul class="docs-bullet-list docs-code-list">
                       {% for example in item["examples"] %}
-                        <li><code>{{ example }}</code></li>
+                        <li>
+                          <code>{{ example }}</code>
+                          <button type="button" class="docs-clip-button" data-copy-text="{{ example }}">Копировать</button>
+                        </li>
                       {% endfor %}
                     </ul>
                   </div>
