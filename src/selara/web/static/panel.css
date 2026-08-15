@@ -6049,10 +6049,6 @@ body.page-landing {
     padding: 6px 8px;
   }
 
-  .admin-actions-col {
-    width: 70px;
-  }
-
   .feedback-card-head,
   .admin-feedback-actions {
     flex-direction: column;

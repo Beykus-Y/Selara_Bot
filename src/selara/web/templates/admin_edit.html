@@ -16,7 +16,12 @@
       </div>
     </div>
 
-    <form class="admin-edit-form" method="post" action="/app/admin/table/{{ table_name }}/update">
+    <div class="banner banner-warning" role="note">
+      Прямое изменение записи в базе данных. Изменения применяются немедленно и не
+      проходят бизнес-валидацию бота — проверьте значения перед сохранением.
+    </div>
+
+    <form class="admin-edit-form" method="post" action="/app/admin/table/{{ table_name }}/update" data-admin-edit-form>
       {% for key, value in pk_fields %}
         <input type="hidden" name="{{ key }}" value="{{ value }}">
       {% endfor %}
@@ -24,11 +29,12 @@
       <div class="admin-edit-fields">
         {% for col_name, value in columns %}
           <div class="admin-edit-field">
-            <label>
+            <label for="field-{{ col_name }}">
               <span class="field-label">{{ col_name }}</span>
               {% if col_name.endswith('_at') and value %}
                 <span class="text-muted">UTC</span>
                 <input
+                  id="field-{{ col_name }}"
                   type="datetime-local"
                   name="{{ col_name }}"
                   value="{{ value.strftime('%Y-%m-%dT%H:%M:%S') }}"
@@ -36,18 +42,20 @@
                   class="admin-field-input"
                 >
               {% elif value is sameas true or value is sameas false %}
-                <select name="{{ col_name }}" class="admin-field-input">
+                <select id="field-{{ col_name }}" name="{{ col_name }}" class="admin-field-input">
                   <option value="true" {% if value is sameas true %}selected{% endif %}>true</option>
                   <option value="false" {% if value is sameas false %}selected{% endif %}>false</option>
                 </select>
               {% elif value is string and value|length > 100 %}
                 <textarea
+                  id="field-{{ col_name }}"
                   name="{{ col_name }}"
                   class="admin-field-input admin-textarea"
                   rows="5"
                 >{{ value }}</textarea>
               {% else %}
                 <input
+                  id="field-{{ col_name }}"
                   type="text"
                   name="{{ col_name }}"
                   value="{{ value if value is not none else '' }}"
@@ -66,7 +74,7 @@
 
       <div class="admin-edit-actions">
         <a href="/app/admin/table/{{ table_name }}" class="button ghost">Отмена</a>
-        <button type="submit" class="button primary">Сохранить</button>
+        <button type="submit" class="button primary" data-admin-edit-submit>Сохранить</button>
       </div>
     </form>
 

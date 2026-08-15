@@ -884,6 +884,116 @@ async def test_admin_table_page_renders_with_column_filters(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_admin_table_page_clamps_invalid_page_param(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(scalar_value=1),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/users?page=not-a-number")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "Alice" in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_table_page_encodes_pagination_and_filter_links(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(scalar_value=120),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=101,
+                        username="alice",
+                        first_name="Alice",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/users?username=a%26b")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert "page=2" in response.text
+    assert "username=a%26b" in response.text
+    assert "&username=a&b\"" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_admin_table_page_shows_reference_labels(monkeypatch) -> None:
     settings = _settings()
     auth_session = FakeSession()

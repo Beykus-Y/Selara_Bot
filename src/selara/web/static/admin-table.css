@@ -1,0 +1,48 @@
+.admin-actions-col {
+  width: 130px;
+}
+
+.admin-row-actions {
+  gap: 8px;
+}
+
+.admin-row-actions .button-small {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.badge-ok {
+  background: rgb(89 214 178 / 16%);
+  border-color: rgb(89 214 178 / 32%);
+  color: #8ef2d3;
+}
+
+.badge-error {
+  background: rgb(255 121 134 / 16%);
+  border-color: rgb(255 121 134 / 32%);
+  color: #ffb3bd;
+}
+
+.banner-warning {
+  background: rgb(255 196 92 / 10%);
+  border-color: rgb(255 196 92 / 28%);
+  color: #ffe3ad;
+}

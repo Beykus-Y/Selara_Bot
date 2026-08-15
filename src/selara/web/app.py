@@ -9542,9 +9542,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 ],
             )
 
-        page = int(request.query_params.get("page", 1))
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (TypeError, ValueError):
+            page = 1
         limit = 50
-        
+
         # Собираем все фильтры из query params
         filters_input = {}
         for key, value in request.query_params.items():
@@ -9606,15 +9609,28 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     for col in model_class.__table__.columns
                 ],
             )
-            row_entries = [
-                {
-                    "row": row,
-                    "pk_query": _admin_primary_key_query(_admin_primary_key_values_from_row(model_class, row)),
-                }
-                for row in rows
-            ]
+            row_entries = []
+            for row in rows:
+                pk_values = _admin_primary_key_values_from_row(model_class, row)
+                row_entries.append(
+                    {
+                        "row": row,
+                        "pk_query": _admin_primary_key_query(pk_values),
+                        "delete_label": f"{_admin_table_title(table_name)}: {_admin_primary_key_display(pk_values)}",
+                    }
+                )
 
             await session.commit()
+
+        def _table_list_href(*, target_page: int) -> str:
+            params = dict(filters_input)
+            if target_page > 1:
+                params["page"] = str(target_page)
+            base_path = f"/app/admin/table/{table_name}"
+            return f"{base_path}?{urlencode(params)}" if params else base_path
+
+        previous_page_href = _table_list_href(target_page=page - 1) if page > 1 else None
+        next_page_href = _table_list_href(target_page=page + 1) if page * limit < total else None
 
         return _render_template(
             "admin_table.html",
@@ -9634,6 +9650,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             limit=limit,
             filters_input=filters_input,
             reference_labels=reference_labels,
+            previous_page_href=previous_page_href,
+            next_page_href=next_page_href,
+            extra_styles=["admin-table.css"],
+            extra_scripts=["admin-table.js"],
         )
 
     @app.get("/app/admin/table/{table_name}/edit")
@@ -9684,6 +9704,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             primary_key_columns=primary_key_columns,
             columns=columns,
             reference_labels=reference_labels,
+            extra_styles=["admin-table.css"],
+            extra_scripts=["admin-table.js"],
         )
 
     @app.post("/app/admin/table/{table_name}/update")

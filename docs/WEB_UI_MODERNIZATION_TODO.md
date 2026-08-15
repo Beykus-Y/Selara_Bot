@@ -383,16 +383,28 @@
 
 #### 2.6. Generic DB explorer
 
-- [ ] Сохранить `admin_table.html` как технический инструмент, не смешивая его с
-  продуктовой админкой.
-- [ ] Сделать список таблиц searchable и сгруппированным по доменам.
-- [ ] Зафиксировать понятные labels для внешних ключей рядом с raw ID.
-- [ ] На mobile использовать contained horizontal scroll или card view для
-  приоритетных таблиц.
-- [ ] Улучшить pagination и URL filters без ручной конкатенации query string.
-- [ ] Обновить `admin_edit.html`: labels, типы полей, validation, destructive warnings.
-- [ ] Обновить confirm dialog удаления и возврат фокуса.
-- [ ] Добавить Playwright CRUD-тест на специально разрешённой тестовой таблице.
+- [x] Сохранить `admin_table.html` как технический инструмент, не смешивая его с
+  продуктовой админкой. Стили и JS вынесены в собственные `admin-table.css`/
+  `admin-table.js`, не затрагивающие продуктовые страницы.
+- [ ] Сделать список таблиц searchable и сгруппированным по доменам. Группировка по
+  доменам уже есть на `admin.html`; текстовый поиск по таблицам остаётся отдельным
+  срезом, чтобы не смешивать правки главной админки и технического DB explorer.
+- [x] Зафиксировать понятные labels для внешних ключей рядом с raw ID. Уже
+  реализовано через `reference_labels` в списке и в форме редактирования.
+- [x] На mobile использовать contained horizontal scroll или card view для
+  приоритетных таблиц. `.table-wrapper` — явно обозначенный технический контейнер с
+  `overflow-x: auto`; горизонтальная прокрутка всей страницы не используется.
+- [x] Улучшить pagination и URL filters без ручной конкатенации query string.
+  Ссылки постранично строятся на сервере через `urlencode`; исправлен краш при
+  нечисловом/отрицательном `page`.
+- [x] Обновить `admin_edit.html`: labels, типы полей, validation, destructive
+  warnings. Добавлен предупреждающий баннер о прямом изменении БД и submit guard.
+- [x] Обновить confirm dialog удаления и возврат фокуса. Диалог теперь называет
+  удаляемую запись, восстанавливает фокус на вызвавшую кнопку, JS вынесен в
+  `admin-table.js`.
+- [~] Добавить Playwright CRUD-тест на специально разрешённой тестовой таблице.
+  Добавлены browser-тесты geometry/focus/pagination/warning; полноценный E2E CRUD
+  через реальный FastAPI/БД остаётся для этапа тестовой инфраструктуры (этап 0).
 
 **Критерий завершения этапа 2:** все административные задачи доступны с desktop,
 smartphone и tablet; рассылка и архив покрыты функциональными тестами; generic DB
@@ -562,14 +574,14 @@ responsive → accessibility → visual review → TODO update.
 
 ## 8. Сводный прогресс
 
-**Общий прогресс roadmap: 18%.** Значение рассчитано как среднее завершение семи
+**Общий прогресс roadmap: 19%.** Значение рассчитано как среднее завершение семи
 этапов; прогресс приоритетного этапа админки отслеживается отдельно.
 
 | Этап | Статус | Выполнено | Примечание |
 |---|---|---:|---|
 | 0. Baseline и проверки | `[~]` | 40% | Debt guards; ESLint/Stylelint; rendered admin HTMLHint fixture |
 | 1. Дизайн-система | `[~]` | 15% | Семантический base и page-specific CSS/JS foundation |
-| 2. Админка | `[~]` | 68% | Audit view завершён; далее generic DB explorer |
+| 2. Админка | `[~]` | 78% | Generic DB explorer в основном закрыт; остаются admin_login.html, поиск по списку таблиц и полная Playwright-матрица |
 | 3. Документация | `[ ]` | 0% | После критичной части админки |
 | 4. Остальные страницы | `[ ]` | 0% | После админки и документации |
 | 5. Игры | `[ ]` | 0% | Высокий риск, выполнять последними |
@@ -596,6 +608,7 @@ responsive → accessibility → visual review → TODO update.
 
 | Дата | Исполнитель | Задача | Статус | Commit/проверки | Примечание |
 |---|---|---|---|---|---|
+| 2026-08-15 | Claude | Generic DB explorer: пагинация, edit/delete safety, touch targets | `[x]` | commit: pending; 882 unit; focused route 11/11; focused browser 6/6; ESLint; Stylelint; HTMLHint ×6; frontend build; 7 desktop/mobile/tablet/dialog/empty screenshots | Исправлен краш и отрицательный offset при нечисловом `page`; urlencode-пагинация вместо ручной конкатенации; delete-диалог называет удаляемую запись и восстанавливает фокус на вызвавшую кнопку; destructive-warning + submit guard на edit; JS вынесен в `admin-table.js`; badge/touch-target/warning CSS — в новый `admin-table.css`, чтобы не расширять `panel.css` сверх baseline-лимита; добавлены sr-only labels для фильтров и `type="button"`/`for`/`id` по замечаниям HTMLHint. Поиск по списку таблиц на `admin.html` оставлен отдельным незакрытым пунктом ниже. |
 | 2026-08-15 | Codex | Журнал аудита чата: timeline/table hybrid | `[x]` | commit: pending; 874 unit; focused 50/50; audit Chromium 4/4; ESLint; Stylelint; HTMLHint ×4; frontend build; 8 desktop/mobile/tablet screenshots | Русские labels и категории; группировка по датам; URL-поиск/фильтры; раскрываемые event/action/actor/target ID без raw meta; безопасный DB error, empty/filtered/long/responsive states |
 | 2026-08-15 | Codex | Заявки пользователей: task-like workflow | `[x]` | commit: pending; 866 unit; focused 76/76; feedback Chromium 5/5; ESLint; Stylelint; HTMLHint ×3; frontend build; 8 desktop/mobile/tablet screenshots | URL-фильтр статуса, lifecycle/history, быстрый status update с сохранением фильтра/позиции, submit guard, empty/error/long/responsive states |
 | 2026-08-15 | Codex | Обязательный workflow UI-срезов | `[x]` | commit: pending; baseline contract test; document review | Tests-first, временный рендер в `/tmp`, ручная проверка каждого PNG, итерационное сравнение и финальное сохранение в `~/selara_screen` обязательны для всех исполнителей |

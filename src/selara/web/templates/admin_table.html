@@ -15,15 +15,16 @@
     </div>
 
     <div class="admin-table-controls">
-      <form class="admin-search-form" method="get" action="/app/admin/table/{{ table_name }}" style="flex-wrap: wrap; gap: 8px;">
+      <form class="admin-search-form" method="get" action="/app/admin/table/{{ table_name }}">
         {% for col in columns %}
+          <label class="sr-only" for="filter-{{ col }}">Фильтр по полю {{ col }}</label>
           <input
+            id="filter-{{ col }}"
             type="text"
             name="{{ col }}"
             placeholder="{{ col }}"
             value="{{ filters_input.get(col, '') }}"
             class="admin-search-input"
-            style="min-width: 120px; flex: 1;"
           >
         {% endfor %}
         <button type="submit" class="button primary">Найти</button>
@@ -75,8 +76,14 @@
               {% endfor %}
               <td class="admin-actions-col">
                 <span class="admin-row-actions">
-                  <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?{{ entry.pk_query }}">✏️</a>
-                  <button class="button button-small button-danger" data-delete-url="/app/admin/table/{{ table_name }}/delete?{{ entry.pk_query }}">🗑️</button>
+                  <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?{{ entry.pk_query }}" aria-label="Редактировать запись {{ entry.delete_label }}">✏️</a>
+                  <button
+                    type="button"
+                    class="button button-small button-danger"
+                    data-delete-url="/app/admin/table/{{ table_name }}/delete?{{ entry.pk_query }}"
+                    data-delete-label="{{ entry.delete_label }}"
+                    aria-label="Удалить запись {{ entry.delete_label }}"
+                  >🗑️</button>
                 </span>
               </td>
             </tr>
@@ -93,21 +100,16 @@
 
     {% if total > limit %}
       <div class="admin-pagination">
-        {% set filter_params = namespace(str='') %}
-        {% for key, value in filters_input.items() %}
-          {% set filter_params.str = filter_params.str + '&' + key + '=' + value %}
-        {% endfor %}
-        
-        {% if page > 1 %}
-          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page - 1 }}{{ filter_params.str }}">← Назад</a>
+        {% if previous_page_href %}
+          <a class="button ghost" href="{{ previous_page_href }}">← Назад</a>
         {% endif %}
 
         <span class="pagination-info">
           Страница {{ page }} из {{ ((total + limit - 1) / limit)|int }}
         </span>
 
-        {% if page * limit < total %}
-          <a class="button ghost" href="/app/admin/table/{{ table_name }}?page={{ page + 1 }}{{ filter_params.str }}">Вперёд →</a>
+        {% if next_page_href %}
+          <a class="button ghost" href="{{ next_page_href }}">Вперёд →</a>
         {% endif %}
       </div>
     {% endif %}
@@ -121,35 +123,11 @@
     <form method="post" class="confirm-dialog-form" id="delete-form">
       <div id="delete-hidden-fields"></div>
       <h3>Подтверждение удаления</h3>
-      <p>Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
+      <p>Вы уверены, что хотите удалить запись <strong data-delete-target></strong>? Это действие нельзя отменить.</p>
       <div class="confirm-dialog-actions">
-        <button type="button" class="button ghost" onclick="document.getElementById('delete-dialog').close()">Отмена</button>
+        <button type="button" class="button ghost" data-delete-cancel>Отмена</button>
         <button type="submit" class="button danger">Удалить</button>
       </div>
     </form>
   </dialog>
-{% endblock %}
-
-{% block scripts %}
-  <script>
-    document.querySelectorAll('[data-delete-url]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const url = btn.getAttribute('data-delete-url');
-        const dialog = document.getElementById('delete-dialog');
-        const form = document.getElementById('delete-form');
-        const urlParams = new URLSearchParams(url.split('?')[1]);
-        const hiddenFields = document.getElementById('delete-hidden-fields');
-        hiddenFields.replaceChildren();
-        for (const [key, value] of urlParams.entries()) {
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = key;
-          input.value = value;
-          hiddenFields.appendChild(input);
-        }
-        form.action = url.split('?')[0];
-        dialog.showModal();
-      });
-    });
-  </script>
 {% endblock %}
