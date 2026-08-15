@@ -150,3 +150,18 @@ def test_daily_article_is_dispatched_via_the_documented_regex_path() -> None:
     # that it bypasses that mechanism, so a future refactor that adds one
     # doesn't leave this catalog entry's notes stale.
     assert "article" not in _real_aiogram_commands("economy.py", "text_commands.py")
+
+
+def test_misc_public_utility_syntax_matches_real_aiogram_command_registrations() -> None:
+    real_commands = _real_aiogram_commands("help.py", "settings.py", "stats.py", "moderation.py")
+    for spec in ("misc_lastseen", "misc_public_service_commands"):
+        for syntax_entry in get_command_spec(spec).syntax:
+            base = _base_command_word(syntax_entry)
+            assert base in real_commands, f"{spec}: '{syntax_entry}' claims /{base}, not found"
+
+
+def test_misc_public_utility_natural_triggers_exist_in_the_real_trigger_maps() -> None:
+    all_real_triggers = set(EXACT_TRIGGER_TO_COMMAND_KEY) | set(PREFIX_TRIGGER_TO_COMMAND_KEY)
+    for key in ("misc_lastseen", "misc_public_service_commands"):
+        for trigger in get_command_spec(key).natural_triggers:
+            assert trigger in all_real_triggers, f"{key}: natural trigger {trigger!r} not found"

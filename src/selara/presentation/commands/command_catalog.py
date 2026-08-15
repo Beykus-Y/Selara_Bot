@@ -301,6 +301,31 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         natural_triggers=("сбежать из семьи", "сбежать от хозяина"),
         notes=("/escapefamily доступна только если у вас есть родитель в этом чате.",),
     ),
+    CommandSpec(
+        key="misc_lastseen",
+        category="misc",
+        dispatch_kind="both",
+        syntax=("/lastseen [@username|user_id]",),
+        title_ru="Когда пользователь был активен",
+        description_ru="Команда показывает, когда конкретный участник последний раз проявлял активность, и работает как по аргументу, так и по reply.",
+        natural_triggers=("когда был", "когда была"),
+        examples=("/lastseen @username", "reply + /lastseen"),
+    ),
+    CommandSpec(
+        key="misc_public_service_commands",
+        category="misc",
+        dispatch_kind="both",
+        syntax=("/help", "/settings", "/roles", "/modstat [@username|user_id]"),
+        title_ru="Публичные служебные команды",
+        description_ru="Эти команды не меняют настройки, а помогают понять состояние группы: список ролей, moderation-статус и параметры чата.",
+        natural_triggers=("помощь",),
+        examples=("/modstat", "/modstat @username", "reply + /modstat"),
+        notes=(
+            "/settings показывает текущие настройки, но менять их могут только роли с правом управления.",
+            "/roles выводит назначенные роли бота в чате.",
+            "/modstat без аргументов показывает ваш собственный moderation-статус.",
+        ),
+    ),
 )
 
 

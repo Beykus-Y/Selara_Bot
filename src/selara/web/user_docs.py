@@ -156,26 +156,21 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             ),
         ),
         _docs_item(
-            "Когда пользователь был активен",
-            text="Команда показывает, когда конкретный участник последний раз проявлял активность, и работает как по аргументу, так и по reply.",
+            (_lastseen := get_command_spec("misc_lastseen")).title_ru,
+            text=_lastseen.description_ru,
             badges=("группа", "reply"),
-            commands=("/lastseen [@username|user_id]",),
-            triggers=("когда был", "когда была"),
-            examples=("/lastseen @username", "reply + /lastseen"),
+            commands=_lastseen.syntax,
+            triggers=_lastseen.natural_triggers,
+            examples=_lastseen.examples,
         ),
         _docs_item(
-            "Публичные служебные команды",
-            text=(
-                "Эти команды не меняют настройки, а помогают понять состояние группы: список ролей, moderation-статус и параметры чата."
-            ),
+            (_public_svc := get_command_spec("misc_public_service_commands")).title_ru,
+            text=_public_svc.description_ru,
             badges=("группа",),
-            commands=("/help", "/settings", "/roles", "/modstat [@username|user_id]"),
-            examples=("/modstat", "/modstat @username", "reply + /modstat"),
-            notes=(
-                "`/settings` показывает текущие настройки, но менять их могут только роли с правом управления.",
-                "`/roles` выводит назначенные роли бота в чате.",
-                "`/modstat` без аргументов показывает ваш собственный moderation-статус.",
-            ),
+            commands=_public_svc.syntax,
+            triggers=_public_svc.natural_triggers,
+            examples=_public_svc.examples,
+            notes=_public_svc.notes,
         ),
     ),
     _docs_section(

@@ -646,10 +646,29 @@ dev-машине) и не блокирует остальной roadmap.
   питомца) — в старой доке была только «Усыновление, питомцы и семейное
   древо» с `/adopt`/`/pet`/`/family`, без обеих escape-команд и без
   `/adoptdaughter`; новая карточка «Уйти из семьи» добавлена, чтобы их
-  закрыть. (4) **social/admin/moderation**; (5)
-  **settings/misc** (включая gacha — найдена агентом полностью
-  недокументированной нигде, требует отдельного изучения механики банеров
-  перед описанием); (6) `help.py` — не обязательно full-derive (лимит длины
+  закрыть. (4) **[x] сделано частично** — публичная (user-facing) часть
+  «social/admin/moderation»: `misc_lastseen` (`/lastseen`) и
+  `misc_public_service_commands` (`/help`, `/settings`, `/roles`, `/modstat`
+  — команды просмотра, не изменения). Верифицировано против `help.py`,
+  `settings.py`, `stats.py`, `moderation.py` и trigger maps. Найдено: у
+  «Публичные служебные команды» не было `triggers` вообще, хотя `помощь` —
+  рабочий эквивалент `/help` — теперь показан. **План уточнён по ходу
+  работы**: реальные admin-only команды управления ролями/алиасами/
+  настройками (`roleadd`, `rolecreate`, `roledefs`, `roledelete`,
+  `roleperms`, `roleremove`, `rolesetrank`, `rolesettitle`, `roletemplates`
+  из `moderation.py`; `aliases`, `aliasmode`, `setalias`, `unalias` из
+  `aliases.py`; `setcfg`, `facttest`, `setrank`, `ranks` из `settings.py`) —
+  **не в этом срезе**: `admin_docs.py`'s текущая схема `_docs_item()` не
+  имеет полей `commands`/`triggers` вообще (только title/text/examples/notes,
+  в отличие от `user_docs.py`) — их нужно сначала добавить в схему и шаблон
+  `admin_docs.html`, это отдельная, более крупная задача, чем повторное
+  использование уже готового поля. Перенесено в отдельный под-срез (5b) ниже.
+  (5a) **settings/misc** (user-facing часть, включая gacha — найдена агентом
+  полностью недокументированной нигде, требует отдельного изучения механики
+  банеров перед описанием); (5b) **admin-only команды ролей/алиасов/
+  настроек** — требует расширения схемы `admin_docs.py`/`admin_docs.html`
+  полями `commands`/`triggers` по образцу `user_docs.py`, затем заполнение
+  каталога; (6) `help.py` — не обязательно full-derive (лимит длины
   Telegram-сообщения уже был причиной оставить RP-список в help.py выжимкой,
   не полным дублем — тот же принцип, вероятно, применится и здесь: curated
   highlight subset из каталога, а не 100+ строк); (7)
@@ -1053,6 +1072,7 @@ responsive → accessibility → visual review → TODO update.
 
 | Дата | Исполнитель | Задача | Статус | Commit/проверки | Примечание |
 |---|---|---|---|---|---|
+| 2026-08-16 | Claude | Единый источник slash-команд: публичная часть social/admin/moderation, план уточнён (4 из 7 срезов плана) | `[~]` | commit: pending; 1053 unit (новые: +2 в `test_command_catalog.py`, +1 в `test_web_user_docs.py`); `git diff --check` | `misc_lastseen` и `misc_public_service_commands` добавлены в каталог, `user_docs.py`'s секция «Статистика и статус» переключена на источник. Найдено: у «Публичные служебные команды» не было `triggers` — `помощь` (эквивалент `/help`) теперь показан. **План уточнён**: обнаружено, что реальные admin-only команды управления ролями/алиасами/настройками (18 команд из `moderation.py`/`aliases.py`/`settings.py`) не могут просто переключиться на каталог как остальные — у `admin_docs.py`'s `_docs_item()` нет полей `commands`/`triggers` вообще, в отличие от `user_docs.py`. Это отдельный под-срез (5b), а не часть текущего. Осталось 3 полных + 1 частичный из 7 срезов плана. |
 | 2026-08-16 | Claude | Единый источник slash-команд: категории family/relationships (3 из 7 срезов плана) | `[~]` | commit: 0e9fd11; 1050 unit (новые: +4 в `test_command_catalog.py`, +2 в `test_web_user_docs.py`); `git diff --check`; Playwright spot-check | 4 relationship-группы и 2 family-группы добавлены в каталог, обе секции `user_docs.py` переключены на источник. Верифицировано против `relationships.py`/`chat_assistant.py` и `catalog.py`'s trigger maps. **Найдены 2 реальные недокументированные команды**: `/adoptdaughter` (удочерение) и `/escapepet` (уйти из статуса питомца) — новая карточка «Уйти из семьи» закрывает обе, плюс `/escapefamily`, которая тоже отсутствовала. Осталось 4 из 7 срезов плана. |
 | 2026-08-16 | Claude | Единый источник slash-команд: категория games (2 из 7 срезов плана) | `[~]` | commit: fb45af2; 1044 unit (новые: +2 в `test_command_catalog.py`, +1 в `test_web_user_docs.py`); `git diff --check` | `games_lobby` (`/game` + 7 режимов) и `games_role_reveal` (`/role`, `/start`) добавлены в каталог, `user_docs.py`'s секция «Игры» переключена на источник. Верифицировано против `game/router.py` (`Command("game"/"role"/"start")`) и `catalog.py`'s trigger maps. Найдено небольшое реальное улучшение по пути: у «Скрытая роль, карточка и ЛС» не было ни одного `triggers` — `роль`/`старт` оказались настоящими рабочими natural-language эквивалентами, просто не показанными в доке; теперь видны. Осталось 5 из 7 срезов плана. |
 | 2026-08-16 | Claude | Единый источник slash-команд: schema + категория economy (1 из 7 срезов плана) | `[~]` | commit: 3b2d480; 1041 unit (новые: `test_command_catalog.py` 5/5, +2 в `test_web_user_docs.py`); `git diff --check` | Новый `command_catalog.py`: `CommandSpec` с `dispatch_kind` (slash/natural_language/both) — добавлено после находки, что часть команд (`/article`) диспетчеризуется через третий, ad-hoc regex-путь в обход и aiogram `Command()`, и `catalog.py`, что не ловится простым грепом. 5 economy command-групп заполнены переиспользованием уже верифицированного текста из среза про availability badges (не переписаны с нуля). `user_docs.py`'s экономика переключена на источник. Найден и закрыт **дубль до коммита**: `/article` чуть не получил вторую карточку — уже был описан в «Объявления, подписка и чатовые мемы»; вместо новой карточки этот существующий item частично переключён на каталог (только commands/triggers для article, остальное — своё). Тесты verify syntax/triggers каталога против реального кода (`Command("...")` в `economy.py`, trigger maps в `catalog.py`), а не только внутреннюю согласованность. Осталось 6 из 7 срезов плана (games, family/relationships, social/admin/moderation, settings/misc+gacha, help.py, USER_GUIDE/ADMIN_GUIDE). |
