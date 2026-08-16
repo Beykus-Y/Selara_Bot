@@ -20,7 +20,6 @@
     <div class="error-status-stack">
       <article class="error-status-card">
         <span class="landing-card-kicker">что произошло</span>
-        <strong>{{ status_code }} · {{ status_label }}</strong>
         <p>
           {% if status_code == "404" %}
             Адрес не существует, был удалён или вы открыли устаревшую ссылку.
@@ -38,9 +37,19 @@
         <span class="landing-card-kicker">что делать дальше</span>
         <strong>Вернуться в рабочий маршрут</strong>
         <p>
-          Используйте кнопки ниже, чтобы открыть главную, авторизацию или доступные кабинеты и продолжить работу без ручного ввода URL.
+          Используйте кнопки выше, чтобы открыть главную, авторизацию или доступные кабинеты и продолжить работу без ручного ввода URL.
         </p>
       </article>
+
+      {% if request_id %}
+        <article class="error-status-card">
+          <span class="landing-card-kicker">код обращения</span>
+          <strong><code data-request-id="{{ request_id }}">{{ request_id }}</code></strong>
+          <p class="error-request-id">
+            Назовите этот код администратору — по нему в логах сервера находится именно эта ошибка.
+          </p>
+        </article>
+      {% endif %}
     </div>
   </section>
 {% endblock %}

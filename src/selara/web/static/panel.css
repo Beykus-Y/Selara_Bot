@@ -383,16 +383,14 @@ code {
 
 .hero-copy h1,
 .panel h2,
-.panel h3,
-.error-panel h1 {
+.panel h3 {
   margin: 0;
   font-family: var(--font-display);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 
-.hero-copy h1,
-.error-panel h1 {
+.hero-copy h1 {
   font-size: clamp(38px, 5vw, 62px);
   line-height: 0.96;
   margin-bottom: 16px;
@@ -4491,14 +4489,100 @@ select option[disabled] {
   background: rgba(255, 255, 255, 0.025);
 }
 
-.error-panel {
-  max-width: 760px;
-  padding: 34px;
-  margin-top: var(--gap);
+/* Shared status/error page (error.html). */
+.error-hero {
+  /* `.hero`'s `minmax(0, 1.7fr) auto` sizes the right column to its content,
+     which on this page squeezes the headline into a narrow column and lets the
+     explanation cards sprawl. Give both sides a bounded, balanced share. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+  align-items: start;
 }
 
-.error-panel .top-actions {
-  margin-top: 18px;
+.error-copy {
+  min-width: 0;
+}
+
+.error-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgb(124 144 255 / 26%);
+  background: rgb(124 144 255 / 14%);
+  color: var(--violet-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.error-code {
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4vw, 44px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--muted-strong);
+}
+
+.error-actions {
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+
+.error-status-stack {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.error-status-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.error-status-card strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.error-status-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.error-request-id {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.error-request-id code {
+  color: var(--muted-strong);
+}
+
+@media (width <= 860px) {
+  .error-hero {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ========== PAGE LANDING REDESIGN ========== */

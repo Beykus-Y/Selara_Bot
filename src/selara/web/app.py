@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import logging
 import re
+import secrets
 import xml.etree.ElementTree as ElementTree
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
@@ -971,6 +972,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         flash: str | None = None,
         error: str | None = None,
         action_links: list[dict[str, str]] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, object]:
         top_links = (
             _top_links(("/", "На главную", "ghost"), ("/login", "Войти", "primary"))
@@ -1014,6 +1016,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "headline": headline,
             "message": message,
             "action_links": actions,
+            "request_id": request_id,
         }
 
     async def _load_error_user(request: Request) -> UserSnapshot | None:
@@ -1033,12 +1036,33 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         headline: str,
         message: str,
         action_links: list[dict[str, str]] | None = None,
+        request_id: str | None = None,
     ):
-        if _prefers_json(request):
-            return JSONResponse(
-                status_code=status_code,
-                content={"ok": False, "status_code": status_code, "headline": headline, "message": message},
+        # Server-side failures get a short id the visitor can quote to an admin;
+        # without it a "I got a 500" report cannot be matched to a log line.
+        if status_code >= 500:
+            if request_id is None:
+                request_id = secrets.token_hex(4)
+            logger.error(
+                "Status page rendered request_id=%s status=%s method=%s path=%s",
+                request_id,
+                status_code,
+                request.method,
+                request.url.path,
             )
+        else:
+            request_id = None
+
+        if _prefers_json(request):
+            payload: dict[str, object] = {
+                "ok": False,
+                "status_code": status_code,
+                "headline": headline,
+                "message": message,
+            }
+            if request_id is not None:
+                payload["request_id"] = request_id
+            return JSONResponse(status_code=status_code, content=payload)
         try:
             user = await _load_error_user(request)
             return _render_template(
@@ -1050,16 +1074,23 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     message=message,
                     user=user,
                     action_links=action_links,
+                    request_id=request_id,
                 ),
             )
         except Exception:
             logger.exception("Failed to render status page", extra={"status_code": status_code})
+            request_id_block = (
+                f"<p>Код обращения: <code data-request-id='{escape(request_id)}'>{escape(request_id)}</code></p>"
+                if request_id is not None
+                else ""
+            )
             return HTMLResponse(
                 status_code=status_code,
                 content=(
                     "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
                     f"<title>Selara {status_code}</title></head><body>"
                     f"<h1>{escape(headline)}</h1><p>{escape(message)}</p>"
+                    f"{request_id_block}"
                     "<p><a href='/'>На главную</a></p></body></html>"
                 ),
             )
@@ -1112,12 +1143,16 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
-        logger.exception("Unhandled web exception", exc_info=exc)
+        # Generate the id before logging so the traceback and the id the user
+        # sees end up in the same log record.
+        request_id = secrets.token_hex(4)
+        logger.exception("Unhandled web exception request_id=%s", request_id, exc_info=exc)
         return await _render_status_page(
             request,
             status_code=500,
             headline="Внутренняя ошибка",
             message="На сервере произошла ошибка. Страница не упала насовсем, но запрос выполнить не удалось.",
+            request_id=request_id,
         )
 
     def _redirect(path: str) -> RedirectResponse:
