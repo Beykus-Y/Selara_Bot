@@ -71,13 +71,17 @@ def test_landing_context_has_no_dead_unrendered_fields() -> None:
         assert dead_key not in context, f"{dead_key} should have been removed as dead output"
 
 
-# NOTE: build_landing_context() builds 6 feature_cards, but landing.html's
-# template only ever renders cards[1], cards[2], and a merge of cards[3]+
-# cards[4] into one "+"-kicker card — cards[0] ("Команды для обычного
-# участника") and cards[5] ("Управление группой") are silently dropped.
-# Left unresolved (not a test) pending Ilya's call on whether the landing
-# page should show all 6 categories or 3 curated ones was a deliberate
-# design choice — see the 2026-08-16 decision log entry.
+def test_landing_page_renders_all_six_feature_categories() -> None:
+    # Previously the template only rendered cards[1], cards[2], and a merge
+    # of cards[3]+cards[4] via a "+"-kicker hack, silently dropping cards[0]
+    # and cards[5] — see the 2026-08-16 decision log entries in
+    # WEB_UI_MODERNIZATION_TODO.md (Ilya chose to show all 6).
+    html = _render()
+    context = _context()
+    feature_cards = context["feature_cards"]
+    assert len(feature_cards) == 6
+    for card in feature_cards:
+        assert card["title"] in html
 
 
 @pytest.mark.asyncio

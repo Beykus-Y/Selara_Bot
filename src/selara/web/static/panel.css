@@ -5132,9 +5132,6 @@ body.page-landing {
   .landing-features-three-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .card-social {
-    grid-column: span 2;
-  }
 }
 
 @media (max-width: 768px) {
@@ -5163,10 +5160,7 @@ body.page-landing {
   .landing-features-three-grid {
     grid-template-columns: 1fr;
   }
-  .card-social {
-    grid-column: span 1;
-  }
-  
+
   .timeline-line {
     display: none;
   }

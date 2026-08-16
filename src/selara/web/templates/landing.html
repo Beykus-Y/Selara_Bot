@@ -69,15 +69,16 @@
     </div>
     
     <div class="landing-features-three-grid">
-      {% set games_card = feature_cards[1] if feature_cards|length > 1 else (feature_cards[0] if feature_cards|length > 0 else none) %}
-      {% set eco_card = feature_cards[2] if feature_cards|length > 2 else none %}
-      {% set social_card = feature_cards[3] if feature_cards|length > 3 else (feature_cards[0] if feature_cards|length > 0 else none) %}
-
-      <!-- Card 1: Games -->
-      {% if games_card %}
-      <article class="landing-feature-big-card card-games">
+      {% for card in feature_cards %}
+      <article class="landing-feature-big-card">
         <div class="card-glow"></div>
         <div class="card-icon-wrapper">
+          {% if card["icon"] == "commands" %}
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          {% elif card["icon"] == "games" %}
           <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="6" y1="12" x2="10" y2="12"></line>
             <line x1="8" y1="10" x2="8" y2="14"></line>
@@ -85,73 +86,42 @@
             <line x1="18" y1="11" x2="18.01" y2="11"></line>
             <rect x="2" y="6" width="20" height="12" rx="3"></rect>
           </svg>
-        </div>
-        <span class="card-kicker">{{ games_card["kicker"] }}</span>
-        <h3>{{ games_card["title"] }}</h3>
-        <p>{{ games_card["text"] }}</p>
-        <div class="card-pills">
-          {% for item in games_card["items"] %}
-            <span class="card-pill">{{ item }}</span>
-          {% endfor %}
-        </div>
-        {% if games_card["href"] %}
-          <a class="card-action-btn" href="{{ games_card["href"] }}">{{ games_card["link_label"] }}</a>
-        {% endif %}
-      </article>
-      {% endif %}
-
-      <!-- Card 2: Economy -->
-      {% if eco_card %}
-      <article class="landing-feature-big-card card-economy">
-        <div class="card-glow"></div>
-        <div class="card-icon-wrapper">
+          {% elif card["icon"] == "economy" %}
           <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="2" y="4" width="20" height="16" rx="2"></rect>
             <line x1="12" y1="4" x2="12" y2="20"></line>
             <line x1="2" y1="12" x2="22" y2="12"></line>
           </svg>
-        </div>
-        <span class="card-kicker">{{ eco_card["kicker"] }}</span>
-        <h3>{{ eco_card["title"] }}</h3>
-        <p>{{ eco_card["text"] }}</p>
-        <div class="card-pills">
-          {% for item in eco_card["items"] %}
-            <span class="card-pill">{{ item }}</span>
-          {% endfor %}
-        </div>
-        {% if eco_card["href"] %}
-          <a class="card-action-btn" href="{{ eco_card["href"] }}">{{ eco_card["link_label"] }}</a>
-        {% endif %}
-      </article>
-      {% endif %}
-
-      <!-- Card 3: Social -->
-      {% if social_card %}
-      <article class="landing-feature-big-card card-social">
-        <div class="card-glow"></div>
-        <div class="card-icon-wrapper">
+          {% elif card["icon"] == "family" %}
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
+          {% elif card["icon"] == "social" %}
           <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
           </svg>
-        </div>
-        <span class="card-kicker">{% if feature_cards|length > 4 %}{{ social_card["kicker"] }} + {{ feature_cards[4]["kicker"] }}{% else %}{{ social_card["kicker"] }}{% endif %}</span>
-        <h3>Социальные связи и RP-реакции</h3>
-        <p>{{ social_card["text"] }}{% if feature_cards|length > 4 %} А также RP-команды для живого общения в чате.{% endif %}</p>
-        <div class="card-pills">
-          {% for item in social_card["items"] %}
-            <span class="card-pill">{{ item }}</span>
-          {% endfor %}
-          {% if feature_cards|length > 4 %}
-            {% for item in feature_cards[4]["items"][:6] %}
-              <span class="card-pill card-pill-soft">{{ item }}</span>
-            {% endfor %}
+          {% else %}
+          <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
           {% endif %}
         </div>
-        {% if social_card["href"] %}
-          <a class="card-action-btn" href="{{ social_card["href"] }}">{{ social_card["link_label"] }}</a>
+        <span class="card-kicker">{{ card["kicker"] }}</span>
+        <h3>{{ card["title"] }}</h3>
+        <p>{{ card["text"] }}</p>
+        <div class="card-pills">
+          {% for item in card["items"] %}
+            <span class="card-pill">{{ item }}</span>
+          {% endfor %}
+        </div>
+        {% if card["href"] %}
+          <a class="card-action-btn" href="{{ card["href"] }}">{{ card["link_label"] }}</a>
         {% endif %}
       </article>
-      {% endif %}
+      {% endfor %}
     </div>
   </section>
 
