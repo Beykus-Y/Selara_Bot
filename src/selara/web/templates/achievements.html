@@ -37,9 +37,12 @@
         {% if section.rows %}
           <div class="list-stack compact">
             {% for row in section.rows %}
-              <div class="stat-row">
+              <div class="stat-row achievement-row{% if not row.unlocked %} is-locked{% endif %}">
                 <div>
-                  <strong>{{ row.title }}</strong>
+                  <div class="achievement-row-head">
+                    <strong>{{ row.title }}</strong>
+                    <span class="pill{% if row.unlocked %} pill-active{% endif %}">{{ row.status_label }}</span>
+                  </div>
                   <p>{{ row.meta }}</p>
                   <p>{{ row.description }}</p>
                 </div>

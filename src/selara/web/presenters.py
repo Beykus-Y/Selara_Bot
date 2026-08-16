@@ -271,15 +271,18 @@ def build_dashboard_panel(*, title: str, dashboard: EconomyDashboard | None, emp
     }
 
 
-def build_achievement_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
+def build_achievement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     for row in rows:
+        unlocked = row["status"] == "получено"
         items.append(
             {
                 "title": f"{row['icon']} {row['title']}",
+                "unlocked": unlocked,
+                "status_label": "Получено" if unlocked else "Не открыто",
                 "meta": (
-                    f"{row['scope_label']} • {achievement_rarity_label_ru(row['rarity'])} • {row['status']} • "
-                    f"{row['holders_percent']:.2f}% / {row['holders_count']}"
+                    f"{row['scope_label']} • {achievement_rarity_label_ru(row['rarity'])} • "
+                    f"{row['holders_percent']:.2f}% участников ({row['holders_count']})"
                 ),
                 "value": row["awarded_at"] or "не открыто",
                 "description": row["description"],

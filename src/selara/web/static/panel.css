@@ -734,6 +734,22 @@ code {
   text-align: right;
 }
 
+.achievement-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.achievement-row-head strong {
+  margin-bottom: 0;
+}
+
+.achievement-row.is-locked {
+  opacity: 0.62;
+}
+
 .role-permissions {
   align-self: start !important;
   max-width: 34ch;
