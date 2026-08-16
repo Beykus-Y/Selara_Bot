@@ -176,6 +176,47 @@ async def _create_started_whoami_game(store: GameStore, *, owner_user_id: int, c
     return started_game
 
 
+ALL_GAME_KINDS = (
+    "spy",
+    "mafia",
+    "dice",
+    "number",
+    "quiz",
+    "bredovukha",
+    "bunker",
+    "whoami",
+    "zlobcards",
+)
+
+
+async def _create_started_game(store: GameStore, *, kind: str, owner_user_id: int, chat_id: int, chat_title: str):
+    from selara.presentation.game_state import GAME_DEFINITIONS
+
+    game, error = await store.create_lobby(
+        kind=kind,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        owner_user_id=owner_user_id,
+        owner_label="Хозяйка вечера",
+        reveal_eliminated_role=True,
+    )
+    assert error is None, f"{kind}: {error}"
+    assert game is not None
+
+    min_players = GAME_DEFINITIONS[kind].min_players
+    for index in range(min_players - 1):
+        user_id = 300 + index
+        joined_game, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"Игрок {index + 1}")
+        assert joined_game is not None
+        assert status == "joined", f"{kind}: {status}"
+
+    started_game, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None, f"{kind}: {start_error}"
+    assert started_game is not None
+    assert started_game.status == "started"
+    return started_game
+
+
 async def _mount(page, html: str) -> None:
     await page.set_content(html)
     for stylesheet in ("panel.css", "server-ui-foundation.css"):
@@ -268,6 +309,45 @@ async def test_games_dashboard_active_whoami_game_has_no_overflow(monkeypatch) -
 
     async with _web_client(monkeypatch, state, store=store) as (client, store):
         await _create_started_whoami_game(store, owner_user_id=77, chat_id=-1001, chat_title="Клуб настолок «Ложка и Чайник»")
+        response = await client.get("/app/games")
+    assert response.status_code == 200
+    html = response.text
+    assert "game-meta-grid" in html
+
+    results: dict[int, bool] = {}
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            for viewport in VIEWPORTS:
+                page = await browser.new_page(viewport=viewport)
+                await _mount(page, html)
+                results[viewport["width"]] = await page.evaluate(
+                    "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+                )
+                await page.close()
+        finally:
+            await browser.close()
+
+    _assert_no_overflow_at_all_viewports(results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ALL_GAME_KINDS)
+async def test_games_dashboard_every_mode_active_panel_has_no_overflow(monkeypatch, kind: str) -> None:
+    """Sub-slice 3/N of Этап 5's 'зафиксировать все игровые сценарии':
+    the whoami-only coverage above was just one of 9 modes. Bunker in
+    particular needs 6 players (the highest min_players of any mode) and
+    renders a distinct seat-selection panel not shared with the other modes.
+    """
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок «Ложка и Чайник»", bot_role="game_master")],
+    )
+    store = GameStore()
+
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        await _create_started_game(store, kind=kind, owner_user_id=77, chat_id=-1001, chat_title="Клуб настолок «Ложка и Чайник»")
         response = await client.get("/app/games")
     assert response.status_code == 200
     html = response.text
