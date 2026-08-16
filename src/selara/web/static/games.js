@@ -1,0 +1,933 @@
+(() => {
+  const dashboardRoot = document.querySelector("[data-live-root]");
+  if (!dashboardRoot) {
+    return;
+  }
+
+  const indicator = document.querySelector("[data-live-indicator]");
+  const manualRefreshButton = document.querySelector("[data-manual-refresh]");
+  const toastRegion = document.getElementById("toast-region");
+  let liveSignature = dashboardRoot.dataset.liveSignature || "";
+  let refreshPromise = null;
+  let liveEventSource = null;
+  const gameSockets = new Map();
+  const socketReadyGames = new Set();
+  let fallbackPollTimer = null;
+  let wsDisabledUntil = 0;
+  let sseHealthy = false;
+  const FALLBACK_POLL_MS = 4000;
+  const WS_RETRY_BACKOFF_MS = 30000;
+
+  const setLiveState = (state, text) => {
+    if (!indicator) {
+      return;
+    }
+    indicator.dataset.state = state;
+    indicator.textContent = text;
+  };
+
+  const hasHealthyLiveTransport = () => sseHealthy || socketReadyGames.size > 0;
+
+  const stopFallbackPolling = () => {
+    if (fallbackPollTimer) {
+      window.clearInterval(fallbackPollTimer);
+      fallbackPollTimer = null;
+    }
+  };
+
+  const ensureFallbackPolling = () => {
+    if (fallbackPollTimer) {
+      return;
+    }
+    fallbackPollTimer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      refreshDashboard({ silent: true });
+    }, FALLBACK_POLL_MS);
+  };
+
+  const syncLiveFallbackState = () => {
+    if (hasHealthyLiveTransport()) {
+      stopFallbackPolling();
+      return;
+    }
+    ensureFallbackPolling();
+  };
+
+  const showToast = (message, tone = "ok") => {
+    if (!toastRegion || !message) {
+      return;
+    }
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.dataset.tone = tone;
+    toast.textContent = message;
+    toastRegion.appendChild(toast);
+    window.setTimeout(() => {
+      toast.classList.add("is-hiding");
+    }, 2200);
+    window.setTimeout(() => {
+      toast.remove();
+    }, 2600);
+  };
+
+  const setPending = (panel, pending) => {
+    if (!panel) {
+      return;
+    }
+    panel.classList.toggle("is-pending", pending);
+    for (const field of panel.querySelectorAll("button, input, select, textarea")) {
+      if (field instanceof HTMLInputElement && field.type === "hidden") {
+        continue;
+      }
+      field.disabled = pending;
+    }
+  };
+
+  const formKey = (form) => {
+    const endpoint = form.getAttribute("action") || "";
+    const gameId = form.querySelector('input[name="game_id"]')?.value || "";
+    const callbackData = form.querySelector('input[name="callback_data"]')?.value || "";
+    const actionName = form.querySelector('input[name="action"]')?.value || "";
+    return [endpoint, gameId, callbackData, actionName].join("::");
+  };
+
+  const encodeSelectorValue = (value) => {
+    if (window.CSS?.escape) {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/["\\]/g, "\\$&");
+  };
+
+  const snapshotForms = (root) => {
+    const snapshot = new Map();
+    for (const form of root.querySelectorAll("[data-game-action-form]")) {
+      const fields = [];
+      for (const field of form.querySelectorAll("input, select, textarea")) {
+        if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) {
+          continue;
+        }
+        fields.push({
+          name: field.name,
+          tag: field.tagName.toLowerCase(),
+          type: field instanceof HTMLInputElement ? field.type : "",
+          value: field.value,
+          checked: field instanceof HTMLInputElement ? field.checked : false
+        });
+      }
+      snapshot.set(formKey(form), fields);
+    }
+    return snapshot;
+  };
+
+  const syncKindPicker = (picker, value) => {
+    if (!(picker instanceof HTMLElement)) {
+      return;
+    }
+    const hiddenInput = picker.querySelector('input[name="kind"]');
+    const buttons = picker.querySelectorAll("[data-kind-choice]");
+    const title = picker.querySelector("[data-kind-preview-title]");
+    const text = picker.querySelector("[data-kind-preview-text]");
+    const players = picker.querySelector("[data-kind-preview-players]");
+    const mode = picker.querySelector("[data-kind-preview-mode]");
+
+    if (hiddenInput) {
+      hiddenInput.value = value;
+    }
+
+    for (const button of buttons) {
+      const isActive = button.dataset.kindChoice === value;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
+      if (!isActive) {
+        continue;
+      }
+      if (title) {
+        title.textContent = button.dataset.kindTitle || "";
+      }
+      if (text) {
+        text.textContent = button.dataset.kindDescription || button.dataset.kindNote || "";
+      }
+      if (players) {
+        players.textContent = button.dataset.kindPlayers || "";
+      }
+      if (mode) {
+        mode.textContent = button.dataset.kindMode || "";
+      }
+    }
+    syncKindSensitiveSections(picker, value);
+  };
+
+  const selectedChatAllows18 = (scope) => {
+    if (!(scope instanceof HTMLElement)) {
+      return true;
+    }
+    const form = scope.closest("form");
+    if (!(form instanceof HTMLFormElement)) {
+      return true;
+    }
+    const chatSelect = form.querySelector("[data-create-chat-select]");
+    if (!(chatSelect instanceof HTMLSelectElement)) {
+      return true;
+    }
+    const selected = chatSelect.selectedOptions[0];
+    return selected?.dataset.actions18Enabled !== "false";
+  };
+
+  const syncWhoamiCategoryAvailability = (scope) => {
+    if (!(scope instanceof HTMLElement)) {
+      return true;
+    }
+    const picker = scope.querySelector("[data-whoami-category-picker]");
+    if (!(picker instanceof HTMLElement)) {
+      return true;
+    }
+    const chatAllows18 = selectedChatAllows18(scope);
+    for (const button of picker.querySelectorAll("[data-whoami-category-choice]")) {
+      if (!(button instanceof HTMLButtonElement)) {
+        continue;
+      }
+      const isExplicit = button.dataset.whoamiCategoryExplicit === "true";
+      const shouldHide = !chatAllows18 && isExplicit;
+      button.hidden = shouldHide;
+      button.disabled = shouldHide;
+    }
+    return chatAllows18;
+  };
+
+  const syncWhoamiCategoryPicker = (picker, value) => {
+    if (!(picker instanceof HTMLElement)) {
+      return;
+    }
+    const scope = picker.closest("[data-whoami-category-scope]");
+    if (!(scope instanceof HTMLElement)) {
+      return;
+    }
+
+    const chatAllows18 = syncWhoamiCategoryAvailability(scope);
+    const hiddenInput = scope.querySelector('input[name="whoami_category"]');
+    const buttons = [...picker.querySelectorAll("[data-whoami-category-choice]")];
+    const availableButtons = buttons.filter(
+      (button) => button instanceof HTMLButtonElement && !button.hidden && !button.disabled
+    );
+    let currentValue = value || "";
+    let activeButton = null;
+
+    for (const button of availableButtons) {
+      const isActive = button.dataset.whoamiCategoryChoice === currentValue;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
+      if (isActive) {
+        activeButton = button;
+      }
+    }
+    for (const button of buttons) {
+      if (availableButtons.includes(button)) {
+        continue;
+      }
+      button.classList.remove("is-active");
+      button.setAttribute("aria-pressed", "false");
+    }
+
+    if (!activeButton && availableButtons.length) {
+      activeButton = availableButtons[0];
+      currentValue = activeButton.dataset.whoamiCategoryChoice || "";
+      for (const button of availableButtons) {
+        const isActive = button === activeButton;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", String(isActive));
+      }
+    }
+
+    if (hiddenInput instanceof HTMLInputElement) {
+      hiddenInput.value = currentValue;
+    }
+
+    const summary = scope.querySelector("[data-whoami-category-summary]");
+    if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLElement)) {
+      return;
+    }
+
+    const label = activeButton.dataset.whoamiCategoryLabel || "Случайная тема";
+    const count = activeButton.dataset.whoamiCategoryCount || "";
+    summary.textContent = currentValue
+      ? `Выбрана тема: ${label}${count ? ` · ${count} карточек` : ""}.`
+      : (
+        chatAllows18
+          ? "Тема не фиксируется заранее. На старте будет выбран случайный набор карточек."
+          : "18+ темы скрыты для выбранного чата. На старте будет выбран случайный безопасный набор карточек."
+      );
+  };
+
+  const syncZlobCategoryAvailability = (scope) => {
+    if (!(scope instanceof HTMLElement)) {
+      return true;
+    }
+    const picker = scope.querySelector("[data-zlob-category-picker]");
+    if (!(picker instanceof HTMLElement)) {
+      return true;
+    }
+    const chatAllows18 = selectedChatAllows18(scope);
+    for (const button of picker.querySelectorAll("[data-zlob-category-choice]")) {
+      if (!(button instanceof HTMLButtonElement)) {
+        continue;
+      }
+      const isExplicit = button.dataset.zlobCategoryExplicit === "true";
+      const shouldHide = !chatAllows18 && isExplicit;
+      button.hidden = shouldHide;
+      button.disabled = shouldHide;
+    }
+    return chatAllows18;
+  };
+
+  const syncZlobCategoryPicker = (picker, value) => {
+    if (!(picker instanceof HTMLElement)) {
+      return;
+    }
+    const scope = picker.closest("[data-zlob-category-scope]");
+    if (!(scope instanceof HTMLElement)) {
+      return;
+    }
+
+    const chatAllows18 = syncZlobCategoryAvailability(scope);
+    const hiddenInput = scope.querySelector('input[name="zlob_category"]');
+    const buttons = [...picker.querySelectorAll("[data-zlob-category-choice]")];
+    const availableButtons = buttons.filter(
+      (button) => button instanceof HTMLButtonElement && !button.hidden && !button.disabled
+    );
+    let currentValue = value || "";
+    let activeButton = null;
+
+    for (const button of availableButtons) {
+      const isActive = button.dataset.zlobCategoryChoice === currentValue;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
+      if (isActive) {
+        activeButton = button;
+      }
+    }
+    for (const button of buttons) {
+      if (availableButtons.includes(button)) {
+        continue;
+      }
+      button.classList.remove("is-active");
+      button.setAttribute("aria-pressed", "false");
+    }
+
+    if (!activeButton && availableButtons.length) {
+      activeButton = availableButtons[0];
+      currentValue = activeButton.dataset.zlobCategoryChoice || "";
+      for (const button of availableButtons) {
+        const isActive = button === activeButton;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", String(isActive));
+      }
+    }
+
+    if (hiddenInput instanceof HTMLInputElement) {
+      hiddenInput.value = currentValue;
+    }
+
+    const summary = scope.querySelector("[data-zlob-category-summary]");
+    if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLElement)) {
+      return;
+    }
+
+    const label = activeButton.dataset.zlobCategoryLabel || "Случайная тема";
+    const count = activeButton.dataset.zlobCategoryCount || "";
+    summary.textContent = currentValue
+      ? `Выбрана тема: ${label}${count ? ` · ${count} белых/чёрных карт` : ""}.`
+      : (
+        chatAllows18
+          ? "Тема не фиксируется заранее. На старте будет выбран случайный набор."
+          : "18+ темы скрыты для выбранного чата. На старте будет выбран случайный безопасный набор."
+      );
+  };
+
+  const syncSpyCategoryPicker = (picker, value) => {
+    if (!(picker instanceof HTMLElement)) {
+      return;
+    }
+    const scope = picker.closest("[data-spy-category-scope]");
+    if (!(scope instanceof HTMLElement)) {
+      return;
+    }
+
+    const hiddenInput = scope.querySelector('input[name="spy_category"]');
+    const buttons = [...picker.querySelectorAll("[data-spy-category-choice]")];
+    let currentValue = value || "";
+    let activeButton = null;
+
+    for (const button of buttons) {
+      if (!(button instanceof HTMLButtonElement)) {
+        continue;
+      }
+      const isActive = button.dataset.spyCategoryChoice === currentValue;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
+      if (isActive) {
+        activeButton = button;
+      }
+    }
+
+    if (!(activeButton instanceof HTMLButtonElement) && buttons.length) {
+      const fallbackButton = buttons.find((button) => button instanceof HTMLButtonElement);
+      if (fallbackButton instanceof HTMLButtonElement) {
+        activeButton = fallbackButton;
+        currentValue = fallbackButton.dataset.spyCategoryChoice || "";
+        for (const button of buttons) {
+          if (!(button instanceof HTMLButtonElement)) {
+            continue;
+          }
+          const isActive = button === activeButton;
+          button.classList.toggle("is-active", isActive);
+          button.setAttribute("aria-pressed", String(isActive));
+        }
+      }
+    }
+
+    if (hiddenInput instanceof HTMLInputElement) {
+      hiddenInput.value = currentValue;
+    }
+
+    const summary = scope.querySelector("[data-spy-category-summary]");
+    if (!(summary instanceof HTMLElement) || !(activeButton instanceof HTMLButtonElement)) {
+      return;
+    }
+
+    const label = activeButton.dataset.spyCategoryLabel || "Случайная тема";
+    const count = activeButton.dataset.spyCategoryCount || "";
+    summary.textContent = currentValue
+      ? `Выбрана тема: ${label}${count ? ` · ${count} локаций` : ""}.`
+      : "Тема не фиксируется заранее. На старте будет выбрана случайная группа локаций.";
+  };
+
+  const syncKindSensitiveSections = (picker, value) => {
+    if (!(picker instanceof HTMLElement)) {
+      return;
+    }
+    for (const section of picker.querySelectorAll("[data-kind-sensitive]")) {
+      if (!(section instanceof HTMLElement)) {
+        continue;
+      }
+      const shouldShow = section.dataset.kindSensitive === value;
+      section.hidden = !shouldShow;
+      section.style.display = shouldShow ? "" : "none";
+      section.setAttribute("aria-hidden", String(!shouldShow));
+      for (const field of section.querySelectorAll("input, select, textarea, button")) {
+        if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement || field instanceof HTMLButtonElement)) {
+          continue;
+        }
+        field.disabled = !shouldShow;
+        if (!shouldShow && field instanceof HTMLInputElement && ["whoami_category", "spy_category", "zlob_category"].includes(field.name)) {
+          field.value = "";
+        }
+      }
+      if (shouldShow) {
+        const whoamiPicker = section.querySelector("[data-whoami-category-picker]");
+        const whoamiHiddenInput = section.querySelector('input[name="whoami_category"]');
+        syncWhoamiCategoryPicker(whoamiPicker, whoamiHiddenInput instanceof HTMLInputElement ? whoamiHiddenInput.value : "");
+
+        const spyPicker = section.querySelector("[data-spy-category-picker]");
+        const spyHiddenInput = section.querySelector('input[name="spy_category"]');
+        syncSpyCategoryPicker(spyPicker, spyHiddenInput instanceof HTMLInputElement ? spyHiddenInput.value : "");
+
+        const zlobPicker = section.querySelector("[data-zlob-category-picker]");
+        const zlobHiddenInput = section.querySelector('input[name="zlob_category"]');
+        syncZlobCategoryPicker(zlobPicker, zlobHiddenInput instanceof HTMLInputElement ? zlobHiddenInput.value : "");
+      }
+    }
+  };
+
+  const syncAllKindPickers = (root) => {
+    for (const picker of root.querySelectorAll("[data-kind-picker]")) {
+      const hiddenInput = picker.querySelector('input[name="kind"]');
+      const firstButton = picker.querySelector("[data-kind-choice]");
+      const currentValue = hiddenInput?.value || firstButton?.dataset.kindChoice || "";
+      if (currentValue) {
+        syncKindPicker(picker, currentValue);
+      }
+    }
+  };
+
+  const syncAllWhoamiCategoryPickers = (root) => {
+    for (const scope of root.querySelectorAll("[data-whoami-category-scope]")) {
+      if (!(scope instanceof HTMLElement)) {
+        continue;
+      }
+      const picker = scope.querySelector("[data-whoami-category-picker]");
+      const hiddenInput = scope.querySelector('input[name="whoami_category"]');
+      syncWhoamiCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+    }
+  };
+
+  const syncAllSpyCategoryPickers = (root) => {
+    for (const scope of root.querySelectorAll("[data-spy-category-scope]")) {
+      if (!(scope instanceof HTMLElement)) {
+        continue;
+      }
+      const picker = scope.querySelector("[data-spy-category-picker]");
+      const hiddenInput = scope.querySelector('input[name="spy_category"]');
+      syncSpyCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+    }
+  };
+
+  const syncAllZlobCategoryPickers = (root) => {
+    for (const scope of root.querySelectorAll("[data-zlob-category-scope]")) {
+      if (!(scope instanceof HTMLElement)) {
+        continue;
+      }
+      const picker = scope.querySelector("[data-zlob-category-picker]");
+      const hiddenInput = scope.querySelector('input[name="zlob_category"]');
+      syncZlobCategoryPicker(picker, hiddenInput instanceof HTMLInputElement ? hiddenInput.value : "");
+    }
+  };
+
+  const restoreForms = (root, snapshot) => {
+    for (const form of root.querySelectorAll("[data-game-action-form]")) {
+      const fields = snapshot.get(formKey(form));
+      if (!fields) {
+        continue;
+      }
+      for (const state of fields) {
+        if (!state.name) {
+          continue;
+        }
+        const selector = `[name="${encodeSelectorValue(state.name)}"]`;
+        for (const field of form.querySelectorAll(selector)) {
+          if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) {
+            continue;
+          }
+          if (field instanceof HTMLInputElement && (field.type === "checkbox" || field.type === "radio")) {
+            field.checked = Boolean(state.checked);
+          } else {
+            field.value = state.value;
+          }
+        }
+      }
+    }
+    syncAllKindPickers(root);
+    syncAllWhoamiCategoryPickers(root);
+    syncAllSpyCategoryPickers(root);
+    syncAllZlobCategoryPickers(root);
+  };
+
+  const parseDashboardHtml = (html) => {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = html;
+    return wrapper;
+  };
+
+  const patchSection = (selector, incomingRoot) => {
+    const current = dashboardRoot.querySelector(selector);
+    const incoming = incomingRoot.querySelector(selector);
+    if (!current && !incoming) {
+      return;
+    }
+    if (!incoming) {
+      current?.remove();
+      return;
+    }
+    if (!current) {
+      dashboardRoot.appendChild(incoming.cloneNode(true));
+      return;
+    }
+    if (current.outerHTML !== incoming.outerHTML) {
+      current.replaceWith(incoming.cloneNode(true));
+    }
+  };
+
+  const hasOnlyGamePanels = (container) => {
+    return [...container.children].every(
+      (child) => child.matches("[data-game-panel][data-game-id]")
+    );
+  };
+
+  const patchGamesList = (incomingRoot) => {
+    const currentList = dashboardRoot.querySelector("#games-list");
+    const incomingList = incomingRoot.querySelector("#games-list");
+    if (!currentList && !incomingList) {
+      return;
+    }
+    if (!incomingList) {
+      currentList?.remove();
+      return;
+    }
+    if (!currentList) {
+      dashboardRoot.appendChild(incomingList.cloneNode(true));
+      return;
+    }
+
+    if (!hasOnlyGamePanels(currentList) || !hasOnlyGamePanels(incomingList)) {
+      if (currentList.outerHTML !== incomingList.outerHTML) {
+        currentList.replaceWith(incomingList.cloneNode(true));
+      }
+      return;
+    }
+
+    const existingById = new Map();
+    for (const child of currentList.children) {
+      const gameId = child.dataset.gameId || "";
+      if (gameId) {
+        existingById.set(gameId, child);
+      }
+    }
+
+    const incomingChildren = [...incomingList.children];
+    for (const [index, incomingChild] of incomingChildren.entries()) {
+      const incomingId = incomingChild.dataset.gameId || "";
+      let targetNode = incomingChild.cloneNode(true);
+      const existing = incomingId ? existingById.get(incomingId) : null;
+      if (existing) {
+        if (existing.outerHTML === incomingChild.outerHTML) {
+          targetNode = existing;
+        } else {
+          existing.replaceWith(targetNode);
+        }
+      }
+      const currentAtIndex = currentList.children[index] || null;
+      if (targetNode !== currentAtIndex) {
+        currentList.insertBefore(targetNode, currentAtIndex);
+      }
+    }
+
+    while (currentList.children.length > incomingChildren.length) {
+      currentList.lastElementChild?.remove();
+    }
+  };
+
+  const patchDashboardDom = (html) => {
+    const incomingRoot = parseDashboardHtml(html);
+    patchSection(".metrics-grid", incomingRoot);
+    patchSection("#create-game", incomingRoot);
+    patchGamesList(incomingRoot);
+    patchSection(".recent-games-panel", incomingRoot);
+  };
+
+  const applyDashboardHtml = (html, signature) => {
+    const snapshot = snapshotForms(dashboardRoot);
+    const previousScrollY = window.scrollY;
+    const previousHeight = dashboardRoot.offsetHeight;
+    const commit = () => {
+      dashboardRoot.style.minHeight = `${previousHeight}px`;
+      dashboardRoot.classList.add("is-refreshing");
+      patchDashboardDom(html);
+      dashboardRoot.dataset.liveSignature = signature;
+      liveSignature = signature;
+      restoreForms(dashboardRoot, snapshot);
+      connectGameSockets();
+      window.scrollTo({ top: previousScrollY });
+      window.requestAnimationFrame(() => {
+        dashboardRoot.style.minHeight = "";
+        dashboardRoot.classList.remove("is-refreshing");
+      });
+    };
+    commit();
+  };
+
+  const refreshDashboard = async ({ silent = false } = {}) => {
+    if (refreshPromise) {
+      return refreshPromise;
+    }
+
+    const url = new URL("/app/games/live", window.location.origin);
+    if (liveSignature) {
+      url.searchParams.set("signature", liveSignature);
+    }
+
+    if (!silent) {
+      setLiveState("sync", "обновляю...");
+    }
+
+    refreshPromise = fetch(url, {
+      headers: {
+        "Accept": "application/json",
+        "X-Requested-With": "fetch"
+      }
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok || data?.ok === false) {
+          if (data?.redirect) {
+            document.body.classList.add("is-route-transition");
+            window.location.assign(data.redirect);
+            return;
+          }
+          throw new Error(data?.message || "Live refresh failed");
+        }
+        if (!data?.changed) {
+          liveSignature = data?.signature || liveSignature;
+          setLiveState("ready", "обновить сцену");
+          // A WS reconnect is normally only attempted from
+          // applyDashboardHtml() (via connectGameSockets() in commit()),
+          // which this branch skips entirely. Without this call, a
+          // socket that errored stays stranded on fallback polling
+          // forever once wsDisabledUntil elapses, because nothing else
+          // ever re-triggers the retry. connectGameSockets() is a no-op
+          // while still inside the backoff window and skips games that
+          // already have a live socket, so calling it on every poll is safe.
+          connectGameSockets();
+          return;
+        }
+        if (typeof data?.html === "string" && typeof data?.signature === "string") {
+          applyDashboardHtml(data.html, data.signature);
+        }
+        setLiveState("ready", "обновить сцену");
+      })
+      .catch(() => {
+        setLiveState("error", "offline");
+        ensureFallbackPolling();
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+
+    return refreshPromise;
+  };
+
+  const closeGameSockets = () => {
+    for (const socket of gameSockets.values()) {
+      try {
+        socket.close();
+      } catch {
+        // ignore close race
+      }
+    }
+    gameSockets.clear();
+    socketReadyGames.clear();
+    syncLiveFallbackState();
+  };
+
+  const connectGameSockets = () => {
+    if (Date.now() < wsDisabledUntil) {
+      return;
+    }
+    const expectedIds = new Set();
+    for (const panel of dashboardRoot.querySelectorAll("[data-game-panel][data-game-id]")) {
+      const gameId = panel.dataset.gameId || "";
+      if (!gameId) {
+        continue;
+      }
+      expectedIds.add(gameId);
+      if (gameSockets.has(gameId)) {
+        continue;
+      }
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const socket = new WebSocket(`${protocol}://${window.location.host}/api/live/ws/game/${encodeURIComponent(gameId)}`);
+      socket.addEventListener("open", () => {
+        socketReadyGames.add(gameId);
+        syncLiveFallbackState();
+      });
+      socket.addEventListener("message", (event) => {
+        let payload = null;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          payload = null;
+        }
+        if (payload && payload.type === "ping") {
+          return;
+        }
+        refreshDashboard({ silent: true });
+      });
+      socket.addEventListener("error", () => {
+        socketReadyGames.delete(gameId);
+        wsDisabledUntil = Date.now() + WS_RETRY_BACKOFF_MS;
+        setLiveState("error", "offline");
+        syncLiveFallbackState();
+      });
+      socket.addEventListener("close", () => {
+        if (gameSockets.get(gameId) === socket) {
+          gameSockets.delete(gameId);
+        }
+        socketReadyGames.delete(gameId);
+        syncLiveFallbackState();
+      });
+      gameSockets.set(gameId, socket);
+    }
+    for (const [gameId, socket] of gameSockets.entries()) {
+      if (expectedIds.has(gameId)) {
+        continue;
+      }
+      try {
+        socket.close();
+      } catch {
+        // ignore close race
+      }
+      gameSockets.delete(gameId);
+      socketReadyGames.delete(gameId);
+    }
+    syncLiveFallbackState();
+  };
+
+  const connectLiveStream = () => {
+    if (liveEventSource) {
+      liveEventSource.close();
+    }
+    sseHealthy = false;
+    syncLiveFallbackState();
+    liveEventSource = new EventSource("/api/live/stream?scope=games");
+    liveEventSource.onopen = () => {
+      sseHealthy = true;
+      syncLiveFallbackState();
+    };
+    liveEventSource.addEventListener("new_vote", () => {
+      refreshDashboard({ silent: true });
+    });
+    liveEventSource.addEventListener("phase_change", () => {
+      refreshDashboard({ silent: true });
+    });
+    liveEventSource.addEventListener("game_updated", () => {
+      refreshDashboard({ silent: true });
+    });
+    liveEventSource.onerror = () => {
+      sseHealthy = false;
+      setLiveState("error", "offline");
+      syncLiveFallbackState();
+    };
+  };
+
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const refreshButton = target.closest("[data-manual-refresh]");
+    if (refreshButton) {
+      event.preventDefault();
+      refreshDashboard({ silent: false });
+      return;
+    }
+    const categoryButton = target.closest("[data-whoami-category-choice]");
+    if (categoryButton && dashboardRoot.contains(categoryButton)) {
+      event.preventDefault();
+      const picker = categoryButton.closest("[data-whoami-category-picker]");
+      syncWhoamiCategoryPicker(picker, categoryButton.dataset.whoamiCategoryChoice || "");
+      if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+        const form = picker.closest("form");
+        if (form instanceof HTMLFormElement) {
+          form.requestSubmit();
+        }
+      }
+      return;
+    }
+    const spyCategoryButton = target.closest("[data-spy-category-choice]");
+    if (spyCategoryButton && dashboardRoot.contains(spyCategoryButton)) {
+      event.preventDefault();
+      const picker = spyCategoryButton.closest("[data-spy-category-picker]");
+      syncSpyCategoryPicker(picker, spyCategoryButton.dataset.spyCategoryChoice || "");
+      if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+        const form = picker.closest("form");
+        if (form instanceof HTMLFormElement) {
+          form.requestSubmit();
+        }
+      }
+      return;
+    }
+    const zlobCategoryButton = target.closest("[data-zlob-category-choice]");
+    if (zlobCategoryButton && dashboardRoot.contains(zlobCategoryButton)) {
+      event.preventDefault();
+      const picker = zlobCategoryButton.closest("[data-zlob-category-picker]");
+      syncZlobCategoryPicker(picker, zlobCategoryButton.dataset.zlobCategoryChoice || "");
+      if (picker instanceof HTMLElement && picker.dataset.autoSubmit === "true") {
+        const form = picker.closest("form");
+        if (form instanceof HTMLFormElement) {
+          form.requestSubmit();
+        }
+      }
+      return;
+    }
+    const button = target.closest("[data-kind-choice]");
+    if (!button || !dashboardRoot.contains(button)) {
+      return;
+    }
+    const picker = button.closest("[data-kind-picker]");
+    syncKindPicker(picker, button.dataset.kindChoice || "");
+  });
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.matches("[data-game-action-form]") || !dashboardRoot.contains(form)) {
+      return;
+    }
+    event.preventDefault();
+
+    const panel = form.closest("[data-game-panel], [data-create-game-panel], .panel");
+    const payload = new URLSearchParams(new FormData(form));
+    const endpoint = form.getAttribute("action") || window.location.pathname;
+    setPending(panel, true);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          "X-Requested-With": "fetch"
+        },
+        body: payload
+      });
+
+      const data = await response.json().catch(() => null);
+      const message = data?.message || (response.ok ? "Действие выполнено." : "Не удалось выполнить действие.");
+      showToast(message, data?.ok === false || !response.ok ? "error" : "ok");
+
+      const redirect = typeof data?.redirect === "string" ? data.redirect : "";
+      const canStayOnGames = redirect.startsWith("/app/games");
+      if (redirect && !canStayOnGames) {
+        document.body.classList.add("is-route-transition");
+        window.setTimeout(() => {
+          window.location.assign(redirect);
+        }, 260);
+        return;
+      }
+
+      await refreshDashboard({ silent: false });
+      if (panel && response.ok) {
+        panel.classList.add("is-complete");
+        window.setTimeout(() => {
+          panel.classList.remove("is-complete");
+        }, 1200);
+      }
+    } catch {
+      showToast("Сервер недоступен. Повторите попытку.", "error");
+      setLiveState("error", "offline");
+    } finally {
+      setPending(panel, false);
+    }
+  });
+
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement) || !target.matches("[data-create-chat-select]")) {
+      return;
+    }
+    const form = target.closest("form");
+    if (form instanceof HTMLElement) {
+      syncAllWhoamiCategoryPickers(form);
+      syncAllSpyCategoryPickers(form);
+      syncAllZlobCategoryPickers(form);
+    }
+  });
+
+  syncAllKindPickers(dashboardRoot);
+  syncAllWhoamiCategoryPickers(dashboardRoot);
+  syncAllSpyCategoryPickers(dashboardRoot);
+  syncAllZlobCategoryPickers(dashboardRoot);
+  if (manualRefreshButton instanceof HTMLElement) {
+    manualRefreshButton.setAttribute("aria-label", "Обновить сцену");
+  }
+  setLiveState("ready", "обновить сцену");
+  connectGameSockets();
+  connectLiveStream();
+  syncLiveFallbackState();
+  window.addEventListener("beforeunload", () => {
+    if (liveEventSource) {
+      liveEventSource.close();
+    }
+    sseHealthy = false;
+    stopFallbackPolling();
+    closeGameSockets();
+  });
+})();

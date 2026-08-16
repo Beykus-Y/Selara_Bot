@@ -237,6 +237,11 @@ async def test_ws_reconnects_after_backoff_even_when_dashboard_never_changes(mon
     async def serve_page(route):
         await route.fulfill(status=200, content_type="text/html", body=html)
 
+    games_js_source = (STATIC_DIR / "games.js").read_text(encoding="utf-8")
+
+    async def serve_games_js(route):
+        await route.fulfill(status=200, content_type="application/javascript", body=games_js_source)
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
@@ -245,6 +250,7 @@ async def test_ws_reconnects_after_backoff_even_when_dashboard_never_changes(mon
             await page.add_init_script(FAKE_TRANSPORTS_INIT_SCRIPT)
             await page.route("http://selara.test/app/games", serve_page)
             await page.route("**/app/games/live**", handle_live)
+            await page.route("**/static/games.js", serve_games_js)
             await page.goto("http://selara.test/app/games")
 
             ws_count_before = await page.evaluate("window.__wsInstances.length")

@@ -40,9 +40,7 @@ EXPECTED_TEMPLATES = {
     "user_docs.html",
 }
 
-INLINE_SCRIPT_TEMPLATES = {
-    "games.html",
-}
+INLINE_SCRIPT_TEMPLATES: set[str] = set()
 
 
 def _template_sources() -> dict[str, str]:
@@ -98,7 +96,7 @@ def test_server_ui_does_not_increase_inline_debt() -> None:
 
     assert inline_style_count <= 38
     assert script_templates == INLINE_SCRIPT_TEMPLATES
-    assert inline_script_lines <= 1942
+    assert inline_script_lines <= 0
     assert panel_css_lines <= 6270
 
 

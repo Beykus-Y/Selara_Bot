@@ -5377,7 +5377,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],  # type: ignore[index]
             )
         )
-        return _render_template("games.html", **page_context)
+        return _render_template("games.html", extra_scripts=["games.js"], **page_context)
 
     @app.get("/api/app/games")
     async def games_page_api(request: Request):
