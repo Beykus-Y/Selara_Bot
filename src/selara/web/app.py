@@ -6024,7 +6024,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
         return _render_template(
             "chat.html",
-            extra_scripts=["chat-overview.js", "chat-settings.js"],
+            extra_scripts=["chat-overview.js", "chat-settings.js", "chat-plain-forms.js"],
             **page_context,
         )
 

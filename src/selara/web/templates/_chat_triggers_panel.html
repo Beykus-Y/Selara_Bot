@@ -73,7 +73,7 @@
               <input type="text" name="media_type" value="{{ trigger.media_type }}" placeholder="Тип медиа: photo / sticker / video">
               <div class="top-actions">
                 <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
-                <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>
+                <button type="submit" name="action" value="delete" class="button danger small" data-confirm-delete="Удалить смарт-триггер «{{ trigger.keyword }}»? Это действие нельзя отменить.">Удалить</button>
               </div>
             {% endif %}
           </form>
