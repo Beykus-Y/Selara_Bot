@@ -444,3 +444,64 @@ async def test_games_dashboard_finished_game_result_card_has_no_overflow(monkeyp
         f"result banner text color {banner_rgb} is too light (luminance {luminance:.2f}) to read "
         "against the light pastel .recent-game-card background"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["whoami", "mafia"])
+async def test_games_dashboard_large_roster_has_no_overflow(monkeypatch, kind: str) -> None:
+    """Sub-slice 6/N: the roadmap checklist explicitly calls out "максимальное
+    количество игроков" (max player count) as something to verify.
+    GameStore.join() has no upper bound at all on lobby size — the only real
+    ceiling is the whoami/spy card bank size (61 cards in the largest
+    category), so a 24-player party is a realistic stress case for the
+    roster/table displays, not an edge a real chat would rarely hit.
+    """
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок «Ложка и Чайник»", bot_role="game_master")],
+    )
+    store = GameStore()
+
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        game, error = await store.create_lobby(
+            kind=kind,
+            chat_id=-1001,
+            chat_title="Клуб настолок «Ложка и Чайник»",
+            owner_user_id=77,
+            owner_label="Хозяйка вечера с очень длинным именем для проверки переполнения",
+            reveal_eliminated_role=True,
+        )
+        assert error is None
+        assert game is not None
+        for index in range(23):
+            user_id = 300 + index
+            joined_game, status = await store.join(
+                game_id=game.game_id, user_id=user_id, user_label=f"Участник номер {index + 1} с длинным именем"
+            )
+            assert joined_game is not None
+            assert status == "joined"
+        started_game, start_error = await store.start(game_id=game.game_id)
+        assert start_error is None
+        assert started_game is not None
+        assert len(started_game.players) == 24
+
+        response = await client.get("/app/games")
+    assert response.status_code == 200
+    html = response.text
+
+    results: dict[int, bool] = {}
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            for viewport in VIEWPORTS:
+                page = await browser.new_page(viewport=viewport)
+                await _mount(page, html)
+                results[viewport["width"]] = await page.evaluate(
+                    "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+                )
+                await page.close()
+        finally:
+            await browser.close()
+
+    _assert_no_overflow_at_all_viewports(results)
