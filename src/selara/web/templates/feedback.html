@@ -32,16 +32,16 @@
           <p class="panel-subtitle">Коротко назовите функцию и ниже опишите, как она должна работать.</p>
         </div>
       </div>
-      <form class="stack-form" method="post" action="/app/feedback">
+      <form class="stack-form" method="post" action="/app/feedback" data-feedback-form>
         <label class="field">
           <span>Что добавить</span>
           <input type="text" name="title" maxlength="160" placeholder="Например: напоминания по расписанию" required>
         </label>
         <label class="field">
           <span>Описание</span>
-          <textarea name="details" rows="7" placeholder="Что именно должен уметь бот, где это должно появиться и как ты это видишь." required></textarea>
+          <textarea name="details" rows="7" maxlength="4000" placeholder="Что именно должен уметь бот, где это должно появиться и как ты это видишь." required></textarea>
         </label>
-        <button type="submit" class="button primary">Отправить идею</button>
+        <button type="submit" class="button primary" data-feedback-submit>Отправить идею</button>
       </form>
     </article>
 

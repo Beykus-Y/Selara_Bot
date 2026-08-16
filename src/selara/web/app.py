@@ -5243,7 +5243,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],  # type: ignore[index]
             )
         )
-        return _render_template("feedback.html", **page_context)
+        return _render_template("feedback.html", extra_scripts=["feedback-form.js"], **page_context)
 
     @app.post("/app/feedback")
     async def feedback_submit(request: Request):
@@ -5278,6 +5278,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 redirect_path = _with_message("/app/feedback", key="error", text="Опишите, что именно нужно добавить.")
                 if prefers_json:
                     return _json_result(ok=False, message="Опишите, что именно нужно добавить.", status_code=400, redirect=redirect_path)
+                return _redirect(redirect_path)
+            if len(details) > 4000:
+                await session.commit()
+                redirect_path = _with_message("/app/feedback", key="error", text="Описание должно быть до 4000 символов.")
+                if prefers_json:
+                    return _json_result(ok=False, message="Описание должно быть до 4000 символов.", status_code=400, redirect=redirect_path)
                 return _redirect(redirect_path)
 
             feature_request = UserFeatureRequestModel(
@@ -9929,6 +9935,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if not details:
                 await session.commit()
                 return _json_result(ok=False, message="Опишите, что именно нужно добавить.", status_code=400)
+            if len(details) > 4000:
+                await session.commit()
+                return _json_result(ok=False, message="Описание должно быть до 4000 символов.", status_code=400)
 
             feature_request = UserFeatureRequestModel(
                 user_id=user.telegram_user_id,
