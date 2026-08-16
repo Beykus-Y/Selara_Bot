@@ -333,7 +333,11 @@ async def test_activity_event_runtime_backfill_enables_event_reads() -> None:
     chat = ChatSnapshot(telegram_chat_id=202, chat_type="group", title="Backfill")
     user_one = UserSnapshot(telegram_user_id=601, username="one", first_name="One", last_name=None, is_bot=False)
     user_two = UserSnapshot(telegram_user_id=602, username="two", first_name="Two", last_name=None, is_bot=False)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # Anchored to noon UTC, not datetime.now(): get_chat_activity_daily_series
+    # buckets by UTC calendar day, and the assertions below need `now - 6h`
+    # to land on the same day as `now` — a real-clock `now` would flake
+    # whenever the test happened to run within 6 hours of UTC midnight.
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
 
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
