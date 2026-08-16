@@ -31,13 +31,13 @@ def test_family_graph_json_cannot_break_out_of_script_tag() -> None:
         bundle_summary=[],
         family_nodes=nodes,
         family_edges=[],
-        family_nodes_json=json.dumps(nodes, ensure_ascii=False),
-        family_edges_json="[]",
     )
 
-    script = rendered.split("const nodes = ", 1)[1].split(";", 1)[0]
-    assert "</script>" not in script.lower()
-    assert "\\u003c/script\\u003e" in script.lower()
+    data_island = rendered.split('id="family-graph-data">', 1)[1].split("</script>", 1)[0]
+    assert "</script>" not in data_island.lower()
+    assert "\\u003c/script\\u003e" in data_island.lower()
+    parsed = json.loads(data_island)
+    assert parsed["nodes"][0]["label"] == malicious_label
 
 
 def test_family_graph_never_injects_member_labels_through_inner_html() -> None:

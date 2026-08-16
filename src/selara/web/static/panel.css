@@ -3823,13 +3823,17 @@ body.page-games.is-route-transition .panel {
 
 .family-scene {
   position: relative;
-  min-height: 620px;
-  overflow: auto;
+  overflow: hidden;
   border-radius: 24px;
   border: 1px solid rgba(88, 216, 255, 0.12);
   background:
     radial-gradient(circle at top, rgba(124, 144, 255, 0.12), transparent 48%),
     linear-gradient(180deg, rgba(4, 8, 18, 0.94), rgba(7, 13, 24, 0.88));
+}
+
+.family-scene-inner {
+  position: relative;
+  transform-origin: top left;
 }
 
 .family-svg {

@@ -6324,6 +6324,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 }
                 for edge in graph.edges
             ]
+            focus_label = next((node["label"] for node in nodes if node["id"] == focus_user_id), None)
+            if focus_label is None:
+                focus_label = await _resolve_chat_member_label(activity_repo, chat_id=chat_id, user_id=focus_user_id)
             await session.commit()
 
         page_context: dict[str, object] = {
@@ -6332,7 +6335,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "chat_id": chat.chat_id,
             "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
             "focus_user_id": focus_user_id,
-            "focus_label": next((node["label"] for node in nodes if node["id"] == focus_user_id), f"user:{focus_user_id}"),
+            "focus_label": focus_label,
             "family_nodes": nodes,
             "family_edges": edges,
             "bundle_summary": [
@@ -6375,7 +6378,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     user=user,
                 ),
             )
-        return _render_template("family.html", **page_context)
+        return _render_template("family.html", extra_scripts=["family-graph.js"], **page_context)
 
     @app.get("/api/chat/{chat_id}/family")
     async def family_page_api(chat_id: int, request: Request, user_id: int | None = None):
