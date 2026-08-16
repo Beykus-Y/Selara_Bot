@@ -12,6 +12,11 @@ PANEL_CSS = ROOT / "src" / "selara" / "web" / "static" / "panel.css"
 FOUNDATION_CSS = ROOT / "src" / "selara" / "web" / "static" / "server-ui-foundation.css"
 
 EXPECTED_TEMPLATES = {
+    "_chat_achievements_tab.html",
+    "_chat_audit_and_aliases.html",
+    "_chat_overview_tab.html",
+    "_chat_settings_panel.html",
+    "_chat_triggers_panel.html",
     "_games_dashboard.html",
     "achievements.html",
     "admin.html",
@@ -60,7 +65,15 @@ def test_server_ui_template_inventory_is_explicit_and_compiles() -> None:
 
 def test_full_page_templates_share_the_base_layout() -> None:
     sources = _template_sources()
-    standalone_templates = {"base.html", "_games_dashboard.html"}
+    standalone_templates = {
+        "base.html",
+        "_games_dashboard.html",
+        "_chat_achievements_tab.html",
+        "_chat_audit_and_aliases.html",
+        "_chat_overview_tab.html",
+        "_chat_settings_panel.html",
+        "_chat_triggers_panel.html",
+    }
 
     for template_name, source in sources.items():
         if template_name in standalone_templates:

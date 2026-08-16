@@ -1,0 +1,229 @@
+  {% if active_tab == "overview" %}
+  <section class="metrics-grid">
+    {% for metric in metrics %}
+      <article class="metric-card tone-{{ metric.tone }}">
+        <span class="metric-label">{{ metric.label }}</span>
+        <strong class="metric-value">{{ metric.value }}</strong>
+        <span class="metric-note">{{ metric.note }}</span>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="overview-live-grid">
+    <article class="panel overview-activity-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Активность по дням</h2>
+          <p class="panel-subtitle">Живой срез за последние 7 дней без ручного обновления страницы.</p>
+        </div>
+      </div>
+      <div class="activity-chart" data-chat-activity-chart>
+        {% for _ in range(7) %}
+          <div class="activity-bar is-skeleton">
+            <span class="skeleton skeleton-bar"></span>
+            <strong class="skeleton skeleton-text short"></strong>
+            <small class="skeleton skeleton-text tiny"></small>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel overview-callout-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Герой дня</h2>
+          <p class="panel-subtitle">Самый активный участник за 24 часа.</p>
+        </div>
+      </div>
+      <div class="overview-callout" data-hero-of-day>
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </article>
+
+    <article class="panel overview-callout-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Богач дня</h2>
+          <p class="panel-subtitle">Самый крупный баланс в активном режиме экономики чата.</p>
+        </div>
+      </div>
+      <div class="overview-callout" data-richest-of-day>
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text short"></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="panel chat-hub-panel" data-chat-overview-root data-chat-id="{{ chat_id }}">
+    <div class="panel-head">
+      <div>
+        <h2>Полный лидерборд</h2>
+        <p class="panel-subtitle">Пагинация по 50 строк, поиск по имени, username и Telegram ID.</p>
+      </div>
+      <button type="button" class="button ghost small" data-lb-find-me>Найти меня</button>
+    </div>
+
+    <div class="chat-hub-toolbar">
+      <div class="mode-switch" role="tablist" aria-label="Режим рейтинга">
+        <button type="button" class="is-active" data-lb-mode="mix">Гибрид</button>
+        <button type="button" data-lb-mode="activity">Сообщения</button>
+        <button type="button" data-lb-mode="karma">Карма</button>
+      </div>
+
+      <form class="chat-hub-search" data-lb-search-form>
+        <input
+          type="search"
+          name="q"
+          placeholder="Имя, @username или Telegram ID"
+          autocomplete="off"
+          data-lb-search
+        >
+        <button type="submit" class="button subtle small">Поиск</button>
+      </form>
+    </div>
+
+    <p class="helper-text chat-hub-status" data-lb-status>Загружаем рейтинг...</p>
+
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Участник</th>
+            <th class="lb-mobile-hide">Username</th>
+            <th>Сообщения</th>
+            <th>Карма</th>
+            <th>Рейтинг</th>
+            <th class="lb-mobile-hide">Активность</th>
+          </tr>
+        </thead>
+        <tbody data-lb-body>
+          {% for _ in range(6) %}
+            <tr>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text"></span></td>
+              <td class="lb-mobile-hide"><span class="skeleton skeleton-text short"></span></td>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text tiny"></span></td>
+              <td><span class="skeleton skeleton-text short"></span></td>
+              <td class="lb-mobile-hide"><span class="skeleton skeleton-text short"></span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="chat-hub-pager" data-lb-pager></div>
+  </section>
+
+  <section class="grid two-col">
+    {% for panel in dashboard_panels %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>{{ panel.title }}</h2>
+        </div>
+        {% if panel.empty_text %}
+          <p class="empty-text">{{ panel.empty_text }}</p>
+        {% else %}
+          <div class="list-stack compact">
+            {% for row in panel.rows %}
+              <div class="stat-row">
+                <div>
+                  <strong>{{ row.title }}</strong>
+                  <p>{{ row.meta }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="grid two-col">
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Ваш доступ</h2>
+      </div>
+      <div class="list-stack compact">
+        {% for row in access_rows %}
+          <div class="stat-row">
+            <div>
+              <strong>{{ row.title }}</strong>
+              <p>{{ row.meta }}</p>
+            </div>
+            <span>{{ row.value }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <h2>Роли и ранги команд</h2>
+      </div>
+      <h3 class="subheading">Роли</h3>
+      <div class="list-stack compact">
+        {% for role in roles %}
+          <div class="stat-row">
+            <div>
+              <strong>{{ role.title }}</strong>
+              <p>{{ role.meta }}</p>
+            </div>
+            <span class="role-permissions">{{ role.permissions }}</span>
+          </div>
+        {% endfor %}
+      </div>
+
+      <h3 class="subheading">Ранги команд</h3>
+      {% if command_rules %}
+        <div class="list-stack compact">
+          {% for rule in command_rules %}
+            <div class="stat-row">
+              <div>
+                <strong>{{ rule.command }}</strong>
+                <p>Минимальная роль</p>
+              </div>
+              <span>{{ rule.role }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-text">Индивидуальные ограничения команд пока не заданы.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="leaderboard-grid">
+    {% for board in leaderboards %}
+      <article class="panel leaderboard-panel accent-{{ board.accent }}">
+        <div class="panel-head">
+          <div>
+            <h2>{{ board.title }}</h2>
+            <p class="panel-subtitle">{{ board.subtitle }}</p>
+          </div>
+        </div>
+        {% if board.rows %}
+          <div class="list-stack compact">
+            {% for row in board.rows %}
+              <div class="rank-row">
+                <span class="rank-no">{{ row.position }}</span>
+                <div class="rank-copy">
+                  <strong>{{ row.name }}</strong>
+                  <p>{{ row.secondary }}</p>
+                </div>
+                <span class="rank-value">{{ row.primary }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Для этого рейтинга пока не хватает данных.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+  {% endif %}

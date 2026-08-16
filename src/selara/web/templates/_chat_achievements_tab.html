@@ -1,0 +1,33 @@
+  {% if active_tab == "achievements" %}
+  <section class="grid two-col">
+    {% for section in achievement_sections %}
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>{{ section.title }}</h2>
+            <p class="panel-subtitle">Локальные достижения внутри этой группы.</p>
+          </div>
+        </div>
+        {% if section.rows %}
+          <div class="list-stack compact">
+            {% for row in section.rows %}
+              <div class="stat-row achievement-row{% if not row.unlocked %} is-locked{% endif %}">
+                <div>
+                  <div class="achievement-row-head">
+                    <strong>{{ row.title }}</strong>
+                    <span class="pill{% if row.unlocked %} pill-active{% endif %}">{{ row.status_label }}</span>
+                  </div>
+                  <p>{{ row.meta }}</p>
+                  <p>{{ row.description }}</p>
+                </div>
+                <span>{{ row.value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty-text">Пока нет локальных достижений для этой группы.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+  {% endif %}

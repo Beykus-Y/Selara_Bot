@@ -1,0 +1,86 @@
+  {% if active_tab == "settings" and can_manage_settings %}
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Смарт-триггеры</h2>
+        <p class="panel-subtitle">Автоответы по точному совпадению, вхождению фразы и началу сообщения прямо из панели.</p>
+      </div>
+    </div>
+
+    <article class="setting-card">
+      <div class="setting-head">
+        <strong>Переменные шаблонов</strong>
+        <code>/triggervars</code>
+      </div>
+      <p class="setting-description">
+        Один и тот же набор переменных работает в Telegram и в браузере. Полный каталог доступен в
+        <a href="{{ trigger_template_docs_url }}">админ-документации</a>.
+      </p>
+      <div class="token-cloud">
+        {% for item in trigger_template_quick_rows %}
+          <span class="token-chip" title="{{ item.description }}">{{ item.token }}</span>
+        {% endfor %}
+      </div>
+      <div class="list-stack compact">
+        {% for example in trigger_template_examples %}
+          <div class="helper-text"><code>{{ example }}</code></div>
+        {% endfor %}
+      </div>
+    </article>
+
+    {% if can_manage_settings %}
+      <div class="settings-grid">
+        <form class="setting-card" method="post" action="/app/chat/{{ chat_id }}/triggers">
+          <div class="setting-head">
+            <strong>Новый триггер</strong>
+            <code>chat_triggers</code>
+          </div>
+          <input type="text" name="keyword" placeholder="Ключевое слово или фраза">
+          <select name="match_type">
+            <option value="contains">Содержит фразу</option>
+            <option value="exact">Точное совпадение</option>
+            <option value="starts_with">Начинается с</option>
+          </select>
+          <textarea name="response_text" rows="4" placeholder="Ответ текстом. Поддерживает {user}, {chat}, {args}, {reply_user}..."></textarea>
+          <p class="helper-text">Для буквальных фигурных скобок используйте {{ '{{' }} и {{ '}}' }}.</p>
+          <input type="text" name="media_file_id" placeholder="ID медиафайла (опционально)">
+          <input type="text" name="media_type" placeholder="Тип медиа: photo / sticker / video">
+          <button type="submit" class="button primary small">Сохранить триггер</button>
+        </form>
+      </div>
+    {% endif %}
+
+    {% if triggers %}
+      <div class="settings-grid">
+        {% for trigger in triggers %}
+          <form class="setting-card" method="post" action="/app/chat/{{ chat_id }}/triggers">
+            <input type="hidden" name="trigger_id" value="{{ trigger.id }}">
+            <div class="setting-head">
+              <strong>{{ trigger.keyword }}</strong>
+              <code>{{ trigger.match_type_label }}</code>
+            </div>
+            <p class="helper-text">{{ trigger.preview }}</p>
+            {% if can_manage_settings %}
+              <input type="text" name="keyword" value="{{ trigger.keyword }}">
+              <select name="match_type">
+                <option value="contains" {% if trigger.match_type == "contains" %}selected{% endif %}>Содержит фразу</option>
+                <option value="exact" {% if trigger.match_type == "exact" %}selected{% endif %}>Точное совпадение</option>
+                <option value="starts_with" {% if trigger.match_type == "starts_with" %}selected{% endif %}>Начинается с</option>
+              </select>
+              <textarea name="response_text" rows="4" placeholder="Ответ текстом">{{ trigger.response_text }}</textarea>
+              <p class="helper-text">Можно использовать шаблонные переменные вроде {{ '{user}' }}, {{ '{reply_user}' }}, {{ '{chat}' }}, {{ '{args}' }}.</p>
+              <input type="text" name="media_file_id" value="{{ trigger.media_file_id }}" placeholder="ID медиафайла (опционально)">
+              <input type="text" name="media_type" value="{{ trigger.media_type }}" placeholder="Тип медиа: photo / sticker / video">
+              <div class="top-actions">
+                <button type="submit" name="action" value="save" class="button subtle small">Обновить</button>
+                <button type="submit" name="action" value="delete" class="button danger small">Удалить</button>
+              </div>
+            {% endif %}
+          </form>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-text">Смарт-триггеры ещё не созданы.</p>
+    {% endif %}
+  </section>
+  {% endif %}

@@ -1,0 +1,96 @@
+  {% if active_tab == "settings" and can_manage_settings %}
+  <section class="panel settings-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Настройки чата</h2>
+        <p class="panel-subtitle">Редактирование вынесено в веб-форму, а не в огромный текстовый блок.</p>
+      </div>
+      <a class="button ghost small" href="{{ admin_docs_url }}" data-docs-link>Документация админа</a>
+    </div>
+    <div class="banner banner-{{ manage_settings_tone }}">{{ manage_settings_note }}</div>
+
+    <div class="settings-summary-grid">
+      {% for row in settings_overview %}
+        <article class="setting-summary-card">
+          <strong>{{ row.title }}</strong>
+          <span>{{ row.value }}</span>
+          <p>{{ row.meta }}</p>
+        </article>
+      {% endfor %}
+    </div>
+
+    {% for section in settings_sections %}
+      <section class="settings-section">
+        <h3 class="subheading">{{ section.title }}</h3>
+        <div class="settings-grid">
+          {% for item in section["items"] %}
+            <article
+              class="setting-card"
+              data-setting-card
+              data-setting-key="{{ item.key }}"
+              data-setting-title="{{ item.title }}"
+              data-setting-input-kind="{{ item.input_kind }}"
+              {% if item.input_kind in ("select", "toggle") %}data-setting-saved-value="{{ item.current_value|lower }}"{% endif %}
+            >
+              <div class="setting-head">
+                <div class="setting-title-row">
+                  <strong>{{ item.title }}</strong>
+                  <a
+                    class="setting-doc-link"
+                    href="{{ admin_docs_url }}#{{ item.doc_anchor }}"
+                    data-docs-link
+                    aria-label="Открыть документацию по настройке {{ item.title }}"
+                    title="Открыть документацию"
+                  >?</a>
+                </div>
+                <div class="setting-meta-strip">
+                  <span class="setting-status">{{ item.current_value_display }}</span>
+                  <span class="setting-format">Формат: {{ item.hint }}</span>
+                </div>
+                <code>{{ item.key }}</code>
+              </div>
+              <p class="setting-description">{{ item.description }}</p>
+              <p class="helper-text setting-values">
+                Сейчас: <strong data-setting-current>{{ item.current_value_display }}</strong> • по умолчанию: <strong data-setting-default>{{ item.default_value_display }}</strong>
+              </p>
+
+              {% if item.editable %}
+                <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
+                  <input type="hidden" name="key" value="{{ item.key }}">
+                  {% if item.input_kind == "toggle" %}
+                    <label class="setting-toggle">
+                      <input
+                        type="checkbox"
+                        data-setting-toggle
+                        aria-label="Переключить {{ item.title }}"
+                        {% if item.current_value|lower == "true" %}checked{% endif %}
+                      >
+                      <input type="hidden" name="value" value="{{ item.current_value|lower }}">
+                      <span class="setting-toggle-track"></span>
+                    </label>
+                  {% elif item.input_kind == "select" %}
+                    <select name="value">
+                      {% for option in item.options %}
+                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% elif item.input_kind == "textarea" %}
+                    <textarea name="value" rows="5">{{ item.current_value }}</textarea>
+                  {% else %}
+                    <input type="text" name="value" value="{{ item.current_value }}">
+                  {% endif %}
+                  <button type="submit" class="button primary small">Сохранить</button>
+                </form>
+                <form class="setting-reset" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="reset">
+                  <input type="hidden" name="key" value="{{ item.key }}">
+                  <input type="hidden" name="value" value="default">
+                  <button type="submit" class="button ghost small">Сбросить</button>
+                </form>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+  </section>
+  {% endif %}
