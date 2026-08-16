@@ -48,6 +48,7 @@ def _render_audit(
     empty: bool = False,
     filtered: bool = False,
     load_error: str | None = None,
+    total_count: int | None = None,
 ) -> str:
     environment = create_template_environment(template_dir=TEMPLATE_DIR)
     all_rows = [
@@ -111,7 +112,9 @@ def _render_audit(
             {"href": "/app/chat/-1001", "label": "Обзор", "variant": "ghost"},
             {"href": "/app/chat/-1001/audit", "label": "Журнал", "variant": "primary"},
         ],
-        audit_total_count=0 if empty else len(all_rows),
+        audit_total_count=(
+            total_count if total_count is not None else (0 if empty else len(all_rows))
+        ),
         audit_shown_count=len(rows),
         audit_system_count=0 if empty else 1,
         audit_filters={
@@ -137,8 +140,22 @@ def _render_audit(
     )
 
 
-async def _mount(page, *, empty: bool = False, load_error: str | None = None) -> None:
-    await page.set_content(_render_audit(empty=empty, load_error=load_error))
+async def _mount(
+    page,
+    *,
+    empty: bool = False,
+    filtered: bool = False,
+    load_error: str | None = None,
+    total_count: int | None = None,
+) -> None:
+    await page.set_content(
+        _render_audit(
+            empty=empty,
+            filtered=filtered,
+            load_error=load_error,
+            total_count=total_count,
+        )
+    )
     for stylesheet in ("panel.css", "server-ui-foundation.css", "audit.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
 
@@ -185,15 +202,60 @@ async def test_chat_audit_timeline_is_readable_and_responsive(
 
 
 @pytest.mark.asyncio
-async def test_chat_audit_empty_and_load_error_states_explain_recovery() -> None:
+async def test_chat_audit_load_error_never_claims_the_log_is_empty() -> None:
+    """A failed query must not be presented as "no events yet".
+
+    The audit log is a security surface: when `list_audit_logs` raises, the
+    page previously kept the generic empty state ("Событий пока нет. Новые
+    изменения и действия бота появятся здесь автоматически"), which tells an
+    admin the chat is quiet when in truth nothing is known.
+    """
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page(viewport={"width": 390, "height": 844})
         try:
-            await _mount(page, empty=True, load_error="Не удалось загрузить журнал событий. Попробуйте обновить страницу.")
+            await _mount(
+                page,
+                empty=True,
+                load_error="Не удалось загрузить журнал событий. Попробуйте обновить страницу.",
+            )
             audit = page.locator("[data-audit-page]")
-            assert await audit.get_by_role("alert").is_visible()
+            assert await audit.get_by_role("alert").first.is_visible()
+
+            body = await audit.inner_text()
+            assert "Событий пока нет" not in body
+            assert "появятся здесь автоматически" not in body
+            # ...and it must offer a way to try again.
+            assert await audit.get_by_role("link", name="Обновить страницу").is_visible()
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_audit_empty_log_without_filters_hides_the_reset_action() -> None:
+    """"Сбросить фильтры" with no active filters is a dead control."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 390, "height": 844})
+        try:
+            await _mount(page, empty=True)
+            audit = page.locator("[data-audit-page]")
             assert await audit.get_by_text("Событий пока нет").is_visible()
-            assert await audit.get_by_role("link", name="Сбросить фильтры").is_visible()
+            assert await audit.get_by_role("link", name="Сбросить фильтры").count() == 0
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_audit_filtered_empty_state_offers_a_reset() -> None:
+    """Events exist but the filters match none — resetting is the real fix."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 390, "height": 844})
+        try:
+            await _mount(page, empty=True, filtered=True, total_count=4)
+            audit = page.locator("[data-audit-page]")
+            assert await audit.get_by_text("По фильтрам ничего не найдено").is_visible()
+            assert await audit.get_by_role("link", name="Сбросить фильтры").first.is_visible()
         finally:
             await browser.close()

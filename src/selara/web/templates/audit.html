@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
+  {% set audit_has_active_filters = audit_filters.q or audit_filters.category != 'all' or audit_filters.actor != 'all' %}
   <div class="audit-page" data-audit-page>
     <section class="hero audit-hero">
       <div class="hero-copy">
@@ -27,7 +28,7 @@
           <span class="audit-kicker">Поиск по событиям</span>
           <h2 id="audit-filter-title">Найдите нужное изменение</h2>
         </div>
-        {% if audit_filters.q or audit_filters.category != 'all' or audit_filters.actor != 'all' %}
+        {% if audit_has_active_filters %}
           <a class="button ghost audit-reset-link" href="{{ audit_reset_href }}">Сбросить фильтры</a>
         {% endif %}
       </div>
@@ -128,14 +129,22 @@
       {% else %}
         <div class="audit-empty-state">
           <span class="audit-empty-icon" aria-hidden="true">◇</span>
-          {% if audit_total_count and not audit_load_error %}
+          {% if audit_load_error %}
+            {# A failed query is not an empty log — never imply the chat was quiet. #}
+            <h3 class="audit-empty-title">Журнал не удалось загрузить</h3>
+            <p class="audit-empty-copy">Это сбой чтения, а не отсутствие событий: какие записи есть в журнале, сейчас неизвестно.</p>
+            <a class="button ghost" href="{{ audit_reset_href }}">Обновить страницу</a>
+          {% elif audit_total_count %}
             <h3 class="audit-empty-title">По фильтрам ничего не найдено</h3>
             <p class="audit-empty-copy">Измените запрос, категорию или тип инициатора.</p>
+            <a class="button ghost" href="{{ audit_reset_href }}">Сбросить фильтры</a>
           {% else %}
             <h3 class="audit-empty-title">Событий пока нет</h3>
             <p class="audit-empty-copy">Новые изменения и действия бота появятся здесь автоматически.</p>
+            {% if audit_has_active_filters %}
+              <a class="button ghost" href="{{ audit_reset_href }}">Сбросить фильтры</a>
+            {% endif %}
           {% endif %}
-          <a class="button ghost" href="{{ audit_reset_href }}">Сбросить фильтры</a>
         </div>
       {% endif %}
     </section>
