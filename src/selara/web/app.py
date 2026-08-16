@@ -8636,7 +8636,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_auth_required(admin_user_id):
             if prefers_json:
-                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
             return _redirect("/app/admin/login")
 
         try:
@@ -8662,7 +8662,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_auth_required(admin_user_id):
             if prefers_json:
-                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
             return _redirect("/app/admin/login")
 
         broadcast, summary_text, status_code, error_field = await _execute_admin_broadcast(
@@ -8938,7 +8938,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     ok=False,
                     message="Сессия истекла. Войдите снова.",
                     status_code=401,
-                    redirect="/admin/login",
+                    redirect="/app/admin/login",
                 )
             return _redirect("/app/admin/login")
 
@@ -8970,7 +8970,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if not _admin_auth_required(admin_user_id):
                 await session.commit()
                 if prefers_json:
-                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/admin/login")
+                    return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
                 return _redirect("/app/admin/login")
 
             form = await _parse_form(request)
@@ -9907,7 +9907,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
             if not _admin_auth_required(admin_user_id):
                 await session.commit()
-                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
             activity_repo = SqlAlchemyActivityRepository(session)
             feedback_requests = await _load_admin_feature_request_items(session)
@@ -10049,7 +10049,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
             await session.commit()
 
-        response = _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect="/admin/login")
+        response = _json_result(ok=True, message="Сессия завершена.", status_code=200, redirect="/app/admin/login")
         response.delete_cookie(settings.admin_session_cookie_name)
         return response
 
@@ -10060,7 +10060,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         try:
             await send_daily_backup(bot=await _get_game_bot(), settings=settings)
@@ -10077,7 +10077,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         broadcast, summary_text, status_code, error_field = await _execute_admin_broadcast(
             request,
@@ -10116,7 +10116,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 ok=False,
                 message="Требуется вход в админку.",
                 status_code=401,
-                redirect="/admin/login",
+                redirect="/app/admin/login",
             )
         ok, message, status_code = await _execute_admin_broadcast_reply_reaction(
             request,
@@ -10136,7 +10136,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
             if not _admin_auth_required(admin_user_id):
                 await session.commit()
-                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
             activity_repo = SqlAlchemyActivityRepository(session)
             broadcast = await activity_repo.get_admin_broadcast(broadcast_id=broadcast_id)
@@ -10285,7 +10285,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             admin_user_id = await _load_admin_from_request(session, request, touch=True)
             if not _admin_auth_required(admin_user_id):
                 await session.commit()
-                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+                return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
             form = await _parse_form(request)
             new_status = str(form.get("status", "")).strip()
@@ -10318,7 +10318,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
@@ -10420,7 +10420,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
@@ -10490,7 +10490,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
@@ -10546,7 +10546,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
         if not _admin_auth_required(admin_user_id):
-            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/admin/login")
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
