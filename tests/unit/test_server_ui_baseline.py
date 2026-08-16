@@ -36,7 +36,6 @@ EXPECTED_TEMPLATES = {
 }
 
 INLINE_SCRIPT_TEMPLATES = {
-    "chat.html",
     "economy.html",
     "family.html",
     "games.html",

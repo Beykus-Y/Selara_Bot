@@ -6021,7 +6021,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],
             )
         )
-        return _render_template("chat.html", **page_context)
+        return _render_template(
+            "chat.html",
+            extra_scripts=["chat-overview.js", "chat-settings.js"],
+            **page_context,
+        )
 
     @app.get("/api/chat/{chat_id}/overview")
     async def chat_overview_api(chat_id: int, request: Request):
