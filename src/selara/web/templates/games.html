@@ -697,6 +697,15 @@
             if (!data?.changed) {
               liveSignature = data?.signature || liveSignature;
               setLiveState("ready", "обновить сцену");
+              // A WS reconnect is normally only attempted from
+              // applyDashboardHtml() (via connectGameSockets() in commit()),
+              // which this branch skips entirely. Without this call, a
+              // socket that errored stays stranded on fallback polling
+              // forever once wsDisabledUntil elapses, because nothing else
+              // ever re-triggers the retry. connectGameSockets() is a no-op
+              // while still inside the backoff window and skips games that
+              // already have a live socket, so calling it on every poll is safe.
+              connectGameSockets();
               return;
             }
             if (typeof data?.html === "string" && typeof data?.signature === "string") {
