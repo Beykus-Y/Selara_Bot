@@ -147,6 +147,29 @@ class FakeActivityRepo:
         self._state.alias_mode_by_chat[chat.telegram_chat_id] = mode
         return mode
 
+    async def remove_chat_alias(self, *, chat_id: int, alias_text_norm: str):
+        _ = chat_id
+        return bool(alias_text_norm)
+
+    async def remove_chat_trigger(self, *, chat_id: int, trigger_id: int):
+        _ = chat_id, trigger_id
+        return True
+
+    async def upsert_chat_trigger(
+        self,
+        *,
+        chat,
+        trigger_id: int | None,
+        keyword: str,
+        match_type: str,
+        response_text: str | None,
+        media_file_id: str | None,
+        media_type: str | None,
+        actor_user_id: int | None,
+    ):
+        _ = chat, trigger_id, keyword, match_type, response_text, media_file_id, media_type, actor_user_id
+        return None
+
     async def upsert_chat_settings(self, *, chat, values: dict[str, object]):
         updated = ChatSettings(**values)
         self._state.chat_settings_by_chat[chat.telegram_chat_id] = updated
@@ -639,6 +662,48 @@ async def test_chat_alias_route_accepts_daily_article_source(monkeypatch) -> Non
     assert state.alias_upsert_calls[-1]["command_key"] == "article"
     assert state.alias_upsert_calls[-1]["source_trigger_norm"] == "моя статья"
     assert state.alias_upsert_calls[-1]["alias_text_norm"] == "за что сужусь"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "form"),
+    [
+        ("/app/chat/-1001/triggers", {"keyword": "привет", "response_text": "hi"}),
+        ("/app/chat/-1001/triggers", {"action": "delete", "trigger_id": "999"}),
+        ("/app/chat/-1001/aliases", {"source_trigger": "моя статья", "alias_text": "стата"}),
+        ("/app/chat/-1001/aliases", {"action": "delete", "alias_text": "стата"}),
+        ("/app/chat/-1001/settings", {"key": "alias_mode", "value": "both"}),
+        ("/app/chat/-1001/settings", {"key": "alias_mode", "value": "not-a-real-mode"}),
+        ("/app/chat/-1001/settings", {"key": "economy_enabled", "value": "true"}),
+        ("/app/chat/-1001/settings", {"key": "not-a-real-setting", "value": "x"}),
+    ],
+)
+async def test_plain_form_post_returns_to_the_settings_tab_not_overview(
+    monkeypatch, path: str, form: dict[str, str]
+) -> None:
+    """Regression guard: alias/trigger/setting forms are plain (non-fetch)
+    POSTs. Their redirect used to drop back to /app/chat/{id} with no
+    `tab` query param, and chat_page defaults an absent tab to "overview" —
+    so saving a trigger or alias threw the user off the Settings tab onto
+    Overview, where the editor they were just using does not exist.
+    """
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+        alias_mode_by_chat={-1001: "both"},
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(path, data=form)
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/app/chat/-1001?tab=settings"), (
+        f"POST {path} with {form} redirected to {location!r}, losing the Settings tab"
+    )
 
 
 @pytest.mark.asyncio

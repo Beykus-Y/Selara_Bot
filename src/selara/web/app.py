@@ -7105,7 +7105,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if not allowed:
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав.")
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text="Недостаточно прав.")
                 if prefers_json:
                     return _json_result(ok=False, message="Недостаточно прав.", status_code=403, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7116,7 +7116,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if action == "delete":
                 if trigger_id is None or not await activity_repo.remove_chat_trigger(chat_id=chat_id, trigger_id=trigger_id):
                     await session.commit()
-                    redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Триггер не найден.")
+                    redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text="Триггер не найден.")
                     if prefers_json:
                         return _json_result(ok=False, message="Триггер не найден.", status_code=404, redirect=redirect_path)
                     return _redirect(redirect_path)
@@ -7131,7 +7131,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 invalidate_chat_feature_cache(chat_id)
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер удалён.")
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="flash", text="Триггер удалён.")
                 if prefers_json:
                     return _json_result(ok=True, message="Триггер удалён.", status_code=200, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7149,7 +7149,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             except ValueError as exc:
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text=str(exc))
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text=str(exc))
                 if prefers_json:
                     return _json_result(ok=False, message=str(exc), status_code=400, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7165,7 +7165,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             invalidate_chat_feature_cache(chat_id)
             await session.commit()
-            redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Триггер сохранён.")
+            redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="flash", text="Триггер сохранён.")
             if prefers_json:
                 return _json_result(ok=True, message="Триггер сохранён.", status_code=200, redirect=redirect_path)
             return _redirect(redirect_path)
@@ -7208,7 +7208,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if not allowed:
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Недостаточно прав.")
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text="Недостаточно прав.")
                 if prefers_json:
                     return _json_result(ok=False, message="Недостаточно прав.", status_code=403, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7231,7 +7231,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 key = "flash" if removed else "error"
                 text = "Алиас удалён." if removed else "Алиас не найден."
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key=key, text=text)
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key=key, text=text)
                 if prefers_json:
                     return _json_result(ok=removed, message=text, status_code=200 if removed else 404, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7241,7 +7241,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             source_norm = normalize_text_command(source_raw)
             if command_key is None or not alias_norm:
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text="Некорректный source или alias.")
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text="Некорректный source или alias.")
                 if prefers_json:
                     return _json_result(ok=False, message="Некорректный source или alias.", status_code=400, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7257,7 +7257,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             except ValueError as exc:
                 await session.commit()
-                redirect_path = _with_message(f"/app/chat/{chat_id}", key="error", text=str(exc))
+                redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="error", text=str(exc))
                 if prefers_json:
                     return _json_result(ok=False, message=str(exc), status_code=400, redirect=redirect_path)
                 return _redirect(redirect_path)
@@ -7272,7 +7272,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 actor_user_id=user.telegram_user_id,
             )
             await session.commit()
-            redirect_path = _with_message(f"/app/chat/{chat_id}", key="flash", text="Алиас сохранён.")
+            redirect_path = _with_message(f"/app/chat/{chat_id}?tab=settings", key="flash", text="Алиас сохранён.")
             if prefers_json:
                 return _json_result(ok=True, message="Алиас сохранён.", status_code=200, redirect=redirect_path)
             return _redirect(redirect_path)
@@ -7329,7 +7329,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if not allowed:
                 await session.commit()
                 redirect_path = _with_message(
-                    f"/app/chat/{chat_id}",
+                    f"/app/chat/{chat_id}?tab=settings",
                     key="error",
                     text="У вас нет права manage_settings для этой группы.",
                 )
@@ -7361,7 +7361,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         + ", ".join(ALIAS_MODE_VALUES)
                     )
                     redirect_path = _with_message(
-                        f"/app/chat/{chat_id}",
+                        f"/app/chat/{chat_id}?tab=settings",
                         key="error",
                         text=message,
                     )
@@ -7404,7 +7404,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
                 return _redirect(
                     _with_message(
-                        f"/app/chat/{chat_id}",
+                        f"/app/chat/{chat_id}?tab=settings",
                         key="flash",
                         text=message,
                     )
@@ -7424,7 +7424,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 message = error or "Не удалось обновить настройку."
                 redirect_path = _with_message(
-                    f"/app/chat/{chat_id}",
+                    f"/app/chat/{chat_id}?tab=settings",
                     key="error",
                     text=message,
                 )
@@ -7469,7 +7469,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             return _redirect(
                 _with_message(
-                    f"/app/chat/{chat_id}",
+                    f"/app/chat/{chat_id}?tab=settings",
                     key="flash",
                     text=message,
                 )
