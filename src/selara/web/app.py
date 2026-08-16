@@ -6039,57 +6039,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403, redirect="/app")
 
+            # Polled on every SSE chat_activity/new_vote/chat_refresh event (chat-overview.js
+            # scheduleRefresh), so this only computes the 3 fields the client actually renders
+            # (daily_activity/hero_of_day/richest_of_day) rather than the full page context.
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
-            defaults = chat_settings_defaults
-            role_definition = await activity_repo.get_effective_role_definition(chat_id=chat_id, user_id=user.telegram_user_id)
-            can_manage_settings = await _can_manage_chat_settings(
-                activity_repo,
-                chat=chat,
-                user=user,
-            )
-            summary = await activity_repo.get_chat_activity_summary(chat_id=chat_id)
-            stats = await get_my_stats(activity_repo, chat_id=chat_id, user_id=user.telegram_user_id)
-            rep_stats = await get_rep_stats(
-                activity_repo,
-                chat_id=chat_id,
-                user_id=user.telegram_user_id,
-                limit=max(current_settings.top_limit_max, 50),
-                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
-                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
-                days=current_settings.leaderboard_7d_days,
-            )
             activity_series = await _build_chat_daily_activity_series(session, chat_id=chat_id, days=7)
-            roles = await activity_repo.list_chat_role_definitions(chat_id=chat_id)
-            command_rules = await activity_repo.list_command_access_rules(chat_id=chat_id)
-            audit_entries = await activity_repo.list_audit_logs(chat_id=chat_id, limit=10)
-            top_activity = await activity_repo.get_top(chat_id=chat_id, limit=8)
-            top_mix = await activity_repo.get_leaderboard(
-                chat_id=chat_id,
-                mode="mix",
-                period="all",
-                since=None,
-                limit=8,
-                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
-                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
-            )
-            top_karma = await activity_repo.get_leaderboard(
-                chat_id=chat_id,
-                mode="karma",
-                period="all",
-                since=None,
-                limit=8,
-                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
-                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
-            )
-            top_mix_7d = await activity_repo.get_leaderboard(
-                chat_id=chat_id,
-                mode="mix",
-                period="7d",
-                since=_now_utc() - timedelta(days=current_settings.leaderboard_7d_days),
-                limit=8,
-                karma_weight=current_settings.leaderboard_hybrid_karma_weight,
-                activity_weight=current_settings.leaderboard_hybrid_activity_weight,
-            )
             hero_candidates = await activity_repo.get_leaderboard(
                 chat_id=chat_id,
                 mode="activity",
@@ -6109,60 +6063,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 if scope is not None:
                     richest_payload = await _build_richest_user_payload(session, scope_id=scope.scope_id, chat_id=chat_id)
-            global_dashboard, _ = await _load_dashboard_if_exists(
-                economy_repo,
-                mode="global",
-                chat_id=None,
-                user_id=user.telegram_user_id,
-            )
-            local_dashboard, _ = await _load_dashboard_if_exists(
-                economy_repo,
-                mode="local",
-                chat_id=chat_id,
-                user_id=user.telegram_user_id,
-            )
 
             await session.commit()
 
         hero = hero_candidates[0] if hero_candidates else None
-        chat_context = build_chat_context(
-            user=user,
-            chat=chat,
-            summary=summary,
-            stats=stats,
-            rep_stats=rep_stats,
-            role_definition=role_definition,
-            current_settings=current_settings,
-            defaults=defaults,
-            can_manage_settings=can_manage_settings,
-            roles=roles,
-            command_rules=command_rules,
-            aliases=[],
-            alias_source_options=build_alias_source_options(),
-            triggers=[],
-            audit_entries=audit_entries,
-            global_dashboard=global_dashboard,
-            local_dashboard=local_dashboard,
-            top_activity=top_activity,
-            top_mix=top_mix,
-            top_karma=top_karma,
-            top_mix_7d=top_mix_7d,
-            local_achievement_sections=[],
-            flash=None,
-            error=None,
-        )
         return JSONResponse(
             content={
                 "ok": True,
-                "chat_id": chat_id,
-                "chat_title": chat.chat_title or f"chat:{chat.chat_id}",
-                "hero_subtitle": chat_context["hero_subtitle"],
-                "metrics": chat_context["metrics"],
-                "summary": {
-                    "participants_count": summary.participants_count,
-                    "total_messages": summary.total_messages,
-                    "last_activity_at": format_datetime(summary.last_activity_at),
-                },
                 "daily_activity": activity_series,
                 "hero_of_day": (
                     {
@@ -6174,13 +6081,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     else None
                 ),
                 "richest_of_day": richest_payload,
-                "dashboard_panels": chat_context["dashboard_panels"],
-                "access_rows": chat_context["access_rows"],
-                "roles": chat_context["roles"],
-                "command_rules": chat_context["command_rules"],
-                "leaderboards": chat_context["leaderboards"],
-                "audit_rows": chat_context["audit_rows"],
-                "can_manage_settings": can_manage_settings,
             }
         )
 

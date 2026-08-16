@@ -472,10 +472,15 @@ async def test_chat_overview_api_returns_live_summary(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
-    assert payload["summary"]["participants_count"] == 12
     assert payload["daily_activity"][0]["messages"] == 11
     assert payload["hero_of_day"]["messages"] == 18
     assert payload["richest_of_day"]["balance"] == 999
+    # This endpoint is polled on every SSE live-update tick
+    # (chat-overview.js scheduleRefresh) — it must only ever compute and
+    # return the 3 fields the client actually renders, not the full page
+    # context (roles/command_rules/audit/leaderboards/etc. were previously
+    # computed and returned here but silently dropped by the client).
+    assert set(payload) == {"ok", "daily_activity", "hero_of_day", "richest_of_day"}
 
 
 @pytest.mark.asyncio
