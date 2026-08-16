@@ -219,9 +219,27 @@
   `test_admin_overview_prioritizes_tasks_without_overflow[390px]`). Каждый раз
   проверялось `git stash` + повторным запуском, регрессии не подтверждались.
   Это не блокирует работу сейчас (CI пока зелёный), но при росте browser-набора
-  станет источником ложных красных прогонов. Нужна отдельная задача: выяснить
-  причину (общий event loop / гонка запуска Chromium / нехватка ресурсов при
-  параллельном рендере) и стабилизировать, а не перезапускать вслепую.
+  станет источником ложных красных прогонов.
+  - **2026-08-17: найдена и исправлена одна из трёх причин.**
+    `test_admin_overview_prioritizes_tasks_without_overflow[390px]` читал
+    `bounding_box()` skip-link'а через фиксированные `wait_for_timeout(180)`
+    после `Tab`, а `.skip-link{transition:transform 140ms ease}` — запас всего
+    40мс. Под нагрузкой полного прогона (тысячи предыдущих ассертов,
+    GC/scheduler jitter) этого запаса не хватает, и геометрия читается
+    «в полёте» — тот же класс бага, что уже был найден и исправлен в
+    `test_web_admin_shell_browser.py` (2026-08-15, commit 3ee68a4) тем же
+    способом: `page.add_style_tag(content="*, *::before, *::after
+    { transition: none !important; }")` в `_mount()`
+    (`tests/unit/test_web_admin_overview_browser.py`). Проверено в изоляции
+    (15 прогонов подряд зелёные — но тест был стабилен в изоляции и раньше,
+    флак проявлялся только в полном прогоне) и полным прогоном `tests/unit`
+    после фикса. Причины двух других тестов (`test_activity_event_runtime_...`
+    — не browser-тест вообще, вероятно гонка в async event-бэкафилле;
+    `test_server_admin_broadcast_composer_handles_photo_and_reactions` — беглый
+    просмотр `admin-broadcast.js` не выявил похожей проблемы: клик по
+    подтверждению вызывает `form.requestSubmit()` синхронно, disable кнопки
+    происходит до `fetch`, гонки не видно) **остаются неподтверждёнными** — не
+    гадать и не чинить вслепую, ждать следующего наблюдаемого падения.
 - [ ] Настроить trace, screenshot и video только при ошибке CI.
 - [ ] Определить стабильную среду визуальных snapshots: одинаковые Linux image,
   Chromium/WebKit versions, fonts и timezone.

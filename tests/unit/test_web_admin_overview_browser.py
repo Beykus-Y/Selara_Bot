@@ -130,6 +130,12 @@ async def _mount(
         "admin-table-search.css",
     ):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
+    # The skip-link's `transform` transition (140ms) can still be mid-flight
+    # when a test reads its geometry right after a fixed wait_for_timeout —
+    # flaky only under full-suite load, not in isolation. Disable transitions
+    # for deterministic geometry reads (same fix already applied in
+    # test_web_admin_shell_browser.py for the identical failure class).
+    await page.add_style_tag(content="*, *::before, *::after { transition: none !important; }")
     await page.add_script_tag(path=str(STATIC_DIR / "admin-overview.js"), type="module")
     await page.add_script_tag(path=str(STATIC_DIR / "admin-table-search.js"), type="module")
 
