@@ -41,7 +41,6 @@ EXPECTED_TEMPLATES = {
 }
 
 INLINE_SCRIPT_TEMPLATES = {
-    "economy.html",
     "games.html",
 }
 

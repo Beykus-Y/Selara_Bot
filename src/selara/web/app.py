@@ -6569,7 +6569,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     user=user,
                 ),
             )
-        return _render_template("economy.html", **page_context)
+        return _render_template("economy.html", extra_scripts=["economy.js"], **page_context)
 
     @app.get("/api/chat/{chat_id}/economy")
     async def chat_economy_page_api(chat_id: int, request: Request):
