@@ -21,6 +21,7 @@ from selara.domain.entities import (
     UserChatOverview,
     UserSnapshot,
 )
+from selara.presentation.game_state import LiveEvent
 from selara.web import app as web_app_module
 
 
@@ -776,3 +777,67 @@ async def test_economy_mutations_are_rejected_while_chat_is_write_locked(
     assert response.status_code == 423
     assert response.json()["ok"] is False
     mutation.assert_not_awaited()
+
+
+class _FakeLiveBroker:
+    """Yields exactly the events chat-overview.js's scheduleRefresh() cares
+    about, in the exact wire shape `_stream_live_events` must emit."""
+
+    def __init__(self, events: list[LiveEvent]) -> None:
+        self._events = events
+
+    async def subscribe(self, *, scope: str, chat_id: int | None = None, game_id: str | None = None):
+        _ = scope, chat_id, game_id
+        for event in self._events:
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_chat_live_stream_delivers_real_event_types_client_listens_for(monkeypatch) -> None:
+    # Regression guard for the "live updates" chat.html sub-slice: this is the
+    # exact SSE contract chat-overview.js depends on
+    # (liveSource.addEventListener("chat_activity"/"new_vote"/"chat_refresh", scheduleRefresh))
+    # — verified end-to-end through the real /api/live/stream route (auth,
+    # chat-visibility check, SSE framing), not just by reading the source.
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+    )
+
+    events = [
+        LiveEvent(event_type="chat_activity", scope="chat", revision="1", chat_id=-1001),
+        LiveEvent(event_type="new_vote", scope="chat", revision="2", chat_id=-1001),
+        LiveEvent(event_type="chat_refresh", scope="chat", revision="3", chat_id=-1001),
+    ]
+    monkeypatch.setattr(web_app_module.GAME_STORE, "_broker", _FakeLiveBroker(events))
+
+    async with _web_client(monkeypatch, state) as client:
+        async with client.stream("GET", "/api/live/stream?scope=chat&chat_id=-1001") as response:
+            assert response.status_code == 200
+            body = b""
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if body.count(b"\n\n") >= len(events):
+                    break
+
+    text = body.decode("utf-8")
+    for event in events:
+        assert f"event: {event.event_type}\ndata: {event.to_json()}\n\n" in text
+
+
+@pytest.mark.asyncio
+async def test_chat_live_stream_rejects_chats_the_user_cannot_see(monkeypatch) -> None:
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[],
+    )
+    monkeypatch.setattr(web_app_module.GAME_STORE, "_broker", _FakeLiveBroker([]))
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.get("/api/live/stream?scope=chat&chat_id=-9999")
+
+    assert response.status_code == 403
