@@ -762,7 +762,6 @@ def build_landing_context(
         "error": error,
         "home_href": "/",
         "brand_subtitle": "бот для Telegram-групп",
-        "hero_eyebrow": "Платформа для Telegram-сообществ",
         "hero_title_primary": "Selara",
         "hero_title_secondary": "бот для групп, игр и экономики",
         "hero_subtitle": (
@@ -772,32 +771,7 @@ def build_landing_context(
         "hero_ctas": hero_ctas,
         "session_note": (f"Сессия активна для {session_label}" if session_label is not None else None),
         "developer_credit": "Разработчик: Beykus",
-        "signal_cards": [
-            {
-                "label": "командный слой",
-                "value": "slash + text + reply",
-                "note": "slash-команды, текстовые триггеры и reply-сценарии живут в одном маршруте.",
-                "tone": "cyan",
-            },
-            {
-                "label": "игры",
-                "value": f"{len(GAME_LAUNCHABLE_KINDS)} live-режимов",
-                "note": "От лобби и скрытых ролей до веб-управления активными партиями.",
-                "tone": "violet",
-            },
-            {
-                "label": "социальное",
-                "value": f"{len(SOCIAL_COMMAND_KEY_TO_ACTION)} reply-действие",
-                "note": "От дружелюбных реакций до 18+ сценариев с отдельным gate по настройке.",
-                "tone": "magenta",
-            },
-            {
-                "label": "панель",
-                "value": "вход и кабинет",
-                "note": "Одноразовый код из Telegram, затем кабинет, документация, игры и аудит.",
-                "tone": "indigo",
-            },
-        ],
+        "social_action_count": len(SOCIAL_COMMAND_KEY_TO_ACTION),
         "metrics": [
             build_metric(
                 label="Игровые режимы",
@@ -823,22 +797,6 @@ def build_landing_context(
                 tone="indigo",
             ),
         ],
-        "overview_text": (
-            "Selara полезна и обычным участникам, и владельцам чатов. Пользователь получает игры, "
-            "статистику, экономику, отношения, семьи и быстрые reply-действия. Администратор получает "
-            "роли, ранги, алиасы, триггеры, настройки, аудит и удобный браузерный интерфейс."
-        ),
-        "overview_pills": (
-            "статистика",
-            "игры",
-            "экономика",
-            "отношения",
-            "семьи",
-            "социальные действия",
-            "алиасы",
-            "настройки",
-            "журнал изменений",
-        ),
         "step_cards": [
             {
                 "step": "01",

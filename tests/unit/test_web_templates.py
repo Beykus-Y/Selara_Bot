@@ -125,7 +125,6 @@ def test_landing_template_renders_core_sections() -> None:
         page_name="landing",
         home_href="/",
         brand_subtitle="бот для Telegram-групп",
-        hero_eyebrow="Платформа для Telegram-сообществ",
         hero_title_primary="Selara",
         hero_title_secondary="бот для групп, игр и экономики",
         hero_subtitle="Описание лендинга.",
@@ -135,16 +134,11 @@ def test_landing_template_renders_core_sections() -> None:
         ],
         session_note=None,
         developer_credit="Разработчик: Beykus",
-        signal_cards=[
-            {"label": "команды", "value": "slash + text + reply", "note": "маршруты", "tone": "cyan"},
-            {"label": "игры", "value": "7 live-режимов", "note": "game hub", "tone": "violet"},
-        ],
         metrics=[
             {"label": "Игры", "value": "8", "note": "метрика", "tone": "violet"},
             {"label": "Экономика", "value": "global / local", "note": "метрика", "tone": "cyan"},
         ],
-        overview_text="Обзор Selara.",
-        overview_pills=["игры", "экономика", "документация"],
+        social_action_count=118,
         step_cards=[
             {"step": "01", "title": "Откройте бота", "text": "Шаг 1"},
             {"step": "02", "title": "Получите код", "text": "Шаг 2"},
