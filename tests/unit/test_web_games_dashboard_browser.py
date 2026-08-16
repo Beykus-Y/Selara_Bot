@@ -505,3 +505,55 @@ async def test_games_dashboard_large_roster_has_no_overflow(monkeypatch, kind: s
             await browser.close()
 
     _assert_no_overflow_at_all_viewports(results)
+
+
+@pytest.mark.asyncio
+async def test_games_dashboard_lobby_state_has_no_overflow(monkeypatch) -> None:
+    """Sub-slice 9/N: the "lobby" state (game created, not yet started —
+    `status == "lobby"`, "Лобби открыто" spotlight) was the one game-panel
+    state none of the earlier sub-slices exercised; every prior active-game
+    test used store.start() to reach the "started" status. Closes the
+    "унифицировать lobby/create/active/results/error компонентов" checklist
+    item's last untested state — the lobby panel reuses the same
+    .panel/.game-meta-grid/.game-spotlight shell already verified for active
+    games and results, confirmed here rather than assumed.
+    """
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок «Ложка и Чайник»", bot_role="game_master")],
+    )
+    store = GameStore()
+
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        game, error = await store.create_lobby(
+            kind="whoami",
+            chat_id=-1001,
+            chat_title="Клуб настолок «Ложка и Чайник»",
+            owner_user_id=77,
+            owner_label="Хозяйка вечера с очень длинным именем для проверки переполнения",
+            reveal_eliminated_role=True,
+        )
+        assert error is None
+        assert game is not None
+        response = await client.get("/app/games")
+    assert response.status_code == 200
+    html = response.text
+    assert "Лобби открыто" in html
+    assert "Набор игроков" in html
+
+    results: dict[int, bool] = {}
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            for viewport in VIEWPORTS:
+                page = await browser.new_page(viewport=viewport)
+                await _mount(page, html)
+                results[viewport["width"]] = await page.evaluate(
+                    "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+                )
+                await page.close()
+        finally:
+            await browser.close()
+
+    _assert_no_overflow_at_all_viewports(results)
