@@ -1813,6 +1813,18 @@ body.page-games::before {
   color: #1d2340;
 }
 
+/* .banner-ok/.banner-error are styled for the app's dark page background
+   (light near-white text). Nested inside a light pastel result card, that
+   text drops to near-zero contrast against the card instead of being
+   overridden here. */
+.page-games .recent-game-card .banner-ok {
+  color: #0f6b52;
+}
+
+.page-games .recent-game-card .banner-error {
+  color: #9c1c2e;
+}
+
 .page-games .game-panel.spy,
 .page-games .game-panel-spy {
   background:

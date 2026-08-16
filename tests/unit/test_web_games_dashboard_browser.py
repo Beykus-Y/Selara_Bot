@@ -368,3 +368,79 @@ async def test_games_dashboard_every_mode_active_panel_has_no_overflow(monkeypat
             await browser.close()
 
     _assert_no_overflow_at_all_viewports(results)
+
+
+def _srgb_channel_to_linear(value: float) -> float:
+    channel = value / 255
+    return channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(r: int, g: int, b: int) -> float:
+    lr, lg, lb = _srgb_channel_to_linear(r), _srgb_channel_to_linear(g), _srgb_channel_to_linear(b)
+    return 0.2126 * lr + 0.7152 * lg + 0.0722 * lb
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["whoami", "bredovukha", "dice"])
+async def test_games_dashboard_finished_game_result_card_has_no_overflow(monkeypatch, kind: str) -> None:
+    """Sub-slice 4/N: the "results" state (`recent-games-panel`,
+    `_games_dashboard.html:1153-1244`) renders one of three mutually distinct
+    reveal branches depending on the mode: `role_reveal_rows` (secret-role
+    modes like whoami/spy/mafia), `bred_reveal_rows` (bredovukha only), or
+    plain `score_rows` (score-only modes like dice/number/quiz) — plus an
+    always-present `result_text` banner and optional personal notes. One
+    representative mode per branch, not all 9.
+
+    Also a regression guard for a real contrast bug found by reviewing this
+    slice's screenshots: `.banner-ok`/`.banner-error` are styled for the
+    app's dark page background (near-white text) but `.recent-result-banner`
+    nests one inside a light pastel `.recent-game-card` — the text was
+    technically present in the DOM but visually invisible. Since all
+    `.recent-game-card*` background variants are light pastels (panel.css
+    ~1781-1809), asserting the resolved text color is dark (not just
+    "differs from the un-themed default") is a reliable proxy for readable
+    contrast without needing to sample the card's gradient background.
+    """
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок «Ложка и Чайник»", bot_role="game_master")],
+    )
+    store = GameStore()
+
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        game = await _create_started_game(store, kind=kind, owner_user_id=77, chat_id=-1001, chat_title="Клуб настолок «Ложка и Чайник»")
+        await store.finish(game_id=game.game_id, winner_text="Хозяйка вечера победила с явным перевесом.")
+        response = await client.get("/app/games")
+    assert response.status_code == 200
+    html = response.text
+    assert "recent-games-panel" in html
+    assert "recent-result-banner" in html
+
+    results: dict[int, bool] = {}
+    banner_rgb: tuple[int, int, int] | None = None
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            for viewport in VIEWPORTS:
+                page = await browser.new_page(viewport=viewport)
+                await _mount(page, html)
+                results[viewport["width"]] = await page.evaluate(
+                    "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+                )
+                if viewport is VIEWPORTS[0]:
+                    color = await page.locator(".recent-result-banner").evaluate(
+                        "element => getComputedStyle(element).color"
+                    )
+                    banner_rgb = tuple(int(part) for part in color.split("(")[1].split(")")[0].split(",")[:3])
+                await page.close()
+        finally:
+            await browser.close()
+
+    _assert_no_overflow_at_all_viewports(results)
+    assert banner_rgb is not None
+    luminance = _relative_luminance(*banner_rgb)
+    assert luminance < 0.35, (
+        f"result banner text color {banner_rgb} is too light (luminance {luminance:.2f}) to read "
+        "against the light pastel .recent-game-card background"
+    )
