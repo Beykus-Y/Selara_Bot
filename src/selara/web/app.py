@@ -4459,6 +4459,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 flash=request.query_params.get("flash"),
                 error=request.query_params.get("error"),
             ),
+            extra_scripts=["login-form.js"],
         )
 
     @app.get("/api/login/context")

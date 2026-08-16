@@ -64,10 +64,11 @@
           <p class="panel-subtitle">Введите свежий код из Telegram. Если ошиблись, бот всегда может выдать новый.</p>
         </div>
       </div>
-      <form class="stack-form" method="post" action="/login">
-        <label class="field">
+      <form class="stack-form" method="post" action="/login" data-login-form>
+        <label class="field" for="login-code">
           <span>Код из Telegram</span>
           <input
+            id="login-code"
             class="code-input"
             type="password"
             name="code"
@@ -79,7 +80,7 @@
             required
           >
         </label>
-        <button type="submit" class="button primary">Войти</button>
+        <button type="submit" class="button primary" data-login-submit>Войти</button>
       </form>
       <p class="helper-text">
         Не пересылайте код. Если истёк, просто запросите новый через <code>/login</code>.

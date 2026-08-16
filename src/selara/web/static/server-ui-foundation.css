@@ -180,6 +180,31 @@
   line-height: 1.55;
 }
 
+.landing-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.landing-pill {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgb(168 85 247 / 14%);
+  border: 1px solid rgb(168 85 247 / 25%);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.landing-pill-soft {
+  background: rgb(168 85 247 / 6%);
+  border-color: rgb(168 85 247 / 12%);
+  color: #d8b4fe;
+}
+
 .landing-card-kicker {
   color: var(--cyan-soft);
   font-size: 11px;
