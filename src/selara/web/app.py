@@ -152,6 +152,7 @@ from selara.web.presenters import (
     filter_audit_rows,
     format_datetime,
     group_audit_rows,
+    setting_value_display,
     user_label,
 )
 from selara.web.rendering import create_template_environment
@@ -7359,6 +7360,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             "title": setting_payload["title"],
                             "current_value": str(setting_payload["current_value"]),
                             "default_value": str(setting_payload["default_value"]),
+                            "current_value_display": setting_payload["current_value_display"],
+                            "default_value_display": setting_payload["default_value_display"],
                         },
                     )
                 return _redirect(
@@ -7411,6 +7414,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             setting_title = setting_title_ru(key)
             message = f"Настройка «{setting_title}» обновлена."
             if prefers_json:
+                current_value = str(updated.get(key, default_map.get(key, "")))
+                default_value = str(default_map.get(key, ""))
                 return _json_result(
                     ok=True,
                     message=message,
@@ -7418,8 +7423,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     setting={
                         "key": key,
                         "title": setting_title,
-                        "current_value": str(updated.get(key, default_map.get(key, ""))),
-                        "default_value": str(default_map.get(key, "")),
+                        "current_value": current_value,
+                        "default_value": default_value,
+                        "current_value_display": setting_value_display(key, current_value),
+                        "default_value_display": setting_value_display(key, default_value),
                     },
                 )
             return _redirect(

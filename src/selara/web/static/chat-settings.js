@@ -15,58 +15,6 @@
   let pendingDocsHref = "";
   let allowUnload = false;
 
-  const humanizeSettingValue = (key, value) => {
-    const normalized = String(value ?? "");
-    const lowered = normalized.toLowerCase();
-    if (!normalized.trim()) {
-      return "пусто";
-    }
-    if ([
-      "text_commands_enabled",
-      "leaderboard_hybrid_buttons_enabled",
-      "mafia_reveal_eliminated_role",
-      "actions_18_enabled",
-      "smart_triggers_enabled",
-      "welcome_enabled",
-      "goodbye_enabled",
-      "welcome_cleanup_service_messages",
-      "cleanup_leave_service_messages",
-      "entry_captcha_enabled",
-      "entry_captcha_kick_on_fail",
-      "custom_rp_enabled",
-      "family_tree_enabled",
-      "titles_enabled",
-      "craft_enabled",
-      "auctions_enabled",
-      "economy_enabled",
-      "cleanup_economy_commands",
-    ].includes(key)) {
-      return lowered === "true" ? "включено" : "выключено";
-    }
-    if (key === "text_commands_locale") {
-      return lowered === "ru" ? "русский" : lowered === "en" ? "english" : normalized;
-    }
-    if (key === "alias_mode") {
-      if (lowered === "aliases_if_exists") {
-        return "только алиасы группы";
-      }
-      if (lowered === "both") {
-        return "смешанный режим";
-      }
-      if (lowered === "standard_only") {
-        return "только стандартные команды";
-      }
-      return normalized;
-    }
-    if (key === "economy_mode") {
-      return lowered === "global" ? "общая" : lowered === "local" ? "по группе" : normalized;
-    }
-    if (normalized.length > 42) {
-      return `${normalized.slice(0, 39)}...`;
-    }
-    return normalized;
-  };
-
   const showToast = (message, tone = "ok") => {
     if (!toastRegion || !message) {
       return;
@@ -211,19 +159,22 @@
       return;
     }
 
+    const currentDisplay = setting.current_value_display ?? setting.current_value;
+    const defaultDisplay = setting.default_value_display ?? setting.default_value;
+
     const currentValue = card.querySelector("[data-setting-current]");
     if (currentValue) {
-      currentValue.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.current_value);
+      currentValue.textContent = currentDisplay;
     }
 
     const defaultValue = card.querySelector("[data-setting-default]");
     if (defaultValue) {
-      defaultValue.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.default_value);
+      defaultValue.textContent = defaultDisplay;
     }
 
     const status = card.querySelector(".setting-status");
     if (status) {
-      status.textContent = humanizeSettingValue(card.dataset.settingKey || "", setting.current_value);
+      status.textContent = currentDisplay;
     }
 
     const input = getEditableField(card);

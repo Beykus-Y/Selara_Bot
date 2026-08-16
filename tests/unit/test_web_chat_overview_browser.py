@@ -192,7 +192,8 @@ async def test_chat_settings_toggle_marks_card_dirty_and_saves_via_fetch() -> No
                     content_type="application/json",
                     body=(
                         '{"ok": true, "message": "Сохранено.", '
-                        '"setting": {"current_value": "false", "default_value": "true"}}'
+                        '"setting": {"current_value": "false", "default_value": "true", '
+                        '"current_value_display": "выключено", "default_value_display": "включено"}}'
                     ),
                 )
 

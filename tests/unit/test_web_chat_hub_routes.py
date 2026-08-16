@@ -146,6 +146,11 @@ class FakeActivityRepo:
         self._state.alias_mode_by_chat[chat.telegram_chat_id] = mode
         return mode
 
+    async def upsert_chat_settings(self, *, chat, values: dict[str, object]):
+        updated = ChatSettings(**values)
+        self._state.chat_settings_by_chat[chat.telegram_chat_id] = updated
+        return updated
+
     async def upsert_chat_alias(
         self,
         *,
@@ -572,9 +577,42 @@ async def test_update_chat_setting_persists_alias_mode(monkeypatch) -> None:
     assert payload["ok"] is True
     assert payload["setting"]["key"] == "alias_mode"
     assert payload["setting"]["current_value"] == "standard_only"
+    assert payload["setting"]["current_value_display"] == "только стандартные команды"
     assert state.alias_mode_by_chat[-1001] == "standard_only"
     assert state.audit_log_calls[-1]["action_code"] == "web_setting_updated"
     assert "both -> standard_only" in str(state.audit_log_calls[-1]["description"])
+
+
+@pytest.mark.asyncio
+async def test_update_chat_setting_returns_humanized_display_for_boolean_keys(monkeypatch) -> None:
+    # Regression guard: chat-settings.js used to re-implement this humanization
+    # client-side with a hand-copied, stale list of boolean setting keys that
+    # was missing several real ones (persona_enabled among them) — after an
+    # AJAX save the UI would show raw "true"/"false" instead of
+    # "включено"/"выключено" for those keys. The server now returns the
+    # display string directly (via setting_value_display(), the same function
+    # used for the initial page render) so the client never re-derives it.
+    settings = _settings()
+    state = ChatHubState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
+        activity_groups=[_overview(-1001, "Selara Hub")],
+    )
+    state.chat_settings_by_chat[-1001] = default_chat_settings(settings)
+
+    async with _web_client(monkeypatch, state) as client:
+        response = await client.post(
+            "/app/chat/-1001/settings",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            data={"key": "persona_enabled", "value": "true"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["setting"]["current_value"] == "True"
+    assert payload["setting"]["current_value_display"] == "включено"
+    assert payload["setting"]["default_value_display"] in {"включено", "выключено"}
 
 
 @pytest.mark.asyncio
