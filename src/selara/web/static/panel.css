@@ -462,6 +462,16 @@ code {
   text-transform: uppercase;
 }
 
+@media (width <= 860px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-side {
+    justify-items: start;
+  }
+}
+
 .hero-orb {
   position: relative;
   width: 280px;
