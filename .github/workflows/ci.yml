@@ -27,6 +27,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      TZ: UTC
       BOT_TOKEN: 123456:CI_TOKEN
       DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
       TEST_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
