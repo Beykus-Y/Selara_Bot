@@ -5083,6 +5083,113 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             status_code=200,
         )
 
+    @app.get("/api/miniapp/chat/{chat_id}/economy")
+    async def miniapp_chat_economy_api(chat_id: int, request: Request):
+        """Read-only MVP for the Mini App economy tab (see roadmap decision
+        log 2026-08-17): balance/farm/inventory summary only, no
+        drag&drop/market/trading — that parity is a separate, larger track
+        if ever needed. Reuses the same dashboard load as the Jinja
+        economy.html page instead of re-deriving the query."""
+        async with session_factory() as session:
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=True)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            if not current_settings.economy_enabled:
+                await session.commit()
+                return _json_result(ok=False, message="Экономика отключена в этой группе.", status_code=403)
+
+            economy_repo = SqlAlchemyEconomyRepository(session)
+            dashboard, error = await _load_dashboard_if_exists(
+                economy_repo, mode=current_settings.economy_mode, chat_id=chat_id, user_id=user.telegram_user_id,
+            )
+            await session.commit()
+
+        if dashboard is None:
+            return _json_result(ok=False, message=error or "Не удалось открыть экономический кабинет.", status_code=400)
+
+        now = _now_utc()
+        plots_ready = sum(1 for p in dashboard.plots if p.crop_code is not None and p.ready_at is not None and p.ready_at <= now)
+        plots_growing = sum(1 for p in dashboard.plots if p.crop_code is not None and (p.ready_at is None or p.ready_at > now))
+        plots_empty = sum(1 for p in dashboard.plots if p.crop_code is None)
+        return JSONResponse(
+            content={
+                "ok": True,
+                "economy": {
+                    "balance": dashboard.account.balance,
+                    "farm_level": dashboard.farm.farm_level,
+                    "farm_size_tier": dashboard.farm.size_tier,
+                    "plots_ready": plots_ready,
+                    "plots_growing": plots_growing,
+                    "plots_empty": plots_empty,
+                    "inventory_item_count": sum(1 for item in dashboard.inventory if item.quantity > 0),
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/family/{chat_id}")
+    async def miniapp_family_api(chat_id: int, request: Request):
+        """Read-only MVP for the Mini App family tab: reuses the same
+        _build_family_page_context() the Jinja family.html page uses, and
+        trims it to the summary fields + node list (no interactive SVG
+        graph -- that's Jinja-only for now)."""
+        page_context, error_or_redirect, status_code = await _build_family_page_context(chat_id, request)
+        if page_context is None:
+            return _json_result(ok=False, message=error_or_redirect or "Не удалось открыть семью.", status_code=status_code or 400)
+
+        return JSONResponse(
+            content={
+                "ok": True,
+                "family": {
+                    "focus_label": page_context["focus_label"],
+                    "summary": page_context["bundle_summary"],
+                    "members": [
+                        {"id": node["id"], "label": node["label"], "role": node["role"]}
+                        for node in page_context["family_nodes"]
+                    ],
+                },
+            },
+            status_code=200,
+        )
+
+    @app.get("/api/miniapp/chat/{chat_id}/audit")
+    async def miniapp_chat_audit_api(chat_id: int, request: Request):
+        """Read-only MVP for the Mini App audit tab: last 20 rows only, no
+        search/filter UI -- reuses _build_chat_audit_page_context()'s
+        already-shaped rows instead of re-deriving the audit query."""
+        page_context, error_or_redirect = await _build_chat_audit_page_context(chat_id, request)
+        if page_context is None:
+            return _json_result(ok=False, message="Не удалось открыть журнал аудита.", status_code=403, redirect=error_or_redirect)
+
+        rows = page_context["audit_rows"][:20]
+        return JSONResponse(
+            content={
+                "ok": True,
+                "audit": {
+                    "total_rows": len(page_context["audit_rows"]),
+                    "rows": [
+                        {
+                            "event_id": row["event_id"],
+                            "when": row["when"],
+                            "action_label": row["action_label"],
+                            "tone": row["tone"],
+                            "description": row["description"],
+                            "actor_label": row["actor_label"],
+                            "target_label": row["target_label"] if row["has_target"] else None,
+                        }
+                        for row in rows
+                    ],
+                },
+            },
+            status_code=200,
+        )
+
     @app.get("/api/miniapp/games")
     async def miniapp_games_page_api(request: Request):
         async with session_factory() as session:
