@@ -162,7 +162,9 @@
 
   const syncModeButtons = () => {
     for (const button of modeButtons) {
-      button.classList.toggle("is-active", button.dataset.lbMode === state.mode);
+      const isActive = button.dataset.lbMode === state.mode;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
     }
   };
 

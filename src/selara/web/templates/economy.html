@@ -100,7 +100,7 @@
         </div>
       </div>
       <form class="stack-form" data-market-create-form>
-        <select name="item_code">
+        <select name="item_code" aria-label="Предмет для продажи">
           {% for item in inventory_items %}
             <option value="{{ item.item_code }}">{{ item.label }} ({{ item.quantity }})</option>
           {% endfor %}
@@ -119,7 +119,7 @@
         </div>
       </div>
       <div class="controls-row">
-        <select id="trade-item-select"></select>
+        <select id="trade-item-select" aria-label="Предмет для истории цен"></select>
       </div>
       <canvas id="trade-chart" height="160"></canvas>
     </article>

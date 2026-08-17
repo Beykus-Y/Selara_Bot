@@ -182,7 +182,7 @@
           {% if create_chat_options %}
             <div class="field">
               <span>Чат для запуска</span>
-              <select name="chat_id" required data-create-chat-select>
+              <select name="chat_id" required data-create-chat-select aria-label="Чат для запуска">
                 {% for chat in create_chat_options %}
                   <option value="{{ chat.chat_id }}" data-actions-18-enabled="{{ chat.actions_18_enabled }}">{{ chat.title }}</option>
                 {% endfor %}

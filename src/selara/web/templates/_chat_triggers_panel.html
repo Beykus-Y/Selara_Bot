@@ -36,7 +36,7 @@
             <code>chat_triggers</code>
           </div>
           <input type="text" name="keyword" placeholder="Ключевое слово или фраза">
-          <select name="match_type">
+          <select name="match_type" aria-label="Тип совпадения">
             <option value="contains">Содержит фразу</option>
             <option value="exact">Точное совпадение</option>
             <option value="starts_with">Начинается с</option>
@@ -62,7 +62,7 @@
             <p class="helper-text">{{ trigger.preview }}</p>
             {% if can_manage_settings %}
               <input type="text" name="keyword" value="{{ trigger.keyword }}">
-              <select name="match_type">
+              <select name="match_type" aria-label="Тип совпадения">
                 <option value="contains" {% if trigger.match_type == "contains" %}selected{% endif %}>Содержит фразу</option>
                 <option value="exact" {% if trigger.match_type == "exact" %}selected{% endif %}>Точное совпадение</option>
                 <option value="starts_with" {% if trigger.match_type == "starts_with" %}selected{% endif %}>Начинается с</option>

@@ -65,7 +65,7 @@
           </p>
           <form class="setting-form" method="post" action="/app/chat/{{ chat_id }}/settings" data-setting-submit="save">
             <input type="hidden" name="key" value="{{ alias_mode_setting.key }}">
-            <select name="value">
+            <select name="value" aria-label="{{ alias_mode_setting.title }}">
               {% for option in alias_mode_setting.options %}
                 <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
@@ -87,7 +87,7 @@
               <code>setalias</code>
             </div>
             <p class="setting-description">Источник должен быть стандартным текстовым триггером, например «топ» или «крафт».</p>
-            <select name="source_trigger" required>
+            <select name="source_trigger" required aria-label="Встроенный триггер">
               <option value="" selected disabled>Выберите встроенный триггер</option>
               {% for option in alias_source_options %}
                 <option value="{{ option.value }}">{{ option.label }}</option>
@@ -109,7 +109,7 @@
               <p class="helper-text">Источник: {{ alias.source }}</p>
               {% if can_manage_settings %}
                 <input type="hidden" name="alias_text" value="{{ alias.alias }}">
-                <select name="source_trigger" required>
+                <select name="source_trigger" required aria-label="Встроенный триггер">
                   {% for option in alias_source_options %}
                     <option value="{{ option.value }}" {% if option.value == alias.source %}selected{% endif %}>{{ option.label }}</option>
                   {% endfor %}

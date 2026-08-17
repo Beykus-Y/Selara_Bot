@@ -69,13 +69,13 @@
                       <span class="setting-toggle-track"></span>
                     </label>
                   {% elif item.input_kind == "select" %}
-                    <select name="value">
+                    <select name="value" aria-label="{{ item.title }}">
                       {% for option in item.options %}
                         <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
                       {% endfor %}
                     </select>
                   {% elif item.input_kind == "textarea" %}
-                    <textarea name="value" rows="5">{{ item.current_value }}</textarea>
+                    <textarea name="value" rows="5" aria-label="{{ item.title }}">{{ item.current_value }}</textarea>
                   {% else %}
                     <input type="text" name="value" value="{{ item.current_value }}">
                   {% endif %}
