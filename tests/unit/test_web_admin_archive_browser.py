@@ -161,6 +161,7 @@ async def test_archive_desktop_is_split_dialogue_without_database_table() -> Non
             await page.set_content(_render_archive(selected_explicitly=True))
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
             await page.evaluate(
                 """() => {
@@ -233,6 +234,7 @@ async def test_archive_photo_preview_shows_recoverable_error_without_broken_imag
             await page.set_content(_render_archive(selected_explicitly=True))
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
             preview = page.locator("[data-archive-photo-preview]")
             button = preview.locator("[data-archive-photo-load]")
@@ -270,6 +272,7 @@ async def test_archive_mobile_uses_list_then_conversation_flow(
             await page.set_content(_render_archive(selected_explicitly=selected_explicitly))
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
             archive_script = STATIC_DIR / "admin-archive.js"
             if archive_script.exists():
@@ -349,6 +352,7 @@ async def test_archive_jump_target_scrolls_highlights_and_focuses(reduced_motion
             await page.set_content(_render_archive(selected_explicitly=True, highlight_id=3))
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
             await page.add_script_tag(path=str(STATIC_DIR / "admin-archive.js"), type="module")
 
@@ -386,6 +390,7 @@ async def test_archive_context_jump_link_visible_only_with_active_filters() -> N
             )
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
 
             links = page.locator(".archive-context-jump")
@@ -397,6 +402,7 @@ async def test_archive_context_jump_link_visible_only_with_active_filters() -> N
             )
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
             assert await page.locator(".archive-context-jump").count() == 0
         finally:
@@ -412,6 +418,7 @@ async def test_archive_tablet_portrait_prioritizes_the_conversation() -> None:
             await page.set_content(_render_archive(selected_explicitly=True))
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
 
             assert await page.locator(".archive-chat-rail").is_hidden()
@@ -474,6 +481,7 @@ async def test_archive_long_feed_paginates_without_overflow(viewport: dict[str, 
             )
             await page.add_style_tag(path=str(STATIC_DIR / "panel.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "server-ui-foundation.css"))
+            await page.add_style_tag(path=str(STATIC_DIR / "admin-shared.css"))
             await page.add_style_tag(path=str(STATIC_DIR / "admin-archive.css"))
 
             assert await page.locator(".archive-message").count() == 50

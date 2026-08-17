@@ -85,6 +85,7 @@ async def _mount(page, *, status: str = "all", empty: bool = False) -> None:
     for stylesheet in (
         "panel.css",
         "server-ui-foundation.css",
+        "admin-shared.css",
         "admin-overview.css",
         "admin-feedback.css",
         "admin-broadcast.css",
@@ -112,6 +113,7 @@ async def _goto_feedback(page, *, status: str = "all", empty: bool = False) -> N
     for stylesheet in (
         "panel.css",
         "server-ui-foundation.css",
+        "admin-shared.css",
         "admin-overview.css",
         "admin-feedback.css",
         "admin-broadcast.css",

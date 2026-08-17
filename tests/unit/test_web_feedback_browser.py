@@ -53,7 +53,7 @@ def _render_feedback(*, error: str | None = None, flash: str | None = None, feed
 
 async def _mount(page, html: str) -> None:
     await page.set_content(html)
-    for stylesheet in ("panel.css", "server-ui-foundation.css"):
+    for stylesheet in ("panel.css", "server-ui-foundation.css", "admin-shared.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
     await page.add_script_tag(path=str(STATIC_DIR / "feedback-form.js"), type="module")
     await page.wait_for_timeout(80)

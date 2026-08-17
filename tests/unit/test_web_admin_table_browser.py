@@ -105,7 +105,7 @@ def _render_admin_edit() -> str:
 
 async def _mount(page, html: str) -> None:
     await page.set_content(html)
-    for stylesheet in ("panel.css", "server-ui-foundation.css", "admin-table.css"):
+    for stylesheet in ("panel.css", "server-ui-foundation.css", "admin-shared.css", "admin-table.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
     await page.add_script_tag(path=str(STATIC_DIR / "admin-table.js"), type="module")
 

@@ -5403,7 +5403,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],  # type: ignore[index]
             )
         )
-        return _render_template("feedback.html", extra_scripts=["feedback-form.js"], **page_context)
+        return _render_template(
+            "feedback.html",
+            extra_styles=["admin-shared.css"],
+            extra_scripts=["feedback-form.js"],
+            **page_context,
+        )
 
     @app.post("/app/feedback")
     async def feedback_submit(request: Request):
@@ -8554,6 +8559,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=request.query_params.get("error"),
             ),
             extra_styles=[
+                "admin-shared.css",
                 "admin-overview.css",
                 "admin-feedback.css",
                 "admin-broadcast.css",
@@ -9647,7 +9653,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     error=request.query_params.get("error"),
                     active="history",
                 ),
-                extra_styles=["admin-archive.css"],
+                extra_styles=["admin-shared.css", "admin-archive.css"],
                 extra_scripts=["admin-archive.js"],
                 table_name=table_name,
                 table_title="Архив сообщений",
@@ -9797,7 +9803,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             reference_labels=reference_labels,
             previous_page_href=previous_page_href,
             next_page_href=next_page_href,
-            extra_styles=["admin-table.css"],
+            extra_styles=["admin-shared.css", "admin-table.css"],
             extra_scripts=["admin-table.js"],
         )
 
@@ -9849,7 +9855,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             primary_key_columns=primary_key_columns,
             columns=columns,
             reference_labels=reference_labels,
-            extra_styles=["admin-table.css"],
+            extra_styles=["admin-shared.css", "admin-table.css"],
             extra_scripts=["admin-table.js"],
         )
 

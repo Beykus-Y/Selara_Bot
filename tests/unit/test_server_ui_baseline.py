@@ -114,7 +114,7 @@ def test_server_ui_does_not_increase_inline_debt() -> None:
     assert inline_style_count <= 38
     assert script_templates == INLINE_SCRIPT_TEMPLATES
     assert inline_script_lines <= 0
-    assert panel_css_lines <= 3455
+    assert panel_css_lines <= 2605
 
 
 def test_admin_broadcast_uses_packaged_external_javascript() -> None:

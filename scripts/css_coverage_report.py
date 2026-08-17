@@ -42,6 +42,7 @@ ALL_CSS_FILES = [
     "games.css",
     "landing.css",
     "login-error.css",
+    "admin-shared.css",
     "admin-overview.css",
     "admin-feedback.css",
     "admin-broadcast.css",
