@@ -70,7 +70,7 @@ body.page-landing {
   background: linear-gradient(135deg, var(--landing-accent), #8b5cf6);
   border-color: rgba(168, 85, 247, 0.4);
   color: #000000;
-  box-shadow: 0 8px 20px rgba(168, 85, 247, 0.25);
+  box-shadow: 0 8px 20px var(--landing-accent-glow);
 }
 
 .page-landing .button.primary:hover {
@@ -235,7 +235,7 @@ body.page-landing {
   padding: 4px 10px;
   border-radius: 999px;
   background: rgba(168, 85, 247, 0.14);
-  border: 1px solid rgba(168, 85, 247, 0.25);
+  border: 1px solid var(--landing-accent-glow);
   letter-spacing: 0.04em;
 }
 
@@ -356,7 +356,7 @@ body.page-landing {
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #a855f7;
+  color: var(--landing-accent);
   margin-bottom: 8px;
 }
 

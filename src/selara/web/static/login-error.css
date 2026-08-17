@@ -101,7 +101,7 @@
   background:
     radial-gradient(circle at 12% 10%, rgba(124, 144, 255, 0.12), transparent 28%),
     radial-gradient(circle at 88% 84%, rgba(88, 216, 255, 0.1), transparent 32%),
-    linear-gradient(180deg, #06101c 0%, #07111f 46%, #050b15 100%);
+    linear-gradient(180deg, #06101c 0%, #07111f 46%, var(--bg-0) 100%);
 }
 
 .page-login::before,
