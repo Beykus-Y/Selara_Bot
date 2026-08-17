@@ -760,6 +760,7 @@ def build_landing_context(
 
     return {
         "page_title": "Selara • Лендинг",
+        "page_description": "Selara — Telegram-бот для сообществ: игры, экономика, семьи и социальные механики, управляемые через веб-панель.",
         "page_name": "landing",
         "flash": flash,
         "error": error,

@@ -770,6 +770,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     def _login_context(*, flash: str | None, error: str | None) -> dict[str, object]:
         return {
             "page_title": "Selara • Вход",
+            "page_description": "Войдите в веб-панель Selara без пароля — по одноразовому коду из Telegram-бота.",
             "page_name": "login",
             "extra_styles": ["login-error.css"],
             "top_links": _top_links(
@@ -4492,7 +4493,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 "page": {
                     key: value
                     for key, value in context.items()
-                    if key not in {"page_title", "page_name", "flash", "error", "home_href", "brand_subtitle"}
+                    if key
+                    not in {"page_title", "page_description", "page_name", "flash", "error", "home_href", "brand_subtitle"}
                 },
             }
         )

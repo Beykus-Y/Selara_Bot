@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page_title }}</title>
+  <meta name="description" content="{{ page_description|default('Selara — Telegram-бот для сообществ: игры, экономика, семьи и социальные механики, управляемые через веб-панель.') }}">
   <link rel="stylesheet" href="{{ static_url('panel.css') }}">
   <link rel="stylesheet" href="{{ static_url('server-ui-foundation.css') }}">
   {% for stylesheet in extra_styles|default([]) %}
