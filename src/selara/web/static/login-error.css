@@ -1,0 +1,134 @@
+/* Shared status/error page (error.html). */
+.error-hero {
+  /* `.hero`'s `minmax(0, 1.7fr) auto` sizes the right column to its content,
+     which on this page squeezes the headline into a narrow column and lets the
+     explanation cards sprawl. Give both sides a bounded, balanced share. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+  align-items: start;
+}
+
+.error-copy {
+  min-width: 0;
+}
+
+.error-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgb(124 144 255 / 26%);
+  background: rgb(124 144 255 / 14%);
+  color: var(--violet-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.error-code {
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4vw, 44px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--muted-strong);
+}
+
+.error-actions {
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+
+.error-status-stack {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.error-status-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.error-status-card strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.error-status-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.error-request-id {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.error-request-id code {
+  color: var(--muted-strong);
+}
+
+@media (width <= 860px) {
+  .error-hero {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ========== KEEP LOGIN AND ERROR PAGE STYLES SEPARATED ========== */
+
+.page-login,
+.page-error {
+  background:
+    radial-gradient(circle at 12% 10%, rgba(124, 144, 255, 0.12), transparent 28%),
+    radial-gradient(circle at 88% 84%, rgba(88, 216, 255, 0.1), transparent 32%),
+    linear-gradient(180deg, #06101c 0%, #07111f 46%, #050b15 100%);
+}
+
+.page-login::before,
+.page-error::before {
+  opacity: 0.22;
+}
+
+.page-login .bg-stars,
+.page-error .bg-stars {
+  opacity: 0.18;
+}
+
+.page-login .bg-grid,
+.page-error .bg-grid {
+  opacity: 0.52;
+}
+
+.page-login .topbar,
+.page-error .topbar {
+  border-color: rgba(124, 144, 255, 0.12);
+  background: rgba(7, 12, 24, 0.82);
+  box-shadow: 0 24px 54px rgba(3, 8, 18, 0.24);
+}
+
+.page-login .button,
+.page-error .button {
+  min-height: 46px;
+  border-radius: 16px;
+}
+

@@ -180,7 +180,7 @@ def _render(*, status_code: str, status_label: str, request_id: str | None = Non
 
 async def _mount(page, html: str) -> None:
     await page.set_content(html)
-    for stylesheet in ("panel.css", "server-ui-foundation.css"):
+    for stylesheet in ("panel.css", "server-ui-foundation.css", "login-error.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
 
 

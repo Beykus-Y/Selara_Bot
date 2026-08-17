@@ -771,6 +771,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return {
             "page_title": "Selara • Вход",
             "page_name": "login",
+            "extra_styles": ["login-error.css"],
             "top_links": _top_links(
                 ("/", "Главная", "ghost"),
                 ("/app/docs/user", "Справка", "ghost"),
@@ -1008,6 +1009,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return {
             "page_title": f"Selara • {status_code}",
             "page_name": "error",
+            "extra_styles": ["login-error.css"],
             "top_links": top_links,
             "show_logout": user is not None,
             "flash": flash,
