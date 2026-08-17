@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, pagination %}
 
 {% block content %}
   <div class="panel">
@@ -99,19 +99,7 @@
     </div>
 
     {% if total > limit %}
-      <div class="admin-pagination">
-        {% if previous_page_href %}
-          <a class="button ghost" href="{{ previous_page_href }}">← Назад</a>
-        {% endif %}
-
-        <span class="pagination-info">
-          Страница {{ page }} из {{ ((total + limit - 1) / limit)|int }}
-        </span>
-
-        {% if next_page_href %}
-          <a class="button ghost" href="{{ next_page_href }}">Вперёд →</a>
-        {% endif %}
-      </div>
+      {{ pagination(previous_page_href, next_page_href, page, ((total + limit - 1) / limit)|int) }}
     {% endif %}
 
     <div class="admin-back-link">

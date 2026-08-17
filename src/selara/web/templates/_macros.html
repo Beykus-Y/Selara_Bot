@@ -10,3 +10,15 @@
 {% macro status_badge(base_class, tone, label) -%}
 <span class="{{ base_class }} {{ base_class }}-{{ tone }}">{{ label }}</span>
 {%- endmacro %}
+
+{% macro pagination(previous_href, next_href, page, total_pages) -%}
+<div class="admin-pagination">
+  {%- if previous_href %}
+  <a class="button ghost" href="{{ previous_href }}">← Назад</a>
+  {%- endif %}
+  <span class="pagination-info">Страница {{ page }} из {{ total_pages }}</span>
+  {%- if next_href %}
+  <a class="button ghost" href="{{ next_href }}">Вперёд →</a>
+  {%- endif %}
+</div>
+{%- endmacro %}
