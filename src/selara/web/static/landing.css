@@ -69,7 +69,7 @@ body.page-landing {
 .page-landing .button.primary {
   background: linear-gradient(135deg, var(--landing-accent), #8b5cf6);
   border-color: rgba(168, 85, 247, 0.4);
-  color: #ffffff;
+  color: #000000;
   box-shadow: 0 8px 20px rgba(168, 85, 247, 0.25);
 }
 
