@@ -1,5 +1,8 @@
 from selara.core.config import Settings
+from selara.presentation.commands.command_catalog import GAME_RULES_RU
+from selara.presentation.game_state import GAME_LAUNCHABLE_KINDS
 from selara.presentation.handlers.help import (
+    _HELP_GAMES_ORDER,
     _build_help_keyboard,
     _parse_help_callback_data,
     _resolve_help_payload,
@@ -65,3 +68,22 @@ def test_help_callback_parser_works_for_legacy_format() -> None:
     section, owner_id = _parse_help_callback_data("help:economy")
     assert section == "economy"
     assert owner_id is None
+
+
+def test_help_games_menu_covers_every_launchable_game_kind() -> None:
+    # Regression guard: whoami and zlobcards were both real, launchable game
+    # modes with zero way to reach their rules from /help — missing from
+    # _HELP_GAMES_ORDER entirely, so the in-Telegram games picker silently
+    # never offered them.
+    menu_keys = {key for key, _title in _HELP_GAMES_ORDER}
+    for kind in GAME_LAUNCHABLE_KINDS:
+        assert kind in menu_keys, f"{kind}: launchable but missing from the /help games menu"
+        text, _keyboard = _resolve_help_payload(Settings(BOT_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///tmp/test.db"), section=f"game_{kind}")
+        assert "Правила" in text, f"{kind}: /help game detail text has no rules"
+
+
+def test_help_games_section_keyboard_has_a_button_per_launchable_kind() -> None:
+    keyboard = _build_help_keyboard(section="games", owner_user_id=None)
+    callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
+    for kind in GAME_LAUNCHABLE_KINDS:
+        assert f"help:game_{kind}" in callbacks
