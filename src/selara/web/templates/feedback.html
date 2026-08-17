@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
 
 {% block content %}
   <section class="hero">
@@ -86,7 +87,7 @@
                 <strong>{{ item.title }}</strong>
                 <p class="feedback-meta">Создано {{ item.created_at }}</p>
               </div>
-              <span class="feedback-status feedback-status-{{ item.status_code }}">{{ item.status_label }}</span>
+              {{ status_badge("feedback-status", item.status_code, item.status_label) }}
             </div>
             <p class="feedback-body">{{ item.details }}</p>
             <p class="feedback-note">{{ item.status_note }}</p>

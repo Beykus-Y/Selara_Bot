@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
 
 {% block content %}
   <div class="panel">
@@ -484,7 +485,7 @@
                   <h4 id="feedback-task-title-{{ item.id }}">{{ item.title }}</h4>
                   <p>{{ item.author_label }} · создана {{ item.created_at }}</p>
                 </div>
-                <span class="feedback-status feedback-status-{{ item.status_code }}">{{ item.status_label }}</span>
+                {{ status_badge("feedback-status", item.status_code, item.status_label) }}
               </header>
 
               <p class="admin-feedback-task-body">{{ item.details }}</p>

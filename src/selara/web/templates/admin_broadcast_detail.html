@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
 
 {% macro reaction_text(item) -%}
   {% if item.reaction_type == "custom_emoji" -%}
@@ -123,9 +124,7 @@
                   <strong>{{ item.chat_title }}</strong>
                   <small>chat_id={{ item.chat_id }}</small>
                 </div>
-                <span class="broadcast-delivery-status broadcast-delivery-status-{{ item.status_tone }}">
-                  {{ item.status_label }}
-                </span>
+                {{ status_badge("broadcast-delivery-status", item.status_tone, item.status_label) }}
               </header>
               <dl class="broadcast-delivery-facts">
                 <div><dt>Активность</dt><dd>{{ item.last_activity_at }}</dd></div>

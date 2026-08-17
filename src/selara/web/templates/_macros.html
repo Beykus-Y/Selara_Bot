@@ -6,3 +6,7 @@
   {% endfor %}
 </nav>
 {%- endmacro %}
+
+{% macro status_badge(base_class, tone, label) -%}
+<span class="{{ base_class }} {{ base_class }}-{{ tone }}">{{ label }}</span>
+{%- endmacro %}
