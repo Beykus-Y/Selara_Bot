@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import status_badge %}
+{% from "_macros.html" import status_badge, panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -27,12 +27,7 @@
 
   <section class="grid two-col">
     <article class="panel panel-accent">
-      <div class="panel-head">
-        <div>
-          <h2>Новая заявка</h2>
-          <p class="panel-subtitle">Коротко назовите функцию и ниже опишите, как она должна работать.</p>
-        </div>
-      </div>
+      {{ panel_head("Новая заявка", "Коротко назовите функцию и ниже опишите, как она должна работать.") }}
       <form class="stack-form" method="post" action="/app/feedback" data-feedback-form>
         <label class="field">
           <span>Что добавить</span>
@@ -47,12 +42,7 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Как это работает</h2>
-          <p class="panel-subtitle">Эта страница доступна только после обычной авторизации через Telegram.</p>
-        </div>
-      </div>
+      {{ panel_head("Как это работает", "Эта страница доступна только после обычной авторизации через Telegram.") }}
       <div class="list-stack compact">
         <div class="security-card">
           <strong>Заявка попадает в админку</strong>
@@ -71,13 +61,9 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Мои заявки</h2>
-        <p class="panel-subtitle">История отправленных предложений и текущий статус каждой идеи.</p>
-      </div>
+    {% call panel_head("Мои заявки", "История отправленных предложений и текущий статус каждой идеи.") %}
       <span class="panel-tag">{{ feedback_items|length }}</span>
-    </div>
+    {% endcall %}
     {% if feedback_items %}
       <div class="feedback-list">
         {% for item in feedback_items %}

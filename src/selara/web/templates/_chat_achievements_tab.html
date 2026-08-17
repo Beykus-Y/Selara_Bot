@@ -1,13 +1,9 @@
+  {% from "_macros.html" import panel_head %}
   {% if active_tab == "achievements" %}
   <section class="grid two-col">
     {% for section in achievement_sections %}
       <article class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>{{ section.title }}</h2>
-            <p class="panel-subtitle">Локальные достижения внутри этой группы.</p>
-          </div>
-        </div>
+        {{ panel_head(section.title, "Локальные достижения внутри этой группы.") }}
         {% if section.rows %}
           <div class="list-stack compact">
             {% for row in section.rows %}

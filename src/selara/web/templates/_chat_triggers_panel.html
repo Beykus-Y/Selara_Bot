@@ -1,11 +1,7 @@
+  {% from "_macros.html" import panel_head %}
   {% if active_tab == "settings" and can_manage_settings %}
   <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Смарт-триггеры</h2>
-        <p class="panel-subtitle">Автоответы по точному совпадению, вхождению фразы и началу сообщения прямо из панели.</p>
-      </div>
-    </div>
+    {{ panel_head("Смарт-триггеры", "Автоответы по точному совпадению, вхождению фразы и началу сообщения прямо из панели.") }}
 
     <article class="setting-card">
       <div class="setting-head">

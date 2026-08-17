@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -21,9 +22,7 @@
 
   <section class="docs-layout">
     <aside class="panel docs-nav">
-      <div class="panel-head">
-        <h2>Навигация</h2>
-      </div>
+      {{ panel_head("Навигация") }}
       <div class="docs-search-box">
         <label class="sr-only" for="admin-docs-search-input">Поиск по документации</label>
         <input
@@ -67,12 +66,7 @@
 
     <div class="docs-content">
       <section class="panel" id="docs-trigger-types">
-        <div class="panel-head">
-          <div>
-            <h2>Типы совпадения смарт-триггеров</h2>
-            <p class="panel-subtitle">Те же значения используются в формах панели, но показываются на русском.</p>
-          </div>
-        </div>
+        {{ panel_head("Типы совпадения смарт-триггеров", "Те же значения используются в формах панели, но показываются на русском.") }}
         <div class="docs-card-grid">
           {% for item in trigger_match_types %}
             <article class="docs-card">
@@ -87,12 +81,7 @@
       </section>
 
       <section class="panel" id="docs-trigger-variables">
-        <div class="panel-head">
-          <div>
-            <h2>Переменные шаблонов</h2>
-            <p class="panel-subtitle">Этот список общий для смарт-триггеров и кастомных RP-действий. Для буквальных фигурных скобок используйте {{ '{{' }} и {{ '}}' }}.</p>
-          </div>
-        </div>
+        {{ panel_head("Переменные шаблонов", "Этот список общий для смарт-триггеров и кастомных RP-действий. Для буквальных фигурных скобок используйте " ~ '{{' ~ " и " ~ '}}' ~ ".") }}
         {% for group in trigger_template_variable_groups %}
           <div class="panel-head">
             <div>
@@ -117,12 +106,7 @@
 
       {% for section in docs_sections %}
         <section class="panel docs-section" id="{{ section.anchor }}" data-docs-search-section>
-          <div class="panel-head">
-            <div>
-              <h2>{{ section.title }}</h2>
-              <p class="panel-subtitle">{{ section.summary }}</p>
-            </div>
-          </div>
+          {{ panel_head(section.title, section.summary) }}
           <div class="docs-card-grid">
             {% for item in section["items"] %}
               <article class="docs-card" data-docs-search-card data-docs-search-text="{{ item.search_text }}">

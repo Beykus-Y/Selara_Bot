@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -40,12 +41,7 @@
 
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Ферма</h2>
-          <p class="panel-subtitle">Перекидывайте семена на пустые грядки, расходники на занятые.</p>
-        </div>
-      </div>
+      {{ panel_head("Ферма", "Перекидывайте семена на пустые грядки, расходники на занятые.") }}
       <div class="economy-plot-grid" data-plot-grid>
         {% for plot in plot_cards %}
           <button
@@ -64,12 +60,7 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Инвентарь</h2>
-          <p class="panel-subtitle">На телефоне сначала тапните по предмету, затем по цели применения.</p>
-        </div>
-      </div>
+      {{ panel_head("Инвентарь", "На телефоне сначала тапните по предмету, затем по цели применения.") }}
       <div class="economy-inventory-grid" data-inventory-grid>
         {% for item in inventory_items %}
           <button
@@ -93,12 +84,7 @@
 
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Выставить лот</h2>
-          <p class="panel-subtitle">Полностью веб-интерфейс: фильтры, покупка и снятие лотов с рынка.</p>
-        </div>
-      </div>
+      {{ panel_head("Выставить лот", "Полностью веб-интерфейс: фильтры, покупка и снятие лотов с рынка.") }}
       <form class="stack-form" data-market-create-form>
         <select name="item_code" aria-label="Предмет для продажи">
           {% for item in inventory_items %}
@@ -112,12 +98,7 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>История цен</h2>
-          <p class="panel-subtitle">Сделки за последние 7 дней.</p>
-        </div>
-      </div>
+      {{ panel_head("История цен", "Сделки за последние 7 дней.") }}
       <div class="controls-row">
         <select id="trade-item-select" aria-label="Предмет для истории цен"></select>
       </div>
@@ -126,11 +107,7 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Рынок</h2>
-        <p class="panel-subtitle">Фильтруйте семена и расходники, сортируйте предложения по цене.</p>
-      </div>
+    {% call panel_head("Рынок", "Фильтруйте семена и расходники, сортируйте предложения по цене.") %}
       <div class="top-actions">
         <button type="button" class="button subtle small" data-market-filter="all">Все</button>
         <button type="button" class="button ghost small" data-market-filter="seeds">Только семена</button>
@@ -138,7 +115,7 @@
         <button type="button" class="button ghost small" data-market-sort="asc">Цена ↑</button>
         <button type="button" class="button ghost small" data-market-sort="desc">Цена ↓</button>
       </div>
-    </div>
+    {% endcall %}
     <div class="economy-market-grid" id="market-grid">
       {% for row in market_rows %}
         <article

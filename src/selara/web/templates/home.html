@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -26,10 +27,9 @@
 
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <h2>Админ-группы</h2>
+      {% call panel_head("Админ-группы") %}
         <span class="panel-tag">{{ admin_groups|length }}</span>
-      </div>
+      {% endcall %}
       {% if admin_groups %}
         <div class="list-stack">
           {% for group in admin_groups %}
@@ -48,10 +48,9 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <h2>Недавние группы</h2>
+      {% call panel_head("Недавние группы") %}
         <span class="panel-tag">{{ activity_groups|length }}</span>
-      </div>
+      {% endcall %}
       {% if activity_groups %}
         <div class="list-stack">
           {% for group in activity_groups %}
@@ -72,9 +71,7 @@
 
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <h2>{{ global_dashboard.title }}</h2>
-      </div>
+      {{ panel_head(global_dashboard.title) }}
       {% if global_dashboard.empty_text %}
         <p class="empty-text">{{ global_dashboard.empty_text }}</p>
       {% else %}
@@ -93,9 +90,7 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <h2>Безопасность</h2>
-      </div>
+      {{ panel_head("Безопасность") }}
       <div class="list-stack compact">
         {% for item in security_items %}
           <div class="security-card">

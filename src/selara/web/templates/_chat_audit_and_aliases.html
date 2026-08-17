@@ -1,12 +1,9 @@
+  {% from "_macros.html" import panel_head %}
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Журнал аудита</h2>
-          <p class="panel-subtitle">Свежие действия бота и админов в этой группе.</p>
-        </div>
+      {% call panel_head("Журнал аудита", "Свежие действия бота и админов в этой группе.") %}
         <a class="button ghost small" href="/app/chat/{{ chat_id }}/audit">Открыть всю ленту</a>
-      </div>
+      {% endcall %}
       {% if audit_rows %}
         <div class="list-stack compact">
           {% for row in audit_rows[:10] %}
@@ -26,12 +23,7 @@
 
     {% if active_tab == "settings" and can_manage_settings %}
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Алиасы команд</h2>
-          <p class="panel-subtitle">Веб-редактор слоя алиасов без кавычек и ручного ввода в чате.</p>
-        </div>
-      </div>
+      {{ panel_head("Алиасы команд", "Веб-редактор слоя алиасов без кавычек и ручного ввода в чате.") }}
       <div class="settings-grid">
         <article
           class="setting-card"

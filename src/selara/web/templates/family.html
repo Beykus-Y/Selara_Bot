@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -33,35 +34,20 @@
   {% if family_nodes %}
   <section class="grid two-col family-layout">
     <article class="panel family-scene-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Граф связей</h2>
-          <p class="panel-subtitle">Клик по узлу обновляет правую панель. Клик по имени переводит фокус на этого участника.</p>
-        </div>
-      </div>
+      {{ panel_head("Граф связей", "Клик по узлу обновляет правую панель. Клик по имени переводит фокус на этого участника.") }}
       <div class="family-scene" id="family-scene">
         <div class="family-scene-inner" id="family-scene-inner"></div>
       </div>
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Связи узла</h2>
-          <p class="panel-subtitle">Роли и связи относительно текущего фокуса.</p>
-        </div>
-      </div>
+      {{ panel_head("Связи узла", "Роли и связи относительно текущего фокуса.") }}
       <div class="list-stack compact" id="family-side-list"></div>
     </article>
   </section>
 
   <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Участники в графе</h2>
-        <p class="panel-subtitle">Быстрый переход на другой центр дерева.</p>
-      </div>
-    </div>
+    {{ panel_head("Участники в графе", "Быстрый переход на другой центр дерева.") }}
     <div class="token-cloud">
       {% for node in family_nodes %}
         <a class="token-chip" href="{{ node.href }}">{{ node.label }}</a>

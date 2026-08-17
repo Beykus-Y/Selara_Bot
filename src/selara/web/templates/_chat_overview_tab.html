@@ -1,4 +1,4 @@
-  {% from "_macros.html" import tabs %}
+  {% from "_macros.html" import tabs, panel_head %}
   {% if active_tab == "overview" %}
   <section class="metrics-grid">
     {% for metric in metrics %}
@@ -12,12 +12,7 @@
 
   <section class="overview-live-grid">
     <article class="panel overview-activity-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Активность по дням</h2>
-          <p class="panel-subtitle">Живой срез за последние 7 дней без ручного обновления страницы.</p>
-        </div>
-      </div>
+      {{ panel_head("Активность по дням", "Живой срез за последние 7 дней без ручного обновления страницы.") }}
       <div class="activity-chart" data-chat-activity-chart>
         {% for _ in range(7) %}
           <div class="activity-bar is-skeleton">
@@ -30,12 +25,7 @@
     </article>
 
     <article class="panel overview-callout-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Герой дня</h2>
-          <p class="panel-subtitle">Самый активный участник за 24 часа.</p>
-        </div>
-      </div>
+      {{ panel_head("Герой дня", "Самый активный участник за 24 часа.") }}
       <div class="overview-callout" data-hero-of-day>
         <div class="skeleton skeleton-title"></div>
         <div class="skeleton skeleton-text"></div>
@@ -44,12 +34,7 @@
     </article>
 
     <article class="panel overview-callout-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Богач дня</h2>
-          <p class="panel-subtitle">Самый крупный баланс в активном режиме экономики чата.</p>
-        </div>
-      </div>
+      {{ panel_head("Богач дня", "Самый крупный баланс в активном режиме экономики чата.") }}
       <div class="overview-callout" data-richest-of-day>
         <div class="skeleton skeleton-title"></div>
         <div class="skeleton skeleton-text"></div>
@@ -59,13 +44,9 @@
   </section>
 
   <section class="panel chat-hub-panel" data-chat-overview-root data-chat-id="{{ chat_id }}">
-    <div class="panel-head">
-      <div>
-        <h2>Полный лидерборд</h2>
-        <p class="panel-subtitle">Пагинация по 50 строк, поиск по имени, username и Telegram ID.</p>
-      </div>
+    {% call panel_head("Полный лидерборд", "Пагинация по 50 строк, поиск по имени, username и Telegram ID.") %}
       <button type="button" class="button ghost small" data-lb-find-me>Найти меня</button>
-    </div>
+    {% endcall %}
 
     <div class="chat-hub-toolbar">
       {{ tabs(
@@ -127,9 +108,7 @@
   <section class="grid two-col">
     {% for panel in dashboard_panels %}
       <article class="panel">
-        <div class="panel-head">
-          <h2>{{ panel.title }}</h2>
-        </div>
+        {{ panel_head(panel.title) }}
         {% if panel.empty_text %}
           <p class="empty-text">{{ panel.empty_text }}</p>
         {% else %}
@@ -151,9 +130,7 @@
 
   <section class="grid two-col">
     <article class="panel">
-      <div class="panel-head">
-        <h2>Ваш доступ</h2>
-      </div>
+      {{ panel_head("Ваш доступ") }}
       <div class="list-stack compact">
         {% for row in access_rows %}
           <div class="stat-row">
@@ -168,9 +145,7 @@
     </article>
 
     <article class="panel">
-      <div class="panel-head">
-        <h2>Роли и ранги команд</h2>
-      </div>
+      {{ panel_head("Роли и ранги команд") }}
       <h3 class="subheading">Роли</h3>
       <div class="list-stack compact">
         {% for role in roles %}
@@ -206,12 +181,7 @@
   <section class="leaderboard-grid">
     {% for board in leaderboards %}
       <article class="panel leaderboard-panel accent-{{ board.accent }}">
-        <div class="panel-head">
-          <div>
-            <h2>{{ board.title }}</h2>
-            <p class="panel-subtitle">{{ board.subtitle }}</p>
-          </div>
-        </div>
+        {{ panel_head(board.title, board.subtitle) }}
         {% if board.rows %}
           <div class="list-stack compact">
             {% for row in board.rows %}

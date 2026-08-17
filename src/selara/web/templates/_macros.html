@@ -31,6 +31,20 @@
 </div>
 {%- endmacro %}
 
+{% macro panel_head(title, subtitle=none) -%}
+<div class="panel-head">
+  <div>
+    <h2>{{ title }}</h2>
+    {%- if subtitle %}
+    <p class="panel-subtitle">{{ subtitle }}</p>
+    {%- endif %}
+  </div>
+  {%- if caller is defined %}
+  {{ caller() }}
+  {%- endif %}
+</div>
+{%- endmacro %}
+
 {% macro confirm_dialog(title, question_prefix, question_suffix, cancel_label, confirm_label) -%}
 <dialog class="confirm-dialog" id="delete-dialog">
   <form method="post" class="confirm-dialog-form" id="delete-form">

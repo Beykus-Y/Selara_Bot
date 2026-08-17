@@ -1,12 +1,9 @@
+  {% from "_macros.html" import panel_head %}
   {% if active_tab == "settings" and can_manage_settings %}
   <section class="panel settings-panel">
-    <div class="panel-head">
-      <div>
-        <h2>Настройки чата</h2>
-        <p class="panel-subtitle">Редактирование вынесено в веб-форму, а не в огромный текстовый блок.</p>
-      </div>
+    {% call panel_head("Настройки чата", "Редактирование вынесено в веб-форму, а не в огромный текстовый блок.") %}
       <a class="button ghost small" href="{{ admin_docs_url }}" data-docs-link>Документация админа</a>
-    </div>
+    {% endcall %}
     <div class="banner banner-{{ manage_settings_tone }}">{{ manage_settings_note }}</div>
 
     <div class="settings-summary-grid">

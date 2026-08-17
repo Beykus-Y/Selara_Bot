@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
 
 {% block content %}
   <section class="hero">
@@ -27,13 +28,9 @@
   <section class="grid two-col">
     {% for section in achievement_sections %}
       <article class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>{{ section.title }}</h2>
-            <p class="panel-subtitle">Глобальные достижения аккаунта, не привязанные к одной группе.</p>
-          </div>
+        {% call panel_head(section.title, "Глобальные достижения аккаунта, не привязанные к одной группе.") %}
           <span class="panel-tag">{{ section.rows|length }}</span>
-        </div>
+        {% endcall %}
         {% if section.rows %}
           <div class="list-stack compact">
             {% for row in section.rows %}
@@ -57,12 +54,7 @@
     {% endfor %}
 
     <article class="panel">
-      <div class="panel-head">
-        <div>
-          <h2>Как открываются</h2>
-          <p class="panel-subtitle">Часть достижений приходит из активности, часть из социальных и семейных механик.</p>
-        </div>
-      </div>
+      {{ panel_head("Как открываются", "Часть достижений приходит из активности, часть из социальных и семейных механик.") }}
       <div class="list-stack compact">
         <div class="security-card">
           <strong>Сообщения и стрики</strong>
