@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from selara.core.config import Settings
-from selara.presentation.commands.command_catalog import GAME_RULES_RU
+from selara.presentation.commands.command_catalog import GAME_RULES_RU, get_command_spec
 
 router = Router(name="help")
 
@@ -33,32 +33,51 @@ _HELP_GAMES_ORDER: tuple[tuple[str, str], ...] = (
     ("bunker", "🏚 Бункер"),
 )
 
+def _base_words(*keys: str) -> list[str]:
+    """Base command words (e.g. "/farm plant <культура>" -> "/farm") for a
+    catalog spec's syntax, deduplicated and in catalog order. Pulls the
+    actual syntax from command_catalog.py instead of retyping it, so a
+    command's real argument shape can change without this list drifting —
+    only the base word itself is shown here, matching help.py's established
+    terse-overview style (full argument syntax lives in USER_GUIDE.md/
+    user_docs.py, not in the /help quick menu).
+    """
+    seen: list[str] = []
+    for key in keys:
+        for entry in get_command_spec(key).syntax:
+            base = entry.split()[0]
+            if base.startswith("/") and base not in seen:
+                seen.append(base)
+    return seen
+
+
+def _code_join(words: list[str]) -> str:
+    return ", ".join(f"<code>{word}</code>" for word in words)
+
+
 _HELP_SECTION_TEXT: dict[str, str] = {
     "stats": (
         "<b>Статистика</b>\n"
-        "• <code>/me</code> — профиль в чате\n"
-        "• <code>/rep</code> — карма и активность\n"
-        "• <code>/top [N]</code> — топ пользователей за всё время по сообщениям\n"
-        "• <code>/active [N]</code> — топ по активности\n"
-        "• <code>/top karma [N]</code> — топ по карме\n"
-        "• <code>/top гибрид [N]</code> — гибридный топ\n"
-        "• <code>/top неделя|сутки|час|месяц [N|&lt;N]</code> — топ или список ниже порога за период\n"
-        "• <code>/lastseen [@username|user_id]</code> — когда был активен"
+        f"• {_code_join(_base_words('stats_profile'))} — профиль, карма и своё описание\n"
+        f"• {_code_join(_base_words('stats_leaderboards'))} — топ пользователей и активности "
+        "(<code>karma</code>, <code>гибрид</code>, <code>неделя|сутки|час|месяц</code>)\n"
+        f"• {_code_join(_base_words('misc_lastseen'))} — когда был активен\n"
+        f"• {_code_join(_base_words('stats_achievements'))} — достижения и награды"
     ),
     "games": (
         "<b>Игры</b>\n"
         "Выберите конкретную игру кнопками ниже — покажу описание и правила.\n"
-        "• <code>/game</code> — открыть меню игр\n"
-        "• <code>/role [game_id]</code> — узнать свою роль (для скрытых игр)\n"
+        f"• {_code_join(_base_words('games_lobby'))} — открыть меню игр\n"
+        f"• {_code_join(_base_words('games_role_reveal'))} — узнать свою роль (для скрытых игр)\n"
         "• Лобби запускает создатель или участник с правом управления играми"
     ),
     "economy": (
         "<b>Экономика</b>\n"
-        "• <code>/eco</code> — панель\n"
-        "• <code>/farm</code>, <code>/shop</code>, <code>/inventory</code>\n"
-        "• <code>/tap</code>, <code>/daily</code>, <code>/lottery</code>\n"
-        "• <code>/market</code>, <code>/pay</code>, <code>/growth</code>\n"
-        "• Кнопки панели персональные: другим нужно открыть свою через <code>/eco</code>"
+        f"• {_code_join(_base_words('economy_panel'))}\n"
+        f"• {_code_join(_base_words('economy_farm'))}\n"
+        f"• {_code_join(_base_words('economy_shop_inventory_craft'))}\n"
+        f"• {_code_join(_base_words('economy_market_transfer_auction'))}\n"
+        f"• Кнопки панели персональные: другим нужно открыть свою через {_code_join(_base_words('economy_panel')[:1])}"
     ),
     "relationships": (
         "<b>Отношения</b>\n"
@@ -66,11 +85,11 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• <code>мой брак</code> — отдельная карточка активного брака\n"
         "• <code>браки</code> — все активные браки беседы\n"
         "• <code>/pair @user</code> или <code>предложить встречаться @user</code> — предложение пары\n"
-        "• <code>/breakup</code> — расстаться\n"
+        f"• {_code_join(_base_words('relationships_end')[:1])} — расстаться\n"
         "• <code>/marry @user</code> или <code>предложить брак @user</code> — предложение брака\n"
-        "• <code>/divorce</code> — развод\n"
-        "• Для пары: <code>/care</code>, <code>/date</code>, <code>/gift</code>, <code>/support</code>, <code>/flirt</code>, <code>/surprise</code>\n"
-        "• Для брака: <code>/love</code>, <code>/care</code>, <code>/date</code>, <code>/gift</code>, <code>/support</code>, <code>/vow</code>"
+        f"• {_code_join(_base_words('relationships_end')[1:2])} — развод\n"
+        f"• Для пары: {_code_join(_base_words('relationships_pair_actions'))}\n"
+        f"• Для брака: {_code_join(_base_words('relationships_marriage_actions'))}"
     ),
     "social": (
         "<b>Социальное</b>\n"
@@ -84,20 +103,20 @@ _HELP_SECTION_TEXT: dict[str, str] = {
     ),
     "moderation": (
         "<b>Модерация</b>\n"
-        "• <code>/pred</code>, <code>/warn</code>, <code>/unwarn</code>\n"
-        "• <code>/ban</code>, <code>/unban</code>, <code>/modstat</code>\n"
-        "• <code>/roles</code>, <code>/roleadd</code>, <code>/roleremove</code>\n"
-        "• <code>/roledefs</code>, <code>/roletemplates</code>, <code>/rolecreate</code>\n"
+        f"• {_code_join(_base_words('admin_moderation_actions'))}\n"
+        f"• {_code_join(_base_words('misc_public_service_commands')[2:4])}\n"
+        f"• {_code_join(_base_words('admin_role_assignment'))}\n"
+        f"• {_code_join(_base_words('admin_role_definitions') + _base_words('admin_role_custom')[:1])}\n"
         "• Без <code>/</code>: пред / варн / снять пред / снять варн / бан / снять бан — по reply или с <code>@username/id</code>"
     ),
     "settings": (
         "<b>Настройки и алиасы</b>\n"
-        "• <code>/settings</code> — текущие настройки\n"
-        "• <code>/setcfg key value</code> — изменить настройку\n"
-        "• <code>/setrank</code>, <code>/ranks</code> — ранги доступа команд\n"
-        "• <code>/setalias</code>, <code>/aliases</code>, <code>/unalias</code>, <code>/aliasmode</code>\n"
-        "• <code>/settrigger</code>, <code>/triggers</code>, <code>/deltrigger</code>, <code>/triggervars</code>\n"
-        "• <code>/rpadd</code>, <code>/rps</code>, <code>/rpdel</code> — кастомные reply-действия с шаблонами\n"
+        f"• {_code_join(_base_words('misc_public_service_commands')[1:2])} — текущие настройки\n"
+        f"• {_code_join(_base_words('admin_settings_tools')[:1])} key value — изменить настройку\n"
+        f"• {_code_join(_base_words('admin_command_ranks'))} — ранги доступа команд\n"
+        f"• {_code_join(_base_words('admin_aliases'))}\n"
+        f"• {_code_join(_base_words('admin_smart_triggers'))}\n"
+        f"• {_code_join(_base_words('admin_custom_rp_actions'))} — кастомные reply-действия с шаблонами\n"
         "• ЛС-панель: <code>/start</code> в личке\n"
         "• С телефона: Mini App из <code>/start</code> в личке\n"
         "• С ПК: <code>/login</code> в личке выдаёт одноразовый код для /app"

@@ -3,6 +3,7 @@ from selara.presentation.commands.command_catalog import GAME_RULES_RU
 from selara.presentation.game_state import GAME_LAUNCHABLE_KINDS
 from selara.presentation.handlers.help import (
     _HELP_GAMES_ORDER,
+    _HELP_SECTIONS_ORDER,
     _build_help_keyboard,
     _parse_help_callback_data,
     _resolve_help_payload,
@@ -87,3 +88,14 @@ def test_help_games_section_keyboard_has_a_button_per_launchable_kind() -> None:
     callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
     for kind in GAME_LAUNCHABLE_KINDS:
         assert f"help:game_{kind}" in callbacks
+
+
+def test_every_help_section_renders_non_empty_command_text() -> None:
+    # Sub-slice 6b: section bodies are now built from command_catalog.py
+    # syntax at import time instead of hand-typed literals. This is the
+    # basic sanity net for that construction — every section still resolves
+    # to real, non-broken text with at least one <code> command reference.
+    for key, _title in _HELP_SECTIONS_ORDER:
+        text, keyboard = _resolve_help_payload(Settings(BOT_TOKEN="token", DATABASE_URL="sqlite+aiosqlite:///tmp/test.db"), section=key)
+        assert "<code>" in text, f"{key}: no command reference rendered"
+        assert keyboard.inline_keyboard
