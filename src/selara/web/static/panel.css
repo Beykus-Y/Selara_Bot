@@ -46,6 +46,18 @@
   --z-sticky: 20;
   --z-overlay: 70;
   --z-modal: 1000;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+  --leading-tight: 1.1;
+  --leading-snug: 1.2;
+  --leading-base: 1.5;
+  --leading-relaxed: 1.65;
   --gap: clamp(16px, 2vw, 22px);
   --content-width: 1320px;
 }
