@@ -356,11 +356,16 @@ async def test_archive_jump_target_scrolls_highlights_and_focuses(reduced_motion
             await target.wait_for(state="visible")
             assert "is-jump-target" in (await target.get_attribute("class") or "")
             assert await page.evaluate("document.activeElement.id") == "archive-msg-3"
-            await page.wait_for_timeout(400)
-            assert await target.evaluate(
-                "element => { const r = element.getBoundingClientRect(); "
-                "return r.top >= 0 && r.bottom <= window.innerHeight; }"
-            )
+            in_view = False
+            for _ in range(20):
+                in_view = await target.evaluate(
+                    "element => { const r = element.getBoundingClientRect(); "
+                    "return r.top >= 0 && r.bottom <= window.innerHeight; }"
+                )
+                if in_view:
+                    break
+                await page.wait_for_timeout(100)
+            assert in_view, "target did not scroll into view within 2s"
             await page.wait_for_timeout(2700)
             assert "is-jump-target" not in (await target.get_attribute("class") or "")
             assert not await page.evaluate(
