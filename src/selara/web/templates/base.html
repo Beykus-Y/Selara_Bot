@@ -23,7 +23,7 @@
     <div class="bg-layer bg-party-confetti"></div>
   {% endif %}
 
-  <main id="main-content" class="shell" tabindex="-1">
+  <div class="shell">
     <header class="topbar">
       <a class="brand" href="{{ home_href|default('/app') }}">
         <span class="brand-mark"></span>
@@ -44,15 +44,17 @@
       </nav>
     </header>
 
-    {% if flash %}
-      <div class="banner banner-ok" role="status">{{ flash }}</div>
-    {% endif %}
-    {% if error %}
-      <div class="banner banner-error" role="alert">{{ error }}</div>
-    {% endif %}
+    <main id="main-content" tabindex="-1">
+      {% if flash %}
+        <div class="banner banner-ok" role="status">{{ flash }}</div>
+      {% endif %}
+      {% if error %}
+        <div class="banner banner-error" role="alert">{{ error }}</div>
+      {% endif %}
 
-    {% block content %}{% endblock %}
-  </main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   {% for script in extra_scripts|default([]) %}
     <script type="module" src="{{ static_url(script) }}"></script>
