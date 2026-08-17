@@ -18,6 +18,7 @@ EXPECTED_TEMPLATES = {
     "_chat_settings_panel.html",
     "_chat_triggers_panel.html",
     "_games_dashboard.html",
+    "_games_mode_bredovukha.html",
     "_games_mode_mafia.html",
     "_games_mode_spy.html",
     "_games_mode_whoami.html",
@@ -68,6 +69,7 @@ def test_full_page_templates_share_the_base_layout() -> None:
     standalone_templates = {
         "base.html",
         "_games_dashboard.html",
+        "_games_mode_bredovukha.html",
         "_games_mode_mafia.html",
         "_games_mode_spy.html",
         "_games_mode_whoami.html",
