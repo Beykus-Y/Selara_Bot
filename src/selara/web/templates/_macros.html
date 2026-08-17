@@ -22,3 +22,25 @@
   {%- endif %}
 </div>
 {%- endmacro %}
+
+{% macro tabs(items, aria_label, data_attr) -%}
+<div class="mode-switch" role="tablist" aria-label="{{ aria_label }}">
+  {%- for item in items %}
+  <button type="button" {% if item.active %}class="is-active" {% endif %}role="tab" aria-selected="{{ 'true' if item.active else 'false' }}" data-{{ data_attr }}="{{ item.value }}">{{ item.label }}</button>
+  {%- endfor %}
+</div>
+{%- endmacro %}
+
+{% macro confirm_dialog(title, question_prefix, question_suffix, cancel_label, confirm_label) -%}
+<dialog class="confirm-dialog" id="delete-dialog">
+  <form method="post" class="confirm-dialog-form" id="delete-form">
+    <div id="delete-hidden-fields"></div>
+    <h3>{{ title }}</h3>
+    <p>{{ question_prefix }} <strong data-delete-target></strong>{{ question_suffix }}</p>
+    <div class="confirm-dialog-actions">
+      <button type="button" class="button ghost" data-delete-cancel>{{ cancel_label }}</button>
+      <button type="submit" class="button danger">{{ confirm_label }}</button>
+    </div>
+  </form>
+</dialog>
+{%- endmacro %}

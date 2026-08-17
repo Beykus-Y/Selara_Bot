@@ -14,7 +14,8 @@ TEMPLATE_DIR = ROOT / "src" / "selara" / "web" / "templates"
 def _render_macro(source: str, **context: object) -> str:
     environment = create_template_environment(template_dir=TEMPLATE_DIR)
     template = environment.from_string(
-        '{% from "_macros.html" import breadcrumb, status_badge, pagination %}\n' + source
+        '{% from "_macros.html" import breadcrumb, status_badge, pagination, tabs, confirm_dialog %}\n'
+        + source
     )
     return template.render(**context)
 
@@ -94,3 +95,38 @@ def test_pagination_shows_both_links_on_a_middle_page() -> None:
     assert "← Назад" in html
     assert "Вперёд →" in html
     assert "Страница 2 из 3" in html
+
+
+def test_tabs_marks_exactly_one_tab_active_and_uses_the_given_data_attr() -> None:
+    html = _render_macro(
+        "{{ tabs(items, aria_label, data_attr) }}",
+        items=[
+            {"value": "mix", "label": "Гибрид", "active": True},
+            {"value": "activity", "label": "Сообщения", "active": False},
+        ],
+        aria_label="Режим рейтинга",
+        data_attr="lb-mode",
+    )
+    assert 'role="tablist"' in html
+    assert 'aria-label="Режим рейтинга"' in html
+    assert html.count('class="is-active"') == 1
+    assert 'aria-selected="true"' in html
+    assert 'aria-selected="false"' in html
+    assert 'data-lb-mode="mix"' in html
+    assert 'data-lb-mode="activity"' in html
+
+
+def test_confirm_dialog_wraps_the_target_placeholder_in_the_question() -> None:
+    html = _render_macro(
+        "{{ confirm_dialog(title, prefix, suffix, cancel_label, confirm_label) }}",
+        title="Подтверждение удаления",
+        prefix="Вы уверены, что хотите удалить запись",
+        suffix="? Это действие нельзя отменить.",
+        cancel_label="Отмена",
+        confirm_label="Удалить",
+    )
+    assert 'id="delete-dialog"' in html
+    assert 'id="delete-form"' in html
+    assert 'id="delete-hidden-fields"' in html
+    assert "<strong data-delete-target></strong>" in html
+    assert "Вы уверены, что хотите удалить запись <strong data-delete-target></strong>? Это действие нельзя отменить." in html
