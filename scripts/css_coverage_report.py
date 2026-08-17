@@ -29,6 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests" / "unit"))
 
 from selara.web.rendering import create_template_environment  # noqa: E402
 
@@ -134,6 +135,60 @@ async def _app_rendered_pages() -> list[tuple[str, str]]:
         ("games_create_grid", games_create),
         ("games_active_whoami", games_active),
         ("landing", landing),
+    ]
+
+
+async def _family_page() -> str:
+    """family.html needs its own repo mocking (has_permission + a distinct
+    activity-repo shape) -- reuse the fixtures already built for
+    test_web_family_routes.py instead of re-deriving them."""
+    import httpx
+    from unittest import mock
+
+    import test_web_family_routes as family_test
+
+    state = family_test.FamilyState(
+        settings=family_test._settings(),
+        user=family_test.UserSnapshot(
+            telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False
+        ),
+        activity_groups=[family_test._overview(family_test.CHAT_ID, "Клуб настолок")],
+        bundle=family_test.FamilyBundle(
+            subject_user_id=77, spouse_user_id=None,
+            parents=(), grandparents=(), step_parents=(), siblings=(), children=(), pets=(), owners=(),
+        ),
+        graph=family_test.FamilyGraph(focus_user_id=77, node_user_ids=(), edges=()),
+    )
+
+    with mock.patch.object(
+        family_test.web_app_module, "SqlAlchemyActivityRepository", lambda session: family_test.FakeFamilyActivityRepo(state)
+    ), mock.patch.object(
+        family_test.web_app_module, "SqlAlchemyWebAuthRepository", lambda session: family_test.FakeWebAuthRepo(state)
+    ), mock.patch.object(family_test.web_app_module, "has_permission", family_test._has_permission):
+        app = family_test.web_app_module.create_web_app(
+            settings=state.settings, session_factory=family_test.DummySessionFactory()
+        )
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+        client.cookies.set(state.settings.web_session_cookie_name, "session-token")
+        html = (await client.get(f"/app/family/{family_test.CHAT_ID}")).text
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+    return html
+
+
+def _direct_render_pages() -> list[tuple[str, str]]:
+    """Pages with an existing standalone _render()-style fixture in a test
+    module -- imported and reused rather than re-deriving contexts."""
+    import test_web_chat_audit_browser as audit_test
+    import test_web_chat_overview_browser as chat_test
+    import test_web_economy_browser as economy_test
+
+    return [
+        ("economy", economy_test._render()),
+        ("chat_overview", chat_test._render(active_tab="overview")),
+        ("chat_achievements", chat_test._render(active_tab="achievements")),
+        ("chat_settings", chat_test._render(active_tab="settings")),
+        ("audit", audit_test._render_audit()),
     ]
 
 
@@ -268,7 +323,12 @@ MATCH_SELECTORS_JS = """
 async def main() -> None:
     from playwright.async_api import async_playwright
 
-    pages = _fixture_pages() + await _app_rendered_pages()
+    pages = (
+        _fixture_pages()
+        + await _app_rendered_pages()
+        + _direct_render_pages()
+        + [("family", await _family_page())]
+    )
     # Keyed by selector text, not index -- some pages can legitimately
     # observe a slightly different rule count (e.g. a stylesheet with a
     # duplicate selector counted once vs twice depending on parser state),
