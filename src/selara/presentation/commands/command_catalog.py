@@ -531,6 +531,22 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        key="admin_role_step",
+        category="admin",
+        dispatch_kind="natural_language",
+        syntax=("reply + повысить", "reply + понизить"),
+        title_ru="Повышение и понижение роли на шаг",
+        description_ru=(
+            "Меняет роль участника на один шаг вверх или вниз по рангу — reply-словом, без "
+            "выбора конкретной роли (в отличие от /roleadd)."
+        ),
+        natural_triggers=("повысить", "понизить"),
+        notes=(
+            "Требует reply на сообщение участника.",
+            "Нельзя понизить последнего владельца; повышение ограничено вашим собственным рангом.",
+        ),
+    ),
+    CommandSpec(
         key="admin_smart_triggers",
         category="admin",
         dispatch_kind="both",

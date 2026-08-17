@@ -220,13 +220,15 @@ def test_admin_role_alias_settings_commands_have_no_invented_natural_triggers() 
     # The original admin-only slice (roles/aliases/settings management)
     # checked directly against catalog.py's trigger maps and confirmed
     # slash-only — verify that stays true. Scoped to just those keys, not
-    # the whole "admin" category: admin_smart_triggers/admin_custom_rp_actions
-    # were added later with real, verified natural-language forms
-    # (научить/добавить_действие) and are intentionally excluded here.
+    # the whole "admin" category: admin_smart_triggers/admin_custom_rp_actions/
+    # admin_role_step were added later with real, verified natural-language
+    # forms (научить/добавить_действие/повысить+понизить) and are
+    # intentionally excluded here.
+    _NATURAL_LANGUAGE_ADMIN_KEYS = ("admin_smart_triggers", "admin_custom_rp_actions", "admin_role_step")
     slash_only_keys = {
         spec.key
         for spec in commands_for_category("admin")
-        if spec.key not in ("admin_smart_triggers", "admin_custom_rp_actions")
+        if spec.key not in _NATURAL_LANGUAGE_ADMIN_KEYS
     }
     for spec in commands_for_category("admin"):
         if spec.key not in slash_only_keys:
@@ -248,6 +250,21 @@ def test_admin_smart_triggers_and_rp_natural_forms_are_real() -> None:
     assert "добавить_действие" in rp.natural_triggers
     assert "_CUSTOM_RP_ADD_PATTERN" in source
     assert "добавить_действие" in source
+
+
+def test_admin_role_step_natural_triggers_match_the_real_regex_dispatch() -> None:
+    # Found while auditing ADMIN_GUIDE.md's moderation reply-word list
+    # against the catalog: "повысить"/"понизить" are a real, distinct
+    # role-step feature (not the same as /roleadd or /pred|/warn|/ban),
+    # dispatched via their own regex in moderation.py — was missing from
+    # the catalog entirely.
+    source = _real_source_text("moderation.py")
+    assert "_REPLY_ROLE_STEP_PATTERN" in source
+
+    spec = get_command_spec("admin_role_step")
+    assert spec.dispatch_kind == "natural_language"
+    for trigger in spec.natural_triggers:
+        assert trigger in source, f"natural trigger {trigger!r} not found in moderation.py"
 
 
 def test_misc_public_utility_natural_triggers_exist_in_the_real_trigger_maps() -> None:
