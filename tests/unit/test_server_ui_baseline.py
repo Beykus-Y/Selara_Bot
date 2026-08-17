@@ -28,6 +28,7 @@ EXPECTED_TEMPLATES = {
     "_games_mode_spy.html",
     "_games_mode_whoami.html",
     "_games_mode_zlobcards.html",
+    "_macros.html",
     "achievements.html",
     "admin.html",
     "admin_broadcast_detail.html",
@@ -73,6 +74,7 @@ def test_full_page_templates_share_the_base_layout() -> None:
     sources = _template_sources()
     standalone_templates = {
         "base.html",
+        "_macros.html",
         "_games_dashboard.html",
         "_games_mode_bredovukha.html",
         "_games_mode_mafia.html",

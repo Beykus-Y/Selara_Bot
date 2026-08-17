@@ -1,14 +1,14 @@
 {% extends "base.html" %}
+{% from "_macros.html" import breadcrumb %}
 
 {% block content %}
   <div class="panel archive-panel">
     <header class="archive-page-head">
       <div>
-        <nav class="breadcrumb" aria-label="Хлебные крошки">
-          <a href="/app/admin">Админка</a>
-          <span class="breadcrumb-sep" aria-hidden="true">/</span>
-          <span>Архив сообщений</span>
-        </nav>
+        {{ breadcrumb([
+          {"href": "/app/admin", "label": "Админка"},
+          {"label": "Архив сообщений"},
+        ]) }}
         <h2>Архив сообщений</h2>
         <p class="panel-subtitle">
           Сохранённые входящие сообщения и снимки редакций. Это диагностический архив Selara, а не полная копия истории Telegram.

@@ -1,16 +1,15 @@
 {% extends "base.html" %}
+{% from "_macros.html" import breadcrumb %}
 
 {% block content %}
   <div class="panel">
     <div class="panel-head">
       <div>
-        <nav class="breadcrumb">
-          <a href="/app/admin">Админка</a>
-          <span class="breadcrumb-sep">/</span>
-          <a href="/app/admin/table/{{ table_name }}">{{ table_title }}</a>
-          <span class="breadcrumb-sep">/</span>
-          <span>Редактирование</span>
-        </nav>
+        {{ breadcrumb([
+          {"href": "/app/admin", "label": "Админка"},
+          {"href": "/app/admin/table/" ~ table_name, "label": table_title},
+          {"label": "Редактирование"},
+        ]) }}
         <h2>Редактирование записи</h2>
         <p class="panel-subtitle">Таблица: <code>{{ table_name }}</code> • ID: <code>{{ record_id }}</code></p>
       </div>
