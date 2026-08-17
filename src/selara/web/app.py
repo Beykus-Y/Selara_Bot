@@ -4470,7 +4470,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 error=page_context["error"],
             )
         )
-        return _render_template("landing.html", **page_context)
+        return _render_template("landing.html", extra_styles=["landing.css"], **page_context)
 
     @app.get("/api/landing/context")
     async def landing_context_api(request: Request):
