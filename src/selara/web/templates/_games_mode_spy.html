@@ -1,0 +1,117 @@
+        {% if game.spy_view %}
+          <section class="spy-stage-layout">
+            <article class="game-action-section spy-intel-card spy-intel-card-{{ game.spy_view.role_card.tone }}">
+              <div class="section-caption">
+                <strong>{% if game.is_member %}Ваше досье{% else %}Режим просмотра{% endif %}</strong>
+                <p>Вся важная информация по роли и локации лежит здесь, как в отдельном игровом экране.</p>
+              </div>
+              <div class="spy-intel-header">
+                <span class="spy-intel-team">{{ game.spy_view.role_card.team }}</span>
+                <strong>{{ game.spy_view.role_card.title }}</strong>
+              </div>
+              <div class="spy-intel-chip">
+                <span>{{ game.spy_view.role_card.intel_label }}</span>
+                <strong>{{ game.spy_view.role_card.intel_value }}</strong>
+              </div>
+              <div class="spy-intel-facts">
+                <div class="spy-intel-fact">
+                  <span>Цель</span>
+                  <p>{{ game.spy_view.role_card.objective }}</p>
+                </div>
+                <div class="spy-intel-fact">
+                  <span>Как играть</span>
+                  <p>{{ game.spy_view.role_card.ability }}</p>
+                </div>
+              </div>
+            </article>
+
+            <article class="game-action-section spy-suspect-card">
+              <div class="section-caption">
+                <strong>Доска подозрений</strong>
+                <p>Кого стол сейчас давит сильнее всего, сколько уже голосов и кто идёт к досрочному финалу.</p>
+              </div>
+              <div class="spy-summary-ribbon">
+                <span class="spy-summary-pill">Тема: {{ game.spy_view.summary.category }}</span>
+                <span class="spy-summary-pill">Голоса: {{ game.spy_view.summary.votes }}</span>
+                <span class="spy-summary-pill">Большинство: {{ game.spy_view.summary.majority }}</span>
+                <span class="spy-summary-pill">Лидер: {{ game.spy_view.summary.leader }}</span>
+              </div>
+              <div class="spy-suspect-grid">
+                {% for row in game.spy_view.suspect_rows %}
+                  <div class="spy-suspect-row spy-suspect-row-{{ row.tone }}">
+                    <div class="spy-suspect-head">
+                      <strong>{{ row.label }}</strong>
+                      <span class="spy-vote-count">{{ row.votes }}</span>
+                    </div>
+                    <div class="spy-vote-track">
+                      <span class="spy-vote-fill" style="width: {{ row.meter }}%;"></span>
+                    </div>
+                    <div class="spy-suspect-badges">
+                      {% for badge in row.badges %}
+                        <span class="spy-badge spy-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+          </section>
+
+          <section class="game-action-section spy-status-section spy-status-section-{{ game.spy_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.spy_view.status_title }}</strong>
+              <p>{{ game.spy_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.spy_view.action_title or game.spy_view.action_buttons %}
+            <section class="game-action-section spy-action-section">
+              <div class="section-caption">
+                <strong>{{ game.spy_view.action_title or "Подозрение" }}</strong>
+                <p>{{ game.spy_view.action_text or "Доска уже показывает полный ход дедукции." }}</p>
+              </div>
+              {% if game.spy_view.action_buttons %}
+                <div class="choice-grid spy-choice-grid">
+                  {% for button in game.spy_view.action_buttons %}
+                    <form method="post" action="/app/games/action" data-game-action-form>
+                      <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                      <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                    </form>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="spy-empty-state">Голосование уже закрыто. Ниже осталась финальная доска подозрений и раскрытие ролей.</div>
+              {% endif %}
+            </section>
+          {% endif %}
+
+          {% if game.spy_view.guess_form %}
+            <section class="game-action-section spy-guess-section">
+              <div class="section-caption">
+                <strong>Финальный риск шпиона</strong>
+                <p>Если вы уверены, что вычислили место, назовите его. Верный ответ сразу приносит победу шпиону, неверный закрывает раунд победой мирных.</p>
+              </div>
+              <form class="stack-form spy-guess-form" method="post" action="/app/games/action" data-game-action-form>
+                <input type="hidden" name="game_id" value="{{ game.spy_view.guess_form.game_id }}">
+                <input type="hidden" name="action" value="spy_guess">
+                <label class="field">
+                  <span>Локация</span>
+                  <input
+                    type="text"
+                    name="guess_location"
+                    list="spy-locations-{{ game.game_id }}"
+                    placeholder="{{ game.spy_view.guess_form.placeholder }}"
+                    autocomplete="off"
+                    required
+                  >
+                </label>
+                <datalist id="spy-locations-{{ game.game_id }}">
+                  {% for location in game.spy_view.guess_form.locations %}
+                    <option value="{{ location }}"></option>
+                  {% endfor %}
+                </datalist>
+                <button type="submit" class="button primary">{{ game.spy_view.guess_form.button_label }}</button>
+              </form>
+            </section>
+          {% endif %}
+        {% endif %}

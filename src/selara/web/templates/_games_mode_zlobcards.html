@@ -1,0 +1,131 @@
+        {% if game.zlob_view %}
+          <section class="game-action-section whoami-status-section whoami-status-section-{{ game.zlob_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.zlob_view.status_title }}</strong>
+              <p>{{ game.zlob_view.status_text }}</p>
+            </div>
+            <div class="spy-summary-ribbon">
+              <span class="spy-summary-pill">Тема: {{ game.zlob_view.category }}</span>
+              <span class="spy-summary-pill">Раунд: {{ game.zlob_view.round_label }}</span>
+              <span class="spy-summary-pill">Цель: {{ game.zlob_view.target_score }}</span>
+              <span class="spy-summary-pill">Пропуски: {{ game.zlob_view.black_slots }}</span>
+            </div>
+          </section>
+
+          <section class="game-action-section">
+            <div class="section-caption">
+              <strong>Чёрная карточка</strong>
+              <p>Выберите {{ game.zlob_view.black_slots }} карту(ы), чтобы собрать панчлайн.</p>
+            </div>
+            <div class="game-prompt-card">
+              <p>{{ game.zlob_view.black_text }}</p>
+            </div>
+          </section>
+
+          {% if game.zlob_view.submit_form %}
+            <section class="game-action-section game-form-section">
+              <div class="section-caption">
+                <strong>Сдать карты с веба</strong>
+                <p>Нативная отправка без Telegram-кнопок. Для двух пропусков выберите две разные карты.</p>
+              </div>
+              <form class="stack-form game-inline-form native-action-form" method="post" action="/app/games/action" data-game-action-form>
+                <input type="hidden" name="action" value="zlob_submit">
+                <input type="hidden" name="game_id" value="{{ game.zlob_view.submit_form.game_id }}">
+                <div class="field">
+                  <span>Первая карта</span>
+                  <select name="card_index" required>
+                    {% for card in game.zlob_view.submit_form.hand %}
+                      <option value="{{ card.index }}">{{ card.text }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                {% if game.zlob_view.submit_form.slots > 1 %}
+                  <div class="field">
+                    <span>Вторая карта</span>
+                    <select name="card_index_second" required>
+                      {% for card in game.zlob_view.submit_form.hand %}
+                        <option value="{{ card.index }}">{{ card.text }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                {% endif %}
+                <button type="submit" class="button primary small">Отправить карты</button>
+              </form>
+            </section>
+          {% endif %}
+
+          {% if game.zlob_view.submit_buttons %}
+            <section class="game-action-section">
+              <div class="section-caption">
+                <strong>Быстрый выбор</strong>
+                <p>Те же действия кнопками, если так удобнее.</p>
+              </div>
+              <div class="choice-grid">
+                {% for button in game.zlob_view.submit_buttons %}
+                  <form method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.zlob_view.submission_rows %}
+            <section class="game-action-section game-form-section">
+              <div class="section-caption">
+                <strong>Кто уже сдал</strong>
+                <p>Состояние игроков обновляется без перезагрузки страницы.</p>
+              </div>
+              <div class="submission-grid">
+                {% for row in game.zlob_view.submission_rows %}
+                  <div class="submission-row submission-row-{{ row.state }}" title="{{ row.label }}">
+                    <strong title="{{ row.label }}">{{ row.label }}</strong>
+                    <span class="submission-state submission-state-{{ row.state }}">{{ row.state_label }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.zlob_view.vote_buttons %}
+            <section class="game-action-section">
+              <div class="section-caption">
+                <strong>Голосование</strong>
+                <p>Варианты анонимны до конца раунда.</p>
+              </div>
+              {% if game.zlob_view.voted_option_label %}
+                <p class="helper-text">Ваш текущий выбор: {{ game.zlob_view.voted_option_label }}.</p>
+              {% endif %}
+              <div class="choice-grid">
+                {% for button in game.zlob_view.vote_buttons %}
+                  <form method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.zlob_view.option_rows %}
+            <section class="game-action-section reveal-section">
+              <div class="section-caption">
+                <strong>{% if game.zlob_view.show_vote %}Анонимные варианты{% else %}Итог раунда{% endif %}</strong>
+                <p>{% if game.zlob_view.show_vote %}Авторы скрыты до завершения голосования.{% else %}После раунда видно авторов и голоса.{% endif %}</p>
+              </div>
+              <div class="reveal-grid">
+                {% for row in game.zlob_view.option_rows %}
+                  <div class="reveal-row reveal-row-{{ row.tone }}" title="{{ row.text }}">
+                    <span class="reveal-slot">{{ row.slot }}</span>
+                    <div class="reveal-copy">
+                      <strong title="{{ row.text }}">{{ row.text }}</strong>
+                      <span title="{{ row.author }}">{{ row.author }}</span>
+                    </div>
+                    <span class="reveal-votes">{{ row.votes }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+        {% endif %}

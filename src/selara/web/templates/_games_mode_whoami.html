@@ -1,0 +1,115 @@
+        {% if game.whoami_view %}
+          <section class="game-action-section whoami-status-section whoami-status-section-{{ game.whoami_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.whoami_view.status_title }}</strong>
+              <p>{{ game.whoami_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.whoami_view.action_buttons %}
+            <section class="game-action-section whoami-action-section">
+              <div class="section-caption">
+                <strong>Ответ стола</strong>
+                <p>Первый ответ кнопкой фиксирует вердикт для текущего вопроса.</p>
+              </div>
+              <div class="choice-grid whoami-choice-grid">
+                {% for button in game.whoami_view.action_buttons %}
+                  <form method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                    <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          {% if game.whoami_view.question_form or game.whoami_view.guess_form %}
+            <section class="whoami-form-grid">
+              {% if game.whoami_view.question_form %}
+                <section class="game-action-section whoami-form-section">
+                  <div class="section-caption">
+                    <strong>Вопрос о себе</strong>
+                    <p>Задайте один точный вопрос, на который стол может ответить коротко.</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_ask">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.question_form.game_id }}">
+                    <label class="field">
+                      <span>Ваш вопрос</span>
+                      <input type="text" name="question_text" placeholder="{{ game.whoami_view.question_form.placeholder }}" maxlength="180" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.question_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+
+              {% if game.whoami_view.guess_form %}
+                <section class="game-action-section whoami-form-section whoami-guess-section">
+                  <div class="section-caption">
+                    <strong>Догадка о карточке</strong>
+                    <p>Верная догадка выводит вас из круга вопросов, но партия идёт дальше.</p>
+                  </div>
+                  <form class="stack-form whoami-native-form" method="post" action="/app/games/action" data-game-action-form>
+                    <input type="hidden" name="action" value="whoami_guess">
+                    <input type="hidden" name="game_id" value="{{ game.whoami_view.guess_form.game_id }}">
+                    <label class="field">
+                      <span>Кто вы?</span>
+                      <input type="text" name="guess_text" placeholder="{{ game.whoami_view.guess_form.placeholder }}" maxlength="120" required>
+                    </label>
+                    <button type="submit" class="button primary">{{ game.whoami_view.guess_form.button_label }}</button>
+                  </form>
+                </section>
+              {% endif %}
+            </section>
+          {% endif %}
+
+          <section class="whoami-stage-layout">
+            <article class="game-action-section whoami-roster-card">
+              <div class="section-caption">
+                <strong>Карточки за столом</strong>
+                <p>Свою карточку вы не видите, остальные лежат перед глазами как на столе.</p>
+              </div>
+              <div class="whoami-roster-grid">
+                {% for row in game.whoami_view.table_rows %}
+                  <div class="whoami-player-row whoami-player-row-{{ row.tone }}" title="{{ row.title }}">
+                    <div class="whoami-player-head">
+                      <strong title="{{ row.title }}">{{ row.label }}</strong>
+                      <div class="whoami-player-badges">
+                        {% for badge in row.badges %}
+                          <span class="whoami-badge whoami-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                        {% endfor %}
+                      </div>
+                    </div>
+                    <div class="whoami-identity-tile">{{ row.identity }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+
+            <article class="game-action-section whoami-history-card">
+              <div class="section-caption">
+                <strong>Ход сцены</strong>
+                <p>Здесь остаются последние вопросы, ответы и статусы догадок без спойлеров.</p>
+              </div>
+              {% if game.whoami_view.pending_question %}
+                <div class="whoami-pending-card">
+                  <span>Активный вопрос</span>
+                  <strong>{{ game.whoami_view.pending_question }}</strong>
+                </div>
+              {% endif %}
+              {% if game.whoami_view.history_rows %}
+                <div class="whoami-history-grid">
+                  {% for row in game.whoami_view.history_rows %}
+                    <div class="whoami-history-row whoami-history-row-{{ row.tone }}">
+                      <strong>{{ row.title }}</strong>
+                      <p>{{ row.text }}</p>
+                      <span>{{ row.meta }}</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="whoami-empty-state">Партия только началась. Первый вопрос появится здесь, как только текущий игрок откроет ход.</div>
+              {% endif %}
+            </article>
+          </section>
+        {% endif %}

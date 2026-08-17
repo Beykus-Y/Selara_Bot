@@ -1,0 +1,74 @@
+        {% if game.mafia_view %}
+          <section class="mafia-stage-layout">
+            <article class="game-action-section mafia-identity-card mafia-identity-card-{{ game.mafia_view.role_card.tone }}">
+              <div class="section-caption">
+                <strong>{% if game.is_member %}Ваша роль{% else %}Режим доступа{% endif %}</strong>
+                <p>Скрытая информация и краткий role briefing лежат прямо на сайте, без перехода в личку.</p>
+              </div>
+              <div class="mafia-role-title">
+                <span class="mafia-role-team">{{ game.mafia_view.role_card.team }}</span>
+                <strong>{{ game.mafia_view.role_card.title }}</strong>
+              </div>
+              <div class="mafia-role-facts">
+                <div class="mafia-role-fact">
+                  <span>Цель</span>
+                  <p>{{ game.mafia_view.role_card.objective }}</p>
+                </div>
+                <div class="mafia-role-fact">
+                  <span>Как играется</span>
+                  <p>{{ game.mafia_view.role_card.ability }}</p>
+                </div>
+              </div>
+              {% if game.mafia_view.report_html %}
+                <div class="mafia-report-card">{{ game.mafia_view.report_html | safe }}</div>
+              {% endif %}
+            </article>
+
+            <article class="game-action-section mafia-roster-card">
+              <div class="section-caption">
+                <strong>Стол и статусы</strong>
+                <p>Здесь видно, кто ещё в игре, кто уже выбыл и на кого сейчас завязан публичный этап.</p>
+              </div>
+              <div class="mafia-roster-grid">
+                {% for row in game.mafia_view.roster_rows %}
+                  <div class="mafia-player-row mafia-player-row-{{ row.tone }}">
+                    <strong>{{ row.label }}</strong>
+                    <div class="mafia-player-badges">
+                      {% for badge in row.badges %}
+                        <span class="mafia-badge mafia-badge-{{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </article>
+          </section>
+
+          <section class="game-action-section mafia-status-section mafia-status-section-{{ game.mafia_view.status_tone }}">
+            <div class="section-caption">
+              <strong>{{ game.mafia_view.status_title }}</strong>
+              <p>{{ game.mafia_view.status_text }}</p>
+            </div>
+          </section>
+
+          {% if game.mafia_view.action_title or game.mafia_view.action_buttons %}
+            <section class="game-action-section mafia-action-section">
+              <div class="section-caption">
+                <strong>{{ game.mafia_view.action_title or "Текущая фаза" }}</strong>
+                <p>{{ game.mafia_view.action_text or "Веб-карточка уже знает текущий шаг и отдаёт только актуальные действия." }}</p>
+              </div>
+              {% if game.mafia_view.action_buttons %}
+                <div class="choice-grid mafia-choice-grid">
+                  {% for button in game.mafia_view.action_buttons %}
+                    <form method="post" action="/app/games/action" data-game-action-form>
+                      <input type="hidden" name="callback_data" value="{{ button.callback_data }}">
+                      <button type="submit" class="button {{ button.variant }} small">{{ button.label }}</button>
+                    </form>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="mafia-empty-state">На этой фазе вам не нужно делать скрытый ход. Следите за столом и ждите смену этапа.</div>
+              {% endif %}
+            </section>
+          {% endif %}
+        {% endif %}
