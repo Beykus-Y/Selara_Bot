@@ -216,7 +216,7 @@ _MASK_SCRIPT = """
 
 async def _mount_and_mask(page, html: str) -> None:
     await page.set_content(html)
-    for stylesheet in ("panel.css", "server-ui-foundation.css"):
+    for stylesheet in ("panel.css", "server-ui-foundation.css", "games.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
     await page.add_style_tag(content="*, *::before, *::after { transition: none !important; }")
     await page.evaluate(_MASK_SCRIPT)

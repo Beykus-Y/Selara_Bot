@@ -219,7 +219,7 @@ async def _create_started_game(store: GameStore, *, kind: str, owner_user_id: in
 
 async def _mount(page, html: str) -> None:
     await page.set_content(html)
-    for stylesheet in ("panel.css", "server-ui-foundation.css"):
+    for stylesheet in ("panel.css", "server-ui-foundation.css", "games.css"):
         await page.add_style_tag(path=str(STATIC_DIR / stylesheet))
     # See the skip-link CSS-transition flake fixed in
     # test_web_admin_overview_browser.py this same session — disable
