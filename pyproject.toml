@@ -35,6 +35,7 @@ dev = [
   "pytest>=9.0.3,<10",
   "pytest-asyncio>=1.4.0,<2",
   "PyYAML>=6.0.2,<7",
+  "djlint>=1.36.4,<2",
 ]
 
 [tool.setuptools.packages.find]
@@ -53,3 +54,11 @@ markers = [
   "postgres: tests that require PostgreSQL",
   "e2e: end-to-end tests",
 ]
+
+[tool.djlint]
+profile = "jinja"
+# J018 assumes Flask's {{ url_for() }} convention; this codebase intentionally
+# uses raw string paths everywhere (verified extensively across the Web UI
+# modernization work) and has its own static_url() helper for static assets
+# instead, so the rule is inapplicable noise here, not a real finding.
+ignore = "J018"
