@@ -1454,6 +1454,39 @@ responsive → accessibility → visual review → TODO update.
 ### Этап 6. Очистка, performance и финальные quality gates
 
 - [ ] Удалить подтверждённо недостижимые React admin/docs modules и их CSS/API types.
+  - Исследовано (2026-08-17), не выполнено — вынесено на решение пользователя,
+    масштаб оказался значительно больше исходной формулировки. Проверено по
+    существу, не на глаз: единственная точка входа React-приложения —
+    `frontend/src/app/router/AppRouter.tsx`, реально регистрирует только 6
+    маршрутов (`/`, `/groups`, `/chat/:chatId`, `/games`, `/gacha`, `/more`) +
+    wildcard `NotFoundPage`. Один `index.html`, один Vite bundle (`docker-compose.yml`:
+    сервис `web` — единственный React-фронтенд, отдельно от `app` — FastAPI/Jinja).
+    Грепом `pages/<dir>` по всему `frontend/src` вне самой директории подтверждено:
+    **12 директорий страниц полностью недостижимы** через `AppRouter`, ни разу не
+    импортируются извне себя (кроме одного не-циклового исключения:
+    `pages/admin/model/types.ts` импортирует тип из `pages/feedback` — обе мёртвые
+    вместе): `admin` (1131 строк), `admin-broadcast` (557), `admin-login` (288),
+    `admin-table` (805), `audit` (255), `docs` (809), `economy` (1115), `family`
+    (677), `feedback` (574), `landing` (268), `login` (209), `settings` (381) —
+    **итого ≈7070 строк**. Плюс отдельно найден мёртвый виджет
+    `widgets/app-shell/` (`AppShell.tsx` 323 строки, `LogoutButton.tsx`,
+    `ProfileMenu.tsx`, 2 api-файла — ≈500 строк): реальный рабочий shell —
+    `widgets/miniapp-shell/MiniAppShell.tsx`, используемый в `AppRouter`;
+    `AppShell.tsx` нигде не импортируется как компонент (только тип `AppViewer`
+    из его `model/types.ts` используется живым кодом `shared/miniapp/model.ts` —
+    этот файл типов трогать не нужно). `shared/config/routes.ts` — отдельная
+    находка, не баг: содержит внутренние SPA-пути для мёртвых страниц
+    (`routes.economy`, `routes.family`, `routes.audit`, `routes.admin*` и т.д.,
+    используемые только в `buildChatSectionLinks()`/`ChatSectionNav`, тоже часть
+    мёртвого графа) вперемешку с реальными кросс-ссылками на Jinja-страницы через
+    абсолютные `/app/...` пути (`routes.appUserDocs` и т.д., используются живым
+    `RouteErrorBoundary`) — при удалении мёртвых страниц потребуется точечная
+    чистка `routes.ts`/`buildChatSectionLinks`/`ChatSectionNav`, не полное
+    удаление файла. Формулировка чек-листа называла только «admin/docs» —
+    реальный периметр мёртвого кода оказался в разы больше (все server-migrated
+    страницы Этапа 4, не только админка/доки). Решение не форсировано в одиночку
+    из-за масштаба (≈7500 строк общего удаления) — отправлено пользователю
+    вариантами через Telegram, решение см. в журнале ниже, когда придёт ответ.
 - [ ] Удалить мёртвые Jinja partials, CSS selectors и JavaScript.
 - [ ] Проверить отсутствие дублирующих активных UI-реализаций.
 - [ ] Перевести djLint, Stylelint, ESLint, rendered HTMLHint и axe smoke в blocking
