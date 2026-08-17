@@ -65,7 +65,7 @@
             data-create-whoami-panel
             data-kind-sensitive="whoami"
             aria-hidden="{{ 'false' if default_create_kind == 'whoami' else 'true' }}"
-            {% if default_create_kind != "whoami" %}hidden style="display: none;"{% endif %}
+            {% if default_create_kind != "whoami" %}hidden{% endif %}
           >
             <input type="hidden" name="whoami_category" value="">
             <div class="section-caption">
@@ -103,7 +103,7 @@
             data-create-spy-panel
             data-kind-sensitive="spy"
             aria-hidden="{{ 'false' if default_create_kind == 'spy' else 'true' }}"
-            {% if default_create_kind != "spy" %}hidden style="display: none;"{% endif %}
+            {% if default_create_kind != "spy" %}hidden{% endif %}
           >
             <input type="hidden" name="spy_category" value="">
             <div class="section-caption">
@@ -140,7 +140,7 @@
             data-create-zlob-panel
             data-kind-sensitive="zlobcards"
             aria-hidden="{{ 'false' if default_create_kind == 'zlobcards' else 'true' }}"
-            {% if default_create_kind != "zlobcards" %}hidden style="display: none;"{% endif %}
+            {% if default_create_kind != "zlobcards" %}hidden{% endif %}
           >
             <input type="hidden" name="zlob_category" value="">
             <div class="section-caption">

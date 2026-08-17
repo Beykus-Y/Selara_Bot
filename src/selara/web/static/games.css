@@ -1386,6 +1386,7 @@ body.page-games.is-route-transition .panel {
 .spy-vote-fill {
   position: absolute;
   inset: 0 auto 0 0;
+  width: var(--spy-vote-meter, 0%);
   border-radius: inherit;
   background: linear-gradient(90deg, rgba(255, 153, 111, 0.9), rgba(255, 98, 148, 0.9));
 }

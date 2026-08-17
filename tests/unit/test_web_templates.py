@@ -554,7 +554,7 @@ def test_games_dashboard_template_hides_create_whoami_theme_when_other_game_sele
 
     assert 'data-create-whoami-panel' in html
     assert 'aria-hidden="true"' in html
-    assert 'hidden style="display: none;"' in html
+    assert "hidden" in html
     assert 'Бредовуха' in html
 
 

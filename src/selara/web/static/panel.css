@@ -971,6 +971,13 @@ code {
   gap: 14px;
 }
 
+/* .create-whoami-theme-panel declares its own `display: grid` above, which
+   otherwise beats the UA `[hidden]{display:none}` rule at equal specificity
+   (same pattern already documented in admin-table-search.css). */
+.create-whoami-theme-panel[hidden] {
+  display: none;
+}
+
 .whoami-category-picker {
   display: grid;
   gap: 12px;

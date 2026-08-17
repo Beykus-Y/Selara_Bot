@@ -44,7 +44,7 @@
                       <span class="spy-vote-count">{{ row.votes }}</span>
                     </div>
                     <div class="spy-vote-track">
-                      <span class="spy-vote-fill" style="width: {{ row.meter }}%;"></span>
+                      <span class="spy-vote-fill" style="--spy-vote-meter: {{ row.meter }}%"></span>
                     </div>
                     <div class="spy-suspect-badges">
                       {% for badge in row.badges %}
