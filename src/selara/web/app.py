@@ -604,10 +604,23 @@ async def _build_achievement_sections(
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
-    template_environment = create_template_environment(template_dir=base_dir / "templates")
+    template_environment = create_template_environment(
+        template_dir=base_dir / "templates", static_dir=base_dir / "static"
+    )
 
     app = FastAPI(title="Selara Web Panel")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
+
+    @app.middleware("http")
+    async def _cache_static_assets(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            # static_url() appends a content-hash query string (see
+            # rendering.py), so any file change already produces a new URL —
+            # a long, immutable cache is safe here, unlike a bare /static/*
+            # path with no versioning.
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
     failed_attempts: dict[str, deque[datetime]] = defaultdict(deque)
     chat_settings_defaults = default_chat_settings(settings)

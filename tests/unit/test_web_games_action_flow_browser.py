@@ -235,8 +235,8 @@ async def test_dice_roll_button_submits_its_callback_data(monkeypatch) -> None:
         try:
             page = await browser.new_page()
             await page.route("http://selara.test/app/games", serve_page)
-            await page.route("**/static/games.js", serve_js)
-            await page.route("**/static/panel.css", await serve_file(STATIC_DIR / "panel.css"))
+            await page.route("**/static/games.js*", serve_js)
+            await page.route("**/static/panel.css*", await serve_file(STATIC_DIR / "panel.css"))
             await page.route(
                 "**/static/server-ui-foundation.css", await serve_file(STATIC_DIR / "server-ui-foundation.css")
             )
@@ -302,8 +302,8 @@ async def test_finish_game_button_submits_a_cancel_callback(monkeypatch) -> None
         try:
             page = await browser.new_page()
             await page.route("http://selara.test/app/games", serve_page)
-            await page.route("**/static/games.js", serve_js)
-            await page.route("**/static/panel.css", await serve_file(STATIC_DIR / "panel.css"))
+            await page.route("**/static/games.js*", serve_js)
+            await page.route("**/static/panel.css*", await serve_file(STATIC_DIR / "panel.css"))
             await page.route(
                 "**/static/server-ui-foundation.css", await serve_file(STATIC_DIR / "server-ui-foundation.css")
             )

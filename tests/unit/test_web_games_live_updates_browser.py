@@ -250,7 +250,7 @@ async def test_ws_reconnects_after_backoff_even_when_dashboard_never_changes(mon
             await page.add_init_script(FAKE_TRANSPORTS_INIT_SCRIPT)
             await page.route("http://selara.test/app/games", serve_page)
             await page.route("**/app/games/live**", handle_live)
-            await page.route("**/static/games.js", serve_games_js)
+            await page.route("**/static/games.js*", serve_games_js)
             await page.goto("http://selara.test/app/games")
 
             ws_count_before = await page.evaluate("window.__wsInstances.length")

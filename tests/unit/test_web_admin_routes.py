@@ -634,8 +634,8 @@ async def test_admin_page_has_shared_section_navigation(monkeypatch) -> None:
     assert 'href="#feedback"' in response.text
     assert 'href="/app/admin/table/chat_audit_logs"' in response.text
     assert 'data-admin-backup-dialog' in response.text
-    assert 'src="/static/admin-overview.js"' in response.text
-    assert 'href="/static/admin-overview.css"' in response.text
+    assert 'src="/static/admin-overview.js?v=' in response.text
+    assert 'href="/static/admin-overview.css?v=' in response.text
 
 
 @pytest.mark.asyncio
@@ -760,11 +760,11 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert 'data-broadcast-confirm-dialog' in response.text
     assert 'data-broadcast-confirm-submit' in response.text
     assert 'data-broadcast-confirm-cancel' in response.text
-    assert 'src="/static/admin-broadcast.js"' in response.text
+    assert 'src="/static/admin-broadcast.js?v=' in response.text
     assert 'data-table-search-input' in response.text
     assert 'data-table-search-card' in response.text
     assert 'data-table-search-text="чаты chats"' in response.text
-    assert 'src="/static/admin-table-search.js"' in response.text
+    assert 'src="/static/admin-table-search.js?v=' in response.text
 
 
 @pytest.mark.asyncio
@@ -1367,7 +1367,7 @@ async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> No
     assert "report.pdf" in response.text
     assert "application/pdf" in response.text
     assert "2.0 МБ" in response.text
-    assert 'src="/static/admin-archive.js"' in response.text
+    assert 'src="/static/admin-archive.js?v=' in response.text
 
 
 @pytest.mark.asyncio

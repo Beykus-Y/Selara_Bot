@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import pytest
 from jinja2 import StrictUndefined
 
-from selara.web.rendering import create_template_environment
+from selara.core.config import Settings
+from selara.web import app as web_app_module
+from selara.web.rendering import create_template_environment, static_assets_version
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = ROOT / "src" / "selara" / "web" / "templates"
+STATIC_DIR = ROOT / "src" / "selara" / "web" / "static"
 PANEL_CSS = ROOT / "src" / "selara" / "web" / "static" / "panel.css"
 FOUNDATION_CSS = ROOT / "src" / "selara" / "web" / "static" / "server-ui-foundation.css"
 
@@ -310,3 +315,51 @@ def test_production_miniapp_router_does_not_mount_dormant_admin_pages() -> None:
     assert "@/pages/admin-login" not in router_source
     assert "@/pages/admin-broadcast" not in router_source
     assert "@/pages/docs" not in router_source
+
+
+def test_static_url_is_cache_busted_by_a_stable_content_hash() -> None:
+    environment = create_template_environment(template_dir=TEMPLATE_DIR, static_dir=STATIC_DIR)
+    static_url = environment.globals["static_url"]
+
+    url = static_url("panel.css")
+    assert url.startswith("/static/panel.css?v=")
+    version = url.split("?v=", 1)[1]
+    assert len(version) == 10
+
+    # Recomputing from the same files must be deterministic, not tied to
+    # process/run state, or every restart would needlessly bust every cache.
+    assert static_assets_version(STATIC_DIR) == version
+
+
+def test_static_url_has_no_query_string_without_a_static_dir() -> None:
+    environment = create_template_environment(template_dir=TEMPLATE_DIR)
+    static_url = environment.globals["static_url"]
+
+    assert static_url("panel.css") == "/static/panel.css"
+
+
+@pytest.mark.asyncio
+async def test_static_assets_are_served_with_a_long_immutable_cache_header() -> None:
+    settings = Settings.model_validate(
+        {
+            "BOT_TOKEN": "123456:TEST",
+            "DATABASE_URL": "postgresql+asyncpg://user:pass@localhost:5432/selara_test",
+            "BOT_USERNAME": "selara_test_bot",
+            "WEB_AUTH_SECRET": "secret",
+            "WEB_BASE_URL": "http://127.0.0.1:8080",
+        }
+    )
+
+    def _unused_session_factory():
+        raise AssertionError("static asset requests must not touch the database")
+
+    app = web_app_module.create_web_app(settings=settings, session_factory=_unused_session_factory)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+    try:
+        response = await client.get("/static/panel.css")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
