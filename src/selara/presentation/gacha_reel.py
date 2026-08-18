@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Sequence
 
 from PIL import Image, ImageDraw
@@ -19,6 +22,54 @@ _TOTAL_DURATION_MS = 11500
 _HOLD_INTRO_FRAMES = 6
 _HOLD_STOP_FRAMES = 15
 _HIGHLIGHT_WIDTH = 6
+
+# Constant output framerate for the MP4 encode — source frames have variable
+# hold durations (see _build_duration_schedule), so each source frame is
+# repeated round(duration_ms * _MP4_FPS / 1000) times to approximate the same
+# timing at a fixed fps (required by the image2pipe -> H.264 pipeline).
+_MP4_FPS = 30
+
+
+class GachaReelEncodeError(RuntimeError):
+    pass
+
+
+def _encode_frames_to_mp4(frames: list[Image.Image], durations: list[int]) -> bytes:
+    """MP4 (H.264, no audio) instead of GIF: at this resolution/duration a
+    GIF landed around 9-11MB, and Telegram clients showed files that large
+    as a downloadable document instead of an inline-autoplay animation.
+    MP4 is Telegram's own recommended format for send_animation and encodes
+    the same visual content far smaller (found live, 2026-08-19)."""
+    stdin_payload = BytesIO()
+    for frame, duration_ms in zip(frames, durations):
+        repeat = max(1, round(duration_ms * _MP4_FPS / 1000))
+        frame_bytes = BytesIO()
+        frame.convert("RGB").save(frame_bytes, format="PNG")
+        frame_png = frame_bytes.getvalue()
+        for _ in range(repeat):
+            stdin_payload.write(frame_png)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_path = Path(tmpdir) / "reel.mp4"
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "image2pipe", "-vcodec", "png", "-framerate", str(_MP4_FPS),
+                "-i", "-",
+                "-vf", "format=yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-movflags", "+faststart",
+                str(output_path),
+            ],
+            input=stdin_payload.getvalue(),
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0 or not output_path.exists():
+            raise GachaReelEncodeError(
+                f"ffmpeg failed (exit {result.returncode}): {result.stderr.decode('utf-8', errors='replace')[:500]}"
+            )
+        return output_path.read_bytes()
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,24 +193,4 @@ def build_gacha_reel_animation(
             )
         rgb_frames.append(frame)
 
-    # A single shared palette (quantized from the busiest frame) lets the
-    # GIF encoder delta-encode between frames instead of restating the
-    # (mostly static) background every frame — combined with disposal=1
-    # ("do not dispose") this cuts file size drastically versus a fresh
-    # adaptive palette per frame, without reducing resolution or frame
-    # count (both were explicitly requested to go up, not down).
-    global_palette = rgb_frames[-1].convert("P", palette=Image.ADAPTIVE, colors=256)
-    frames = [frame.quantize(palette=global_palette, dither=Image.Dither.NONE) for frame in rgb_frames]
-
-    buffer = BytesIO()
-    frames[0].save(
-        buffer,
-        format="GIF",
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=0,
-        disposal=1,
-        optimize=True,
-    )
-    return buffer.getvalue()
+    return _encode_frames_to_mp4(rgb_frames, durations)
