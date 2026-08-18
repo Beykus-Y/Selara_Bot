@@ -33,6 +33,7 @@
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "htmlhint": "^1.9.2",
+    "lighthouse": "^13.4.1",
     "stylelint": "^17.14.1",
     "stylelint-config-standard": "^40.0.0",
     "typescript": "~5.9.3",
