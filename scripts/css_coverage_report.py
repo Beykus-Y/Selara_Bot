@@ -180,6 +180,7 @@ async def _family_page() -> str:
 def _direct_render_pages() -> list[tuple[str, str]]:
     """Pages with an existing standalone _render()-style fixture in a test
     module -- imported and reused rather than re-deriving contexts."""
+    import test_web_achievements_browser as achievements_test
     import test_web_chat_audit_browser as audit_test
     import test_web_chat_overview_browser as chat_test
     import test_web_economy_browser as economy_test
@@ -190,6 +191,7 @@ def _direct_render_pages() -> list[tuple[str, str]]:
         ("chat_achievements", chat_test._render(active_tab="achievements")),
         ("chat_settings", chat_test._render(active_tab="settings")),
         ("audit", audit_test._render_audit()),
+        ("achievements", achievements_test._render()),
     ]
 
 
