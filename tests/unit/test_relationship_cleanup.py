@@ -264,3 +264,78 @@ async def test_startup_cleanup_repairs_existing_phantom_and_reports_every_run() 
         assert await session.scalar(select(func.count(FamilyRelationshipArchiveModel.id))) == 1
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_report_includes_gacha_animation_cache_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The startup cleanup report doubles as the only always-sent status
+    ping at boot, so it also reports whether the gacha animation cache is
+    warmed (user request, 2026-08-19: previously there was no way to know
+    warmup had even started without reading server logs directly)."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    from selara.infrastructure import relationship_cleanup as cleanup_module
+
+    monkeypatch.setattr(cleanup_module, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
+
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = SimpleNamespace(admin_user_id=99)
+
+    await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
+
+    report_text = bot.send_message.await_args_list[0].kwargs["text"]
+    assert "не прогрет" in report_text.lower()
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_report_says_gacha_cache_is_warm_when_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    from selara.infrastructure import relationship_cleanup as cleanup_module
+
+    monkeypatch.setattr(cleanup_module, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
+
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = SimpleNamespace(admin_user_id=99)
+
+    await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
+
+    report_text = bot.send_message.await_args_list[0].kwargs["text"]
+    assert "прогрет" in report_text.lower() and "не прогрет" not in report_text.lower()
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_report_does_not_crash_when_gacha_status_check_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gacha readiness check hits the gacha-service over the network — a
+    failure there must not break the (unrelated) relationship cleanup
+    report."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    from selara.infrastructure import relationship_cleanup as cleanup_module
+
+    monkeypatch.setattr(
+        cleanup_module, "is_gacha_animation_cache_ready", AsyncMock(side_effect=RuntimeError("gacha unreachable"))
+    )
+
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = SimpleNamespace(admin_user_id=99)
+
+    summary = await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
+
+    assert summary is not None
+    bot.send_message.assert_awaited_once()
+
+    await engine.dispose()

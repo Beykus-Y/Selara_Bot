@@ -15,7 +15,10 @@ from selara.infrastructure.db.session import create_engine, create_session_facto
 from selara.infrastructure.llm import LlmClient, LlmConfig
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
-from selara.presentation.gacha_reel_orchestration import warm_up_gacha_animation_cache
+from selara.presentation.gacha_reel_orchestration import (
+    is_gacha_animation_cache_ready,
+    warm_up_gacha_animation_cache,
+)
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
@@ -95,9 +98,19 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
     try:
         async with session_factory() as session:
             activity_repo = SqlAlchemyActivityRepository(session)
+            was_ready = await is_gacha_animation_cache_ready(settings, activity_repo)
             await warm_up_gacha_animation_cache(
                 settings=settings, bot=bot, activity_repo=activity_repo, on_card_done=session.commit
             )
+            if not was_ready and settings.admin_user_id is not None:
+                is_ready_now = await is_gacha_animation_cache_ready(settings, activity_repo)
+                if is_ready_now:
+                    try:
+                        await bot.send_message(
+                            chat_id=settings.admin_user_id, text="Прогрев кэша гача-анимаций завершён."
+                        )
+                    except Exception:
+                        logger.exception("Could not notify admin about gacha animation warmup completion")
     except Exception:
         logger.exception("Gacha animation warmup task crashed")
 

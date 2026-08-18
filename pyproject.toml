@@ -36,6 +36,7 @@ dev = [
   "pytest-asyncio>=1.4.0,<2",
   "PyYAML>=6.0.2,<7",
   "djlint>=1.36.4,<2",
+  "aiosqlite>=0.20,<1",
 ]
 
 [tool.setuptools.packages.find]
