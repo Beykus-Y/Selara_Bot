@@ -27,6 +27,14 @@ _VARIANT_CAP = 3
 _REGENERATE_PROBABILITY = 0.15
 _FILLER_COUNT = 10
 
+# Hard ceiling on a single card's warmup (render + Telegram upload + delete).
+# Without this, a hung network call (e.g. a dead-but-not-closed connection
+# to Telegram) blocks the whole sequential warmup loop forever with no
+# exception and no log line — later cards never get processed until the
+# bot is restarted (found live, 2026-08-19: warmup stalled on one card for
+# 4+ hours with zero further progress or errors).
+_WARMUP_CARD_TIMEOUT_SECONDS = 60.0
+
 # How long a cached catalog/image is trusted without even asking the server
 # to revalidate. This bounds worst-case staleness after a deploy to at most
 # this many seconds — after it elapses, every use always sends the
@@ -377,35 +385,54 @@ async def warm_up_gacha_animation_cache(*, settings: Settings, bot: Bot, activit
             if card.code in cached_versions:
                 continue
             try:
-                resolved = await resolve_gacha_reel_animation(
-                    settings=settings,
-                    activity_repo=activity_repo,
-                    banner=banner,
-                    landing_card_code=card.code,
-                    landing_card_name=card.name,
-                    landing_rarity=card.rarity,
-                    landing_rarity_label=card.rarity_label,
-                )
-                sent = await bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload)
-                if resolved.needs_caching and getattr(sent, "animation", None) is not None:
-                    await cache_reel_variant_after_send(
+                await asyncio.wait_for(
+                    _warm_up_one_card(
+                        settings=settings,
+                        bot=bot,
                         activity_repo=activity_repo,
                         banner=banner,
-                        card_code=card.code,
-                        telegram_file_id=sent.animation.file_id,
-                        cache_version=resolved.cache_version,
-                    )
-                try:
-                    await bot.delete_message(chat_id=settings.gacha_admin_user_id, message_id=sent.message_id)
-                except TelegramBadRequest:
-                    pass
-                if on_card_done is not None:
-                    # Commit incrementally — a restart mid-warmup must not
-                    # throw away already-processed cards. The expensive
-                    # part (Pillow render) is separately safe on local
-                    # disk regardless, but without this a restart still
-                    # re-uploads/re-sends every card processed so far.
-                    await on_card_done()
+                        card=card,
+                        on_card_done=on_card_done,
+                    ),
+                    timeout=_WARMUP_CARD_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Gacha animation warmup timed out after %.0fs for %s/%s, skipping",
+                    _WARMUP_CARD_TIMEOUT_SECONDS, banner, card.code,
+                )
+                continue
             except Exception:
                 logger.warning("Gacha animation warmup failed for %s/%s", banner, card.code, exc_info=True)
                 continue
+
+
+async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done) -> None:
+    resolved = await resolve_gacha_reel_animation(
+        settings=settings,
+        activity_repo=activity_repo,
+        banner=banner,
+        landing_card_code=card.code,
+        landing_card_name=card.name,
+        landing_rarity=card.rarity,
+        landing_rarity_label=card.rarity_label,
+    )
+    sent = await bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload)
+    if resolved.needs_caching and getattr(sent, "animation", None) is not None:
+        await cache_reel_variant_after_send(
+            activity_repo=activity_repo,
+            banner=banner,
+            card_code=card.code,
+            telegram_file_id=sent.animation.file_id,
+            cache_version=resolved.cache_version,
+        )
+    try:
+        await bot.delete_message(chat_id=settings.gacha_admin_user_id, message_id=sent.message_id)
+    except TelegramBadRequest:
+        pass
+    if on_card_done is not None:
+        # Commit incrementally — a restart mid-warmup must not throw away
+        # already-processed cards. The expensive part (Pillow render) is
+        # separately safe on local disk regardless, but without this a
+        # restart still re-uploads/re-sends every card processed so far.
+        await on_card_done()

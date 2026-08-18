@@ -490,6 +490,52 @@ async def test_warm_up_continues_past_a_single_card_failure(monkeypatch: pytest.
     )
 
 
+@pytest.mark.asyncio
+async def test_warm_up_skips_a_card_that_hangs_instead_of_stalling_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hung network call for one card (e.g. a dead connection to Telegram
+    that never times out on its own) must not stall the rest of the warmup
+    forever with zero log output — found live 2026-08-19: warmup stalled on
+    one card for 4+ hours with no error and no further progress."""
+    orch._animation_cache_ready = False
+    monkeypatch.setattr(orch, "_WARMUP_CARD_TIMEOUT_SECONDS", 0.05)
+    catalog = SimpleNamespace(
+        cards=[
+            SimpleNamespace(code="stuck", name="Stuck", rarity="common", rarity_label="⬜"),
+            SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜"),
+        ]
+    )
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalog if banner == "genshin" else SimpleNamespace(cards=[])))
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_cached_versions_by_card=AsyncMock(return_value={}),
+        get_gacha_animation_variant_count=AsyncMock(return_value=0),
+        add_gacha_animation_variant=AsyncMock(),
+        evict_oldest_gacha_animation_variant=AsyncMock(),
+    )
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"gif", filename="x.gif"), needs_caching=True, cache_version="v1")
+
+    async def resolve_side_effect(*, banner, landing_card_code, **kwargs):
+        if landing_card_code == "stuck":
+            await asyncio.sleep(10)  # never actually reached within the test timeout
+        return resolved
+
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", AsyncMock(side_effect=resolve_side_effect))
+
+    sent_message = SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id"))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.delete_message = AsyncMock()
+
+    settings = SimpleNamespace(gacha_admin_user_id=905302972)
+    await asyncio.wait_for(
+        orch.warm_up_gacha_animation_cache(settings=settings, bot=bot, activity_repo=activity_repo),
+        timeout=5.0,
+    )
+
+    activity_repo.add_gacha_animation_variant.assert_awaited_once_with(
+        banner="genshin", card_code="amber", telegram_file_id="warmup-file-id", cache_version="v1"
+    )
+
+
 def test_compute_cache_version_changes_when_background_asset_changes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     background = tmp_path / "bg.png"
     background.write_bytes(b"background-v1")
