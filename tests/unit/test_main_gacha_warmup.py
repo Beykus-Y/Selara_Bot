@@ -19,7 +19,7 @@ async def test_warmup_notifies_admin_once_when_cache_becomes_ready(monkeypatch: 
 
     bot = SimpleNamespace(send_message=AsyncMock())
     settings = SimpleNamespace(admin_user_id=99)
-    session = SimpleNamespace(commit=AsyncMock())
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     session_factory = lambda: _AsyncCtx(session)
     monkeypatch.setattr(main_module, "SqlAlchemyActivityRepository", lambda session: SimpleNamespace())
 
@@ -39,7 +39,7 @@ async def test_warmup_does_not_notify_when_already_ready_before_starting(monkeyp
 
     bot = SimpleNamespace(send_message=AsyncMock())
     settings = SimpleNamespace(admin_user_id=99)
-    session = SimpleNamespace(commit=AsyncMock())
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     session_factory = lambda: _AsyncCtx(session)
     monkeypatch.setattr(main_module, "SqlAlchemyActivityRepository", lambda session: SimpleNamespace())
 
@@ -57,7 +57,7 @@ async def test_warmup_does_not_notify_when_still_not_ready_after_running(monkeyp
 
     bot = SimpleNamespace(send_message=AsyncMock())
     settings = SimpleNamespace(admin_user_id=99)
-    session = SimpleNamespace(commit=AsyncMock())
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     session_factory = lambda: _AsyncCtx(session)
     monkeypatch.setattr(main_module, "SqlAlchemyActivityRepository", lambda session: SimpleNamespace())
 
@@ -73,7 +73,7 @@ async def test_warmup_completion_notify_failure_does_not_crash_the_task(monkeypa
 
     bot = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("telegram down")))
     settings = SimpleNamespace(admin_user_id=99)
-    session = SimpleNamespace(commit=AsyncMock())
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     session_factory = lambda: _AsyncCtx(session)
     monkeypatch.setattr(main_module, "SqlAlchemyActivityRepository", lambda session: SimpleNamespace())
 

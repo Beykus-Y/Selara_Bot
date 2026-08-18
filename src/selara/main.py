@@ -100,7 +100,11 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
             activity_repo = SqlAlchemyActivityRepository(session)
             was_ready = await is_gacha_animation_cache_ready(settings, activity_repo)
             await warm_up_gacha_animation_cache(
-                settings=settings, bot=bot, activity_repo=activity_repo, on_card_done=session.commit
+                settings=settings,
+                bot=bot,
+                activity_repo=activity_repo,
+                on_card_done=session.commit,
+                on_card_error=session.rollback,
             )
             if not was_ready and settings.admin_user_id is not None:
                 is_ready_now = await is_gacha_animation_cache_ready(settings, activity_repo)

@@ -1,27 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from aiogram.types import BufferedInputFile
-from PIL import Image
 
 from selara.presentation import gacha_reel_orchestration as orch
 
 
-def _valid_gif_bytes() -> bytes:
-    """A real minimal animated GIF — _read_local_gif validates structure
-    (pre-deploy audit finding, 2026-08-19), so plain placeholder bytes like
-    b"gif-bytes" no longer round-trip through the local-disk tier."""
-    buffer = BytesIO()
-    frame1 = Image.new("P", (4, 4))
-    frame2 = Image.new("P", (4, 4))
-    frame1.save(buffer, format="GIF", save_all=True, append_images=[frame2], duration=100, loop=0)
-    return buffer.getvalue()
+def _valid_mp4_bytes() -> bytes:
+    """A minimal structurally-valid MP4 (ISO-BMFF ftyp box header) —
+    _read_local_reel validates structure (pre-deploy audit finding,
+    2026-08-19; extended to MP4 on the GIF->MP4 switch), so plain
+    placeholder bytes like b"gif-bytes" no longer round-trip through the
+    local-disk tier. Name kept for now to minimize test-file churn — the
+    content itself is what changed."""
+    return b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41" + b"\x00" * 16
 
 
 @pytest.mark.asyncio
@@ -66,7 +63,7 @@ async def test_resolve_generates_new_variant_when_under_cap(monkeypatch: pytest.
         get_gacha_animation_variant_count=AsyncMock(return_value=1),
         get_random_gacha_animation_variant_file_id=AsyncMock(),
     )
-    gif_bytes = _valid_gif_bytes()
+    gif_bytes = _valid_mp4_bytes()
     render_mock = AsyncMock(return_value=gif_bytes)
     monkeypatch.setattr(orch, "_render_reel_gif", render_mock)
 
@@ -82,12 +79,17 @@ async def test_resolve_generates_new_variant_when_under_cap(monkeypatch: pytest.
 
     assert isinstance(result.payload, BufferedInputFile)
     assert result.payload.data == gif_bytes
+    assert result.payload.filename.endswith(".mp4")  # regression guard: found live 2026-08-19 —
+    # a mismatched .gif filename on real MP4 bytes made Telegram silently
+    # refuse to classify the upload as an animation (no .animation in the
+    # response), so the variant was never cached and it displayed as a
+    # generic file instead of inline media.
     assert result.needs_caching is True
     assert result.cache_version == "v1"
     render_mock.assert_awaited_once()
     activity_repo.get_random_gacha_animation_variant_file_id.assert_not_awaited()
     # rendered bytes must also have been written to the local disk tier
-    assert orch._read_local_gif(
+    assert orch._read_local_reel(
         settings=SimpleNamespace(gacha_reel_cache_dir=str(tmp_path)), banner="genshin", card_code="furina", cache_version="v1"
     ) == gif_bytes
 
@@ -157,8 +159,8 @@ async def test_resolve_uses_local_disk_tier_before_rendering(monkeypatch: pytest
     instead of paying for a full Pillow re-render."""
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
     monkeypatch.setattr(orch, "_compute_landing_cache_version", AsyncMock(return_value="v1"))
-    gif_bytes = _valid_gif_bytes()
-    orch._write_local_gif_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=gif_bytes)
+    gif_bytes = _valid_mp4_bytes()
+    orch._write_local_reel_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=gif_bytes)
     activity_repo = SimpleNamespace(
         get_gacha_animation_variant_count=AsyncMock(return_value=0),
         get_random_gacha_animation_variant_file_id=AsyncMock(),
@@ -178,6 +180,7 @@ async def test_resolve_uses_local_disk_tier_before_rendering(monkeypatch: pytest
 
     assert isinstance(result.payload, BufferedInputFile)
     assert result.payload.data == gif_bytes
+    assert result.payload.filename.endswith(".mp4")
     assert result.needs_caching is True  # still needs its file_id cached in Postgres
     render_mock.assert_not_awaited()
 
@@ -246,36 +249,36 @@ async def test_cache_reel_variant_does_not_evict_when_under_cap() -> None:
     activity_repo.add_gacha_animation_variant.assert_awaited_once()
 
 
-def test_write_local_gif_atomic_round_trip_and_no_partial_file_on_crash(tmp_path) -> None:
+def test_write_local_reel_atomic_round_trip_and_no_partial_file_on_crash(tmp_path) -> None:
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
 
-    gif_bytes = _valid_gif_bytes()
-    orch._write_local_gif_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=gif_bytes)
+    gif_bytes = _valid_mp4_bytes()
+    orch._write_local_reel_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=gif_bytes)
 
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v1") == gif_bytes
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v1") == gif_bytes
     # no stray .tmp file left behind after a successful atomic write
-    card_dir = orch._local_gif_path(settings=settings, banner="genshin", card_code="furina", cache_version="v1").parent
+    card_dir = orch._local_reel_path(settings=settings, banner="genshin", card_code="furina", cache_version="v1").parent
     assert list(card_dir.glob("*.tmp")) == []
 
 
-def test_write_local_gif_atomic_replaces_stale_version_and_cleans_up_old_file(tmp_path) -> None:
+def test_write_local_reel_atomic_replaces_stale_version_and_cleans_up_old_file(tmp_path) -> None:
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
-    old_bytes = _valid_gif_bytes()
-    new_bytes = _valid_gif_bytes()
-    orch._write_local_gif_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=old_bytes)
-    orch._write_local_gif_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v2", content=new_bytes)
+    old_bytes = _valid_mp4_bytes()
+    new_bytes = _valid_mp4_bytes()
+    orch._write_local_reel_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=old_bytes)
+    orch._write_local_reel_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v2", content=new_bytes)
 
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v2") == new_bytes
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v2") == new_bytes
 
 
-def test_read_local_gif_missing_file_returns_none_not_an_error(tmp_path) -> None:
+def test_read_local_reel_missing_file_returns_none_not_an_error(tmp_path) -> None:
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="unknown", cache_version="v1") is None
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="unknown", cache_version="v1") is None
 
 
-def test_read_local_gif_rejects_corrupted_or_truncated_file(tmp_path) -> None:
+def test_read_local_reel_rejects_corrupted_or_truncated_file(tmp_path) -> None:
     """Pre-deploy audit finding (2026-08-19): atomic writes prevent *new*
     corruption, but don't protect against a file that's already
     truncated/corrupt on disk for any other reason (partial disk write,
@@ -283,29 +286,21 @@ def test_read_local_gif_rejects_corrupted_or_truncated_file(tmp_path) -> None:
     validating the GIF structure would hand Telegram a broken file
     silently. Must fall back to Tier 3 (render) instead of trusting it."""
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
-    path = orch._local_gif_path(settings=settings, banner="genshin", card_code="furina", cache_version="v1")
+    path = orch._local_reel_path(settings=settings, banner="genshin", card_code="furina", cache_version="v1")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"not a real gif, just garbage bytes")
 
-    assert orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
+    assert orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v1") is None
 
 
-def test_read_local_gif_accepts_a_genuine_animated_gif(tmp_path) -> None:
-    from io import BytesIO
-
-    from PIL import Image
-
-    frame1 = Image.new("P", (10, 10))
-    frame2 = Image.new("P", (10, 10))
-    buffer = BytesIO()
-    frame1.save(buffer, format="GIF", save_all=True, append_images=[frame2], duration=100, loop=0)
-    valid_gif_bytes = buffer.getvalue()
+def test_read_local_reel_accepts_a_genuine_mp4(tmp_path) -> None:
+    valid_mp4_bytes = _valid_mp4_bytes()
 
     settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
-    orch._write_local_gif_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=valid_gif_bytes)
+    orch._write_local_reel_atomic(settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=valid_mp4_bytes)
 
-    result = orch._read_local_gif(settings=settings, banner="genshin", card_code="furina", cache_version="v1")
-    assert result == valid_gif_bytes
+    result = orch._read_local_reel(settings=settings, banner="genshin", card_code="furina", cache_version="v1")
+    assert result == valid_mp4_bytes
 
 
 def test_compute_cache_version_changes_with_landing_card_etag(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -488,6 +483,93 @@ async def test_warm_up_continues_past_a_single_card_failure(monkeypatch: pytest.
     activity_repo.add_gacha_animation_variant.assert_awaited_once_with(
         banner="genshin", card_code="amber", telegram_file_id="warmup-file-id", cache_version="v1"
     )
+
+
+@pytest.mark.asyncio
+async def test_warm_up_rolls_back_session_after_a_card_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed card must roll back the shared DB session before moving on
+    — otherwise, on Postgres, the aborted transaction poisons every
+    subsequent operation on that session (every later commit silently
+    fails) until something rolls it back, so warmup looks like it's
+    running (cards get rendered/sent) but nothing after the first failure
+    ever actually lands in the DB (found live, 2026-08-19: warmup ran for
+    ~45 min, sent many cards, but the cached-variant count never moved past
+    the point of the first failure)."""
+    orch._animation_cache_ready = False
+    catalog = SimpleNamespace(
+        cards=[
+            SimpleNamespace(code="broken", name="Broken", rarity="common", rarity_label="⬜"),
+            SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜"),
+        ]
+    )
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalog if banner == "genshin" else SimpleNamespace(cards=[])))
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_cached_versions_by_card=AsyncMock(return_value={}),
+        get_gacha_animation_variant_count=AsyncMock(return_value=0),
+        add_gacha_animation_variant=AsyncMock(),
+        evict_oldest_gacha_animation_variant=AsyncMock(),
+    )
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"gif", filename="x.gif"), needs_caching=True, cache_version="v1")
+    resolve_mock = AsyncMock(side_effect=[RuntimeError("boom"), resolved])
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", resolve_mock)
+
+    sent_message = SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id"))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.delete_message = AsyncMock()
+    on_card_done = AsyncMock()
+    on_card_error = AsyncMock()
+
+    settings = SimpleNamespace(gacha_admin_user_id=905302972)
+    await orch.warm_up_gacha_animation_cache(
+        settings=settings, bot=bot, activity_repo=activity_repo,
+        on_card_done=on_card_done, on_card_error=on_card_error,
+    )
+
+    on_card_error.assert_awaited_once()  # rolled back exactly once, for the failed card
+    on_card_done.assert_awaited_once()  # the successful card still committed
+
+
+@pytest.mark.asyncio
+async def test_warm_up_survives_on_card_error_itself_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rollback callback can itself raise (e.g. the underlying DB
+    connection already dropped) — found live, 2026-08-19, running warmup
+    against a flaky SSH-tunneled connection: one dropped connection crashed
+    the whole warmup process instead of just skipping that card, wiping out
+    all further progress for the rest of the catalog."""
+    orch._animation_cache_ready = False
+    catalog = SimpleNamespace(
+        cards=[
+            SimpleNamespace(code="broken", name="Broken", rarity="common", rarity_label="⬜"),
+            SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜"),
+        ]
+    )
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalog if banner == "genshin" else SimpleNamespace(cards=[])))
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_cached_versions_by_card=AsyncMock(return_value={}),
+        get_gacha_animation_variant_count=AsyncMock(return_value=0),
+        add_gacha_animation_variant=AsyncMock(),
+        evict_oldest_gacha_animation_variant=AsyncMock(),
+    )
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    resolve_mock = AsyncMock(side_effect=[RuntimeError("boom"), resolved])
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", resolve_mock)
+
+    sent_message = SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id"))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.delete_message = AsyncMock()
+    on_card_done = AsyncMock()
+    on_card_error = AsyncMock(side_effect=RuntimeError("connection already closed"))
+
+    settings = SimpleNamespace(gacha_admin_user_id=905302972)
+    await orch.warm_up_gacha_animation_cache(
+        settings=settings, bot=bot, activity_repo=activity_repo,
+        on_card_done=on_card_done, on_card_error=on_card_error,
+    )  # must not raise
+
+    on_card_error.assert_awaited_once()
+    on_card_done.assert_awaited_once()  # the second card still got attempted and committed
 
 
 @pytest.mark.asyncio

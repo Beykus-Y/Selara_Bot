@@ -6,14 +6,12 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 
 import httpx
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile
-from PIL import Image
 
 from selara.application.use_cases.gacha import GachaUseCaseError, get_banner_cards
 from selara.core.config import Settings
@@ -150,45 +148,43 @@ async def _compute_landing_cache_version(settings: Settings, *, banner: str, lan
     return _compute_cache_version(banner=banner, landing_card_etag=landing_etag)
 
 
-def _local_gif_path(*, settings: Settings, banner: str, card_code: str, cache_version: str) -> Path:
-    return Path(settings.gacha_reel_cache_dir) / banner / card_code / f"{cache_version}.gif"
+def _local_reel_path(*, settings: Settings, banner: str, card_code: str, cache_version: str) -> Path:
+    return Path(settings.gacha_reel_cache_dir) / banner / card_code / f"{cache_version}.mp4"
 
 
-def _is_valid_gif(content: bytes) -> bool:
-    """Cheap structural check — not a full decode of every frame, just
-    enough to catch truncation/corruption before handing the file to
-    Telegram (pre-deploy audit finding, 2026-08-19: a corrupt-but-readable
-    file on disk was previously trusted blindly)."""
-    try:
-        with Image.open(BytesIO(content)) as image:
-            if image.format != "GIF":
-                return False
-            image.verify()
-        return True
-    except Exception:
+def _is_valid_mp4(content: bytes) -> bool:
+    """Cheap structural check — not a full decode, just enough to catch
+    truncation/corruption before handing the file to Telegram (pre-deploy
+    audit finding, 2026-08-19: a corrupt-but-readable file on disk was
+    previously trusted blindly). MP4/ISO-BMFF files start with a size field
+    followed by one of a handful of box-type fourCCs (most commonly
+    b"ftyp"); truncated or corrupted output won't have this structure."""
+    if len(content) < 12:
         return False
+    box_type = content[4:8]
+    return box_type in (b"ftyp", b"moov", b"free", b"mdat", b"wide")
 
 
-def _read_local_gif(*, settings: Settings, banner: str, card_code: str, cache_version: str) -> bytes | None:
-    path = _local_gif_path(settings=settings, banner=banner, card_code=card_code, cache_version=cache_version)
+def _read_local_reel(*, settings: Settings, banner: str, card_code: str, cache_version: str) -> bytes | None:
+    path = _local_reel_path(settings=settings, banner=banner, card_code=card_code, cache_version=cache_version)
     try:
         content = path.read_bytes()
     except (FileNotFoundError, OSError):
         return None
-    if not _is_valid_gif(content):
+    if not _is_valid_mp4(content):
         return None
     return content
 
 
-def _write_local_gif_atomic(*, settings: Settings, banner: str, card_code: str, cache_version: str, content: bytes) -> None:
+def _write_local_reel_atomic(*, settings: Settings, banner: str, card_code: str, cache_version: str, content: bytes) -> None:
     """Write-to-temp-then-rename so a crash mid-write can never leave a
     truncated/corrupt file at the real path — os.replace (via Path.replace)
-    is atomic on POSIX. Also drops any other *.gif in this card's directory
+    is atomic on POSIX. Also drops any other *.mp4 in this card's directory
     (necessarily a stale version — this is the only writer), so tuning the
     renderer repeatedly doesn't leave dead generations on disk forever."""
-    path = _local_gif_path(settings=settings, banner=banner, card_code=card_code, cache_version=cache_version)
+    path = _local_reel_path(settings=settings, banner=banner, card_code=card_code, cache_version=cache_version)
     path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in path.parent.glob("*.gif"):
+    for stale in path.parent.glob("*.mp4"):
         if stale != path:
             stale.unlink(missing_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
@@ -293,13 +289,13 @@ async def resolve_gacha_reel_animation(
                 )
                 return ResolvedReelAnimation(payload=cached_file_id, needs_caching=False, cache_version=cache_version)
 
-    local_bytes = _read_local_gif(settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version)
+    local_bytes = _read_local_reel(settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version)
     if local_bytes is not None:
         logger.info(
             "Gacha reel resolved: tier=local_disk banner=%s card=%s version=%s",
             banner, landing_card_code, cache_version,
         )
-        filename = f"gacha_reel_{banner}_{landing_card_code}.gif"
+        filename = f"gacha_reel_{banner}_{landing_card_code}.mp4"
         return ResolvedReelAnimation(
             payload=BufferedInputFile(local_bytes, filename=filename), needs_caching=True, cache_version=cache_version
         )
@@ -308,7 +304,7 @@ async def resolve_gacha_reel_animation(
         "Gacha reel resolved: tier=render banner=%s card=%s version=%s",
         banner, landing_card_code, cache_version,
     )
-    gif_bytes = await _render_reel_gif(
+    mp4_bytes = await _render_reel_gif(
         settings=settings,
         banner=banner,
         landing_card_code=landing_card_code,
@@ -316,12 +312,12 @@ async def resolve_gacha_reel_animation(
         landing_rarity_label=landing_rarity_label,
         landing_border_color=_rarity_border_color(landing_rarity),
     )
-    _write_local_gif_atomic(
-        settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version, content=gif_bytes
+    _write_local_reel_atomic(
+        settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version, content=mp4_bytes
     )
-    filename = f"gacha_reel_{banner}_{landing_card_code}.gif"
+    filename = f"gacha_reel_{banner}_{landing_card_code}.mp4"
     return ResolvedReelAnimation(
-        payload=BufferedInputFile(gif_bytes, filename=filename), needs_caching=True, cache_version=cache_version
+        payload=BufferedInputFile(mp4_bytes, filename=filename), needs_caching=True, cache_version=cache_version
     )
 
 
@@ -361,7 +357,9 @@ async def is_gacha_animation_cache_ready(settings: Settings, activity_repo) -> b
     return True
 
 
-async def warm_up_gacha_animation_cache(*, settings: Settings, bot: Bot, activity_repo, on_card_done=None) -> None:
+async def warm_up_gacha_animation_cache(
+    *, settings: Settings, bot: Bot, activity_repo, on_card_done=None, on_card_error=None
+) -> None:
     """Fire-and-forget background warmup (see docs/GACHA_MODERNIZATION_TODO.md,
     раздел 10): ensures at least one cached variant per card across active
     banners, so real users don't hit a live ~4-5s render. Runs to Telegram
@@ -401,10 +399,32 @@ async def warm_up_gacha_animation_cache(*, settings: Settings, bot: Bot, activit
                     "Gacha animation warmup timed out after %.0fs for %s/%s, skipping",
                     _WARMUP_CARD_TIMEOUT_SECONDS, banner, card.code,
                 )
+                if on_card_error is not None:
+                    await _safe_on_card_error(on_card_error, banner=banner, card_code=card.code)
                 continue
             except Exception:
                 logger.warning("Gacha animation warmup failed for %s/%s", banner, card.code, exc_info=True)
+                if on_card_error is not None:
+                    # A failed card may have left a half-executed DB write
+                    # (e.g. add_gacha_animation_variant raised mid-INSERT).
+                    # On Postgres, an aborted transaction poisons every
+                    # further operation on this session until rolled back —
+                    # without this, every card after the first failure
+                    # would silently fail to commit for the rest of the run
+                    # (found live, 2026-08-19).
+                    await _safe_on_card_error(on_card_error, banner=banner, card_code=card.code)
                 continue
+
+
+async def _safe_on_card_error(on_card_error, *, banner: str, card_code: str) -> None:
+    """The rollback callback itself can raise (e.g. the underlying DB
+    connection was already dropped) — that must not crash the rest of the
+    warmup run, or a single flaky connection turns one failed card into a
+    total loss of progress for every card after it."""
+    try:
+        await on_card_error()
+    except Exception:
+        logger.warning("Gacha animation warmup: rollback after failure also failed for %s/%s", banner, card_code, exc_info=True)
 
 
 async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done) -> None:
