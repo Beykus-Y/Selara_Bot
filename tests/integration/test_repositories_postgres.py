@@ -530,7 +530,7 @@ async def test_repository_backfill_syncs_event_reads_for_chat() -> None:
     chat = ChatSnapshot(telegram_chat_id=-10088, chat_type="group", title="Backfill Group")
     user_one = UserSnapshot(telegram_user_id=2011, username="one_bf", first_name="One", last_name=None, is_bot=False)
     user_two = UserSnapshot(telegram_user_id=2012, username="two_bf", first_name="Two", last_name=None, is_bot=False)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
 
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
