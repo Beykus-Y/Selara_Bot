@@ -46,6 +46,7 @@ class GachaPullResponse(BaseModel):
 class GachaHistoryEntryPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    pull_id: int
     pulled_at: str
     card_name: str
     rarity: str
@@ -72,6 +73,19 @@ class GachaProfileResponse(BaseModel):
     total_copies: int
     rarity_counts: list[GachaRarityCountPayload] = []
     recent_pulls: list[GachaHistoryEntryPayload]
+
+
+class GachaBannerCardsResponse(BaseModel):
+    status: str
+    banner: str
+    cards: list[GachaCardPayload]
+
+
+class GachaHistoryResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    entries: list[GachaHistoryEntryPayload]
 
 
 class GachaCooldownResetResponse(BaseModel):
@@ -107,9 +121,10 @@ class GachaBackupFile:
 
 
 class GachaClientError(RuntimeError):
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, is_timeout: bool = False) -> None:
         super().__init__(message)
         self.message = message
+        self.is_timeout = is_timeout
 
 
 class HttpGachaClient:
@@ -141,6 +156,44 @@ class HttpGachaClient:
             params={"banner": banner},
         )
         return GachaProfileResponse.model_validate(payload)
+
+    async def get_banner_cards(
+        self, *, banner: str, if_none_match: str | None = None
+    ) -> tuple[GachaBannerCardsResponse | None, str | None]:
+        """Conditional GET: `if_none_match` is sent as `If-None-Match`; a
+        304 response returns `(None, etag)` — caller reuses its own cached
+        copy. Unlike other client methods this bypasses `_request` since
+        304 handling is special-cased (no JSON body, not an error)."""
+        headers = {"If-None-Match": if_none_match} if if_none_match else {}
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds) as client:
+                response = await client.get(f"/v1/gacha/banners/{banner}/cards", headers=headers)
+        except httpx.TimeoutException as exc:
+            raise GachaClientError("Гача-сервер не ответил вовремя.", is_timeout=True) from exc
+        except httpx.HTTPError as exc:
+            raise GachaClientError("Не удалось связаться с гача-сервером.") from exc
+
+        if response.status_code == 304:
+            return None, response.headers.get("etag")
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise GachaClientError(_extract_error_message(exc.response)) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GachaClientError("Гача-сервер вернул некорректный ответ.") from exc
+        return GachaBannerCardsResponse.model_validate(payload), response.headers.get("etag")
+
+    async def get_history(self, *, user_id: int, banner: str, limit: int = 10) -> GachaHistoryResponse:
+        payload = await self._request(
+            "GET",
+            f"/v1/gacha/users/{user_id}/history",
+            params={"banner": banner, "limit": limit},
+        )
+        return GachaHistoryResponse.model_validate(payload)
 
     async def purchase_pull(self, *, user_id: int, username: str | None, banner: str) -> GachaPullResponse:
         payload = await self._request(
@@ -203,6 +256,7 @@ class HttpGachaClient:
         banner: str,
         amount: int,
         admin_token: str,
+        idempotency_key: str | None = None,
     ) -> GachaCurrencyGrantResponse:
         payload = await self._request(
             "POST",
@@ -213,6 +267,7 @@ class HttpGachaClient:
                 "username": username,
                 "banner": banner,
                 "amount": amount,
+                "idempotency_key": idempotency_key,
             },
         )
         return GachaCurrencyGrantResponse.model_validate(payload)
@@ -243,7 +298,7 @@ class HttpGachaClient:
                 response = await client.request(method, path, **kwargs)
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise GachaClientError("Гача-сервер не ответил вовремя.") from exc
+            raise GachaClientError("Гача-сервер не ответил вовремя.", is_timeout=True) from exc
         except httpx.HTTPStatusError as exc:
             raise GachaClientError(_extract_error_message(exc.response)) from exc
         except httpx.HTTPError as exc:

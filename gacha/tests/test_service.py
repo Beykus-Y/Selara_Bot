@@ -21,6 +21,7 @@ class FakeGachaRepository:
         self.banner_wallets: dict[tuple[int, str], int] = {}
         self.pull_records: dict[int, dict[str, object]] = {}
         self.next_pull_id = 1
+        self.currency_grants: dict[str, PlayerState] = {}
 
     async def get_banner_cooldown(self, *, user_id: int, banner: str) -> datetime | None:
         return self.banner_cooldowns.get((user_id, banner))
@@ -57,9 +58,13 @@ class FakeGachaRepository:
         username: str | None,
         banner: str,
         amount: int,
+        idempotency_key: str | None = None,
     ) -> PlayerState:
         if amount == 0:
             raise ValueError("Количество валюты должно быть ненулевым.")
+
+        if idempotency_key is not None and idempotency_key in self.currency_grants:
+            return self.currency_grants[idempotency_key]
 
         current = await self.get_or_create_player(user_id=user_id, username=username)
         wallet_key = (user_id, banner)
@@ -78,7 +83,10 @@ class FakeGachaRepository:
             total_primogems=total_primogems,
         )
         self.players[user_id] = updated
-        return replace(updated, total_primogems=wallet_balance)
+        result = replace(updated, total_primogems=wallet_balance)
+        if idempotency_key is not None:
+            self.currency_grants[idempotency_key] = result
+        return result
 
     async def apply_pull(
         self,
@@ -653,6 +661,38 @@ async def test_grant_currency_adds_banner_balance_without_touching_progress() ->
 
 
 @pytest.mark.asyncio
+async def test_grant_currency_is_idempotent_when_key_repeats() -> None:
+    """A repeated admin currency grant with the same idempotency_key must not
+    apply the amount twice — this is what protects buy_currency_with_coins
+    from double-crediting currency on an ambiguous HTTP timeout (see
+    docs/GACHA_MODERNIZATION_TODO.md, Этап 0)."""
+    repo = FakeGachaRepository()
+    service = GachaService(repo)
+
+    first = await service.grant_currency(
+        user_id=909, username="buyer", banner="genshin", amount=160, idempotency_key="topup-1"
+    )
+    second = await service.grant_currency(
+        user_id=909, username="buyer", banner="genshin", amount=160, idempotency_key="topup-1"
+    )
+
+    assert first.player.total_primogems == 160
+    assert second.player.total_primogems == 160
+    assert second.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_grant_currency_without_key_is_not_deduplicated() -> None:
+    repo = FakeGachaRepository()
+    service = GachaService(repo)
+
+    await service.grant_currency(user_id=910, username="buyer", banner="genshin", amount=160)
+    result = await service.grant_currency(user_id=910, username="buyer", banner="genshin", amount=160)
+
+    assert result.player.total_primogems == 320
+
+
+@pytest.mark.asyncio
 async def test_grant_currency_allows_negative_adjustment_within_wallet() -> None:
     repo = FakeGachaRepository()
     service = GachaService(repo)
@@ -667,6 +707,7 @@ async def test_grant_currency_allows_negative_adjustment_within_wallet() -> None
 
 def test_history_payload_uses_rarity_labels() -> None:
     entry = SimpleNamespace(
+        id=101,
         banner="genshin",
         character_code="amber",
         pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
@@ -701,6 +742,7 @@ def test_profile_message_includes_recent_pulls_block() -> None:
     recent = [
         _to_history_payload(
             SimpleNamespace(
+                id=101,
                 banner="genshin",
                 character_code="amber",
                 pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
@@ -778,6 +820,7 @@ def test_hsr_profile_message_does_not_render_origin_block() -> None:
     recent = [
         _to_history_payload(
             SimpleNamespace(
+                id=101,
                 banner="hsr",
                 character_code="kafka",
                 pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),
@@ -818,6 +861,7 @@ def test_profile_message_renders_unknown_card_without_origin_details() -> None:
     recent = [
         _to_history_payload(
             SimpleNamespace(
+                id=101,
                 banner="genshin",
                 character_code="missing_card",
                 pulled_at=datetime(2026, 3, 14, 12, 0, tzinfo=timezone.utc),

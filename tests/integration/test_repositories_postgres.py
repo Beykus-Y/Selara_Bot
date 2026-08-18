@@ -334,6 +334,174 @@ async def test_repository_subscription_exempt_upserts_missing_user() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_repository_gacha_animation_mode_defaults_true_and_is_per_user() -> None:
+    """Per-user gacha animation-mode toggle (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 2): animated is the new default (opt-out), matching subscription_exempt's
+    existing upsert pattern but with a true default instead of false."""
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        assert await repo.is_gacha_animation_enabled(user_id=777002) is True
+
+        await repo.set_gacha_animation_enabled(user_id=777002, enabled=False)
+        assert await repo.is_gacha_animation_enabled(user_id=777002) is False
+
+        row = await session.get(UserModel, 777002)
+        assert row is not None
+        assert row.gacha_animation_enabled is False
+
+        assert await repo.is_gacha_animation_enabled(user_id=777003) is True
+
+        await repo.set_gacha_animation_enabled(user_id=777002, enabled=True)
+        assert await repo.is_gacha_animation_enabled(user_id=777002) is True
+
+        await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_gacha_animation_variant_cache_lifecycle() -> None:
+    """Hybrid variant cache for the animated pull reel (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3, решение 9): up to 3 cached variants per (banner, card_code); once at
+    the cap, adding another evicts the oldest first."""
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        assert await repo.get_gacha_animation_variant_count(banner="genshin", card_code="furina", cache_version="v1") == 0
+        assert (
+            await repo.get_random_gacha_animation_variant_file_id(banner="genshin", card_code="furina", cache_version="v1")
+            is None
+        )
+
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="file-1", cache_version="v1")
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="file-2", cache_version="v1")
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="file-3", cache_version="v1")
+        await session.commit()
+
+        assert await repo.get_gacha_animation_variant_count(banner="genshin", card_code="furina", cache_version="v1") == 3
+        picked = await repo.get_random_gacha_animation_variant_file_id(banner="genshin", card_code="furina", cache_version="v1")
+        assert picked in {"file-1", "file-2", "file-3"}
+
+        await repo.evict_oldest_gacha_animation_variant(banner="genshin", card_code="furina")
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="file-4", cache_version="v1")
+        await session.commit()
+
+        assert await repo.get_gacha_animation_variant_count(banner="genshin", card_code="furina", cache_version="v1") == 3
+        remaining = set()
+        for _ in range(20):
+            remaining.add(
+                await repo.get_random_gacha_animation_variant_file_id(banner="genshin", card_code="furina", cache_version="v1")
+            )
+        assert "file-1" not in remaining
+        assert "file-4" in remaining
+
+        # a different card_code is an independent cache bucket
+        assert await repo.get_gacha_animation_variant_count(banner="genshin", card_code="amber", cache_version="v1") == 0
+
+        # a renderer/asset version bump makes existing rows invisible to the
+        # new version, even though they still physically exist (they'll be
+        # naturally evicted first next time, since they're the oldest)
+        assert await repo.get_gacha_animation_variant_count(banner="genshin", card_code="furina", cache_version="v2") == 0
+        assert (
+            await repo.get_random_gacha_animation_variant_file_id(banner="genshin", card_code="furina", cache_version="v2")
+            is None
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_get_gacha_animation_cached_versions_by_card() -> None:
+    """Bulk lookup backing the warmup-readiness check (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3): per-card set of cached versions, so readiness can be computed
+    in Python against the catalog without one query per card."""
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        assert await repo.get_gacha_animation_cached_versions_by_card(banner="genshin") == {}
+
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="f1", cache_version="v1")
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="furina", telegram_file_id="f2", cache_version="v2")
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="amber", telegram_file_id="f3", cache_version="v1")
+        await repo.add_gacha_animation_variant(banner="hsr", card_code="kafka", telegram_file_id="f4", cache_version="v1")
+        await session.commit()
+
+        result = await repo.get_gacha_animation_cached_versions_by_card(banner="genshin")
+
+        assert result == {"furina": {"v1", "v2"}, "amber": {"v1"}}
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repository_has_any_gacha_animation_variant_reflects_global_cache_state() -> None:
+    """Coarse global gate for the warmup task (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3): 'is the cache cold *at all*' — not per-card, checked directly
+    against real table content, not a separate flag that could drift out
+    of sync with what's actually cached."""
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+
+    engine = create_async_engine(database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+
+        assert await repo.has_any_gacha_animation_variant() is False
+
+        await repo.add_gacha_animation_variant(banner="genshin", card_code="amber", telegram_file_id="f1", cache_version="v1")
+        await session.commit()
+
+        assert await repo.has_any_gacha_animation_variant() is True
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repository_lists_inactive_members_oldest_first_and_skips_bots_and_inactive_members() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:

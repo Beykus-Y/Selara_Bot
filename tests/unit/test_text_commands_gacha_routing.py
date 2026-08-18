@@ -143,3 +143,89 @@ async def test_manage_gacha_admin_exempt_reports_storage_error(monkeypatch: pyte
     assert message.answers == [
         ("Не удалось обновить обязательность подписки. Попробуйте ещё раз.", {"disable_notification": True})
     ]
+
+
+@pytest.mark.asyncio
+async def test_manage_gacha_admin_exempt_logs_successful_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful admin actions on gacha (exempt toggle, on/off, gachagive)
+    were previously only logged on failure — add audit logging for success
+    too (see docs/GACHA_MODERNIZATION_TODO.md, Этап 0)."""
+    message = _DummyMessage(text="гача админ необяз")
+    message.from_user = SimpleNamespace(id=999, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    message.reply_to_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=77, username="target", first_name="Target", last_name=None, is_bot=False)
+    )
+    activity_repo = SimpleNamespace(set_subscription_exempt=AsyncMock())
+
+    log_calls: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(text_commands.logger, "info", lambda *a, **kw: log_calls.append((a, kw)))
+
+    await text_commands._manage_gacha_admin_exempt(
+        message,
+        activity_repo,
+        SimpleNamespace(gacha_admin_user_id=999),
+        target_username=None,
+        exempt=True,
+    )
+
+    assert log_calls
+    args, kwargs = log_calls[0]
+    extra = kwargs.get("extra", {})
+    assert extra.get("actor_user_id") == 999
+    assert extra.get("target_user_id") == 77
+    assert extra.get("exempt") is True
+
+
+@pytest.mark.asyncio
+async def test_manage_gacha_toggle_logs_successful_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage(text="гача выкл")
+    message.from_user = SimpleNamespace(id=999, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    activity_repo = SimpleNamespace(upsert_chat_settings=AsyncMock())
+    log_calls: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(text_commands.logger, "info", lambda *a, **kw: log_calls.append((a, kw)))
+    monkeypatch.setattr(text_commands, "settings_to_dict", lambda value: {})
+
+    await text_commands._manage_gacha_toggle(
+        message,
+        activity_repo,
+        SimpleNamespace(gacha_admin_user_id=999, admin_user_id=None),
+        _CHAT_SETTINGS,
+        command_key="gacha_off",
+        duration_seconds=None,
+    )
+
+    assert log_calls
+    args, kwargs = log_calls[0]
+    extra = kwargs.get("extra", {})
+    assert extra.get("actor_user_id") == 999
+    assert extra.get("chat_id") == message.chat.id
+    assert extra.get("enable") is False
+
+
+@pytest.mark.asyncio
+async def test_gachagive_requires_explicit_target_and_does_not_default_to_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike cooldown-skip (where defaulting to the sender is a reasonable
+    self-service default), /gachagive without a reply/@username must not
+    silently gift the card to the admin themself."""
+    message = _DummyMessage(text="/gachagive some_code")
+    message.from_user = SimpleNamespace(id=999, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    command = SimpleNamespace(args="some_code")
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=True))
+    give_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "give_gacha_card", give_mock)
+    monkeypatch.setattr(text_commands, "_require_channel_subscription", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_ensure_gacha_admin_user", AsyncMock(return_value=True))
+
+    await text_commands.gachagive_command(
+        message,
+        command,
+        bot=object(),
+        activity_repo=activity_repo,
+        settings=SimpleNamespace(gacha_admin_user_id=999),
+    )
+
+    give_mock.assert_not_awaited()
+    assert message.answers
+    assert "reply" in message.answers[-1][0].lower() or "ответ" in message.answers[-1][0].lower()

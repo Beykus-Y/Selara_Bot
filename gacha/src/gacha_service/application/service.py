@@ -490,6 +490,7 @@ class GachaService:
         username: str | None,
         banner: str,
         amount: int,
+        idempotency_key: str | None = None,
     ) -> CurrencyGrantResult:
         get_banner_config(banner)
         player = await self._repo.adjust_banner_currency(
@@ -497,6 +498,7 @@ class GachaService:
             username=username,
             banner=banner,
             amount=amount,
+            idempotency_key=idempotency_key,
         )
         return CurrencyGrantResult(
             status="ok",

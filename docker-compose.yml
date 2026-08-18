@@ -42,6 +42,9 @@ services:
     environment:
       DATABASE_URL: ${SELARA_DATABASE_URL:?Set SELARA_DATABASE_URL}
       REDIS_URL: ${SELARA_REDIS_URL:-redis://redis:6379/0}
+      GACHA_REEL_CACHE_DIR: /data/gacha_reel_cache
+    volumes:
+      - selara_gacha_reel_cache:/data/gacha_reel_cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,6 +79,7 @@ services:
 volumes:
   selara_pg_data:
   selara_redis_data:
+  selara_gacha_reel_cache:
 
 networks:
   selara_internal:

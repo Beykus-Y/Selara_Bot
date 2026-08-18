@@ -172,8 +172,16 @@ async def test_admin_grant_currency_requires_token_and_returns_player_payload(mo
         def __init__(self, repo) -> None:
             self.repo = repo
 
-        async def grant_currency(self, *, user_id: int, username: str | None, banner: str, amount: int):
-            _ = (self.repo, username)
+        async def grant_currency(
+            self,
+            *,
+            user_id: int,
+            username: str | None,
+            banner: str,
+            amount: int,
+            idempotency_key: str | None = None,
+        ):
+            _ = (self.repo, username, idempotency_key)
             return SimpleNamespace(
                 status="ok",
                 message="currency granted",

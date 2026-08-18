@@ -34,6 +34,7 @@ class UserModel(Base):
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     subscription_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    gacha_animation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -2047,4 +2048,22 @@ class LlmAdminActionModel(Base):
     __table_args__ = (
         Index("idx_llm_admin_actions_chat_created", "chat_id", "created_at"),
         Index("idx_llm_admin_actions_chat_admin", "chat_id", "admin_user_id"),
+    )
+
+
+class GachaAnimationVariantModel(Base):
+    """Cached reel-animation clips for the animated gacha pull mode (see
+    docs/GACHA_MODERNIZATION_TODO.md, Этап 3). Purely a presentation-layer
+    cache — lives in the main bot's DB, not the gacha service's own DB, since
+    it holds no economy data and carries no risk to gacha history."""
+
+    __tablename__ = "gacha_animation_variants"
+
+    banner: Mapped[str] = mapped_column(String(32), primary_key=True)
+    card_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    variant_index: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    cache_version: Mapped[str] = mapped_column(String(32), nullable=False, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

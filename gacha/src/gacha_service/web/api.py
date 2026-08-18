@@ -3,13 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from secrets import compare_digest
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from gacha_service.application.catalog import get_banner_config, get_card_for_banner
+from gacha_service.application.catalog import (
+    get_banner_catalog_etag,
+    get_banner_config,
+    get_card_for_banner,
+    get_cards_for_banner,
+)
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
 from gacha_service.domain.models import (
@@ -80,6 +85,7 @@ class PullResponse(BaseModel):
 
 
 class HistoryEntryPayload(BaseModel):
+    pull_id: int
     pulled_at: datetime
     card_name: str
     rarity: str
@@ -119,6 +125,12 @@ class HistoryResponse(BaseModel):
     entries: list[HistoryEntryPayload]
 
 
+class BannerCardsResponse(BaseModel):
+    status: str
+    banner: str
+    cards: list[CardPayload]
+
+
 class CooldownResetRequest(BaseModel):
     user_id: int = Field(..., gt=0)
     banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
@@ -135,6 +147,7 @@ class AdminGrantCurrencyRequest(BaseModel):
     username: str | None = Field(default=None, max_length=64)
     banner: str = Field(default=settings.default_banner, min_length=1, max_length=32)
     amount: int
+    idempotency_key: str | None = Field(default=None, max_length=64)
 
 
 class SellPullRequest(BaseModel):
@@ -225,6 +238,7 @@ def _to_history_payload(entry) -> HistoryEntryPayload:
         element_code=element_code,
     )
     return HistoryEntryPayload(
+        pull_id=entry.id,
         pulled_at=entry.pulled_at,
         card_name=entry.character_name,
         rarity=rarity.value,
@@ -543,6 +557,47 @@ def build_router(session_factory):
             ],
         )
 
+    @router.get("/banners/{banner}/cards")
+    async def banner_cards(
+        banner: str,
+        response: Response,
+        request: Request = None,
+        if_none_match: str | None = Header(default=None),
+    ):
+        try:
+            cards = get_cards_for_banner(banner)
+            etag = f'"{get_banner_catalog_etag(banner)}"'
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if if_none_match is not None and if_none_match.strip() == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+
+        payload_cards: list[CardPayload] = []
+        for card in cards:
+            region_label, element_label = _resolve_card_labels(
+                banner=banner,
+                region_code=card.region_code,
+                element_code=card.element_code,
+            )
+            payload_cards.append(
+                CardPayload(
+                    code=card.code,
+                    name=card.name,
+                    rarity=card.rarity.value,
+                    rarity_label=RARITY_LABELS[card.rarity],
+                    points=card.points,
+                    primogems=card.primogems,
+                    image_url=_resolve_public_image_url(request, card.image_url),
+                    region_code=card.region_code,
+                    element_code=card.element_code,
+                    region_label=region_label,
+                    element_label=element_label,
+                )
+            )
+        response.headers["ETag"] = etag
+        return BannerCardsResponse(status="ok", banner=banner, cards=payload_cards)
+
     @router.get("/users/{user_id}/collection", response_model=CollectionResponse)
     async def collection(
         user_id: int,
@@ -661,6 +716,7 @@ def build_router(session_factory):
                 username=payload.username,
                 banner=payload.banner,
                 amount=payload.amount,
+                idempotency_key=payload.idempotency_key,
             )
         except ValueError as exc:
             raise _http_exception_for_value_error(exc) from exc

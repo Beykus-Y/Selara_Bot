@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -93,6 +94,18 @@ def get_cards_for_banner(banner: str) -> tuple[GachaCard, ...]:
         )
         for card in config.cards
     )
+
+
+@lru_cache(maxsize=None)
+def get_banner_catalog_etag(banner: str) -> str:
+    """Deterministic content hash of a banner's card catalog — changes iff
+    the underlying config content changes (i.e. on a deploy that ships new
+    banner JSON), not on a wall-clock schedule. Used for HTTP conditional
+    GET (ETag) so a client-side cache never serves a stale catalog past the
+    next deploy, per docs/GACHA_MODERNIZATION_TODO.md, Этап 3 caching work."""
+    config = get_banner_config(banner)
+    canonical = config.model_dump_json()
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def get_card_for_banner(banner: str, code: str) -> GachaCard:

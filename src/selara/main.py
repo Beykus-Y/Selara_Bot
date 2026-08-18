@@ -10,10 +10,12 @@ from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
+from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.infrastructure.llm import LlmClient, LlmConfig
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
+from selara.presentation.gacha_reel_orchestration import warm_up_gacha_animation_cache
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
@@ -85,6 +87,21 @@ def _build_llm_client(settings) -> LlmClient | None:
         return None
 
 
+async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
+    """Fire-and-forget: must never crash bot startup or polling. The
+    expensive part (Pillow rendering) is already durable per-card on the
+    persistent local-disk tier as soon as it happens, independent of this
+    session's commit — see docs/GACHA_MODERNIZATION_TODO.md, раздел 10."""
+    try:
+        async with session_factory() as session:
+            activity_repo = SqlAlchemyActivityRepository(session)
+            await warm_up_gacha_animation_cache(
+                settings=settings, bot=bot, activity_repo=activity_repo, on_card_done=session.commit
+            )
+    except Exception:
+        logger.exception("Gacha animation warmup task crashed")
+
+
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
     achievement_catalog = get_achievement_catalog_from_settings(settings)
@@ -125,6 +142,9 @@ async def _run_bot(settings, session_factory) -> None:
         backup_task = asyncio.create_task(run_daily_backup_scheduler(bot=bot, settings=settings), name="daily-backup")
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
+    gacha_warmup_task = asyncio.create_task(
+        _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
+    )
 
     polling_kwargs: dict = {"settings": settings}
     if stt_client is not None:
@@ -140,6 +160,8 @@ async def _run_bot(settings, session_factory) -> None:
         if backup_task is not None:
             backup_task.cancel()
             await asyncio.gather(backup_task, return_exceptions=True)
+        gacha_warmup_task.cancel()
+        await asyncio.gather(gacha_warmup_task, return_exceptions=True)
         await activity_batcher.close()
         await bot.session.close()
 

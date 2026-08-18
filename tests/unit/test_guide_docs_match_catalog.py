@@ -94,6 +94,26 @@ def test_user_guide_economy_commands_match_catalog() -> None:
     )
 
 
+def test_user_guide_gacha_triggers_match_catalog() -> None:
+    """Gacha (misc_gacha) was previously entirely absent from USER_GUIDE.md
+    despite being in the in-bot /help catalog (see
+    docs/GACHA_MODERNIZATION_TODO.md, Этап 0)."""
+    section = _section(USER_GUIDE, "## 6.4 Гача (Genshin / HSR)")
+    gacha = get_command_spec("misc_gacha")
+    for trigger in gacha.natural_triggers:
+        assert trigger in section, f"USER_GUIDE.md 6.4: missing natural trigger {trigger!r}"
+
+
+def test_admin_guide_gacha_admin_commands_documented() -> None:
+    """Admin-only gacha commands aren't in command_catalog.py (they're
+    dispatched via a separate natural-language intent parser, not the
+    slash/text-command catalog), so this checks literal presence instead of
+    catalog-driven word extraction."""
+    section = _section(ADMIN_GUIDE, "## 10.1. Гача (Genshin/HSR) — управление")
+    for expected in ("гача вкл", "гача выкл", "гача админ обяз", "гача админ необяз", "гача скип", "/gachagive"):
+        assert expected in section, f"ADMIN_GUIDE.md 10.1: missing {expected!r}"
+
+
 def test_admin_guide_role_commands_match_catalog() -> None:
     section = _section(ADMIN_GUIDE, "### Основные команды ролей")
     _assert_all_present(

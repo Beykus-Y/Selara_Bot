@@ -61,6 +61,7 @@ async def test_gacha_client_grant_currency_sends_admin_request(monkeypatch: pyte
                 "username": "buyer",
                 "banner": "genshin",
                 "amount": 180,
+                "idempotency_key": None,
             }
             request = httpx.Request("POST", "http://gacha.local/v1/gacha/admin/currency/grant")
             return httpx.Response(

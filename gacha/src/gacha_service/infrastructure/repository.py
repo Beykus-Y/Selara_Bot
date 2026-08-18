@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -8,12 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gacha_service.domain.models import GachaCard, PlayerState, resolve_rank
 from gacha_service.infrastructure.models import (
+    CurrencyGrantModel,
     PlayerBannerCooldownModel,
     PlayerBannerWalletModel,
     PlayerCardCollectionModel,
     PlayerModel,
     PullHistoryModel,
 )
+
+logger = logging.getLogger(__name__)
+_non_postgres_lock_warning_logged = False
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
@@ -42,6 +47,15 @@ class GachaRepository:
 
     async def lock_user_banner(self, *, user_id: int, banner: str) -> None:
         if self._session.bind is None or self._session.bind.dialect.name != "postgresql":
+            global _non_postgres_lock_warning_logged
+            if not _non_postgres_lock_warning_logged:
+                _non_postgres_lock_warning_logged = True
+                logger.warning(
+                    "Gacha advisory lock is a no-op on this DB dialect (%s) — "
+                    "pull/sell/currency-grant race protection is disabled. "
+                    "Production must run PostgreSQL.",
+                    self._session.bind.dialect.name if self._session.bind is not None else "unknown",
+                )
             return
         resource = f"gacha:user-banner:{int(user_id)}:{banner.strip().lower()}"
         digest = hashlib.blake2b(resource.encode("utf-8"), digest_size=8).digest()
@@ -81,11 +95,17 @@ class GachaRepository:
         username: str | None,
         banner: str,
         amount: int,
+        idempotency_key: str | None = None,
     ) -> PlayerState:
         if amount == 0:
             raise ValueError("Количество валюты должно быть ненулевым.")
 
         await self.lock_user_banner(user_id=user_id, banner=banner)
+
+        if idempotency_key is not None:
+            existing_grant = await self._session.get(CurrencyGrantModel, idempotency_key)
+            if existing_grant is not None:
+                return await self.get_or_create_player(user_id=user_id, username=username, banner=banner)
 
         player = await self._session.get(PlayerModel, user_id)
         if player is None:
@@ -129,6 +149,17 @@ class GachaRepository:
 
         wallet.currency_balance = new_balance
         player.total_primogems = new_total_primogems
+
+        if idempotency_key is not None:
+            self._session.add(
+                CurrencyGrantModel(
+                    idempotency_key=idempotency_key,
+                    user_id=user_id,
+                    banner=banner,
+                    amount=amount,
+                    granted_at=datetime.now(UTC),
+                )
+            )
 
         await self._session.commit()
         await self._session.refresh(player)

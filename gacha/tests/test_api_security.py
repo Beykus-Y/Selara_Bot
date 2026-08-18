@@ -125,3 +125,112 @@ async def test_public_profile_for_unknown_user_is_read_only(monkeypatch: pytest.
     assert response.json()["player"]["user_id"] == 987654
     assert response.json()["player"]["total_points"] == 0
     assert calls == {"get": 1, "create": 0}
+
+
+@pytest.mark.asyncio
+async def test_history_entries_expose_pull_id_for_recovery_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pull_id must round-trip through /history so a client can tell a
+    known pull apart from an older one when recovering from a lost
+    response (see docs/GACHA_MODERNIZATION_TODO.md, Этап 0)."""
+
+    class FakePullHistoryRow:
+        def __init__(self, *, pull_id: int) -> None:
+            self.id = pull_id
+            self.banner = "genshin"
+            self.character_code = "traveler"
+            self.character_name = "Traveler"
+            self.rarity = "epic"
+            self.points = 10
+            self.primogems = 5
+            self.adventure_xp = 3
+            self.image_url = "https://example.test/traveler.png"
+            self.pulled_at = __import__("datetime").datetime(2026, 8, 19, tzinfo=__import__("datetime").timezone.utc)
+
+    class FakeRepo:
+        def __init__(self, session) -> None:
+            _ = session
+
+        async def get_recent_pulls_by_banner(self, **kwargs):
+            _ = kwargs
+            return [FakePullHistoryRow(pull_id=42)]
+
+    async def fake_session_dependency(_session_factory):
+        yield object()
+
+    monkeypatch.setattr(api, "GachaRepository", FakeRepo)
+    monkeypatch.setattr(api, "session_dependency", fake_session_dependency)
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/v1/gacha/users/101/history?banner=genshin")
+
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    assert entries == [{**entries[0], "pull_id": 42}]
+    assert entries[0]["pull_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_banner_cards_endpoint_returns_full_catalog_without_auth() -> None:
+    """Needed for the animated-pull reel (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3): the main bot has to pick filler characters for the scroll
+    animation, but no endpoint exposed the banner's card catalog at all —
+    only per-user profile/history/collection existed. This is pure static
+    config data (no per-user info, no economy state), so it follows the
+    same unauthenticated-read precedent as profile/history/collection."""
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/v1/gacha/banners/genshin/cards")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["banner"] == "genshin"
+    assert len(payload["cards"]) > 0
+    first = payload["cards"][0]
+    assert {"code", "name", "rarity", "rarity_label", "image_url"} <= first.keys()
+
+
+@pytest.mark.asyncio
+async def test_banner_cards_endpoint_supports_conditional_get_with_etag() -> None:
+    """Selara caches the banner catalog client-side (docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3) using this ETag for deterministic invalidation — it must change
+    only when the catalog content actually changes (deploy), never on a
+    timer, and a matching If-None-Match must return an empty 304 (no need
+    to re-transfer ~35KB of JSON on every pull)."""
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await client.get("/v1/gacha/banners/genshin/cards")
+        assert first.status_code == 200
+        etag = first.headers.get("etag")
+        assert etag
+
+        revalidated = await client.get(
+            "/v1/gacha/banners/genshin/cards", headers={"If-None-Match": etag}
+        )
+        assert revalidated.status_code == 304
+        assert revalidated.content == b""
+
+        stale = await client.get(
+            "/v1/gacha/banners/genshin/cards", headers={"If-None-Match": '"not-the-real-etag"'}
+        )
+        assert stale.status_code == 200
+        assert stale.headers.get("etag") == etag
+
+
+@pytest.mark.asyncio
+async def test_banner_cards_endpoint_404_for_unknown_banner() -> None:
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/v1/gacha/banners/unknown/cards")
+
+    assert response.status_code == 404

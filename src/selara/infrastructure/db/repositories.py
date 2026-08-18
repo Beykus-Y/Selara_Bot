@@ -140,6 +140,7 @@ from selara.infrastructure.db.models import (
     EconomyPrivateContextModel,
     EconomyTransferDailyModel,
     FamilyRelationshipArchiveModel,
+    GachaAnimationVariantModel,
     GlobalAchievementStatsModel,
     InlinePrivateMessageModel,
     MarriageModel,
@@ -6317,6 +6318,127 @@ class SqlAlchemyActivityRepository:
             return
 
         user_row.subscription_exempt = exempt
+
+    async def is_gacha_animation_enabled(self, *, user_id: int) -> bool:
+        stmt = select(UserModel.gacha_animation_enabled).where(UserModel.telegram_user_id == user_id)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return bool(row) if row is not None else True
+
+    async def set_gacha_animation_enabled(self, *, user_id: int, enabled: bool) -> None:
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+
+        if dialect == "postgresql":
+            existing_user_id = await self._session.scalar(
+                select(UserModel.telegram_user_id).where(UserModel.telegram_user_id == user_id).limit(1)
+            )
+            stmt = pg_insert(UserModel).values(
+                telegram_user_id=user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                is_bot=False,
+                gacha_animation_enabled=enabled,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[UserModel.telegram_user_id],
+                set_={
+                    "gacha_animation_enabled": stmt.excluded.gacha_animation_enabled,
+                    "updated_at": func.now(),
+                },
+            )
+            await self._session.execute(stmt)
+            if existing_user_id is None:
+                await increment_global_users_base_count(self._session)
+            return
+
+        user_row = await self._session.get(UserModel, user_id)
+        if user_row is None:
+            self._session.add(
+                UserModel(
+                    telegram_user_id=user_id,
+                    username=None,
+                    first_name=None,
+                    last_name=None,
+                    is_bot=False,
+                    gacha_animation_enabled=enabled,
+                )
+            )
+            await self._session.flush()
+            await increment_global_users_base_count(self._session)
+            return
+
+        user_row.gacha_animation_enabled = enabled
+
+    async def has_any_gacha_animation_variant(self) -> bool:
+        stmt = select(GachaAnimationVariantModel.banner).limit(1)
+        return (await self._session.scalar(stmt)) is not None
+
+    async def get_gacha_animation_variant_count(self, *, banner: str, card_code: str, cache_version: str) -> int:
+        stmt = select(func.count()).select_from(GachaAnimationVariantModel).where(
+            GachaAnimationVariantModel.banner == banner,
+            GachaAnimationVariantModel.card_code == card_code,
+            GachaAnimationVariantModel.cache_version == cache_version,
+        )
+        return int(await self._session.scalar(stmt) or 0)
+
+    async def get_random_gacha_animation_variant_file_id(
+        self, *, banner: str, card_code: str, cache_version: str
+    ) -> str | None:
+        stmt = (
+            select(GachaAnimationVariantModel.telegram_file_id)
+            .where(
+                GachaAnimationVariantModel.banner == banner,
+                GachaAnimationVariantModel.card_code == card_code,
+                GachaAnimationVariantModel.cache_version == cache_version,
+            )
+            .order_by(func.random())
+            .limit(1)
+        )
+        return await self._session.scalar(stmt)
+
+    async def get_gacha_animation_cached_versions_by_card(self, *, banner: str) -> dict[str, set[str]]:
+        stmt = select(
+            GachaAnimationVariantModel.card_code, GachaAnimationVariantModel.cache_version
+        ).where(GachaAnimationVariantModel.banner == banner)
+        result: dict[str, set[str]] = {}
+        for card_code, cache_version in (await self._session.execute(stmt)).all():
+            result.setdefault(card_code, set()).add(cache_version)
+        return result
+
+    async def add_gacha_animation_variant(
+        self, *, banner: str, card_code: str, telegram_file_id: str, cache_version: str
+    ) -> None:
+        next_index_stmt = select(func.coalesce(func.max(GachaAnimationVariantModel.variant_index), -1) + 1).where(
+            GachaAnimationVariantModel.banner == banner,
+            GachaAnimationVariantModel.card_code == card_code,
+        )
+        next_index = await self._session.scalar(next_index_stmt)
+        self._session.add(
+            GachaAnimationVariantModel(
+                banner=banner,
+                card_code=card_code,
+                variant_index=next_index,
+                telegram_file_id=telegram_file_id,
+                cache_version=cache_version,
+            )
+        )
+        await self._session.flush()
+
+    async def evict_oldest_gacha_animation_variant(self, *, banner: str, card_code: str) -> None:
+        stmt = (
+            select(GachaAnimationVariantModel)
+            .where(
+                GachaAnimationVariantModel.banner == banner,
+                GachaAnimationVariantModel.card_code == card_code,
+            )
+            .order_by(GachaAnimationVariantModel.created_at.asc())
+            .limit(1)
+        )
+        oldest = await self._session.scalar(stmt)
+        if oldest is not None:
+            await self._session.delete(oldest)
+            await self._session.flush()
 
     async def create_inline_private_message(
         self,

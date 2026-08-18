@@ -59,6 +59,16 @@ class PullHistoryModel(Base):
     pulled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class CurrencyGrantModel(Base):
+    __tablename__ = "gacha_currency_grants"
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    banner: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PlayerCardCollectionModel(Base):
     __tablename__ = "gacha_player_cards"
 

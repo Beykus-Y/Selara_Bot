@@ -83,18 +83,143 @@ async def test_gacha_buy_callback_refreshes_info_message(monkeypatch: pytest.Mon
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
     bot = AsyncMock()
-    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=False),
+    )
 
     await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
 
     purchase_mock.assert_awaited_once()
     deliver_mock.assert_awaited_once()
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
     ]
     assert query.message.edit_text_calls[0][0] == "<b>Гача инфо</b>"
     assert query.answers[-1] == (None, False)
+
+
+@pytest.mark.asyncio
+async def test_gacha_buy_callback_sends_animation_when_enabled_and_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paid pulls (callback 'buy') get the same animated reveal as free
+    pulls (docs/GACHA_MODERNIZATION_TODO.md, Этап 3)."""
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    settings = SimpleNamespace()
+    economy_repo = object()
+    purchase_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            message="paid pull",
+            card=SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜", image_url="http://example.com/card.jpg"),
+            sell_offer=None,
+            pull_id=10,
+        )
+    )
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
+    resolved = SimpleNamespace(payload="fresh-payload", needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    cache_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "cache_reel_variant_after_send", cache_mock)
+    monkeypatch.setattr(text_commands.asyncio, "sleep", AsyncMock())
+
+    sent_message = SimpleNamespace(message_id=555, animation=SimpleNamespace(file_id="paid-file-id"))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.delete_message = AsyncMock()
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=True),
+    )
+
+    await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
+
+    bot.send_animation.assert_awaited_once()
+    assert bot.send_animation.await_args.kwargs["chat_id"] == query.message.chat.id
+    cache_mock.assert_awaited_once_with(
+        activity_repo=activity_repo, banner="genshin", card_code="amber", telegram_file_id="paid-file-id", cache_version="v1"
+    )
+    bot.delete_message.assert_awaited_once_with(chat_id=query.message.chat.id, message_id=555)
+    purchase_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gacha_buy_callback_shows_alert_when_cache_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    settings = SimpleNamespace()
+    economy_repo = object()
+    purchase_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            message="paid pull",
+            card=SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜", image_url="http://example.com/card.jpg"),
+            sell_offer=None,
+            pull_id=10,
+        )
+    )
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
+    resolve_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
+
+    bot = AsyncMock()
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=True),
+    )
+
+    await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
+
+    resolve_mock.assert_not_awaited()
+    bot.send_animation.assert_not_awaited()
+    purchase_mock.assert_awaited_once()  # the real pull result must still go through
+
+
+@pytest.mark.asyncio
+async def test_gacha_buy_callback_still_delivers_result_when_readiness_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same pre-deploy audit finding as the text-command path (2026-08-19):
+    is_gacha_animation_cache_ready must not be able to swallow the already-
+    paid-for pull result if it raises."""
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    settings = SimpleNamespace()
+    economy_repo = object()
+    purchase_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            message="paid pull",
+            card=SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜", image_url="http://example.com/card.jpg"),
+            sell_offer=None,
+            pull_id=10,
+        )
+    )
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        text_commands, "is_gacha_animation_cache_ready", AsyncMock(side_effect=RuntimeError("gacha service down"))
+    )
+    resolve_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
+
+    bot = AsyncMock()
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=True),
+    )
+
+    await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
+
+    resolve_mock.assert_not_awaited()
+    bot.send_animation.assert_not_awaited()
+    deliver_mock.assert_awaited_once()  # the real, already-paid-for result must still go through
 
 
 @pytest.mark.asyncio
@@ -143,10 +268,41 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         currency_amount=160,
     )
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
     ]
     assert query.answers[-1] == ("Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.", False)
+
+
+@pytest.mark.asyncio
+async def test_gacha_animation_toggle_callback_flips_state_and_refreshes_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Этап 2 of docs/GACHA_MODERNIZATION_TODO.md: a per-user opt-out toggle
+    for the (future) animated pull mode, surfaced as a button in 'гача
+    инфо'. Pressing it flips the stored preference and re-renders the info
+    message, same pattern as buy/currency."""
+    query = _DummyQuery(data="gacha:animtoggle:u1", user_id=1)
+    settings = SimpleNamespace()
+    economy_repo = object()
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=True),
+        set_gacha_animation_enabled=AsyncMock(),
+    )
+    build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    bot = AsyncMock()
+
+    await text_commands.gacha_callback(
+        query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS
+    )
+
+    activity_repo.set_gacha_animation_enabled.assert_awaited_once_with(user_id=1, enabled=False)
+    assert build_info_mock.await_count == 2
+    assert query.message.edit_text_calls[0][0] == "<b>Гача инфо</b>"
+    assert query.answers[-1][0] is not None and query.answers[-1][1] is False
 
 
 @pytest.mark.asyncio
@@ -173,7 +329,10 @@ async def test_gacha_callback_rejects_second_press_while_same_message_is_process
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("info", None)))
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
-    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+    activity_repo = SimpleNamespace(
+        is_subscription_exempt=AsyncMock(return_value=False),
+        is_gacha_animation_enabled=AsyncMock(return_value=False),
+    )
 
     first_task = asyncio.create_task(
         text_commands.gacha_callback(
@@ -238,9 +397,12 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
         },
     )
 
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+
     text, markup = await text_commands._build_gacha_info_view(
         SimpleNamespace(),
         _DummyEconomyRepo(),
+        activity_repo,
         user_id=1,
         economy_mode="global",
         chat_id=None,
@@ -252,12 +414,15 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
     assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None
-    assert len(markup.inline_keyboard) == 2
+    assert len(markup.inline_keyboard) == 3
     assert len(markup.inline_keyboard[0]) == 2
     assert markup.inline_keyboard[0][0].icon_custom_emoji_id == "event-id"
     assert markup.inline_keyboard[0][1].icon_custom_emoji_id == "primogem-id"
     assert markup.inline_keyboard[1][0].icon_custom_emoji_id is None
     assert markup.inline_keyboard[1][1].icon_custom_emoji_id is None
+    assert len(markup.inline_keyboard[2]) == 1
+    assert "Вкл" in markup.inline_keyboard[2][0].text
+    assert markup.inline_keyboard[2][0].callback_data == "gacha:animtoggle:u1"
 
 
 @pytest.mark.asyncio

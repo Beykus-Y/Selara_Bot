@@ -47,6 +47,11 @@ from selara.application.use_cases.gacha import (
     sell_pull as sell_gacha_pull,
 )
 from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
+from selara.presentation.gacha_reel_orchestration import (
+    cache_reel_variant_after_send,
+    is_gacha_animation_cache_ready,
+    resolve_gacha_reel_animation,
+)
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.core.timezone import to_timezone
@@ -151,6 +156,7 @@ class _GachaMessageLockEntry:
 
 _GACHA_MESSAGE_LOCKS: dict[tuple[int, int], _GachaMessageLockEntry] = {}
 _GACHA_CALLBACK_IN_FLIGHT: set[tuple[int, int]] = set()
+_GACHA_TEXT_PULL_IN_FLIGHT: set[int] = set()
 
 
 def _gacha_message_lock_key(message: Message) -> tuple[int, int]:
@@ -2145,6 +2151,8 @@ def _parse_gacha_callback_data(data: str | None) -> tuple[str | None, str | None
         return "currency", parts[2], None, int(parts[4][1:]), int(parts[3])
     if len(parts) == 5 and parts[1] == "sell" and parts[3].isdigit() and parts[4].startswith("u") and parts[4][1:].isdigit():
         return "sell", parts[2], int(parts[3]), int(parts[4][1:]), None
+    if len(parts) == 3 and parts[1] == "animtoggle" and parts[2].startswith("u") and parts[2][1:].isdigit():
+        return "animtoggle", "-", None, int(parts[2][1:]), None
     return None, None, None, None, None
 
 
@@ -2161,7 +2169,17 @@ def _build_gacha_sell_markup(*, banner: str, pull_id: int, owner_user_id: int) -
     )
 
 
-def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str], use_custom_emojis: bool = True) -> InlineKeyboardMarkup | None:
+def _gacha_animation_toggle_callback_data(*, owner_user_id: int) -> str:
+    return f"{_GACHA_CALLBACK_PREFIX}animtoggle:u{owner_user_id}"
+
+
+def _build_gacha_info_markup(
+    *,
+    owner_user_id: int,
+    banners: list[str],
+    use_custom_emojis: bool = True,
+    animation_enabled: bool = True,
+) -> InlineKeyboardMarkup | None:
     rows: list[list[InlineKeyboardButton]] = []
     for banner in banners:
         buy_icon_custom_emoji_id = _gacha_custom_emoji_button_id(
@@ -2194,6 +2212,14 @@ def _build_gacha_info_markup(*, owner_user_id: int, banners: list[str], use_cust
         )
     if not rows:
         return None
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"🎬 Анимация: {'Вкл' if animation_enabled else 'Выкл'}",
+                callback_data=_gacha_animation_toggle_callback_data(owner_user_id=owner_user_id),
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2282,6 +2308,7 @@ def _render_gacha_profile_html(*, banner: str, response, use_custom_emojis: bool
 async def _build_gacha_info_view(
     settings: Settings,
     economy_repo,
+    activity_repo,
     *,
     user_id: int,
     economy_mode: str,
@@ -2299,6 +2326,7 @@ async def _build_gacha_info_view(
         chat_id=chat_id,
         user_id=user_id,
     )
+    animation_enabled = await activity_repo.is_gacha_animation_enabled(user_id=user_id)
 
     sections: list[str] = [
         "<b>🎰 Гача инфо</b>",
@@ -2328,6 +2356,7 @@ async def _build_gacha_info_view(
         owner_user_id=user_id,
         banners=available_banners,
         use_custom_emojis=use_custom_emojis,
+        animation_enabled=animation_enabled,
     )
 
 
@@ -2408,10 +2437,103 @@ async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, 
         )
 
 
-async def _send_gacha_pull(message: Message, settings: Settings, *, banner: str) -> None:
+_GACHA_ANIMATION_HOLD_SECONDS = 12.0
+_GACHA_PREPARING_HOLD_SECONDS = 7.0
+_GACHA_PREPARING_TEXT = "🎬 Гача выполняет подготовку анимаций, попробуйте позже."
+
+
+async def _send_gacha_animation_preparing_notice(message: Message, bot: Bot) -> None:
+    """Self-deleting, unlike a normal `_answer_quiet` message — this can
+    fire on every pull while the cache is still warming up (see
+    docs/GACHA_MODERNIZATION_TODO.md, раздел 10), so leaving it in the chat
+    permanently would spam it."""
+    try:
+        kwargs: dict = {}
+        if message.chat.type in {"group", "supergroup"}:
+            kwargs["disable_notification"] = True
+        sent = await message.answer(_GACHA_PREPARING_TEXT, **kwargs)
+        await asyncio.sleep(_GACHA_PREPARING_HOLD_SECONDS)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
+        except TelegramBadRequest:
+            pass
+    except Exception:
+        logger.warning("Gacha preparing notice send/delete failed", exc_info=True)
+
+
+async def _try_send_gacha_pull_animation(
+    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, response
+) -> None:
+    """Best-effort: the result is already computed and passed in via
+    `response` — this only decides how to *reveal* it. Any failure here
+    (Telegram, HTTP fetch, rendering) must fall through silently so the
+    caller still delivers the real result (see docs/GACHA_MODERNIZATION_TODO.md,
+    Этап 3, hard constraints)."""
+    try:
+        resolved = await resolve_gacha_reel_animation(
+            settings=settings,
+            activity_repo=activity_repo,
+            banner=banner,
+            landing_card_code=response.card.code,
+            landing_card_name=response.card.name,
+            landing_rarity=response.card.rarity,
+            landing_rarity_label=response.card.rarity_label,
+        )
+        try:
+            sent = await bot.send_animation(chat_id=message.chat.id, animation=resolved.payload)
+        except TelegramBadRequest:
+            if not isinstance(resolved.payload, str):
+                raise
+            # A stored file_id can go stale server-side — retrying it would
+            # just fail again, so force the local-disk/render tiers instead.
+            resolved = await resolve_gacha_reel_animation(
+                settings=settings,
+                activity_repo=activity_repo,
+                banner=banner,
+                landing_card_code=response.card.code,
+                landing_card_name=response.card.name,
+                landing_rarity=response.card.rarity,
+                landing_rarity_label=response.card.rarity_label,
+                skip_cached_lookup=True,
+            )
+            sent = await bot.send_animation(chat_id=message.chat.id, animation=resolved.payload)
+        if resolved.needs_caching and getattr(sent, "animation", None) is not None:
+            await cache_reel_variant_after_send(
+                activity_repo=activity_repo,
+                banner=banner,
+                card_code=response.card.code,
+                telegram_file_id=sent.animation.file_id,
+                cache_version=resolved.cache_version,
+            )
+        await asyncio.sleep(_GACHA_ANIMATION_HOLD_SECONDS)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
+        except TelegramBadRequest:
+            pass
+    except Exception:
+        logger.warning(
+            "Gacha reel animation failed, falling back to instant result",
+            extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
+            exc_info=True,
+        )
+
+
+async def _send_gacha_pull(message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str) -> None:
     if message.from_user is None:
         return
 
+    user_id = message.from_user.id
+    if user_id in _GACHA_TEXT_PULL_IN_FLIGHT:
+        await _answer_quiet(message, "Запрос уже обрабатывается, подождите.")
+        return
+    _GACHA_TEXT_PULL_IN_FLIGHT.add(user_id)
+    try:
+        await _send_gacha_pull_impl(message, settings, bot, activity_repo, banner=banner)
+    finally:
+        _GACHA_TEXT_PULL_IN_FLIGHT.discard(user_id)
+
+
+async def _send_gacha_pull_impl(message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str) -> None:
     try:
         response = await pull_gacha_card(
             settings,
@@ -2422,6 +2544,30 @@ async def _send_gacha_pull(message: Message, settings: Settings, *, banner: str)
     except GachaUseCaseError as exc:
         await _answer_quiet(message, exc.message)
         return
+
+    try:
+        animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
+            user_id=message.from_user.id
+        )
+        cache_ready = animation_wanted and await is_gacha_animation_cache_ready(settings, activity_repo)
+    except Exception:
+        # is_gacha_animation_cache_ready calls out to the gacha service over
+        # the network — if that fails, the already-computed result below
+        # must still reach the user (pre-deploy audit finding, 2026-08-19:
+        # this was previously unguarded and could silently lose the pull).
+        logger.warning("Gacha animation readiness check failed, delivering classic result", exc_info=True)
+        animation_wanted = False
+        cache_ready = False
+
+    if animation_wanted:
+        if cache_ready:
+            await _try_send_gacha_pull_animation(message, settings, bot, activity_repo, banner=banner, response=response)
+        else:
+            # Fire-and-forget: unlike the animation (which the user is
+            # meant to watch for its hold duration), this notice has
+            # nothing worth waiting for — the real result must not be
+            # delayed just so a throwaway notice can self-delete on time.
+            asyncio.create_task(_send_gacha_animation_preparing_notice(message, bot))
 
     await _deliver_gacha_pull_response(
         message,
@@ -2454,13 +2600,16 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
     )
 
 
-async def _send_gacha_info(message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings) -> None:
+async def _send_gacha_info(
+    message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings, activity_repo
+) -> None:
     if message.from_user is None:
         return
 
     text, reply_markup = await _build_gacha_info_view(
         settings,
         economy_repo,
+        activity_repo,
         user_id=message.from_user.id,
         economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
         chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
@@ -2469,6 +2618,7 @@ async def _send_gacha_info(message: Message, settings: Settings, economy_repo, c
     fallback_text, fallback_reply_markup = await _build_gacha_info_view(
         settings,
         economy_repo,
+        activity_repo,
         user_id=message.from_user.id,
         economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
         chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
@@ -2584,6 +2734,15 @@ async def _manage_gacha_admin_exempt(
         await _answer_quiet(message, "Не удалось обновить обязательность подписки. Попробуйте ещё раз.")
         return
 
+    logger.info(
+        "Gacha subscription exemption updated",
+        extra={
+            "actor_user_id": message.from_user.id if message.from_user is not None else None,
+            "target_user_id": target_user_id,
+            "exempt": exempt,
+        },
+    )
+
     mention = format_user_link(user_id=target_user_id, label=target_label)
     if exempt:
         text = f"Поздравляю {mention}, вам теперь подписка не обязательна."
@@ -2655,6 +2814,16 @@ async def _manage_gacha_toggle(
     values["gacha_enabled"] = enable
     values["gacha_restore_at"] = restore_at
     await activity_repo.upsert_chat_settings(chat=chat, values=values)
+
+    logger.info(
+        "Gacha chat toggle updated",
+        extra={
+            "actor_user_id": user_id,
+            "chat_id": message.chat.id,
+            "enable": enable,
+            "duration_seconds": duration_seconds,
+        },
+    )
 
     state_label = "включена" if enable else "выключена"
     if duration_seconds is not None:
@@ -2871,6 +3040,14 @@ async def gachagive_command(
     ):
         return
 
+    if message.reply_to_message is None and not target_username:
+        await _answer_quiet(
+            message,
+            "Укажите получателя явно: ответьте на его сообщение или добавьте @username. "
+            "Без этого карта никому не выдаётся.",
+        )
+        return
+
     target_user_id, error = await _resolve_gacha_skip_target(
         message,
         activity_repo,
@@ -2889,6 +3066,14 @@ async def gachagive_command(
         await _answer_quiet(message, exc.message)
         return
 
+    logger.info(
+        "Gacha admin card grant",
+        extra={
+            "actor_user_id": message.from_user.id,
+            "target_user_id": target_user_id,
+            "code": code,
+        },
+    )
     await _answer_quiet(message, response.message)
 
 
@@ -5045,6 +5230,26 @@ async def _gacha_callback_impl(
             await _safe_callback_answer(query, exc.message, show_alert=True)
             return
 
+        try:
+            animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
+                user_id=query.from_user.id
+            )
+            cache_ready = animation_wanted and await is_gacha_animation_cache_ready(settings, activity_repo)
+        except Exception:
+            logger.warning("Gacha animation readiness check failed, delivering classic result", exc_info=True)
+            animation_wanted = False
+            cache_ready = False
+
+        if animation_wanted:
+            if cache_ready:
+                await _try_send_gacha_pull_animation(
+                    query.message, settings, bot, activity_repo, banner=banner, response=response
+                )
+            else:
+                await _safe_callback_answer(
+                    query, "Гача выполняет подготовку анимаций, попробуйте позже.", show_alert=True
+                )
+
         await _deliver_gacha_pull_response(
             query.message,
             settings,
@@ -5055,6 +5260,7 @@ async def _gacha_callback_impl(
         text, reply_markup = await _build_gacha_info_view(
             settings,
             economy_repo,
+            activity_repo,
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
@@ -5063,6 +5269,7 @@ async def _gacha_callback_impl(
         fallback_text, fallback_reply_markup = await _build_gacha_info_view(
             settings,
             economy_repo,
+            activity_repo,
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
@@ -5084,6 +5291,49 @@ async def _gacha_callback_impl(
             ),
         )
         await _safe_callback_answer(query)
+        return
+
+    if action == "animtoggle":
+        current_enabled = await activity_repo.is_gacha_animation_enabled(user_id=query.from_user.id)
+        new_enabled = not current_enabled
+        await activity_repo.set_gacha_animation_enabled(user_id=query.from_user.id, enabled=new_enabled)
+
+        text, reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            activity_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+            use_custom_emojis=True,
+        )
+        fallback_text, fallback_reply_markup = await _build_gacha_info_view(
+            settings,
+            economy_repo,
+            activity_repo,
+            user_id=query.from_user.id,
+            economy_mode=economy_mode,
+            chat_id=economy_chat_id,
+            use_custom_emojis=False,
+        )
+        await _run_gacha_message_edit(
+            query.message,
+            lambda: query.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            ),
+            fallback_operation=lambda: query.message.edit_text(
+                fallback_text,
+                parse_mode="HTML",
+                reply_markup=fallback_reply_markup,
+                disable_web_page_preview=True,
+            ),
+        )
+        await _safe_callback_answer(
+            query, "Анимация включена." if new_enabled else "Анимация выключена."
+        )
         return
 
     if action == "currency":
@@ -5108,6 +5358,7 @@ async def _gacha_callback_impl(
         text, reply_markup = await _build_gacha_info_view(
             settings,
             economy_repo,
+            activity_repo,
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
@@ -5116,6 +5367,7 @@ async def _gacha_callback_impl(
         fallback_text, fallback_reply_markup = await _build_gacha_info_view(
             settings,
             economy_repo,
+            activity_repo,
             user_id=query.from_user.id,
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
@@ -5664,7 +5916,7 @@ async def text_commands_handler(
             return
 
     if intent.name == "gacha_pull":
-        await _send_gacha_pull(message, settings, banner=str(intent.args.get("banner", "")))
+        await _send_gacha_pull(message, settings, bot, activity_repo, banner=str(intent.args.get("banner", "")))
         return
 
     if intent.name == "gacha_profile":
@@ -5672,7 +5924,7 @@ async def text_commands_handler(
         return
 
     if intent.name == "gacha_info":
-        await _send_gacha_info(message, settings, economy_repo, chat_settings)
+        await _send_gacha_info(message, settings, economy_repo, chat_settings, activity_repo)
         return
 
     if intent.name == "gacha_skip":
