@@ -17,6 +17,10 @@ from selara.infrastructure.db.models import (
     EconomyAccountModel,
     EconomyMarketListingModel,
     EconomyPrivateContextModel,
+    LlmAdminActionModel,
+    LlmChatGlossaryModel,
+    LlmContextMessageModel,
+    LlmContextSummaryModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -121,6 +125,8 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -138,6 +144,8 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -650,6 +658,64 @@ async def _move_simple_chat_refs(session: AsyncSession, *, old_chat_id: int, new
         .where(EconomyPrivateContextModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
     )
+
+
+async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    """#36: LlmContextMessageModel/LlmContextSummaryModel/LlmAdminActionModel
+    have no unique constraint on chat_id, so a plain bulk UPDATE (same shape
+    as _move_simple_chat_refs) is safe on both dialects -- this used to be
+    entirely missing, silently orphaning all prior LLM context/audit history
+    under the old chat_id on every group -> supergroup upgrade."""
+    await session.execute(
+        update(LlmContextMessageModel)
+        .where(LlmContextMessageModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(LlmContextSummaryModel)
+        .where(LlmContextSummaryModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(LlmAdminActionModel)
+        .where(LlmAdminActionModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
+
+
+async def _merge_llm_glossary_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    source = (
+        select(
+            literal(new_chat_id).label("chat_id"),
+            LlmChatGlossaryModel.term,
+            LlmChatGlossaryModel.definition,
+        )
+        .where(LlmChatGlossaryModel.chat_id == old_chat_id)
+    )
+    stmt = pg_insert(LlmChatGlossaryModel).from_select(["chat_id", "term", "definition"], source)
+    # On a (rare) term collision, keep whatever the new chat already has --
+    # migration shouldn't silently overwrite a glossary entry someone
+    # already wrote post-upgrade.
+    stmt = stmt.on_conflict_do_nothing(index_elements=[LlmChatGlossaryModel.chat_id, LlmChatGlossaryModel.term])
+    await session.execute(stmt)
+    await session.execute(delete(LlmChatGlossaryModel).where(LlmChatGlossaryModel.chat_id == old_chat_id))
+
+
+async def _merge_llm_glossary_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    rows = (await session.execute(
+        select(LlmChatGlossaryModel).where(LlmChatGlossaryModel.chat_id == old_chat_id)
+    )).scalars().all()
+    for row in rows:
+        conflict_exists = (await session.execute(
+            select(exists().where(
+                LlmChatGlossaryModel.chat_id == new_chat_id,
+                LlmChatGlossaryModel.term == row.term,
+            ))
+        )).scalar_one()
+        if conflict_exists:
+            await session.delete(row)
+        else:
+            row.chat_id = new_chat_id
 
 
 async def _migrate_economy_scopes(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> int:
