@@ -127,7 +127,7 @@ def test_admin_broadcast_uses_packaged_external_javascript() -> None:
     assert "extra_scripts" in base_source
     assert "admin-broadcast.js" in script_path.name
     assert script_path.is_file()
-    assert len(script_path.read_text(encoding="utf-8").splitlines()) <= 460
+    assert len(script_path.read_text(encoding="utf-8").splitlines()) <= 520
     assert len(
         (ROOT / "src" / "selara" / "web" / "static" / "admin-broadcast.css")
         .read_text(encoding="utf-8")

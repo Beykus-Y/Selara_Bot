@@ -129,6 +129,39 @@ const initBroadcastComposer = () => {
     label: row.querySelector("[data-broadcast-reaction-label]").value.trim(),
   }));
 
+  const BLOCK_OPEN = "[reactions]";
+  const BLOCK_CLOSE = "[/reactions]";
+
+  // Mirrors parse_broadcast_source (admin_broadcasts.py) closely enough for
+  // preview purposes: a manually-typed [reactions]...[/reactions] block at
+  // the end of the text is real, backend-understood syntax (see the [
+  // reactions] rules in the composer's help text) — the live preview must
+  // reflect that instead of showing the raw brackets as literal message
+  // text, which looked like a broken feature (found live, 2026-08-19).
+  const extractManualReactionsBlock = (source) => {
+    const openAt = source.indexOf(BLOCK_OPEN);
+    const closeAt = source.indexOf(BLOCK_CLOSE);
+    if (openAt === -1 || closeAt === -1 || closeAt < openAt) return null;
+    if (source.indexOf(BLOCK_OPEN, openAt + 1) !== -1) return null; // more than one block
+    const tail = source.slice(closeAt + BLOCK_CLOSE.length).trim();
+    if (tail) return null; // block must be at the end
+    const body = source.slice(0, openAt).trim();
+    if (!body) return null;
+    const rawOptions = source.slice(openAt + BLOCK_OPEN.length, closeAt).trim();
+    const lines = rawOptions.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (lines.length < 2 || lines.length > 6) return null;
+    const options = [];
+    for (const line of lines) {
+      const separatorAt = line.indexOf("=");
+      if (separatorAt === -1) return null;
+      const emoji = line.slice(0, separatorAt).trim();
+      const label = line.slice(separatorAt + 1).trim();
+      if (!emoji || !label) return null;
+      options.push({ emoji, label });
+    }
+    return { body, options };
+  };
+
   const compileBody = () => {
     const source = body.value.trim();
     if (!reactionsToggle.checked) return { source, rendered: source };
@@ -151,7 +184,12 @@ const initBroadcastComposer = () => {
   };
 
   const updatePreview = () => {
-    const source = body.value.trim();
+    const rawSource = body.value.trim();
+    // If the constructor toggle is off, a manually-typed [reactions] block
+    // is real syntax the backend understands — strip it from the body and
+    // render it the same way the constructor's own reactions would.
+    const manualBlock = !reactionsToggle.checked ? extractManualReactionsBlock(rawSource) : null;
+    const source = manualBlock ? manualBlock.body : rawSource;
     const hasBody = Boolean(source);
     previewEmpty.hidden = hasBody;
     previewBody.hidden = !hasBody;
@@ -164,11 +202,12 @@ const initBroadcastComposer = () => {
     else previewPhoto.removeAttribute("src");
 
     previewReactions.replaceChildren();
-    if (reactionsToggle.checked) {
+    const reactionsToShow = reactionsToggle.checked ? reactionValues() : manualBlock?.options;
+    if (reactionsToShow) {
       const title = document.createElement("strong");
       title.textContent = "Реакции:";
       previewReactions.append(title);
-      for (const { emoji, label } of reactionValues()) {
+      for (const { emoji, label } of reactionsToShow) {
         const row = document.createElement("span");
         row.textContent = `${emoji} — ${label}`;
         previewReactions.append(row);
