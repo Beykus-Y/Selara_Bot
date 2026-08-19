@@ -378,10 +378,30 @@ def _build_synthetic_activity_total_rows(
     return rows
 
 
+async def _lock_resources(session: AsyncSession, *resource_keys: str) -> None:
+    """Serialize concurrent check-then-act sequences via pg_advisory_xact_lock.
+
+    Mirrors SqlAlchemyEconomyRepository.lock_resources: locks are acquired in a
+    stable (sorted, de-duplicated) order so that two callers racing to lock the
+    same set of resources in opposite orders cannot deadlock each other. The
+    lock is a plain transaction-scoped advisory lock and is a no-op outside of
+    PostgreSQL (e.g. sqlite in unit tests), same as the economy repository.
+    """
+    if not resource_keys or session.bind is None or session.bind.dialect.name != "postgresql":
+        return
+    for resource_key in sorted(set(resource_keys)):
+        digest = hashlib.blake2b(resource_key.encode("utf-8"), digest_size=8).digest()
+        lock_key = int.from_bytes(digest, byteorder="big", signed=True)
+        await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
+
 class SqlAlchemyActivityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._chat_event_sync_cache: dict[int, str | None] = {}
+
+    async def lock_resources(self, *resource_keys: str) -> None:
+        await _lock_resources(self._session, *resource_keys)
 
     async def upsert_activity(
         self,
@@ -2799,6 +2819,13 @@ class SqlAlchemyActivityRepository:
         if normalized_type == "spouse" and left.telegram_user_id > right.telegram_user_id:
             left, right = right, left
         if normalized_type == "parent":
+            # Lock on the child so concurrent adoption attempts for the same
+            # child serialize. FOR UPDATE inside validate_parent_link only
+            # locks *existing* parent rows, which does nothing when the child
+            # currently has zero parents (nothing to lock) -- the advisory
+            # lock closes that gap by serializing the whole
+            # read-and-count-then-insert sequence regardless of row count.
+            await self.lock_resources(f"family:parent:{chat.telegram_chat_id}:{right.telegram_user_id}")
             error = await self.validate_parent_link(
                 chat_id=chat.telegram_chat_id,
                 actor_user_id=left.telegram_user_id,
@@ -6906,6 +6933,20 @@ class SqlAlchemyActivityRepository:
         row: RelationshipProposalModel,
         event_at: datetime,
     ) -> tuple[RelationshipState | None, str | None]:
+        chat_id_for_lock = int(row.chat_id) if row.chat_id is not None else 0
+        # Lock both participants (sorted so two proposals racing from opposite
+        # directions acquire the locks in the same order and cannot deadlock)
+        # before the "not already married" check, so a concurrent accept for
+        # either user in this chat serializes instead of racing past the check.
+        await self.lock_resources(
+            *sorted(
+                {
+                    f"marriage:{chat_id_for_lock}:{int(row.proposer_user_id)}",
+                    f"marriage:{chat_id_for_lock}:{int(row.target_user_id)}",
+                }
+            )
+        )
+
         proposer_marriage = await self.get_active_marriage(user_id=int(row.proposer_user_id), chat_id=int(row.chat_id) if row.chat_id is not None else None)
         target_marriage = await self.get_active_marriage(user_id=int(row.target_user_id), chat_id=int(row.chat_id) if row.chat_id is not None else None)
         if proposer_marriage is not None or target_marriage is not None:
@@ -8000,12 +8041,7 @@ class SqlAlchemyEconomyRepository:
         self._session = session
 
     async def lock_resources(self, *resource_keys: str) -> None:
-        if not resource_keys or self._session.bind is None or self._session.bind.dialect.name != "postgresql":
-            return
-        for resource_key in sorted(set(resource_keys)):
-            digest = hashlib.blake2b(resource_key.encode("utf-8"), digest_size=8).digest()
-            lock_key = int.from_bytes(digest, byteorder="big", signed=True)
-            await self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+        await _lock_resources(self._session, *resource_keys)
 
     async def set_private_chat_context(self, *, user_id: int, chat_id: int) -> None:
         await self._upsert_chat(ChatSnapshot(telegram_chat_id=chat_id, chat_type="group", title=None))

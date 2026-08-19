@@ -11,6 +11,9 @@ class FakeRepo:
         self.votes_24h = votes_24h
         self.recorded = False
 
+    async def lock_resources(self, *resource_keys: str) -> None:
+        return None
+
     async def count_votes_by_voter_since(self, *, chat_id: int, voter_user_id: int, since: datetime) -> int:
         assert chat_id == 100
         assert voter_user_id == 1

@@ -41,6 +41,11 @@ async def execute(
             target_karma_7d=None,
         )
 
+    # Serialize concurrent votes from the same voter in this chat so the
+    # count-then-check-then-insert sequence below can't race past the daily
+    # limit (mirrors the economy tap/lottery/daily advisory-lock pattern).
+    await repo.lock_resources(f"karma:vote:{chat_id}:{voter.telegram_user_id}")
+
     limit_since = datetime.now(timezone.utc) - timedelta(hours=24)
     votes_24h = await repo.count_votes_by_voter_since(
         chat_id=chat_id,

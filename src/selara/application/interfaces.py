@@ -43,6 +43,8 @@ from selara.domain.entities import (
 
 
 class ActivityRepository(Protocol):
+    async def lock_resources(self, *resource_keys: str) -> None: ...
+
     async def upsert_activity(
         self,
         *,
