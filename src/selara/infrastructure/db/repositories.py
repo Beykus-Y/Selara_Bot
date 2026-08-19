@@ -6892,6 +6892,30 @@ class SqlAlchemyActivityRepository:
         row: RelationshipProposalModel,
         event_at: datetime,
     ) -> tuple[RelationshipState | None, str | None]:
+        chat_id_for_lock = int(row.chat_id) if row.chat_id is not None else 0
+        # Lock both participants (sorted for deadlock-safety, same as
+        # _accept_marriage_proposal) before the "not already paired/married"
+        # checks below. create_marriage_proposal only blocks a duplicate
+        # proposal for the *same pair*, so a user can hold two independent
+        # pending "pair" proposals (or one pending marriage and one pending
+        # pair proposal) in the same chat; without this lock, two concurrent
+        # accepts could both pass the "not already paired" check before
+        # either commits, producing pair-bigamy. Uses the same
+        # "relationship:" namespace as _accept_marriage_proposal (not a
+        # separate "pair:" namespace) because marriage and pair are
+        # mutually-exclusive states for the same user in the same chat -- a
+        # concurrent marriage-accept and pair-accept for the same user must
+        # also serialize against each other, or one could commit a marriage
+        # while the other concurrently commits a pair.
+        await self.lock_resources(
+            *sorted(
+                {
+                    f"relationship:{chat_id_for_lock}:{int(row.proposer_user_id)}",
+                    f"relationship:{chat_id_for_lock}:{int(row.target_user_id)}",
+                }
+            )
+        )
+
         proposer_marriage = await self.get_active_marriage(user_id=int(row.proposer_user_id), chat_id=int(row.chat_id) if row.chat_id is not None else None)
         target_marriage = await self.get_active_marriage(user_id=int(row.target_user_id), chat_id=int(row.chat_id) if row.chat_id is not None else None)
         if proposer_marriage is not None or target_marriage is not None:
@@ -6938,11 +6962,17 @@ class SqlAlchemyActivityRepository:
         # directions acquire the locks in the same order and cannot deadlock)
         # before the "not already married" check, so a concurrent accept for
         # either user in this chat serializes instead of racing past the check.
+        # Uses the shared "relationship:" namespace (not "marriage:") because
+        # marriage and pair are mutually-exclusive states for the same user in
+        # the same chat -- a concurrent marriage-accept and pair-accept for the
+        # same user must serialize against each other too, or one could commit
+        # a marriage while the other concurrently commits a pair (see
+        # _accept_pair_proposal, which locks the same namespace).
         await self.lock_resources(
             *sorted(
                 {
-                    f"marriage:{chat_id_for_lock}:{int(row.proposer_user_id)}",
-                    f"marriage:{chat_id_for_lock}:{int(row.target_user_id)}",
+                    f"relationship:{chat_id_for_lock}:{int(row.proposer_user_id)}",
+                    f"relationship:{chat_id_for_lock}:{int(row.target_user_id)}",
                 }
             )
         )
