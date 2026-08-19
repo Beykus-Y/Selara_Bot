@@ -1518,11 +1518,18 @@ async def role_set_rank_command(message: Message, command: CommandObject, activi
         await message.answer("Ранг должен быть числом.")
         return
 
+    actor_role_definition = await activity_repo.get_effective_role_definition(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+    )
+
     try:
         updated = await activity_repo.update_custom_role(
             chat_id=message.chat.id,
             role_token=tokens[0],
             rank=int(tokens[1]),
+            actor_role_code=actor_role_definition.role_code,
+            actor_rank=actor_role_definition.rank,
         )
     except ValueError as exc:
         await message.answer(str(exc))

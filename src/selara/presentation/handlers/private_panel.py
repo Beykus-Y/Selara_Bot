@@ -658,6 +658,7 @@ async def _apply_private_role_command(
     *,
     chat_snapshot: ChatSnapshot,
     text: str,
+    actor_user_id: int,
 ) -> str:
     normalized = normalize_text_command(text)
     if normalized in {"роли", "список ролей"}:
@@ -698,10 +699,16 @@ async def _apply_private_role_command(
     if match is not None:
         role_token = match.group("role").strip()
         rank = int(match.group("rank"))
+        actor_role_definition = await activity_repo.get_effective_role_definition(
+            chat_id=chat_snapshot.telegram_chat_id,
+            user_id=actor_user_id,
+        )
         updated = await activity_repo.update_custom_role(
             chat_id=chat_snapshot.telegram_chat_id,
             role_token=role_token,
             rank=rank,
+            actor_role_code=actor_role_definition.role_code,
+            actor_rank=actor_role_definition.rank,
         )
         return (
             "<b>Ранг роли обновлён:</b>\n"
@@ -1448,6 +1455,7 @@ async def pending_admin_input_handler(message: Message, activity_repo) -> None:
                 activity_repo,
                 chat_snapshot=chat_snapshot,
                 text=text,
+                actor_user_id=message.from_user.id,
             )
         except ValueError as exc:
             await message.answer(str(exc))

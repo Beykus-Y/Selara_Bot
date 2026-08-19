@@ -4882,6 +4882,8 @@ class SqlAlchemyActivityRepository:
         title_ru: str | None = None,
         rank: int | None = None,
         permissions: Sequence[str] | None = None,
+        actor_role_code: str | None = None,
+        actor_rank: int | None = None,
     ) -> ChatRoleDefinition:
         role = await self.resolve_chat_role_definition(chat_id=chat_id, token=role_token)
         if role is None:
@@ -4905,7 +4907,19 @@ class SqlAlchemyActivityRepository:
             row.title_ru = normalized_title
 
         if rank is not None:
-            row.rank = int(rank)
+            new_rank = int(rank)
+            # Rank lives on the role *definition*, so raising the rank of an
+            # already-assigned custom role retroactively escalates whoever
+            # holds it (see get_effective_role_definition). This mirrors the
+            # ceiling _role_add_allowed enforces for /roleadd: a non-owner
+            # actor may never push a role's rank to/above their own current
+            # rank, and may not touch a role that already outranks them.
+            if actor_role_code != "owner":
+                if actor_rank is None:
+                    raise ValueError("Недостаточно прав для изменения ранга роли.")
+                if new_rank >= actor_rank or int(row.rank) >= actor_rank:
+                    raise ValueError("Эту роль нельзя переранжировать: недостаточно уровня доступа.")
+            row.rank = new_rank
 
         if permissions is not None:
             normalized_permissions = sorted({str(item).strip().lower() for item in permissions if str(item).strip()})

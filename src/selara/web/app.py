@@ -10554,6 +10554,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if not _admin_auth_required(admin_user_id):
             return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
+        valid_tables = [t[0] for t in ADMIN_TABLES]
+        if table_name not in valid_tables:
+            return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
+
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
