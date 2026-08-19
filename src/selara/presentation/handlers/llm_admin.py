@@ -185,7 +185,10 @@ async def _handle(
     )
 
     for _round in range(_MAX_TOOL_ROUNDS):
-        await bot.send_chat_action(message.chat.id, "typing")
+        try:
+            await bot.send_chat_action(message.chat.id, "typing")
+        except Exception:
+            pass
         try:
             response = await llm_client.chat_with_tools(messages=messages, tools=get_tool_definitions())
         except LlmClientError as exc:
@@ -224,6 +227,11 @@ async def _handle(
                     pass
             result = await execute_tool(call, **tool_ctx)
             tool_results.append(result)
+            if result.success and result.db_action_id is not None:
+                # #22: commit immediately so a crash on a *later* round can
+                # no longer roll back an already-completed action's DB state
+                # and audit row while the real Telegram side effect stands.
+                await db_session.commit()
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": result.call_id,
