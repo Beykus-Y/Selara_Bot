@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from selara.domain.entities import ChatRoleDefinition, ChatSnapshot, UserSnapshot
-from selara.infrastructure.llm.tools import ToolCall, execute_tool
+from selara.infrastructure.llm.tools import ToolCall, build_rollback_call, execute_tool
 
 
 @pytest.fixture
@@ -308,3 +308,69 @@ async def test_set_rank_rejects_role_not_below_actor(
     assert result.success is False
     assert "уров" in result.result_text.lower()
     activity_repo.set_bot_role.assert_not_awaited()
+
+
+# --- build_rollback_call (#21: rollback must route through the same dispatcher) ---
+
+
+@pytest.mark.parametrize(
+    ("undo_tool", "expected_registered_name", "extra_payload", "expected_extra_args"),
+    [
+        ("unwarn", "unwarn_user", {}, {}),
+        ("unban", "unban_user", {}, {}),
+        ("unpred", "remove_pred", {}, {}),
+        ("revoke_rest", "revoke_rest", {}, {}),
+        ("revoke_persona", "revoke_persona", {}, {}),
+        ("set_rank", "set_rank", {"previous_rank": "junior_admin"}, {"rank": "junior_admin"}),
+    ],
+)
+def test_build_rollback_call_maps_undo_tool_to_registered_tool(
+    undo_tool, expected_registered_name, extra_payload, expected_extra_args
+):
+    payload = {"tool": undo_tool, "target_user_id": 222, **extra_payload}
+
+    call = build_rollback_call(payload, call_id="rollback:5")
+
+    assert call.name == expected_registered_name
+    assert call.call_id == "rollback:5"
+    assert call.arguments["target"] == "222"
+    for key, value in expected_extra_args.items():
+        assert call.arguments[key] == value
+
+
+def test_build_rollback_call_rejects_unknown_tool():
+    with pytest.raises(ValueError, match="Неизвестный тип отката"):
+        build_rollback_call({"tool": "not_a_real_tool", "target_user_id": 222}, call_id="rollback:1")
+
+
+def test_build_rollback_call_rejects_missing_target():
+    with pytest.raises(ValueError, match="target_user_id"):
+        build_rollback_call({"tool": "unwarn"}, call_id="rollback:1")
+
+
+@pytest.mark.asyncio
+async def test_rollback_call_for_unwarn_goes_through_moderation_target_authorization(
+    chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo
+):
+    # Rollback actor lacks moderate_users -- must be rejected exactly like a
+    # forward unwarn_user call would be, since it goes through the same
+    # execute_tool/_moderation_target_error choke point (#21).
+    activity_repo.get_effective_role_definition = AsyncMock(
+        return_value=_role(chat_snapshot.telegram_chat_id, "participant", 0)
+    )
+    activity_repo.find_chat_user_by_username = AsyncMock(return_value=target_user)
+
+    call = build_rollback_call({"tool": "unwarn", "target_user_id": 222}, call_id="rollback:1")
+    # simulate resolution via username as the digit-id DB lookup path isn't mocked here
+    call.arguments["target"] = "@target_user"
+
+    result = await execute_tool(
+        call,
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+    )
+
+    assert result.success is False
+    assert "прав" in result.result_text.lower()

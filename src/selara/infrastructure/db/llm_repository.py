@@ -177,13 +177,38 @@ class LlmRepository:
     async def mark_rolled_back(
         self, *, action_id: int, rolled_back_by_user_id: int
     ) -> bool:
-        row = await self._session.get(LlmAdminActionModel, action_id)
-        if row is None or row.rolled_back_at is not None:
-            return False
-        row.rolled_back_at = datetime.now(timezone.utc)
-        row.rolled_back_by_user_id = rolled_back_by_user_id
+        """Atomically claim the rollback (fixes #35): an
+        UPDATE ... WHERE rolled_back_at IS NULL is a single statement, so
+        Postgres row-locking guarantees at most one of two concurrent
+        callers can ever observe rowcount == 1, unlike the previous
+        read-then-write which let both concurrent clicks pass the check
+        and both fire a non-idempotent undo (unwarn/unpred)."""
+        stmt = (
+            update(LlmAdminActionModel)
+            .where(
+                LlmAdminActionModel.id == action_id,
+                LlmAdminActionModel.rolled_back_at.is_(None),
+            )
+            .values(
+                rolled_back_at=datetime.now(timezone.utc),
+                rolled_back_by_user_id=rolled_back_by_user_id,
+            )
+        )
+        result = await self._session.execute(stmt)
         await self._session.flush()
-        return True
+        return result.rowcount == 1
+
+    async def clear_rollback_claim(self, *, action_id: int) -> None:
+        """Release a claim taken by mark_rolled_back when the rollback
+        itself then fails validation/authorization (no side effect
+        occurred), so the action can be retried instead of being
+        permanently and incorrectly marked as rolled back."""
+        row = await self._session.get(LlmAdminActionModel, action_id)
+        if row is None:
+            return
+        row.rolled_back_at = None
+        row.rolled_back_by_user_id = None
+        await self._session.flush()
 
     # --- Glossary ---
 

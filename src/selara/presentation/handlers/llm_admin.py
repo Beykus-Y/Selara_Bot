@@ -31,6 +31,7 @@ from selara.infrastructure.llm.prompts import (
 from selara.infrastructure.llm.tools import (
     ToolCall,
     ToolResult,
+    build_rollback_call,
     execute_tool,
     get_tool_definitions,
     get_tool_status,
@@ -367,23 +368,40 @@ async def llm_rollback_callback(
         await callback.answer("Недостаточно прав для отката.", show_alert=True)
         return
 
+    # #35: claim the rollback atomically *before* executing the side effect,
+    # so a concurrent second click can never observe "not yet rolled back"
+    # and double-fire a non-idempotent undo (unwarn/unpred).
+    claimed = await llm_repo.mark_rolled_back(
+        action_id=action_id,
+        rolled_back_by_user_id=callback.from_user.id,
+    )
+    if not claimed:
+        await callback.answer("Это действие уже было откачено.", show_alert=True)
+        return
+
     try:
-        await _execute_rollback(
+        result = await _execute_rollback(
             payload=action.undo_payload_json,
             chat_id=action.chat_id,
             rollback_by=callback.from_user,
             activity_repo=activity_repo,
+            llm_repo=llm_repo,
             bot=bot,
         )
     except Exception as exc:
         log.exception("llm_admin: ошибка отката действия %d", action_id)
+        await llm_repo.clear_rollback_claim(action_id=action_id)
         await callback.answer(f"Ошибка отката: {exc}", show_alert=True)
         return
 
-    await llm_repo.mark_rolled_back(
-        action_id=action_id,
-        rolled_back_by_user_id=callback.from_user.id,
-    )
+    if not result.success:
+        # No side effect happened (auth/validation failed at click time) --
+        # release the claim so the action isn't falsely reported as rolled
+        # back and can be retried once the underlying condition changes.
+        await llm_repo.clear_rollback_claim(action_id=action_id)
+        error_text = json.loads(result.result_text).get("error", "неизвестная ошибка")
+        await callback.answer(f"Ошибка отката: {error_text}", show_alert=True)
+        return
 
     try:
         original_text = callback.message.text or callback.message.caption or ""
@@ -401,10 +419,15 @@ async def _execute_rollback(
     chat_id: int,
     rollback_by: Any,
     activity_repo: Any,
+    llm_repo: LlmRepository,
     bot: Bot,
-) -> None:
-    tool = payload.get("tool")
-    target_user_id = payload.get("target_user_id")
+) -> ToolResult:
+    """Route a rollback through the exact same execute_tool()/
+    _moderation_target_error dispatcher as every forward moderation tool
+    call (fixes #21 -- this used to call repository methods directly,
+    bypassing authorization; only set_rank re-implemented its check by
+    hand, and the other 5 rollback types had none at all)."""
+    call = build_rollback_call(payload, call_id=f"rollback:{payload.get('tool')}")
 
     rollback_actor = UserSnapshot(
         telegram_user_id=rollback_by.id,
@@ -419,91 +442,11 @@ async def _execute_rollback(
         title=None,
     )
 
-    if target_user_id is None:
-        raise ValueError("undo_payload missing target_user_id")
-
-    from selara.infrastructure.db.models import UserModel
-
-    user_row = await activity_repo._session.get(UserModel, int(target_user_id))
-    if user_row is None:
-        raise ValueError(f"Пользователь {target_user_id} не найден в БД.")
-
-    target = UserSnapshot(
-        telegram_user_id=int(user_row.telegram_user_id),
-        username=user_row.username,
-        first_name=user_row.first_name,
-        last_name=user_row.last_name,
-        is_bot=bool(user_row.is_bot),
+    return await execute_tool(
+        call,
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=rollback_actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=bot,
     )
-
-    if tool == "revoke_rest":
-        await activity_repo.revoke_rest(chat=chat_snapshot, actor=rollback_actor, target=target)
-
-    elif tool == "unwarn":
-        await activity_repo.apply_moderation_action(
-            chat=chat_snapshot,
-            actor=rollback_actor,
-            target=target,
-            action="unwarn",
-        )
-
-    elif tool == "unban":
-        await activity_repo.apply_moderation_action(
-            chat=chat_snapshot,
-            actor=rollback_actor,
-            target=target,
-            action="unban",
-        )
-        try:
-            await bot.unban_chat_member(chat_id=chat_id, user_id=int(target_user_id))
-        except Exception as exc:
-            log.warning("llm rollback unban: Telegram unban failed: %s", exc)
-
-    elif tool == "set_rank":
-        previous_rank = payload.get("previous_rank", "participant")
-        actor_role = await activity_repo.get_effective_role_definition(
-            chat_id=chat_id,
-            user_id=rollback_actor.telegram_user_id,
-        )
-        target_role = await activity_repo.get_effective_role_definition(
-            chat_id=chat_id,
-            user_id=target.telegram_user_id,
-        )
-        restored_role = await activity_repo.get_chat_role_definition(
-            chat_id=chat_id,
-            role_code=str(previous_rank),
-        )
-        if actor_role is None or "manage_roles" not in set(actor_role.permissions):
-            raise PermissionError("Недостаточно прав для отката роли.")
-        if restored_role is None:
-            raise ValueError(f"Роль {previous_rank} больше не существует.")
-        if target.telegram_user_id == rollback_actor.telegram_user_id and actor_role.role_code != "owner":
-            raise PermissionError("Нельзя откатывать собственную роль.")
-        if actor_role.role_code != "owner":
-            if target_role is not None and actor_role.rank <= target_role.rank:
-                raise PermissionError("Недостаточно уровня для изменения роли пользователя.")
-            if actor_role.rank <= restored_role.rank:
-                raise PermissionError("Нельзя восстановить роль своего уровня или выше.")
-        await activity_repo.set_bot_role(
-            chat=chat_snapshot,
-            target=target,
-            role=restored_role.role_code,
-            assigned_by_user_id=rollback_by.id,
-        )
-
-    elif tool == "unpred":
-        await activity_repo.apply_moderation_action(
-            chat=chat_snapshot,
-            actor=rollback_actor,
-            target=target,
-            action="unpred",
-        )
-
-    elif tool == "revoke_persona":
-        await activity_repo.clear_chat_persona_label(
-            chat_id=chat_id,
-            user_id=int(target_user_id),
-        )
-
-    else:
-        raise ValueError(f"Неизвестный тип отката: {tool}")

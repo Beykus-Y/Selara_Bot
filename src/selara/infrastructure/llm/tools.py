@@ -124,6 +124,40 @@ async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
         )
 
 
+_UNDO_TOOL_TO_REGISTERED: dict[str, str] = {
+    "revoke_rest": "revoke_rest",
+    "unwarn": "unwarn_user",
+    "unban": "unban_user",
+    "unpred": "remove_pred",
+    "revoke_persona": "revoke_persona",
+    "set_rank": "set_rank",
+}
+
+
+def build_rollback_call(payload: dict, *, call_id: str) -> ToolCall:
+    """Build a synthetic ToolCall from a stored undo_payload so a rollback
+    click routes through the exact same execute_tool()/_moderation_target_error
+    choke point as the original forward action (fixes #21 -- the rollback
+    handler used to call repository methods directly, bypassing authorization
+    entirely and re-implementing only the set_rank check by hand)."""
+    undo_tool = payload.get("tool")
+    registered_name = _UNDO_TOOL_TO_REGISTERED.get(str(undo_tool))
+    if registered_name is None:
+        raise ValueError(f"Неизвестный тип отката: {undo_tool}")
+
+    target_user_id = payload.get("target_user_id")
+    if target_user_id is None:
+        raise ValueError("undo_payload missing target_user_id")
+
+    arguments: dict[str, Any] = {"target": str(target_user_id)}
+    if registered_name == "set_rank":
+        arguments["rank"] = str(payload.get("previous_rank", "participant"))
+    else:
+        arguments["reason"] = "Откат действия ассистента"
+
+    return ToolCall(name=registered_name, arguments=arguments, call_id=call_id)
+
+
 async def _resolve_target(
     target: str,
     *,

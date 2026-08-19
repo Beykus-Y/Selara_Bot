@@ -14,6 +14,7 @@ from selara.presentation.handlers.llm_admin import (
     _handle,
     llm_admin_context_handler,
     llm_admin_nocontext_handler,
+    llm_rollback_callback,
 )
 
 
@@ -164,20 +165,86 @@ async def test_handle_empty_query(chat_settings):
         message.reply.assert_awaited_once_with("Введите запрос после ??")
 
 
+def _target_row_result(user_id: int) -> AsyncMock:
+    """Build the `activity_repo._session.execute(...)` return value that
+    `_resolve_target`'s digit-id branch expects (a scalar row lookup)."""
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = SimpleNamespace(
+        telegram_user_id=user_id,
+        username="target",
+        first_name="Target",
+        last_name=None,
+        is_bot=False,
+    )
+    return execute_result
+
+
+@pytest.mark.asyncio
+async def test_rollback_routes_through_execute_tool_dispatcher() -> None:
+    """#21: rollback must go through the same execute_tool()/
+    _moderation_target_error choke point as every forward moderation tool,
+    not call repository methods directly."""
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
+        get_effective_role_definition=AsyncMock(
+            side_effect=[
+                _role("senior_admin", 20, "moderate_users"),
+                _role("participant", 0),
+            ]
+        ),
+        apply_moderation_action=AsyncMock(return_value=SimpleNamespace(state=SimpleNamespace(warn_count=0))),
+    )
+    llm_repo = SimpleNamespace(
+        add_admin_action=AsyncMock(return_value=SimpleNamespace(id=999)),
+    )
+    actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+
+    result = await _execute_rollback(
+        payload={"tool": "unwarn", "target_user_id": 222},
+        chat_id=-100123,
+        rollback_by=actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=MagicMock(),
+    )
+
+    assert result.success is True
+    activity_repo.apply_moderation_action.assert_awaited_once()
+    assert activity_repo.apply_moderation_action.await_args.kwargs["action"] == "unwarn"
+
+
+@pytest.mark.asyncio
+async def test_rollback_rejects_when_actor_lacks_moderate_users_at_click_time() -> None:
+    """#21: the rank check must be re-evaluated against the rollback actor's
+    *current* rank at click time, exactly like a fresh unwarn_user call --
+    the old direct-repository-call path skipped this entirely for 5 of 6
+    rollback types."""
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
+        get_effective_role_definition=AsyncMock(return_value=_role("participant", 0)),
+        apply_moderation_action=AsyncMock(),
+    )
+    llm_repo = SimpleNamespace(add_admin_action=AsyncMock())
+    actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+
+    result = await _execute_rollback(
+        payload={"tool": "unwarn", "target_user_id": 222},
+        chat_id=-100123,
+        rollback_by=actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=MagicMock(),
+    )
+
+    assert result.success is False
+    assert "прав" in result.result_text.lower()
+    activity_repo.apply_moderation_action.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_rank_rollback_requires_manage_roles_permission() -> None:
     activity_repo = SimpleNamespace(
-        _session=SimpleNamespace(
-            get=AsyncMock(
-                return_value=SimpleNamespace(
-                    telegram_user_id=222,
-                    username="target",
-                    first_name="Target",
-                    last_name=None,
-                    is_bot=False,
-                )
-            )
-        ),
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
         get_effective_role_definition=AsyncMock(
             side_effect=[
                 _role("custom_moderator", 20, "moderate_users"),
@@ -187,34 +254,27 @@ async def test_rank_rollback_requires_manage_roles_permission() -> None:
         get_chat_role_definition=AsyncMock(return_value=_role("junior_admin", 10, "moderate_users")),
         set_bot_role=AsyncMock(),
     )
+    llm_repo = SimpleNamespace(add_admin_action=AsyncMock())
     actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
 
-    with pytest.raises(PermissionError, match="рол"):
-        await _execute_rollback(
-            payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "junior_admin"},
-            chat_id=-100123,
-            rollback_by=actor,
-            activity_repo=activity_repo,
-            bot=MagicMock(),
-        )
+    result = await _execute_rollback(
+        payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "junior_admin"},
+        chat_id=-100123,
+        rollback_by=actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=MagicMock(),
+    )
 
+    assert result.success is False
+    assert "прав" in result.result_text.lower()
     activity_repo.set_bot_role.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_rank_rollback_cannot_restore_role_at_actor_level() -> None:
     activity_repo = SimpleNamespace(
-        _session=SimpleNamespace(
-            get=AsyncMock(
-                return_value=SimpleNamespace(
-                    telegram_user_id=222,
-                    username="target",
-                    first_name="Target",
-                    last_name=None,
-                    is_bot=False,
-                )
-            )
-        ),
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
         get_effective_role_definition=AsyncMock(
             side_effect=[
                 _role("senior_admin", 20, "manage_roles", "moderate_users"),
@@ -224,15 +284,154 @@ async def test_rank_rollback_cannot_restore_role_at_actor_level() -> None:
         get_chat_role_definition=AsyncMock(return_value=_role("senior_admin", 20, "manage_roles")),
         set_bot_role=AsyncMock(),
     )
+    llm_repo = SimpleNamespace(add_admin_action=AsyncMock())
     actor = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
 
-    with pytest.raises(PermissionError, match="уров"):
-        await _execute_rollback(
-            payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "senior_admin"},
-            chat_id=-100123,
-            rollback_by=actor,
-            activity_repo=activity_repo,
-            bot=MagicMock(),
-        )
+    result = await _execute_rollback(
+        payload={"tool": "set_rank", "target_user_id": 222, "previous_rank": "senior_admin"},
+        chat_id=-100123,
+        rollback_by=actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=MagicMock(),
+    )
 
+    assert result.success is False
+    assert "уров" in result.result_text.lower()
     activity_repo.set_bot_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rollback_callback_claims_before_executing_and_reports_success() -> None:
+    """#35: the claim (mark_rolled_back) must happen before the side effect
+    executes, and only once -- this test also proves the callback no longer
+    reports false success (the #36-adjacent concern) when the underlying
+    action actually ran."""
+    callback = AsyncMock()
+    callback.data = "llm_rollback:42"
+    callback.from_user = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+    callback.message = AsyncMock()
+    callback.message.text = "AI-ассистент: сводка"
+    callback.message.edit_text = AsyncMock()
+
+    action = SimpleNamespace(
+        id=42,
+        chat_id=-100123,
+        rolled_back_at=None,
+        undo_payload_json={"tool": "unwarn", "target_user_id": 222},
+        action_description="Варн target",
+    )
+
+    llm_repo = SimpleNamespace(
+        get_admin_action=AsyncMock(return_value=action),
+        mark_rolled_back=AsyncMock(return_value=True),
+        clear_rollback_claim=AsyncMock(),
+        add_admin_action=AsyncMock(return_value=SimpleNamespace(id=1000)),
+    )
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
+        get_effective_role_definition=AsyncMock(
+            side_effect=[
+                _role("senior_admin", 20, "moderate_users"),
+                _role("participant", 0),
+            ]
+        ),
+        apply_moderation_action=AsyncMock(return_value=SimpleNamespace(state=SimpleNamespace(warn_count=0))),
+    )
+
+    call_order: list[str] = []
+    llm_repo.mark_rolled_back.side_effect = lambda **_: call_order.append("claim") or True
+    activity_repo.apply_moderation_action.side_effect = lambda **_: call_order.append("execute") or SimpleNamespace(
+        state=SimpleNamespace(warn_count=0)
+    )
+
+    with (
+        patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo),
+        patch("selara.presentation.handlers.llm_admin.has_permission", new_callable=AsyncMock) as mock_has_perm,
+    ):
+        mock_has_perm.return_value = (True, None, None)
+        await llm_rollback_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=MagicMock())
+
+    assert call_order == ["claim", "execute"]
+    llm_repo.clear_rollback_claim.assert_not_awaited()
+    callback.message.edit_text.assert_awaited_once()
+    assert "Откат выполнен" in callback.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_rollback_callback_releases_claim_when_action_fails_authorization() -> None:
+    """A rollback that fails validation/authorization at click time must not
+    be left permanently marked as rolled-back with nothing having actually
+    happened -- that would be a false-success report."""
+    callback = AsyncMock()
+    callback.data = "llm_rollback:42"
+    callback.from_user = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+    callback.message = AsyncMock()
+    callback.message.text = "AI-ассистент: сводка"
+
+    action = SimpleNamespace(
+        id=42,
+        chat_id=-100123,
+        rolled_back_at=None,
+        undo_payload_json={"tool": "unwarn", "target_user_id": 222},
+        action_description="Варн target",
+    )
+
+    llm_repo = SimpleNamespace(
+        get_admin_action=AsyncMock(return_value=action),
+        mark_rolled_back=AsyncMock(return_value=True),
+        clear_rollback_claim=AsyncMock(),
+    )
+    activity_repo = SimpleNamespace(
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
+        get_effective_role_definition=AsyncMock(return_value=_role("participant", 0)),
+        apply_moderation_action=AsyncMock(),
+    )
+
+    with (
+        patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo),
+        patch("selara.presentation.handlers.llm_admin.has_permission", new_callable=AsyncMock) as mock_has_perm,
+    ):
+        mock_has_perm.return_value = (True, None, None)
+        await llm_rollback_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=MagicMock())
+
+    llm_repo.clear_rollback_claim.assert_awaited_once_with(action_id=42)
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_rollback_callback_second_click_finds_already_claimed() -> None:
+    """#35: if mark_rolled_back reports the row was already claimed (e.g. by
+    a concurrent click), the callback must not execute the underlying
+    side effect at all."""
+    callback = AsyncMock()
+    callback.data = "llm_rollback:42"
+    callback.from_user = SimpleNamespace(id=111, username="actor", first_name="Actor", last_name=None, is_bot=False)
+    callback.message = AsyncMock()
+    callback.message.text = "AI-ассистент: сводка"
+
+    action = SimpleNamespace(
+        id=42,
+        chat_id=-100123,
+        rolled_back_at=None,
+        undo_payload_json={"tool": "unwarn", "target_user_id": 222},
+        action_description="Варн target",
+    )
+
+    llm_repo = SimpleNamespace(
+        get_admin_action=AsyncMock(return_value=action),
+        mark_rolled_back=AsyncMock(return_value=False),
+        clear_rollback_claim=AsyncMock(),
+    )
+    activity_repo = SimpleNamespace(apply_moderation_action=AsyncMock())
+
+    with (
+        patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo),
+        patch("selara.presentation.handlers.llm_admin.has_permission", new_callable=AsyncMock) as mock_has_perm,
+    ):
+        mock_has_perm.return_value = (True, None, None)
+        await llm_rollback_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=MagicMock())
+
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    llm_repo.clear_rollback_claim.assert_not_awaited()
