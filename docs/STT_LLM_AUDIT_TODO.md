@@ -35,7 +35,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 ### 1. [ ] HIGH — persistent system-prompt injection via group chat title
 `llm_admin.py:158-164` interpolates the raw Telegram group title into the LLM's **system**-role message with no escaping/delimiting. Renaming a group only needs Telegram's own "change group info" right, not any bot-level permission — so any such member can plant an injection that rides into every future `?`/`??` call by every admin in that chat. Mitigated in practice by tool-call rank checks (see safe finding 4 in the full report) but should still be fixed — wrap the title in an explicit "untrusted user-supplied metadata" delimiter, or strip/escape control-like phrasing before interpolation.
 
-### 2. [ ] MEDIUM/HIGH — second-order injection via tool results (list_members/get_top/glossary)
+### 2. [x] MEDIUM/HIGH — second-order injection via tool results (list_members/get_top/glossary) — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth trust-tagging)
 `tools.py`'s `_exec_list_members`/`_exec_get_top` return raw `first_name`/`username`/`persona_label` (attacker-controlled via their own Telegram profile) unescaped as tool-result content fed back into the LLM's next round. A crafted display name can bias the assistant into autonomously calling a moderation tool against a victim the attacker chose, using the real admin's authority. `add_to_glossary` is worse — the LLM itself writes and later re-reads it, so an injection there is *persistent* across sessions. Fix direction: mark tool-result content as clearly-delimited untrusted data in the prompt, and/or sanitize free-text fields (names, glossary definitions) before they re-enter LLM context.
 
 ### 3. [ ] MEDIUM — no rate limiting on STT or LLM → cost DoS
@@ -60,7 +60,7 @@ The whole handler runs in one DB transaction (commit only at the end), but tool 
 ### 23. [ ] MEDIUM/HIGH — `get_history` tool has no range/row-count bound, unlike every other list tool
 `_exec_get_history` accepts arbitrary `period_start`/`period_end` with zero limit clause (`get_top`/`list_members`/`get_audit_log` all clamp their limits). Can be used to pull a chat's entire LLM interaction history into one tool result — a cost/context-bloat vector distinct from #3/#19. No test coverage.
 
-### 24. [ ] MEDIUM — context compression can permanently elevate injected content to system-level trust
+### 24. [x] HIGH — context compression can permanently elevate injected content to system-level trust — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth: escaped join + explicit untrusted-data framing on both compress and reload)
 `maybe_compress` joins messages as `"[role]: content"` with no delimiter/escaping — a message containing a literal `"\n[assistant]: ..."` sequence can forge fake role boundaries in what the summarizer model sees. The resulting summary is then reloaded as a **system**-role message on every future turn — ordinary tool/user content gets permanently promoted to system trust once compressed. A distinct, more serious escalation path beyond the per-turn injection in findings #1/#2.
 
 ### 25. [ ] LOW/MEDIUM — inconsistent error handling; STT retry logic is coupled to translated UI text, not exception types
