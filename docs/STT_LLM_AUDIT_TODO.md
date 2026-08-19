@@ -54,7 +54,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 ### 21. [x] HIGH — rollback path bypasses the rank-hierarchy check enforced on forward moderation actions — FIXED 2026-08-20 (commit fd928aa)
 `llm_admin.py`'s "↩ Откатить" callback calls `revoke_rest`/`apply_moderation_action`/`clear_chat_persona_label` directly, bypassing `execute_tool`/`_moderation_target_error` entirely (only `set_rank`'s rollback re-implements the hierarchy check). If an actor's or target's rank changes between the original action and the rollback click, the rollback can act against a target the equivalent forward tool would now refuse. No test coverage for the other 5 rollback types (only `set_rank` is tested), which is exactly where this should have surfaced.
 
-### 22. [ ] HIGH — crash mid-tool-loop can leave a real Telegram ban/mute with zero DB/audit record
+### 22. [x] HIGH — crash mid-tool-loop can leave a real Telegram ban/mute with zero DB/audit record — FIXED 2026-08-20 (commit 1c85442)
 The whole handler runs in one DB transaction (commit only at the end), but tool calls can trigger real, non-transactional Telegram actions (e.g. `bot.ban_chat_member`) mid-loop. `bot.send_chat_action("typing")` is called every round with no try/except (unlike `edit_text`, which is guarded everywhere). If it raises after a real ban already happened, the DB rolls back — the action/audit rows vanish, but the user stays banned with no record of who/why, and no rollback button (since there's no DB row to attach it to).
 
 ### 23. [ ] MEDIUM/HIGH — `get_history` tool has no range/row-count bound, unlike every other list tool
