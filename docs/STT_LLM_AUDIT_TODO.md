@@ -51,7 +51,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 
 ## Pass 3 — deep dive findings (2026-08-20, read-only)
 
-### 21. [ ] HIGH — rollback path bypasses the rank-hierarchy check enforced on forward moderation actions
+### 21. [x] HIGH — rollback path bypasses the rank-hierarchy check enforced on forward moderation actions — FIXED 2026-08-20 (commit fd928aa)
 `llm_admin.py`'s "↩ Откатить" callback calls `revoke_rest`/`apply_moderation_action`/`clear_chat_persona_label` directly, bypassing `execute_tool`/`_moderation_target_error` entirely (only `set_rank`'s rollback re-implements the hierarchy check). If an actor's or target's rank changes between the original action and the rollback click, the rollback can act against a target the equivalent forward tool would now refuse. No test coverage for the other 5 rollback types (only `set_rank` is tested), which is exactly where this should have surfaced.
 
 ### 22. [ ] HIGH — crash mid-tool-loop can leave a real Telegram ban/mute with zero DB/audit record
@@ -97,7 +97,7 @@ No proactive/background LLM trigger path exists. Flagged for confirmation only �
 
 ## Pass 5 — final lateral-thinking pass (2026-08-20, read-only)
 
-### 35. [ ] HIGH — rollback button has a TOCTOU race; `unwarn`/`unpred` are not idempotent, so a double-tap can silently erase an unrelated legitimate warning
+### 35. [x] HIGH — rollback button has a TOCTOU race — FIXED 2026-08-20 (commit fd928aa); `unwarn`/`unpred` are not idempotent, so a double-tap can silently erase an unrelated legitimate warning
 The "already rolled back" check is a plain read before the real side effect, with the flag persisted only after — no row lock, no exactly-once guarantee. For `unban`/`revoke_rest`/`revoke_persona`/`set_rank` a duplicate fire is a harmless no-op, but `unwarn`/`unpred` are relative, clamped-at-zero subtractions — a concurrent double-fire on a target with 2 warns (one being undone, one unrelated) silently zeroes both, with no error and no distinguishing log. Distinct mechanism from #21 (that's about authorization; this is about the endpoint having zero exactly-once guarantee at all).
 
 ### 36. [ ] HIGH — chat migration (group→supergroup) orphans all 4 LLM tables, and rollback clicked post-migration reports false success
