@@ -735,10 +735,21 @@ report (diff review, helper list, duplication removed, full test result)
 sent to Ilya.
 
 ### Separate small cleanup commits (not tied to a stage)
-- [ ] Delete the orphaned "Number" game — **резолюция Ilya: удалить**, own
-  small commit.
+- [x] Delete the orphaned "Number" game — **резолюция Ilya: удалить**
+  (commit f8aaa54, done during the cold-review pass — was previously only
+  marked resolved in this doc, not actually implemented; caught and fixed
+  before the review). Also removed stale user-facing mentions found in
+  `/help`, the command catalog, USER_GUIDE.md, and README.md that had been
+  describing a game that could never be started. Tests-first, full suite
+  green (1432 passed, 1 skipped).
 - [ ] `spy_guess_location` — **резолюция Ilya: подключить позже** — not part
-  of this roadmap, remains deferred.
+  of this roadmap, remains deferred. **Correction found during Number
+  cleanup:** the Telegram-bot UI genuinely has no callback for it (audit
+  was right there), but the **web panel / Mini App already has it wired**
+  (`form_action == "spy_guess"` in `app.py`, calling
+  `GAME_STORE.spy_guess_location`). So this mechanic is reachable today,
+  just not from the bot's own inline keyboards — worth Ilya knowing before
+  deciding on "connect later."
 
 ### New deferred item
 - [?] **#4** Automatic phase timers for Bredovukha/Bunker/Quiz — explicitly
