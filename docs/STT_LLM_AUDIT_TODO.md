@@ -123,7 +123,7 @@ None of `LlmContextMessageModel`/`LlmContextSummaryModel`/`LlmAdminActionModel`/
 ### 8. [x] STT hardcoded to Russian — FIXED 2026-08-20 (P2, auto-detect + ru fallback; LLM prompt text stays Russian per Ilya, no per-chat setting added)
 `stt_language="ru"` is global, no auto-detect. `ADMIN_SYSTEM_PROMPT` hardcodes Russian with no locale variable, even though `text_commands.py` already branches on `chat_settings.text_commands_locale` elsewhere.
 
-### 9. [ ] `?`/`??` assistant and voice transcription are undocumented
+### 9. [x] `?`/`??` assistant and voice transcription are undocumented — FIXED 2026-08-20 (P2, USER_GUIDE + ADMIN_GUIDE)
 Zero mentions in `USER_GUIDE.md`, `ADMIN_GUIDE.md`, or `command_catalog.py`, despite being real permission-gated features.
 
 ### 10. [x] No token/cost usage observability — FIXED 2026-08-20 (P2, log line only, no metrics store)
