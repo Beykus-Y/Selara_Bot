@@ -640,9 +640,63 @@ behavior, verified via actual handler calls, not just reading code:
   well-tested functions in this "low-risk fixes" stage — matches Ilya's
   explicit "don't implement the collapsible-history idea yet" boundary.
 
-### Stage 4 — remaining games
-- [ ] Port the Spy-verified pattern to the other games **one at a time**,
-  preserving each game's unique mechanic (§2 "Что уникально" per game).
+### Stage 4 — remaining games — DONE (2026-08-20, 7 commits, one per game)
+Ported the Spy-verified pattern to all 7 remaining games, one at a time,
+in Ilya's specified order, each with tests + a real end-to-end walkthrough
+before moving to the next. No mechanic changed in any game. Commits:
+bad65b2 (Dice), d00f6ea (Quiz), b1ff578 (Bredovukha), e261bec (WhoAmI),
+0d52a37 (Zlobcards), ada7fa6 (Bunker), 4ca8635 (Mafia).
+
+Per-game summary (also see the "actual renders" report sent to Ilya):
+- **Dice** — board text split; progress line now names who hasn't rolled.
+- **Quiz** — board text split (waiting list pre-existed); answer toast now
+  echoes the chosen letter.
+- **Bredovukha** — board text split for all 3 phases; trimmed now-redundant
+  instruction lines inside the question/vote blocks.
+- **WhoAmI** — board text split for both phases (guess discoverability
+  already fixed in Stage 3 + its follow-up).
+- **Zlobcards** — board text split; **found and fixed a real bug while
+  implementing correction #2**: the lobby's blanket `adjust(2)` split every
+  numeric stepper across row boundaries (e.g. "➕ Раунды" landing next to
+  "➖ Цель" — a misclick risk). Replaced with explicit per-row sizing for
+  the lobby keyboard so every stepper (Bredovukha, Zlobcards x2, Bunker)
+  lands on its own row.
+- **Bunker** — board text split + explicit "остальные пока не ходят"
+  framing (the audit's specific finding for this game); found and fixed a
+  DM-recovery gap (mid-game reveal-turn advances weren't using the unified
+  button+@mention warning); mobile-density check done (1092 chars for an
+  8-player game, well under Telegram's limit — Telegram bubbles wrap text
+  natively, so the web-style overflow concern doesn't apply the way the
+  original audit worried); found-but-deliberately-not-fixed: a minor
+  redundant double-DM at game start (noted, not touched).
+- **Mafia** — board text split for the 4 remaining phases (DM
+  recovery/feed-event classification already done in Stage 3); added a
+  waiting list to execution-confirm voting (day_vote already had one).
+
+**What actually repeated across games (candidates for Stage 5):**
+- The "Сейчас" / "Что делать" board-text split — all 7 games.
+- "Ждём: <names>" waiting lists for simultaneous-answer phases (Dice,
+  Quiz, Bredovukha private-answers, Bredovukha public-vote, Zlobcards
+  private-answers, Zlobcards public-vote, Mafia day_vote, Mafia
+  execution-confirm, Bunker vote) — 9 near-identical implementations.
+- The lobby per-row-sizing fix for numeric steppers (Bredovukha,
+  Zlobcards x2, Bunker) — same underlying bug, same fix shape.
+- Rematch/leave/rules/catalog — already shared infra since Stage 1/2, not
+  re-implemented per game.
+
+**What stayed genuinely unique (not forced into a shared shape):**
+- WhoAmI's free-text question/guess mechanic — correctly not buttonized.
+- Bredovukha's free-text lie submission — same carve-out.
+- Zlobcards' private-hand-as-buttons — already the reference implementation
+  for that specific sub-pattern, not generalized further this stage.
+- Bunker's 9-field progressive reveal and turn-based idle framing — no
+  other game has this shape.
+- Mafia's night-action role variety and dual day-vote surfaces (public
+  board + private card) — untouched, bespoke.
+
+**STOPPED before Stage 5 per Ilya's instruction.** Full report (per-game
+changes, actual renders, repeated vs. unique patterns, full test result)
+sent to Ilya. Stage 5 consolidation waits for his separate confirmation.
 
 ### Stage 5 — consolidation
 - [ ] Only after the pattern has actually repeated across multiple games,
