@@ -2962,10 +2962,11 @@ async def _send_roles_to_private(bot: Bot, game: GroupGame) -> int:
     return failed
 
 
-async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> None:
+async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> int:
     if game.kind != "mafia" or game.status != "started" or game.phase != "night":
-        return
+        return 0
 
+    failed = 0
     for user_id in sorted(game.alive_player_ids):
         keyboard = _build_private_night_action_keyboard(game, actor_user_id=user_id)
         if keyboard is None:
@@ -2994,7 +2995,10 @@ async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> None:
                 reply_markup=keyboard,
             )
         except TelegramForbiddenError:
+            failed += 1
             continue
+
+    return failed
 
 
 async def _send_night_private_reports(bot: Bot, game: GroupGame, resolution: NightResolution) -> None:
@@ -3211,7 +3215,9 @@ async def _resolve_mafia_day_vote(
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
-    await _notify_mafia_night_actions(bot, game)
+    failed_dm = await _notify_mafia_night_actions(bot, game)
+    if failed_dm > 0:
+        await _notify_private_delivery_warning(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote resolved by timer", extra={"game_id": game.game_id})
@@ -3297,7 +3303,9 @@ async def _resolve_mafia_execution_confirm(
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
-    await _notify_mafia_night_actions(bot, game)
+    failed_dm = await _notify_mafia_night_actions(bot, game)
+    if failed_dm > 0:
+        await _notify_private_delivery_warning(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia execution confirm resolved by timer", extra={"game_id": game.game_id})
@@ -4415,20 +4423,28 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
+        failed_role_dm = 0
         if started_game.kind in {"spy", "mafia", "bunker", "whoami", "zlobcards"}:
-            failed_dm = await _send_roles_to_private(bot, started_game)
-            if failed_dm > 0:
-                await _notify_private_delivery_warning(bot, started_game, failed_dm)
+            failed_role_dm = await _send_roles_to_private(bot, started_game)
 
         if started_game.kind == "mafia":
             _schedule_phase_timer(bot, started_game, chat_settings)
-            await _notify_mafia_night_actions(bot, started_game)
+            failed_night_dm = await _notify_mafia_night_actions(bot, started_game)
+            # One combined warning for both DMs (role card + first night's
+            # action prompt) instead of two separate messages -- the same
+            # players who can't receive one usually can't receive the other.
+            failed_dm = max(failed_role_dm, failed_night_dm)
+            if failed_dm > 0:
+                await _notify_private_delivery_warning(bot, started_game, failed_dm)
             await _send_game_feed_event(
                 bot,
                 started_game,
                 text=build_mafia_start_text(round_no=started_game.round_no, night_seconds=chat_settings.mafia_night_seconds),
             )
             return
+
+        if started_game.kind in {"spy", "bunker", "whoami", "zlobcards"} and failed_role_dm > 0:
+            await _notify_private_delivery_warning(bot, started_game, failed_role_dm)
 
         if started_game.kind == "spy":
             await _send_game_feed_event(bot, started_game, text=build_spy_start_text(category=_spy_category_label(started_game)))
