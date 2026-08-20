@@ -238,6 +238,15 @@ async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_use
         )
 
 
+async def _warn_on_failed_dm(bot: Bot, game: GroupGame, failed_user_ids: list[int]) -> None:
+    # Stage 5 consolidation: this "if failed_ids: await
+    # _notify_private_delivery_warning(...)" guard was duplicated at 7
+    # call sites (game start x2, Mafia night re-opens x2, Bunker reveal
+    # advance x3) -- see the Stage 5 roadmap entry for before/after.
+    if failed_user_ids:
+        await _notify_private_delivery_warning(bot, game, failed_user_ids)
+
+
 def _user_label(user_id: int, username: str | None, first_name: str | None, last_name: str | None) -> str:
     if username:
         return f"@{username}"
@@ -324,6 +333,26 @@ def _render_player_inline_list(
     if len(ordered) > limit:
         parts.append(f"+{len(ordered) - limit}")
     return " • ".join(parts)
+
+
+def _append_waiting_line(
+    lines: list[str],
+    game: GroupGame,
+    *,
+    pool: set[int] | tuple[int, ...] | list[int] | dict[int, object],
+    answered: set[int] | tuple[int, ...] | list[int] | dict[int, object],
+    label: str = "Ждём",
+    limit: int = 5,
+) -> None:
+    # Stage 5 consolidation: this exact 3-line shape (compute who from
+    # `pool` isn't in `answered`, skip if empty, append a "<label>: names"
+    # line) was duplicated near-verbatim at 8 call sites across 6 games
+    # (Spy, Dice, Bunker vote, Quiz, Bredovukha x2, Zlobcards x2, Mafia
+    # x2) -- see the Stage 5 roadmap entry for the exact before/after.
+    waiting_ids = [uid for uid in pool if uid not in answered]
+    if not waiting_ids:
+        return
+    lines.append(f"<b>{label}:</b> {_render_player_inline_list(game, waiting_ids, limit=limit)}")
 
 
 def _spy_vote_counts(game: GroupGame) -> dict[int, int]:
@@ -932,9 +961,7 @@ def _render_spy_vote_status(game: GroupGame) -> str:
     else:
         lines.append("<b>Главный подозреваемый:</b> пока нет.")
 
-    waiting_user_ids = [user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.spy_votes]
-    if waiting_user_ids:
-        lines.append(f"<b>Ещё без голоса:</b> {_render_player_inline_list(game, waiting_user_ids, limit=5)}")
+    _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.spy_votes, label="Ещё без голоса")
 
     return "\n".join(lines)
 
@@ -1073,9 +1100,7 @@ def _render_dice_progress(game: GroupGame) -> str:
         for idx, (user_id, score) in enumerate(ranking, start=1):
             lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
 
-    waiting_user_ids = [user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.dice_scores]
-    if waiting_user_ids:
-        lines.append(f"<b>Ждём бросок:</b> {_render_player_inline_list(game, waiting_user_ids, limit=5)}")
+    _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.dice_scores, label="Ждём бросок")
     return "\n".join(lines)
 
 
@@ -1148,9 +1173,7 @@ def _render_bunker_vote_status(game: GroupGame) -> str:
             lines.append(f"<b>Лидер:</b> ничья по {leader_votes} голос(ам)")
     else:
         lines.append("<b>Лидер:</b> пока нет.")
-    waiting_ids = [uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.bunker_votes]
-    if waiting_ids:
-        lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
+    _append_waiting_line(lines, game, pool=game.alive_player_ids, answered=game.bunker_votes)
     return "\n".join(lines)
 
 
@@ -1415,9 +1438,7 @@ def _render_quiz_question(game: GroupGame) -> str:
 
     answered_count = len({user_id for user_id in game.quiz_answers if user_id in game.players})
     lines.append(f"<b>Ответили:</b> {answered_count}/{len(game.players)}")
-    waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.quiz_answers]
-    if waiting_ids:
-        lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
+    _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.quiz_answers)
     return "\n".join(lines)
 
 
@@ -1550,9 +1571,7 @@ def _render_bred_question(game: GroupGame) -> str:
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
-        waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.bred_votes]
-        if waiting_ids:
-            lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
+        _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.bred_votes)
         return "\n".join(lines)
 
     return "\n".join(lines)
@@ -1601,9 +1620,7 @@ def _render_zlob_round_status(game: GroupGame) -> str:
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
-        waiting_ids = [uid for uid in _sorted_player_ids(game, game.players.keys()) if uid not in game.zlob_votes]
-        if waiting_ids:
-            lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
+        _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.zlob_votes)
         return "\n".join(lines)
 
     return "\n".join(lines)
@@ -1844,9 +1861,7 @@ def _render_game_text(
             lines.append("<b>Что делать:</b> выберите кандидата кнопками ниже или в ЛС-карточке.")
             lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.alive_player_ids)}")
             lines.append(f"<b>Под ударом:</b> {_render_vote_leaders(game, _mafia_day_vote_counts(game))}")
-            waiting_ids = [uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.day_votes]
-            if waiting_ids:
-                lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_ids, limit=5)}")
+            _append_waiting_line(lines, game, pool=game.alive_player_ids, answered=game.day_votes)
         elif game.phase == "day_execution_confirm":
             candidate_label = "-"
             if game.mafia_execution_candidate_user_id is not None:
@@ -1856,11 +1871,7 @@ def _render_game_text(
             lines.append("<b>Что делать:</b> голосуйте за/против казни кандидата кнопками ниже.")
             lines.append(f"<b>Кандидат:</b> {escape(candidate_label)}")
             lines.append(f"<b>Голоса:</b> ✅ {yes_count} • ❌ {no_count} • 🗳 {voted_count}/{alive_count}")
-            waiting_confirm_ids = [
-                uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.execution_confirm_votes
-            ]
-            if waiting_confirm_ids:
-                lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_confirm_ids, limit=5)}")
+            _append_waiting_line(lines, game, pool=game.alive_player_ids, answered=game.execution_confirm_votes)
 
         lines.append("")
         lines.append(_render_alive_players(game))
@@ -1990,6 +2001,26 @@ def _render_game_text(
     return "\n".join(lines)
 
 
+def _add_stepper_row(
+    builder: InlineKeyboardBuilder,
+    lobby_row_sizes: list[int],
+    *,
+    game_id: str,
+    key: str,
+    control_label: str,
+    value_text: str,
+) -> None:
+    # Stage 5 consolidation: this exact ➖/value/➕-in-one-row shape was
+    # duplicated at 4 lobby-config sites (Bredovukha rounds, Zlobcards
+    # rounds, Zlobcards target score, Bunker seats) -- same buttons, same
+    # callback_data suffixes, same row-size bookkeeping, differing only in
+    # the label/value text. See the Stage 5 roadmap entry for before/after.
+    builder.button(text=f"➖ {control_label}", callback_data=f"gcfg:{game_id}:{key}_dec")
+    builder.button(text=value_text, callback_data=f"gcfg:{game_id}:{key}_noop")
+    builder.button(text=f"➕ {control_label}", callback_data=f"gcfg:{game_id}:{key}_inc")
+    lobby_row_sizes.append(3)
+
+
 def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboardMarkup | None:
     builder = InlineKeyboardBuilder()
 
@@ -2014,10 +2045,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             builder.button(text=f"🎭 Роль выбывшего: {reveal_text}", callback_data=f"gcfg:{game.game_id}:reveal_elim")
             lobby_row_sizes.append(1)
         if game.kind == "bredovukha":
-            builder.button(text="➖ Раунды", callback_data=f"gcfg:{game.game_id}:bred_rounds_dec")
-            builder.button(text=f"🔢 Раундов: {game.bred_rounds}", callback_data=f"gcfg:{game.game_id}:bred_rounds_noop")
-            builder.button(text="➕ Раунды", callback_data=f"gcfg:{game.game_id}:bred_rounds_inc")
-            lobby_row_sizes.append(3)
+            _add_stepper_row(
+                builder, lobby_row_sizes, game_id=game.game_id, key="bred_rounds",
+                control_label="Раунды", value_text=f"🔢 Раундов: {game.bred_rounds}",
+            )
         if game.kind == "spy":
             category_text = _spy_category_label(game)
             if len(category_text) > 18:
@@ -2036,19 +2067,19 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
                 category_text = f"{category_text[:15]}..."
             builder.button(text=f"😈 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:zlob_cat_next")
             lobby_row_sizes.append(1)
-            builder.button(text="➖ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_dec")
-            builder.button(text=f"🔢 Раунды: {game.zlob_rounds}", callback_data=f"gcfg:{game.game_id}:zlob_rounds_noop")
-            builder.button(text="➕ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_inc")
-            lobby_row_sizes.append(3)
-            builder.button(text="➖ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_dec")
-            builder.button(text=f"🏁 Цель: {game.zlob_target_score}", callback_data=f"gcfg:{game.game_id}:zlob_target_noop")
-            builder.button(text="➕ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_inc")
-            lobby_row_sizes.append(3)
+            _add_stepper_row(
+                builder, lobby_row_sizes, game_id=game.game_id, key="zlob_rounds",
+                control_label="Раунды", value_text=f"🔢 Раунды: {game.zlob_rounds}",
+            )
+            _add_stepper_row(
+                builder, lobby_row_sizes, game_id=game.game_id, key="zlob_target",
+                control_label="Цель", value_text=f"🏁 Цель: {game.zlob_target_score}",
+            )
         if game.kind == "bunker":
-            builder.button(text="➖ Места", callback_data=f"gcfg:{game.game_id}:bunker_seats_dec")
-            builder.button(text=f"🏚 Мест: {game.bunker_seats}", callback_data=f"gcfg:{game.game_id}:bunker_seats_noop")
-            builder.button(text="➕ Места", callback_data=f"gcfg:{game.game_id}:bunker_seats_inc")
-            lobby_row_sizes.append(3)
+            _add_stepper_row(
+                builder, lobby_row_sizes, game_id=game.game_id, key="bunker_seats",
+                control_label="Места", value_text=f"🏚 Мест: {game.bunker_seats}",
+            )
 
         builder.button(text="🎬 Старт", callback_data=f"game:start:{game.game_id}")
         builder.button(text="🛑 Отменить", callback_data=f"game:cancel:{game.game_id}")
@@ -3272,8 +3303,7 @@ async def _resolve_mafia_day_vote(
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
     failed_dm = await _notify_mafia_night_actions(bot, game)
-    if failed_dm:
-        await _notify_private_delivery_warning(bot, game, failed_dm)
+    await _warn_on_failed_dm(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote resolved by timer", extra={"game_id": game.game_id})
@@ -3360,8 +3390,7 @@ async def _resolve_mafia_execution_confirm(
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
     failed_dm = await _notify_mafia_night_actions(bot, game)
-    if failed_dm:
-        await _notify_private_delivery_warning(bot, game, failed_dm)
+    await _warn_on_failed_dm(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia execution confirm resolved by timer", extra={"game_id": game.game_id})
@@ -3577,8 +3606,7 @@ async def _resolve_bunker_vote(
         )
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
         failed_reveal_dm = await _notify_bunker_reveal_turn(bot, game)
-        if failed_reveal_dm:
-            await _notify_private_delivery_warning(bot, game, failed_reveal_dm)
+        await _warn_on_failed_dm(bot, game, failed_reveal_dm)
     elif resolution.next_phase == "bunker_vote":
         note_parts.append("<b>Этап:</b> все характеристики раскрыты, стартовало новое голосование.")
         failed_dm = await _notify_bunker_vote_private(bot, game)
@@ -4486,8 +4514,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             # action prompt) instead of two separate messages -- the same
             # players who can't receive one usually can't receive the other.
             failed_dm = list(dict.fromkeys([*failed_role_dm, *failed_night_dm]))
-            if failed_dm:
-                await _notify_private_delivery_warning(bot, started_game, failed_dm)
+            await _warn_on_failed_dm(bot, started_game, failed_dm)
             await _send_game_feed_event(
                 bot,
                 started_game,
@@ -4546,8 +4573,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 note=f"<b>Первый ход раскрытия:</b> {escape(actor_label)} раскрывает характеристику в ЛС.",
             )
             failed_reveal_dm = await _notify_bunker_reveal_turn(bot, started_game)
-            if failed_reveal_dm:
-                await _notify_private_delivery_warning(bot, started_game, failed_reveal_dm)
+            await _warn_on_failed_dm(bot, started_game, failed_reveal_dm)
             return
 
         return
@@ -4710,8 +4736,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 )
                 if result.next_actor_label is not None and not result.vote_opened:
                     failed_reveal_dm = await _notify_bunker_reveal_turn(bot, updated_game)
-                    if failed_reveal_dm:
-                        await _notify_private_delivery_warning(bot, updated_game, failed_reveal_dm)
+                    await _warn_on_failed_dm(bot, updated_game, failed_reveal_dm)
                 await query.answer("Ход переключён", show_alert=False)
                 return
 
@@ -5460,8 +5485,7 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
 
     if result.next_actor_label is not None and not result.vote_opened:
         failed_reveal_dm = await _notify_bunker_reveal_turn(bot, game)
-        if failed_reveal_dm:
-            await _notify_private_delivery_warning(bot, game, failed_reveal_dm)
+        await _warn_on_failed_dm(bot, game, failed_reveal_dm)
     await _send_game_feed_event(bot, game, text="\n".join(note_lines))
 
     if result.vote_opened:
