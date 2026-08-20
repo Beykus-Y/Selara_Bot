@@ -1664,6 +1664,21 @@ class GameStore:
                 game.bunker_seats = self._default_bunker_seats(players_count=len(game.players))
             return game, "joined"
 
+    async def leave(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str]:
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "not_found"
+            if game.status != "lobby":
+                return game, "not_lobby"
+            if user_id not in game.players:
+                return game, "not_joined"
+            if user_id == game.owner_user_id:
+                return game, "owner_cannot_leave"
+
+            del game.players[user_id]
+            return game, "left"
+
     async def start(self, *, game_id: str, actions_18_enabled: bool = True) -> tuple[GroupGame | None, str | None]:
         async with self._lock:
             game = self._by_id.get(game_id)

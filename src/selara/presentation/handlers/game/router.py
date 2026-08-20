@@ -1840,7 +1840,11 @@ def _render_game_text(
     if game.kind == "spy" and game.phase == "freeplay":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append(f"<b>Тема:</b> {escape(_spy_category_label(game))}")
-        lines.append("<b>Сейчас:</b> задавайте вопросы по кругу и ловите того, кто не знает локацию.")
+        lines.append("<b>Сейчас:</b> обсуждение. Мирные знают локацию, шпион — нет.")
+        lines.append(
+            "<b>Что делать:</b> задавайте вопросы по кругу; если подозреваете "
+            "шпиона — голосуйте кнопкой ниже."
+        )
         lines.append("")
         lines.append(_render_spy_vote_status(game))
 
@@ -1954,6 +1958,7 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
 
     if game.status == "lobby":
         builder.button(text="➕ Присоединиться", callback_data=f"game:join:{game.game_id}")
+        builder.button(text="➖ Покинуть", callback_data=f"game:leave:{game.game_id}")
 
         if game.kind == "mafia":
             reveal_text = "вкл" if game.reveal_eliminated_role else "выкл"
@@ -2027,6 +2032,9 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
 
         builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
+
+    elif game.status == "finished":
+        builder.button(text="🔁 Ещё раз", callback_data=f"game:rematch:{game.game_id}")
 
     if bot_username and game.status == "started":
         if game.kind in {"spy", "mafia"}:
@@ -4242,6 +4250,80 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
         await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
         await query.answer("Вы присоединились", show_alert=False)
+        return
+
+    if action == "leave":
+        updated_game, status = await GAME_STORE.leave(game_id=game_id, user_id=actor_id)
+        if updated_game is None:
+            await query.answer("Игра не найдена", show_alert=False)
+            return
+
+        if status == "not_joined":
+            await query.answer("Вы не в этой игре", show_alert=False)
+            return
+        if status == "not_lobby":
+            await query.answer("Нельзя покинуть: игра уже запущена", show_alert=False)
+            return
+        if status == "owner_cannot_leave":
+            await query.answer(
+                "Создатель лобби не может выйти — отмените игру кнопкой «🛑 Отменить», если она больше не нужна.",
+                show_alert=True,
+            )
+            return
+
+        await _safe_edit_or_send_game_board(bot, updated_game, chat_settings)
+        await query.answer("Вы покинули игру", show_alert=False)
+        return
+
+    if action == "rematch":
+        if game.status != "finished":
+            await query.answer("Эта игра ещё не завершена", show_alert=False)
+            return
+
+        owner_label = await _resolve_chat_player_label(
+            activity_repo,
+            chat_id=game.chat_id,
+            user_id=actor_id,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+        )
+        new_game, error = await GAME_STORE.create_lobby(
+            kind=game.kind,
+            chat_id=game.chat_id,
+            chat_title=game.chat_title,
+            owner_user_id=actor_id,
+            owner_label=owner_label,
+            reveal_eliminated_role=game.reveal_eliminated_role,
+            spy_category=game.spy_category if game.kind == "spy" else None,
+            whoami_category=game.whoami_category if game.kind == "whoami" else None,
+            zlob_category=game.zlob_category if game.kind == "zlobcards" else None,
+            actions_18_enabled=chat_settings.actions_18_enabled,
+        )
+        if error:
+            await query.answer(error, show_alert=True)
+            return
+        if new_game is None:
+            await query.answer("Не удалось создать новую игру", show_alert=False)
+            return
+
+        # Carry over the finished game's settings (rounds/seats/target score),
+        # but deliberately not its players -- everyone, including the same
+        # players, joins the new lobby again via the normal join button.
+        if game.kind == "bredovukha":
+            new_game, _ = await GAME_STORE.set_bred_rounds(game_id=new_game.game_id, rounds=game.bred_rounds)
+        if game.kind == "zlobcards":
+            new_game, _ = await GAME_STORE.set_zlob_rounds(game_id=new_game.game_id, rounds=game.zlob_rounds)
+            new_game, _ = await GAME_STORE.set_zlob_target_score(game_id=new_game.game_id, target_score=game.zlob_target_score)
+        if game.kind == "bunker":
+            new_game, _ = await GAME_STORE.set_bunker_seats(game_id=new_game.game_id, seats=game.bunker_seats)
+        if new_game is None:
+            await query.answer("Не удалось создать новую игру", show_alert=False)
+            return
+
+        await GAME_STORE.set_message_id(game_id=new_game.game_id, message_id=query.message.message_id)
+        await _safe_edit_or_send_game_board(bot, new_game, chat_settings)
+        await query.answer("Новая игра создана", show_alert=False)
         return
 
     if action in {"cancel", "advance", "reveal"}:
