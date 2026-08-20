@@ -114,7 +114,7 @@ None of `LlmContextMessageModel`/`LlmContextSummaryModel`/`LlmAdminActionModel`/
 
 ## Functional completeness gaps (separate read-only audit, 2026-08-20)
 
-### 6. [ ] No way to recover from a poisoned glossary — no delete/view/clear tool or command exists
+### 6. [x] No way to recover from a poisoned glossary — no delete/view/clear tool or command exists — FIXED 2026-08-20 (remove_from_glossary tool + list_glossary)
 `llm_repository.py` only exposes lookup/upsert/list — no `delete_glossary_term`. `tools.py` only registers `lookup_glossary`/`add_to_glossary` — no `remove_from_glossary`. No human-facing command anywhere. Directly blocks recovery from finding #2 above.
 
 ### 7. [ ] STT has no per-chat enable/disable, unlike every other subsystem
@@ -141,13 +141,13 @@ Per-tool status text exists but no round counter/elapsed-time, so a user can't t
 ### 14. [ ] Whisper silently mis-transcribes non-Russian audio instead of erroring
 `language="ru"` is passed unconditionally — non-Russian speech produces garbled "successful" Russian text rather than a clear failure. Compounds gap #8.
 
-### 16. [ ] `list_glossary` repository method exists but is completely unwired
+### 16. [x] `list_glossary` repository method exists but is completely unwired — FIXED 2026-08-20 (wired up as a new LLM tool)
 `llm_repository.py::list_glossary` has zero call sites anywhere in the codebase — no command, tool, or admin view exposes it. Trivial to wire up (the method already exists) but nothing does today, so there's no way to see what's in a chat's glossary at all.
 
-### 17. [ ] Glossary entries have no author tracking
+### 17. [x] Glossary entries have no author tracking — FIXED 2026-08-20 (migration 0057, created_by_user_id/updated_by_user_id)
 `LlmChatGlossaryModel` has no `created_by`/`updated_by` field. Even once delete/view exists (gap #6), there's no way to determine who added or last edited a given entry — relevant for tracing back a poisoning incident (security finding #2).
 
-### 18. [ ] Glossary has no version history — updates silently overwrite
+### 18. [x] Glossary has no version history — updates silently overwrite — FIXED 2026-08-20 (migration 0057, llm_chat_glossary_history table)
 `upsert_glossary_term` does `on_conflict_do_update`, fully replacing `definition` with no history table. Once an entry is edited (maliciously or not), the previous value is unrecoverable — no way to see what a poisoned entry looked like before, or roll back.
 
 ### 19. [x] No length/count limits on glossary entries — FIXED 2026-08-20 (commit 5739a9c)
