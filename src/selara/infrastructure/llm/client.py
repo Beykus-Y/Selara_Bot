@@ -55,13 +55,15 @@ class LlmClient:
         max_tokens: int | None = _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS,
     ):
         try:
-            return await self._client.chat.completions.create(
+            response = await self._client.chat.completions.create(
                 model=self._config.model,
                 messages=messages,
                 tools=tools or None,
                 tool_choice="auto" if tools else None,
                 max_tokens=max_tokens,
             )
+            _log_usage("chat_with_tools", response)
+            return response
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
         except APIConnectionError as exc:
@@ -76,6 +78,7 @@ class LlmClient:
                 messages=messages,
                 max_tokens=max_tokens,
             )
+            _log_usage("chat_simple", response)
             return response.choices[0].message.content or ""
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
@@ -91,6 +94,7 @@ class LlmClient:
                 messages=messages,
                 max_tokens=max_tokens,
             )
+            _log_usage("summarize", response)
             return response.choices[0].message.content or ""
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
@@ -98,6 +102,24 @@ class LlmClient:
             raise LlmClientError("Не удалось подключиться к LLM-сервису.") from exc
         except APIStatusError as exc:
             raise LlmClientError(_extract_api_error(exc)) from exc
+
+
+def _log_usage(method: str, response: object) -> None:
+    """#10: response.usage was never read/logged anywhere -- only
+    failure-path warnings existed, despite a single ?? query fanning out to
+    ~10 billed calls. This is deliberately just a log line (no DB/metrics
+    store) -- per Ilya's note on the skills-design doc, measure actual
+    token cost first before building anything more elaborate on top."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    log.info(
+        "llm usage method=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+        method,
+        getattr(usage, "prompt_tokens", None),
+        getattr(usage, "completion_tokens", None),
+        getattr(usage, "total_tokens", None),
+    )
 
 
 def _extract_api_error(exc: APIStatusError) -> str:
