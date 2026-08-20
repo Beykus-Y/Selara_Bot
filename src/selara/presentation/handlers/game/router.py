@@ -1833,21 +1833,15 @@ def _render_game_text(
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
 
         if game.phase == "night":
-            lines.append(
-                f"<b>Сейчас:</b> ночь. Ночные роли ходят в ЛС, остальные ждут рассвета "
-                f"({_format_duration(chat_settings.mafia_night_seconds)})."
-            )
+            lines.append(f"<b>Сейчас:</b> ночь ({_format_duration(chat_settings.mafia_night_seconds)}).")
+            lines.append("<b>Что делать:</b> роли с ночным действием ходят в ЛС; остальные ждут рассвета.")
         elif game.phase == "day_discussion":
-            lines.append(
-                f"<b>Сейчас:</b> обсуждение перед голосованием. Сверяйте версии и ищите нестыковки "
-                f"({_format_duration(chat_settings.mafia_day_seconds)})."
-            )
+            lines.append(f"<b>Сейчас:</b> обсуждение перед голосованием ({_format_duration(chat_settings.mafia_day_seconds)}).")
+            lines.append("<b>Что делать:</b> сверяйте версии и ищите нестыковки в чате.")
         elif game.phase == "day_vote":
             voted_count = len({voter for voter in game.day_votes if voter in game.alive_player_ids})
-            lines.append(
-                f"<b>Сейчас:</b> дневное голосование. Выберите кандидата кнопками ниже или в ЛС "
-                f"({_format_duration(chat_settings.mafia_vote_seconds)})."
-            )
+            lines.append(f"<b>Сейчас:</b> дневное голосование ({_format_duration(chat_settings.mafia_vote_seconds)}).")
+            lines.append("<b>Что делать:</b> выберите кандидата кнопками ниже или в ЛС-карточке.")
             lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.alive_player_ids)}")
             lines.append(f"<b>Под ударом:</b> {_render_vote_leaders(game, _mafia_day_vote_counts(game))}")
             waiting_ids = [uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.day_votes]
@@ -1858,12 +1852,15 @@ def _render_game_text(
             if game.mafia_execution_candidate_user_id is not None:
                 candidate_label = game.players.get(game.mafia_execution_candidate_user_id, f"user:{game.mafia_execution_candidate_user_id}")
             voted_count, alive_count, yes_count, no_count = _count_alive_execution_confirm_votes(game)
-            lines.append(
-                f"<b>Сейчас:</b> стол подтверждает казнь кандидата "
-                f"({_format_duration(chat_settings.mafia_vote_seconds)})."
-            )
+            lines.append(f"<b>Сейчас:</b> подтверждение казни ({_format_duration(chat_settings.mafia_vote_seconds)}).")
+            lines.append("<b>Что делать:</b> голосуйте за/против казни кандидата кнопками ниже.")
             lines.append(f"<b>Кандидат:</b> {escape(candidate_label)}")
             lines.append(f"<b>Голоса:</b> ✅ {yes_count} • ❌ {no_count} • 🗳 {voted_count}/{alive_count}")
+            waiting_confirm_ids = [
+                uid for uid in _sorted_player_ids(game, game.alive_player_ids) if uid not in game.execution_confirm_votes
+            ]
+            if waiting_confirm_ids:
+                lines.append(f"<b>Ждём:</b> {_render_player_inline_list(game, waiting_confirm_ids, limit=5)}")
 
         lines.append("")
         lines.append(_render_alive_players(game))
