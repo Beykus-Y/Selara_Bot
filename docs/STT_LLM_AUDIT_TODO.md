@@ -32,7 +32,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 
 ## Security findings (adversarial review)
 
-### 1. [ ] HIGH — persistent system-prompt injection via group chat title
+### 1. [x] MEDIUM/HIGH — persistent system-prompt injection via group chat title — MITIGATED 2026-08-20 (P1, defense-in-depth trust-tagging, same pattern as #2/#24)
 `llm_admin.py:158-164` interpolates the raw Telegram group title into the LLM's **system**-role message with no escaping/delimiting. Renaming a group only needs Telegram's own "change group info" right, not any bot-level permission — so any such member can plant an injection that rides into every future `?`/`??` call by every admin in that chat. Mitigated in practice by tool-call rank checks (see safe finding 4 in the full report) but should still be fixed — wrap the title in an explicit "untrusted user-supplied metadata" delimiter, or strip/escape control-like phrasing before interpolation.
 
 ### 2. [x] MEDIUM/HIGH — second-order injection via tool results (list_members/get_top/glossary) — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth trust-tagging)
