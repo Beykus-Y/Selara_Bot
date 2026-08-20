@@ -88,7 +88,7 @@ async def test_rapid_repeated_voice_messages_are_throttled_by_cooldown():
         message = AsyncMock()
         message.chat = MagicMock(id=555)
         message.from_user = MagicMock(id=777)
-        message.voice = MagicMock(file_id=f"voice-{i}")
+        message.voice = MagicMock(file_id=f"voice-{i}", file_size=1000)
         message.reply = AsyncMock(return_value=AsyncMock())
         await voice_message_handler(message, bot, stt_client, settings)
 
@@ -122,7 +122,7 @@ async def test_voice_cooldown_is_scoped_per_chat_and_user():
         message = AsyncMock()
         message.chat = MagicMock(id=chat_id)
         message.from_user = MagicMock(id=user_id)
-        message.voice = MagicMock(file_id="v")
+        message.voice = MagicMock(file_id="v", file_size=1000)
         message.reply = AsyncMock(return_value=AsyncMock())
         await voice_message_handler(message, bot, stt_client, settings)
 

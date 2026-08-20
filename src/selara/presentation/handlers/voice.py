@@ -8,6 +8,7 @@ from aiogram.types import Message
 
 from selara.core.config import Settings
 from selara.infrastructure.stt import SttClient, SttClientError
+from selara.infrastructure.stt.client import _MAX_FILE_SIZE
 
 router = Router(name="voice")
 log = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
 
 
 async def _transcribe_and_reply(
-    message: Message, bot: Bot, stt_client: SttClient, settings: Settings, *, file_id: str, filename: str,
+    message: Message, bot: Bot, stt_client: SttClient, settings: Settings,
+    *, file_id: str, filename: str, file_size: int | None,
 ) -> None:
     if message.from_user is not None:
         key = (message.chat.id, message.from_user.id)
@@ -53,6 +55,14 @@ async def _transcribe_and_reply(
         if last is not None and (now - last) < settings.stt_cooldown_seconds:
             return
         _last_request_at[key] = now
+
+    # #12: Telegram reports file_size on the message itself -- check it
+    # before downloading anything, instead of downloading a file that's
+    # going to be rejected by _validate_audio's size check afterward anyway.
+    if file_size is not None and file_size > _MAX_FILE_SIZE:
+        mb = file_size / (1024 * 1024)
+        await message.reply(f"❌ Файл слишком большой ({mb:.1f} МБ). Максимум — 25 МБ.")
+        return
 
     status = await message.reply(_PENDING_TEXT)
 
@@ -83,7 +93,9 @@ async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClien
     voice = message.voice
     if voice is None:
         return
-    await _transcribe_and_reply(message, bot, stt_client, settings, file_id=voice.file_id, filename="voice.ogg")
+    await _transcribe_and_reply(
+        message, bot, stt_client, settings, file_id=voice.file_id, filename="voice.ogg", file_size=voice.file_size,
+    )
 
 
 @router.message(F.video_note)
@@ -96,5 +108,6 @@ async def video_note_message_handler(message: Message, bot: Bot, stt_client: Stt
     if video_note is None:
         return
     await _transcribe_and_reply(
-        message, bot, stt_client, settings, file_id=video_note.file_id, filename="video_note.mp4",
+        message, bot, stt_client, settings,
+        file_id=video_note.file_id, filename="video_note.mp4", file_size=video_note.file_size,
     )

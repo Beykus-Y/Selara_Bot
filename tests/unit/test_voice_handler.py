@@ -18,7 +18,7 @@ def test_split_transcription_splits_long_unbroken_text_within_telegram_limit() -
 async def test_voice_message_handler_sends_long_transcription_in_plain_text_chunks() -> None:
     status = SimpleNamespace(edit_text=AsyncMock())
     message = SimpleNamespace(
-        voice=SimpleNamespace(file_id="voice-id"),
+        voice=SimpleNamespace(file_id="voice-id", file_size=1000),
         reply=AsyncMock(return_value=status),
         chat=SimpleNamespace(id=1),
         from_user=SimpleNamespace(id=1),
@@ -52,7 +52,7 @@ async def test_video_note_handler_transcribes_and_replies() -> None:
 
     status = SimpleNamespace(edit_text=AsyncMock())
     message = SimpleNamespace(
-        video_note=SimpleNamespace(file_id="video-note-id"),
+        video_note=SimpleNamespace(file_id="video-note-id", file_size=1000),
         reply=AsyncMock(return_value=status),
         chat=SimpleNamespace(id=42),
         from_user=SimpleNamespace(id=7),
@@ -87,7 +87,7 @@ async def test_video_note_handler_shares_the_stt_cooldown_with_voice() -> None:
 
     def _message():
         return SimpleNamespace(
-            video_note=SimpleNamespace(file_id="v"),
+            video_note=SimpleNamespace(file_id="v", file_size=1000),
             reply=AsyncMock(return_value=status),
             chat=SimpleNamespace(id=42),
             from_user=SimpleNamespace(id=7),
@@ -97,3 +97,30 @@ async def test_video_note_handler_shares_the_stt_cooldown_with_voice() -> None:
     await video_note_message_handler(_message(), bot=bot, stt_client=stt_client, settings=settings)
 
     assert stt_client.transcribe_with_retry.await_count == 1
+
+
+# --- #12: size checked only after full download, generic failure message ---
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_rejects_oversized_file_before_downloading() -> None:
+    from selara.presentation.handlers import voice as voice_module
+    voice_module._last_request_at.clear()
+
+    status = SimpleNamespace(edit_text=AsyncMock())
+    message = SimpleNamespace(
+        voice=SimpleNamespace(file_id="voice-id", file_size=30 * 1024 * 1024),
+        reply=AsyncMock(return_value=status),
+        chat=SimpleNamespace(id=1),
+        from_user=SimpleNamespace(id=1),
+    )
+    bot = SimpleNamespace(get_file=AsyncMock(), download_file=AsyncMock())
+    stt_client = SimpleNamespace(transcribe_with_retry=AsyncMock())
+
+    await voice_message_handler(message, bot=bot, stt_client=stt_client, settings=Settings())
+
+    bot.get_file.assert_not_awaited()
+    stt_client.transcribe_with_retry.assert_not_awaited()
+    message.reply.assert_awaited_once()
+    reply_text = message.reply.await_args.args[0]
+    assert "МБ" in reply_text or "большой" in reply_text.lower()
