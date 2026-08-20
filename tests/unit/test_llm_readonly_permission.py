@@ -125,7 +125,12 @@ async def test_actor_with_neither_permission_is_denied(chat_settings):
         await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False)
 
     message.reply.assert_awaited_once()
-    assert "прав" in message.reply.await_args.args[0].lower()
+    denial_text = message.reply.await_args.args[0].lower()
+    assert "прав" in denial_text
+    # #27: junior_admin's default template does NOT grant moderate_users
+    # (only senior_admin+ does) -- the old message named the wrong role.
+    assert "junior_admin" not in denial_text
+    assert "senior_admin" in denial_text
 
 
 @pytest.mark.asyncio

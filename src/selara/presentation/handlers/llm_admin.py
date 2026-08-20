@@ -129,7 +129,13 @@ async def _handle(
             bootstrap_if_missing_owner=False,
         )
     if not allowed:
-        await message.reply("⛔ Недостаточно прав для AI-ассистента (нужна роль junior_admin и выше).")
+        # #27: junior_admin's default template does NOT grant moderate_users
+        # (only senior_admin+ does by default) -- the old message named the
+        # wrong role, misleading admins configuring roles.
+        await message.reply(
+            "⛔ Недостаточно прав для AI-ассистента (нужна роль senior_admin и выше, "
+            "либо кастомная роль с правом использования AI-ассистента)."
+        )
         return
 
     raw_text = message.text or ""
