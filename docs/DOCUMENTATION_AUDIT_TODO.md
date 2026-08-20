@@ -96,6 +96,74 @@ self-review.
   (item #3 vs #8 on lastseen) and correct item #1 (chat_write_locked already
   exists and works, `chat_write_lock.py`).
 
+## P1 — Discoverability / Onboarding (added 2026-08-20, Ilya's follow-up)
+
+`/start` in DM currently opens straight into the technical ЛС-panel (group
+counts, Mini App/PC-panel links) with zero explanation of what Selara even
+does — bad first-run experience for someone who's never used the bot.
+This is scoped as part of the documentation modernization, not a separate
+feature: the fix is a real onboarding path, not a standalone patch.
+
+- [ ] Redesign `/start` (`src/selara/presentation/handlers/private_panel.py`,
+  `send_private_start_panel`/`_render_home_text`/`_build_home_keyboard`):
+  keep it as the existing ЛС-panel entry point for returning users, but make
+  the *first* thing a new user sees a short, plain-language intro (what
+  Selara is, that it's for group chats, main areas: games/stats/economy/
+  relationships-family/gacha), with one obvious **🚀 Как начать** button.
+  Keep Mini App + PC-panel access. Keep the group-count info, but visually
+  below the onboarding block, not as the headline. Short text — this is not
+  a place to cram documentation.
+- [ ] New public **Getting Started** page on the same server, using the
+  existing Web UI/Jinja/design system — study `/app/docs/user` and
+  `/app/docs/admin`'s existing architecture first (`build_user_docs_context`/
+  `build_admin_docs_context` in `src/selara/web/user_docs.py`/`admin_docs.py`,
+  their templates, responsive/nav/search) and do NOT build a second,
+  independent doc system. `/app/docs/user` already renders without an
+  authenticated session (`_load_user_from_request` returns `None` gracefully,
+  no forced redirect) — the new route should follow the same pattern.
+  Preferred URL: `/app/docs/getting-started`, unless investigation finds a
+  better-fitting existing route convention (if so, use it and note why here).
+  This page is "Selara in a minute" onboarding, not a shortened USER_GUIDE —
+  structure: (1) works in group chats, nothing to configure; (2) a few
+  example things to type (кто я / топ / игра / баланс / гача генш) plus one
+  line that many features work in plain words, not just slash commands;
+  (3) some social actions work as a reply to a message (e.g. reply + обнять);
+  (4) the bot sometimes DMs you (hidden roles, some game features), in plain
+  language; (5) links onward to full docs. Must read in under a minute —
+  no walls of text.
+- [ ] Navigation on the Getting Started page into existing docs (e.g. 🚀
+  Начало / ✨ Возможности / 🎮 Игры / 💰 Экономика и гача / 💞 Общение и семья
+  / 🛠 Для администраторов) — reuse existing USER_GUIDE/ADMIN_GUIDE
+  sections/anchors where the material already exists rather than duplicating
+  content; add anchors only where genuinely missing. If a horizontal
+  nav-strip pattern is used, verify mobile overflow/scroll behavior and that
+  targets are comfortably tappable.
+- [ ] Wire the full path together: Telegram `/start` → 🚀 Как начать →
+  Getting Started page → the relevant USER_GUIDE/ADMIN_GUIDE section, with a
+  way back to general docs from the Getting Started page itself. `/start`
+  must never link to raw Markdown/GitHub.
+- [ ] Audience discipline (same rule as the rest of this TODO, reiterated
+  because it's easy to violate by accident while wiring links): Getting
+  Started and USER-facing docs stay in plain human language — no Python
+  function/class names, DB table names, API endpoints, env var names,
+  "gacha-service"/"repository" wording, or raw setting keys like
+  `text_commands_enabled` where "администратор может отключить текстовые
+  команды" says the same thing in plain words. ADMIN_GUIDE is for a regular
+  Telegram chat admin, not a developer, same as before.
+- [ ] Verification checklist (regression checks + manual, per Ilya's
+  explicit list): `/start` contains the "Как начать" button; the button
+  links to a real, existing public route; Getting Started opens with no
+  user/admin session; internal doc links/anchors aren't broken; existing
+  Mini App/PC-panel `/start` flows still work; the user's group count still
+  renders correctly; mobile render has no page-wide horizontal overflow.
+  After implementation: desktop screenshot, mobile screenshot, manual visual
+  check of both, full relevant unit suite, existing docs HTML/anchor tests,
+  `git diff --check`, self-review of the whole diff.
+- [ ] Scope discipline: no opportunistic changes outside documentation/
+  onboarding. If a genuine product decision comes up that can't be
+  unambiguously derived from current behavior, mark it `[?]` here and ask
+  rather than guessing.
+
 ## P2 — cleanup, no confusion caused today
 
 - [ ] Archive (date + pointer to current source, not delete) unless a file
