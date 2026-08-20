@@ -33,6 +33,7 @@ from selara.infrastructure.llm.prompts import (
 from selara.infrastructure.llm.tools import (
     ToolCall,
     ToolResult,
+    _untrusted,
     build_rollback_call,
     execute_tool,
     get_tool_definitions,
@@ -181,8 +182,14 @@ async def _handle(
                 doc_files.append(f"- {filename}: {title}")
     doc_files_list = "\n".join(doc_files) if doc_files else "(нет доступных документов)"
 
+    # #1: chat title is renameable by anyone with Telegram's "change group
+    # info" right (not any bot permission) and rides into the system prompt
+    # on every future call. Marking it as untrusted data is defense-in-depth
+    # only, not a security boundary -- authorization stays entirely in
+    # execute_tool()'s deterministic checks regardless of what the model
+    # does with this text.
     system_prompt = ADMIN_SYSTEM_PROMPT.format(
-        chat_title=message.chat.title or str(message.chat.id),
+        chat_title=_untrusted(message.chat.title) if message.chat.title else str(message.chat.id),
         chat_id=message.chat.id,
         admin_tag=admin_tag,
         admin_user_id=message.from_user.id,
