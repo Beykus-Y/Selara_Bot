@@ -3145,16 +3145,15 @@ async def _open_mafia_day_vote(
     if game is None or error:
         return
 
+    # No group-wide feed event here (games UX audit, Stage 3 correction #5):
+    # "voting is open" is pure current state, already shown on the edited
+    # board with its countdown, and every alive player already gets a
+    # private DM prompting them to vote (_notify_mafia_day_vote_private) --
+    # a separate silent group message carried no information those two
+    # didn't already, so it's classified as noise and dropped rather than
+    # kept or folded into the edit.
     note = "<b>Голосование открыто.</b> Проголосовать можно на доске или в ЛС-карточке от бота."
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
-    await _send_game_feed_event(
-        bot,
-        game,
-        text=(
-            f"<b>Ведущий:</b> Открыто дневное голосование (раунд {game.round_no}).\n"
-            f"У вас {_format_duration(chat_settings.mafia_vote_seconds)}. Голосуйте на доске или в ЛС."
-        ),
-    )
     await _notify_mafia_day_vote_private(bot, game)
     _schedule_phase_timer(bot, game, chat_settings)
 

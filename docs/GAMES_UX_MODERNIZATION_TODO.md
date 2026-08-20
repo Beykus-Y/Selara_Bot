@@ -591,14 +591,54 @@ behavior, verified via actual handler calls, not just reading code:
   structurally impossible for "Покинуть" to ever empty a lobby completely.
   Unambiguous, no [?] needed, nothing changed.
 
-### Stage 3 — low-risk fixes (independent of Stage 1/2, can land any time)
-- [ ] WhoAmI guess UX (button/hint for the identity-guess mechanic)
-- [ ] Mafia DM-failure warning (add the missing night-phase board line)
-- [ ] Bredovukha deep-link fix (`?start=game_{id}` payload missing on its
-  private-submission button)
-- [ ] Unified failed-DM recovery (button + @mention) applied everywhere it
-  already partially exists (bunker/zlobcards/bredovukha)
-- [ ] Mafia feed-event classification per correction #5
+### Stage 3 — low-risk fixes — DONE (2026-08-20)
+- [x] WhoAmI guess UX (commit 74f45cb): example phrasing added to the
+  in-game status text; a current-actor message matching neither the guess
+  patterns nor "?" now gets an explicit hint reply instead of silently
+  vanishing. Kept text-based per Ilya's "don't buttonize when text is the
+  point" carve-out — guessing/asking is the actual gameplay here.
+- [x] Mafia DM-failure warning (commit bdc1a6c): night-phase DM failures
+  used to be a bare `continue`, no count, no board warning — now returns
+  the failed list and reuses the standalone warning message at all 3 call
+  sites (initial start + after each night re-opens).
+- [x] Bredovukha deep-link fix (commit 830a2cc): the DM button was missing
+  `?start=game_{id}`, **and** `_show_role_for_user` (the deep-link
+  handler) had no branch for bredovukha at all — fixing just the URL would
+  have been a no-op. Both fixed.
+- [x] Unified failed-DM recovery (commit 2413241): the bare-count warning
+  ("Не удалось отправить ЛС для N игрок(ов)...") is now a message that
+  @mentions the specific players and includes a "🔐 Открыть в Selara"
+  deep-link button, reusing the existing `?start=game_{id}` mechanism —
+  Ilya's named target pattern, applied everywhere the warning already
+  fires (game start for spy/mafia/bunker/whoami/zlobcards, and Mafia's
+  per-night re-opens).
+- [x] Mafia feed-event classification per correction #5 (commit pending
+  below). Full classification of every Mafia feed-event message against
+  Ilya's rule (current state → edit board; important event worth history →
+  new message; duplicate/technical noise → don't send):
+
+  | Call site | Content | Classification |
+  |---|---|---|
+  | Night resolved → game finished | Elimination + winner + roles reveal | **Keep** — game result |
+  | Night resolved → day begins | "Ночь завершена" + elimination outcome + "День начался" | **Keep** (elimination outcome is a real historical event) — not trimmed this round, see note below |
+  | Day vote opened | "Голосование открыто (раунд N)... Голосуйте на доске или в ЛС" | **Drop** — pure current state; board edit already shows it, every alive player already gets a private DM prompt (`_notify_mafia_day_vote_private`). Implemented: this feed event no longer sends. |
+  | Day vote resolved → execution-confirm opened | Candidate identified, confirm window opens | **Keep** — real historical moment |
+  | Day vote resolved → game finished | Vote result + winner + roles reveal | **Keep** — game result |
+  | Day vote resolved → night begins (tie/no candidate) | Vote outcome + "Ночь началась" | **Keep** (vote outcome is real) — not trimmed this round |
+  | Execution confirm resolved → game finished | Execution result + winner + roles reveal | **Keep** — game result |
+  | Execution confirm resolved → night begins | Execution result + "Ночь началась" | **Keep** (execution result is real) — not trimmed this round |
+  | Game start | "Мини-мафия началась. Ночь 1..." | **Keep** — marks the start of the game in chat history |
+
+  Only the one unambiguous, zero-information-loss case ("day vote opened")
+  was dropped this round. The 3 "Keep, not trimmed" rows above all mix a
+  genuinely historical outcome (who died / vote result / execution result)
+  with a trailing current-state phrase ("День начался" / "Ночь началась")
+  that duplicates the board — trimming just that trailing phrase would
+  reduce redundancy further, but touches the same text-assembly code in 3
+  different resolution functions for a marginal readability gain. Left as
+  a **noted-but-not-implemented refinement** rather than risking those
+  well-tested functions in this "low-risk fixes" stage — matches Ilya's
+  explicit "don't implement the collapsible-history idea yet" boundary.
 
 ### Stage 4 — remaining games
 - [ ] Port the Spy-verified pattern to the other games **one at a time**,
