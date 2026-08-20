@@ -21,7 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 GameStatus = Literal["lobby", "started", "finished"]
-GameKind = Literal["spy", "mafia", "dice", "number", "quiz", "bredovukha", "bunker", "whoami", "zlobcards"]
+GameKind = Literal["spy", "mafia", "dice", "quiz", "bredovukha", "bunker", "whoami", "zlobcards"]
 GamePhase = Literal[
     "lobby",
     "freeplay",
@@ -68,13 +68,6 @@ GAME_DEFINITIONS: dict[GameKind, GameDefinition] = {
         key="dice",
         title="Дуэль кубиков",
         short_description="Все кидают кубик, побеждает максимальный результат.",
-        min_players=2,
-        secret_roles=False,
-    ),
-    "number": GameDefinition(
-        key="number",
-        title="Угадай число",
-        short_description="Бот загадывает число 1..100, игроки пытаются угадать в чате.",
         min_players=2,
         secret_roles=False,
     ),
@@ -126,8 +119,6 @@ GAME_LAUNCHABLE_KINDS: tuple[GameKind, ...] = (
     "bunker",
 )
 
-NUMBER_GUESS_MIN = 1
-NUMBER_GUESS_MAX = 100
 QUIZ_ROUNDS = 5
 BRED_DEFAULT_ROUNDS = 5
 BRED_MIN_ROUNDS = 1
@@ -418,18 +409,6 @@ class DiceRollResult:
     total_players: int
     finished: bool
     winner_text: str | None
-
-
-@dataclass(frozen=True)
-class NumberGuessResult:
-    guess: int
-    direction: Literal["up", "down", "correct"]
-    attempts_for_user: int
-    attempts_total: int
-    winner_user_id: int | None
-    winner_label: str | None
-    winner_text: str | None
-    distance_to_secret: int
 
 
 @dataclass(frozen=True)
@@ -1081,9 +1060,6 @@ class GroupGame:
     alive_player_ids: set[int] = field(default_factory=set)
     spy_location: str | None = None
     spy_category: str | None = None
-    number_secret: int | None = None
-    number_attempts: dict[int, int] = field(default_factory=dict)
-    number_attempts_total: int = 0
     quiz_questions: tuple[QuizQuestion, ...] = field(default_factory=tuple)
     quiz_current_question_index: int | None = None
     quiz_answers: dict[int, int] = field(default_factory=dict)
@@ -1874,14 +1850,6 @@ class GameStore:
                 game.round_no = 1
                 return game, None
 
-            if game.kind == "number":
-                game.phase = "freeplay"
-                game.round_no = 1
-                game.number_secret = random.randint(NUMBER_GUESS_MIN, NUMBER_GUESS_MAX)
-                game.number_attempts.clear()
-                game.number_attempts_total = 0
-                return game, None
-
             if game.kind == "quiz":
                 questions = self._build_quiz_questions(rounds=QUIZ_ROUNDS)
                 if not questions:
@@ -2559,73 +2527,6 @@ class GameStore:
                     total_players=total_players,
                     finished=finished,
                     winner_text=winner_text,
-                ),
-                None,
-            )
-
-    async def number_register_guess(
-        self,
-        *,
-        game_id: str,
-        user_id: int,
-        guess: int,
-    ) -> tuple[GroupGame | None, NumberGuessResult | None, str | None]:
-        async with self._lock:
-            game = self._by_id.get(game_id)
-            if game is None:
-                return None, None, "Игра не найдена"
-            if game.kind != "number":
-                return game, None, "Это не «Угадай число»"
-            if game.status != "started" or game.phase != "freeplay":
-                return game, None, "Игра уже завершена или неактивна"
-            if user_id not in game.players:
-                return game, None, "Вы не в списке игроков этой игры"
-            if guess < NUMBER_GUESS_MIN or guess > NUMBER_GUESS_MAX:
-                return game, None, f"Число должно быть в диапазоне {NUMBER_GUESS_MIN}..{NUMBER_GUESS_MAX}"
-            if game.number_secret is None:
-                return game, None, "Секретное число не инициализировано"
-
-            attempts_for_user = game.number_attempts.get(user_id, 0) + 1
-            game.number_attempts[user_id] = attempts_for_user
-            game.number_attempts_total += 1
-
-            if guess == game.number_secret:
-                winner_label = game.players.get(user_id, f"user:{user_id}")
-                winner_text = (
-                    f"Победил {winner_label}: число {game.number_secret} угадано "
-                    f"за {attempts_for_user} личн. попыток ({game.number_attempts_total} всего)."
-                )
-                game.status = "finished"
-                game.phase = "finished"
-                game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
-                return (
-                    game,
-                    NumberGuessResult(
-                        guess=guess,
-                        direction="correct",
-                        attempts_for_user=attempts_for_user,
-                        attempts_total=game.number_attempts_total,
-                        winner_user_id=user_id,
-                        winner_label=winner_label,
-                        winner_text=winner_text,
-                        distance_to_secret=0,
-                    ),
-                    None,
-                )
-
-            direction: Literal["up", "down", "correct"] = "up" if guess < game.number_secret else "down"
-            return (
-                game,
-                NumberGuessResult(
-                    guess=guess,
-                    direction=direction,
-                    attempts_for_user=attempts_for_user,
-                    attempts_total=game.number_attempts_total,
-                    winner_user_id=None,
-                    winner_label=None,
-                    winner_text=None,
-                    distance_to_secret=abs(guess - game.number_secret),
                 ),
                 None,
             )

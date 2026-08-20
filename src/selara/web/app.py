@@ -3345,7 +3345,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "spy_theme_picker": spy_theme_picker,
                     "whoami_theme_picker": whoami_theme_picker,
                     "zlob_theme_picker": zlob_theme_picker,
-                    "show_number_guess": game.kind == "number" and game.kind in GAME_LAUNCHABLE_KINDS and game.status == "started" and is_member,
                     "show_bred_answer": game.kind == "bredovukha" and game.status == "started" and game.phase == "private_answers" and is_member,
                     "bred_submission_rows": _build_bred_submission_rows(game),
                     "bred_reveal_rows": _build_bred_reveal_rows(game),
@@ -3780,9 +3779,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         started_game,
                         text=game_router_module.build_zlobcards_start_text(category=_zlob_category_label(started_game)),
                     )
-                    return True, success_message
-                if started_game.kind == "number":
-                    await game_router_module._send_game_feed_event(bot, started_game, text=game_router_module.build_number_start_text())
                     return True, success_message
                 if started_game.kind == "dice":
                     await game_router_module._send_game_feed_event(bot, started_game, text=game_router_module.build_dice_start_text())
@@ -5809,41 +5805,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     else:
                         await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings)
                         success, message = True, f"Тема: {_zlob_category_label(updated_game)}"
-            elif form_action == "number_guess":
-                guess_raw = (form.get("guess") or "").strip()
-                if not guess_raw or not guess_raw.lstrip("-").isdigit():
-                    success, message = False, "Введите целое число."
-                else:
-                    guess = int(guess_raw)
-                    current, result, error = await GAME_STORE.number_register_guess(
-                        game_id=game.game_id,
-                        user_id=user.telegram_user_id,
-                        guess=guess,
-                    )
-                    if error:
-                        success, message = False, error
-                    elif current is None or result is None:
-                        success, message = False, "Игра не найдена."
-                    elif result.direction == "correct":
-                        reward_line = await game_router_module._grant_game_rewards_if_needed(
-                            current,
-                            economy_repo=economy_repo,
-                            chat_settings=chat_settings,
-                            winner_user_ids_override={result.winner_user_id} if result.winner_user_id is not None else None,
-                        )
-                        note = f"<b>Финиш:</b> {escape(result.winner_text or 'игра завершена')}"
-                        if reward_line:
-                            note = f"{note}\n{reward_line}"
-                        await game_router_module._safe_edit_or_send_game_board(bot, current, chat_settings, note=note)
-                        success, message = True, "Число угадано, игра завершена."
-                    else:
-                        direction = "нужно больше" if result.direction == "up" else "нужно меньше"
-                        note = (
-                            f"<b>Последняя попытка:</b> {escape(actor_label)} -> <code>{result.guess}</code>, {direction}.\n"
-                            f"<b>Попыток:</b> {result.attempts_for_user} (лично) / {result.attempts_total} (всего)"
-                        )
-                        await game_router_module._safe_edit_or_send_game_board(bot, current, chat_settings, note=note)
-                        success, message = True, "Попытка сохранена."
             elif form_action == "spy_guess":
                 guessed_location = (form.get("guess_location") or "").strip()
                 current, resolution, error = await GAME_STORE.spy_guess_location(

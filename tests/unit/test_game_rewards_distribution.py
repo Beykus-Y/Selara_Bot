@@ -35,12 +35,15 @@ def test_game_rewards_ranges_for_all_game_modes(monkeypatch) -> None:
     assert 10 <= rewards[1] <= 20
     assert 10 <= rewards[3] <= 20
 
-    # number (winner определяется override в обработчике игры)
-    number = _base_game("number")
-    rewards = _build_game_rewards(number, winner_user_ids_override={3})
-    assert rewards[3] > 100
-    assert 10 <= rewards[1] <= 20
+    # winner_user_ids_override (generic mechanism, used e.g. by the web
+    # panel's spy-guess-location action) -- picks the winner independent
+    # of the game kind's own score-based winner detection.
+    overridden = _base_game("dice")
+    overridden.dice_scores = {1: 2, 2: 6, 3: 4}
+    rewards = _build_game_rewards(overridden, winner_user_ids_override={1})
+    assert rewards[1] > 100
     assert 10 <= rewards[2] <= 20
+    assert 10 <= rewards[3] <= 20
 
     # quiz
     quiz = _base_game("quiz")

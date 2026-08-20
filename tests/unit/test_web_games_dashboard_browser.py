@@ -180,7 +180,6 @@ ALL_GAME_KINDS = (
     "spy",
     "mafia",
     "dice",
-    "number",
     "quiz",
     "bredovukha",
     "bunker",
@@ -387,9 +386,9 @@ async def test_games_dashboard_finished_game_result_card_has_no_overflow(monkeyp
     `_games_dashboard.html:1153-1244`) renders one of three mutually distinct
     reveal branches depending on the mode: `role_reveal_rows` (secret-role
     modes like whoami/spy/mafia), `bred_reveal_rows` (bredovukha only), or
-    plain `score_rows` (score-only modes like dice/number/quiz) — plus an
+    plain `score_rows` (score-only modes like dice/quiz) — plus an
     always-present `result_text` banner and optional personal notes. One
-    representative mode per branch, not all 9.
+    representative mode per branch, not all 8.
 
     Also a regression guard for a real contrast bug found by reviewing this
     slice's screenshots: `.banner-ok`/`.banner-error` are styled for the

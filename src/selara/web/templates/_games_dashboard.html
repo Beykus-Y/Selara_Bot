@@ -409,24 +409,6 @@
           </section>
         {% endif %}
 
-        {% if game.show_number_guess %}
-          <section class="game-action-section game-form-section">
-            <div class="section-caption">
-              <strong>Угадай число</strong>
-              <p>Ход можно сделать прямо из браузера.</p>
-            </div>
-            <form class="stack-form game-inline-form native-action-form" method="post" action="/app/games/action" data-game-action-form>
-              <input type="hidden" name="action" value="number_guess">
-              <input type="hidden" name="game_id" value="{{ game.game_id }}">
-              <div class="field">
-                <span>Введите число 1..100</span>
-                <input type="number" name="guess" min="1" max="100" required>
-              </div>
-              <button type="submit" class="button primary small">Отправить</button>
-            </form>
-          </section>
-        {% endif %}
-
         {% if compat.private_buttons %}
           <section class="game-action-section">
             <div class="section-caption">

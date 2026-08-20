@@ -52,12 +52,10 @@ from selara.presentation.handlers.game.modes import (
     build_bredovukha_start_text,
     build_dice_start_text,
     build_mafia_start_text,
-    build_number_start_text,
     build_quiz_start_text,
     build_spy_start_text,
     build_whoami_start_text,
     build_zlobcards_start_text,
-    number_distance_hint,
 )
 from selara.presentation.handlers.private_panel import send_private_start_panel
 
@@ -74,7 +72,6 @@ _GAME_PARTICIPANT_REWARD_MAX = 20
 _GAME_WINNER_REWARD_TOTAL_BY_KIND: dict[GameKind, tuple[int, int]] = {
     "zlobcards": (130, 170),
     "dice": (110, 130),
-    "number": (120, 150),
     "quiz": (130, 165),
     "bredovukha": (130, 165),
     "bunker": (130, 170),
@@ -433,11 +430,6 @@ def _parse_kind(raw: str | None) -> GameKind | None:
         "кости": "dice",
         "кубик": "dice",
         "кубики": "dice",
-        "number": "number",
-        "num": "number",
-        "число": "number",
-        "угадай": "number",
-        "угадай число": "number",
         "quiz": "quiz",
         "викторина": "quiz",
         "вик": "quiz",
@@ -896,8 +888,6 @@ def _phase_title(game: GroupGame) -> str:
     if game.phase == "bunker_vote":
         return "Бункер: голосование"
     if game.phase == "freeplay":
-        if game.kind == "number":
-            return "Поиск числа"
         if game.kind == "quiz":
             return "Вопрос викторины"
         return "Свободная игра"
@@ -1010,10 +1000,6 @@ def _should_handle_whoami_group_text(active_game: GroupGame | None, *, user_id: 
     # dropped with zero feedback (found in the games UX audit); now the
     # handler replies with a hint instead of doing nothing.
     return bool(text.strip())
-
-
-def _should_handle_number_guess(active_game: GroupGame | None) -> bool:
-    return active_game is not None and active_game.kind == "number" and active_game.status == "started"
 
 
 def _should_handle_bred_private_answer(game: GroupGame | None, *, text: str) -> bool:
@@ -1460,26 +1446,6 @@ def _render_quiz_scoreboard(game: GroupGame, *, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-def _render_number_attempts(game: GroupGame, *, limit: int = 8) -> str:
-    if game.kind != "number":
-        return ""
-
-    lines = [f"<b>Всего попыток:</b> {game.number_attempts_total}"]
-    if not game.number_attempts:
-        lines.append("<b>Личный зачёт:</b> пока пусто.")
-        return "\n".join(lines)
-
-    ranking = sorted(
-        game.number_attempts.items(),
-        key=lambda item: (item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
-    )
-    lines.append("<b>Личный зачёт (меньше лучше):</b>")
-    for idx, (user_id, attempts) in enumerate(ranking[:limit], start=1):
-        label = game.players.get(user_id, f"user:{user_id}")
-        lines.append(f"{idx}. {_mention(user_id, label)} — <code>{attempts}</code>")
-    return "\n".join(lines)
-
-
 def _render_bred_scoreboard(game: GroupGame, *, limit: int = 8) -> str:
     if game.kind != "bredovukha":
         return ""
@@ -1905,12 +1871,6 @@ def _render_game_text(
         lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» ниже.")
         lines.append("")
         lines.append(_render_dice_progress(game))
-
-    if game.kind == "number" and game.status == "started":
-        lines.append("<i>Пишите число от 1 до 100 отдельным сообщением в чат.</i>")
-        lines.append("<i>Бот подскажет: больше/меньше и насколько вы близко.</i>")
-        lines.append("")
-        lines.append(_render_number_attempts(game))
 
     if game.kind == "quiz" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
@@ -3799,7 +3759,7 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
         )
         return
     if explicit_kind not in GAME_LAUNCHABLE_KINDS:
-        await message.answer("Игра «Угадай число» больше не доступна для новых запусков.")
+        await message.answer("Эта игра больше недоступна для новых запусков.")
         return
 
     owner_label = await _resolve_chat_player_label(
@@ -4540,10 +4500,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 started_game,
                 text=build_zlobcards_start_text(category=_zlob_category_label(started_game)),
             )
-            return
-
-        if started_game.kind == "number":
-            await _send_game_feed_event(bot, started_game, text=build_number_start_text())
             return
 
         if started_game.kind == "dice":
@@ -6073,84 +6029,6 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
         note=(
             f"<b>Вопрос от:</b> {_mention(result.actor_user_id, result.actor_user_label or actor_label or '-')}\n"
             f"<b>Текст:</b> {escape(result.question_text)}"
-        ),
-    )
-
-
-@router.message(F.text.regexp(r"^\s*-?\d+\s*$"))
-async def number_guess_handler(message: Message, bot: Bot, chat_settings: ChatSettings, economy_repo) -> None:
-    if message.chat.type not in {"group", "supergroup"} or message.from_user is None:
-        raise SkipHandler()
-
-    text = (message.text or "").strip()
-    if not text or text.startswith("/") or not text.lstrip("-").isdigit():
-        raise SkipHandler()
-
-    active_game = await GAME_STORE.get_active_game_for_chat(chat_id=message.chat.id)
-    if not _should_handle_number_guess(active_game):
-        raise SkipHandler()
-
-    guess = int(text)
-    game, result, error = await GAME_STORE.number_register_guess(
-        game_id=active_game.game_id,
-        user_id=message.from_user.id,
-        guess=guess,
-    )
-    if error:
-        await message.reply(error)
-        return
-    if game is None or result is None:
-        return
-
-    player_label = game.players.get(message.from_user.id, _user_label(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name))
-    if result.direction == "up":
-        await _safe_edit_or_send_game_board(
-            bot,
-            game,
-            chat_settings,
-            note=(
-                f"<b>Последняя попытка:</b> {_mention(message.from_user.id, player_label)} -> <code>{result.guess}</code>, нужно больше.\n"
-                f"<b>Близость:</b> {number_distance_hint(result.distance_to_secret)} | "
-                f"<b>Попыток:</b> {result.attempts_for_user} (лично) / {result.attempts_total} (всего)"
-            ),
-        )
-        return
-
-    if result.direction == "down":
-        await _safe_edit_or_send_game_board(
-            bot,
-            game,
-            chat_settings,
-            note=(
-                f"<b>Последняя попытка:</b> {_mention(message.from_user.id, player_label)} -> <code>{result.guess}</code>, нужно меньше.\n"
-                f"<b>Близость:</b> {number_distance_hint(result.distance_to_secret)} | "
-                f"<b>Попыток:</b> {result.attempts_for_user} (лично) / {result.attempts_total} (всего)"
-            ),
-        )
-        return
-
-    winner_text = result.winner_text or f"Победа: {player_label}"
-    reward_line = await _grant_game_rewards_if_needed(
-        game,
-        economy_repo=economy_repo,
-        chat_settings=chat_settings,
-        winner_user_ids_override={result.winner_user_id} if result.winner_user_id is not None else None,
-    )
-    await message.answer(
-        f"🎉 {_mention(message.from_user.id, player_label)} угадал(а) число <code>{result.guess}</code>!",
-        parse_mode="HTML",
-        disable_notification=True,
-    )
-    await _safe_edit_or_send_game_board(bot, game, chat_settings, note=f"<b>Финиш:</b> {escape(winner_text)}")
-    await _send_game_feed_event(
-        bot,
-        game,
-        text=(
-            f"<b>Ведущий:</b> Игра «Угадай число» завершена.\n"
-            f"<b>Победитель:</b> {_mention(message.from_user.id, player_label)}\n"
-            f"<b>Число:</b> <code>{result.guess}</code>\n"
-            f"<b>Попыток:</b> {result.attempts_total}"
-            + (f"\n{reward_line}" if reward_line else "")
         ),
     )
 

@@ -1,7 +1,6 @@
 from selara.presentation.game_state import GameKind, GroupGame
 from selara.presentation.handlers.game.router import (
     _should_handle_bred_private_answer,
-    _should_handle_number_guess,
     _should_handle_whoami_group_text,
 )
 
@@ -44,16 +43,6 @@ def test_whoami_group_text_handles_the_actors_off_pattern_text_too() -> None:
     assert _should_handle_whoami_group_text(game, user_id=1, text="кто я") is True
     assert _should_handle_whoami_group_text(game, user_id=1, text="   ") is False
     assert _should_handle_whoami_group_text(game, user_id=2, text="кто я") is False
-
-
-def test_number_guess_handler_only_captures_active_number_game() -> None:
-    assert _should_handle_number_guess(None) is False
-
-    whoami = _base_game("whoami")
-    assert _should_handle_number_guess(whoami) is False
-
-    number = _base_game("number")
-    assert _should_handle_number_guess(number) is True
 
 
 def test_bred_private_answer_skips_commands_and_missing_game() -> None:

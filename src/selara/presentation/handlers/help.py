@@ -27,7 +27,6 @@ _HELP_GAMES_ORDER: tuple[tuple[str, str], ...] = (
     ("whoami", "🎭 Кто я"),
     ("mafia", "🕴 Мафия"),
     ("dice", "🎲 Дуэль кубиков"),
-    ("number", "🔢 Угадай число"),
     ("quiz", "❓ Викторина"),
     ("bredovukha", "🧠 Бредовуха"),
     ("bunker", "🏚 Бункер"),

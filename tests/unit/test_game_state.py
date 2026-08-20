@@ -476,57 +476,6 @@ async def test_lobby_mafia_reveal_setting_can_be_toggled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_number_game_finishes_after_correct_guess() -> None:
-    store = GameStore()
-    game, error = await store.create_lobby(
-        kind="number",
-        chat_id=201,
-        chat_title="chat",
-        owner_user_id=1,
-        owner_label="u1",
-        reveal_eliminated_role=True,
-    )
-    assert error is None
-    assert game is not None
-
-    joined_game, status = await store.join(game_id=game.game_id, user_id=2, user_label="u2")
-    assert joined_game is not None
-    assert status == "joined"
-
-    started_game, error = await store.start(game_id=game.game_id)
-    assert error is None
-    assert started_game is not None
-    assert started_game.kind == "number"
-    assert started_game.status == "started"
-    assert started_game.number_secret is not None
-
-    secret = started_game.number_secret
-    wrong_guess = secret - 1 if secret > 1 else secret + 1
-    game_after_wrong, wrong_result, error = await store.number_register_guess(
-        game_id=started_game.game_id,
-        user_id=1,
-        guess=wrong_guess,
-    )
-    assert error is None
-    assert game_after_wrong is not None
-    assert wrong_result is not None
-    assert wrong_result.direction in {"up", "down"}
-    assert game_after_wrong.status == "started"
-
-    finished_game, correct_result, error = await store.number_register_guess(
-        game_id=started_game.game_id,
-        user_id=2,
-        guess=secret,
-    )
-    assert error is None
-    assert finished_game is not None
-    assert correct_result is not None
-    assert correct_result.direction == "correct"
-    assert correct_result.winner_user_id == 2
-    assert finished_game.status == "finished"
-
-
-@pytest.mark.asyncio
 async def test_quiz_rounds_and_winner_resolution() -> None:
     store = GameStore()
     game, error = await store.create_lobby(
