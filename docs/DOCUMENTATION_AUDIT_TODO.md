@@ -33,7 +33,7 @@ self-review.
 
 ## P0 — actively misleading, fix first
 
-- [ ] **docs/bot_docs/roles.md** (fed directly to the bot's own LLM assistant —
+- [x] **docs/bot_docs/roles.md** (fed directly to the bot's own LLM assistant —
   errors here become wrong answers to real admins):
   - junior_admin wrongly claims it can warn/pred/ban/rest (default template
     only grants `PERM_ANNOUNCE`, not `moderate_users`).
@@ -47,7 +47,7 @@ self-review.
     against `core/roles.py`'s `SYSTEM_ROLE_TEMPLATES`, so this can't
     silently drift again.
 
-- [ ] **docs/USER_GUIDE.md** — remove/correct claims that no longer match
+- [x] **docs/USER_GUIDE.md** — remove/correct claims that no longer match
   code, and stop referencing BUGS.md as user-facing help:
   - §4.2/§11.3: "когда был @user" text form doesn't resolve a target — fixed
     in code (`catalog.py`'s lastseen tail validator). Remove the false
@@ -57,7 +57,7 @@ self-review.
   - §10 step 6 and §12 FAQ: remove the "see BUGS.md" pointers entirely —
     replace with the existing §13 report-template flow instead.
 
-- [ ] **BUGS.md** — close/correct the two items USER_GUIDE was citing:
+- [x] **BUGS.md** — close/correct the two items USER_GUIDE was citing:
   - #3 (lastseen text doesn't resolve) — confirmed fixed in code, close it.
   - #4 (`/pay` reply-priority) — confirmed backwards vs. code (explicit
     target wins, not reply) — correct the description.
