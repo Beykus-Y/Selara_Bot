@@ -577,8 +577,19 @@ before formally accepting:
   see commit d87a410) — now available in both places, satisfying "available
   at least until the game starts."
 
-All 3 sent to Ilya with full text+keyboard output. Waiting for his
-confirmation before Stage 3.
+All 3 sent to Ilya with full text+keyboard output. **Ilya confirmed: Stage 1/2
+PASS, accepted as-is (2026-08-20).**
+
+**Pre-Stage-3 check (requested by Ilya):** owner-leave and last-player-leave
+behavior, verified via actual handler calls, not just reading code:
+- Owner tapping "Покинуть" → blocked with a clear alert directing them to
+  "🛑 Отменить" instead; nobody removed.
+- Last non-owner player leaving → lobby correctly shrinks to just the owner,
+  stays in `lobby` status; starting still correctly fails with the existing
+  "нужно минимум N игроков" check.
+- Since the owner can never leave (only cancel destroys the lobby), it's
+  structurally impossible for "Покинуть" to ever empty a lobby completely.
+  Unambiguous, no [?] needed, nothing changed.
 
 ### Stage 3 — low-risk fixes (independent of Stage 1/2, can land any time)
 - [ ] WhoAmI guess UX (button/hint for the identity-guess mechanic)
