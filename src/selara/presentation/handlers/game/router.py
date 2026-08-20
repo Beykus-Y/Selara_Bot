@@ -205,22 +205,36 @@ async def _persist_mafia_reveal_default(
         )
 
 
-def _build_private_delivery_warning_text(failed_dm: int) -> str:
+def _build_private_delivery_warning_text(game: GroupGame, failed_user_ids: list[int]) -> str:
+    mentions = ", ".join(
+        _mention(user_id, game.players.get(user_id, f"user:{user_id}")) for user_id in failed_user_ids
+    )
     return (
-        f"Не удалось отправить ЛС для {failed_dm} игрок(ов). "
-        "Им нужно открыть диалог с ботом через кнопку роли или карточки."
+        f"<b>🔐 ЛС недоступно:</b> {mentions}.\n"
+        "Откройте бота и нажмите «Начать» — тогда роль/карточка придёт автоматически."
     )
 
 
-async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_dm: int) -> None:
-    if failed_dm <= 0:
+async def _notify_private_delivery_warning(bot: Bot, game: GroupGame, failed_user_ids: list[int]) -> None:
+    if not failed_user_ids:
         return
+    keyboard = None
+    bot_username = await _get_bot_username(bot)
+    if bot_username:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔐 Открыть в Selara", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
+        keyboard = builder.as_markup()
     try:
-        await bot.send_message(chat_id=game.chat_id, text=_build_private_delivery_warning_text(failed_dm))
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text=_build_private_delivery_warning_text(game, failed_user_ids),
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
     except Exception:
         logger.exception(
             "Failed to deliver private role warning",
-            extra={"chat_id": game.chat_id, "game_id": game.game_id, "failed_dm": failed_dm},
+            extra={"chat_id": game.chat_id, "game_id": game.game_id, "failed_dm": len(failed_user_ids)},
         )
 
 
@@ -2953,20 +2967,20 @@ async def _send_role_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
         return False
 
 
-async def _send_roles_to_private(bot: Bot, game: GroupGame) -> int:
-    failed = 0
+async def _send_roles_to_private(bot: Bot, game: GroupGame) -> list[int]:
+    failed: list[int] = []
     for user_id in game.players:
         ok = await _send_role_to_user(bot, game, user_id)
         if not ok:
-            failed += 1
+            failed.append(user_id)
     return failed
 
 
-async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> int:
+async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> list[int]:
     if game.kind != "mafia" or game.status != "started" or game.phase != "night":
-        return 0
+        return []
 
-    failed = 0
+    failed: list[int] = []
     for user_id in sorted(game.alive_player_ids):
         keyboard = _build_private_night_action_keyboard(game, actor_user_id=user_id)
         if keyboard is None:
@@ -2995,7 +3009,7 @@ async def _notify_mafia_night_actions(bot: Bot, game: GroupGame) -> int:
                 reply_markup=keyboard,
             )
         except TelegramForbiddenError:
-            failed += 1
+            failed.append(user_id)
             continue
 
     return failed
@@ -3216,7 +3230,7 @@ async def _resolve_mafia_day_vote(
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
     failed_dm = await _notify_mafia_night_actions(bot, game)
-    if failed_dm > 0:
+    if failed_dm:
         await _notify_private_delivery_warning(bot, game, failed_dm)
 
     if triggered_by_timer:
@@ -3304,7 +3318,7 @@ async def _resolve_mafia_execution_confirm(
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
     _schedule_phase_timer(bot, game, chat_settings)
     failed_dm = await _notify_mafia_night_actions(bot, game)
-    if failed_dm > 0:
+    if failed_dm:
         await _notify_private_delivery_warning(bot, game, failed_dm)
 
     if triggered_by_timer:
@@ -4423,7 +4437,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
-        failed_role_dm = 0
+        failed_role_dm: list[int] = []
         if started_game.kind in {"spy", "mafia", "bunker", "whoami", "zlobcards"}:
             failed_role_dm = await _send_roles_to_private(bot, started_game)
 
@@ -4433,8 +4447,8 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             # One combined warning for both DMs (role card + first night's
             # action prompt) instead of two separate messages -- the same
             # players who can't receive one usually can't receive the other.
-            failed_dm = max(failed_role_dm, failed_night_dm)
-            if failed_dm > 0:
+            failed_dm = list(dict.fromkeys([*failed_role_dm, *failed_night_dm]))
+            if failed_dm:
                 await _notify_private_delivery_warning(bot, started_game, failed_dm)
             await _send_game_feed_event(
                 bot,
@@ -4443,7 +4457,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             )
             return
 
-        if started_game.kind in {"spy", "bunker", "whoami", "zlobcards"} and failed_role_dm > 0:
+        if started_game.kind in {"spy", "bunker", "whoami", "zlobcards"} and failed_role_dm:
             await _notify_private_delivery_warning(bot, started_game, failed_role_dm)
 
         if started_game.kind == "spy":

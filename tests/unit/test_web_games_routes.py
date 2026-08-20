@@ -120,6 +120,9 @@ class FakeBot:
         FakeBot.sent_messages.append({"chat_id": chat_id, "text": text, "kwargs": kwargs})
         return SimpleNamespace(message_id=999)
 
+    async def get_me(self):
+        return SimpleNamespace(username="selara_test_bot")
+
 
 class DummySession:
     async def commit(self) -> None:
@@ -453,7 +456,6 @@ async def test_web_start_returns_warning_and_notifies_chat_on_failed_dm(monkeypa
     )
 
     async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, send_roles_mock):
-        send_roles_mock.return_value = 2
         game, error = await store.create_lobby(
             kind="whoami",
             chat_id=-5001,
@@ -466,6 +468,7 @@ async def test_web_start_returns_warning_and_notifies_chat_on_failed_dm(monkeypa
         assert game is not None
         await store.join(game_id=game.game_id, user_id=303, user_label="other")
         await store.join(game_id=game.game_id, user_id=404, user_label="third")
+        send_roles_mock.return_value = [303]
 
         response = await client.post(
             "/app/games/action",
@@ -475,9 +478,9 @@ async def test_web_start_returns_warning_and_notifies_chat_on_failed_dm(monkeypa
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert "Не удалось отправить ЛС" in response.json()["message"]
+    assert "ЛС недоступно" in response.json()["message"]
     assert any(
-        item["chat_id"] == -5001 and "Не удалось отправить ЛС" in str(item["text"])
+        item["chat_id"] == -5001 and "ЛС недоступно" in str(item["text"])
         for item in FakeBot.sent_messages
     )
     safe_edit_mock.assert_awaited()

@@ -3741,10 +3741,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 success_message = "Игра запущена."
                 if started_game.kind in {"spy", "mafia", "bunker", "whoami", "zlobcards"}:
                     failed_dm = await game_router_module._send_roles_to_private(bot, started_game)
-                    if failed_dm > 0:
+                    if failed_dm:
                         await game_router_module._notify_private_delivery_warning(bot, started_game, failed_dm)
                         success_message = (
-                            f"{success_message} {game_router_module._build_private_delivery_warning_text(failed_dm)}"
+                            f"{success_message} "
+                            f"{game_router_module._build_private_delivery_warning_text(started_game, failed_dm)}"
                         )
                 if started_game.kind == "mafia":
                     game_router_module._schedule_phase_timer(bot, started_game, chat_settings)

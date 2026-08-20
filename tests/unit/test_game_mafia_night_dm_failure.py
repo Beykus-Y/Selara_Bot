@@ -103,7 +103,7 @@ async def test_night_dm_failure_triggers_a_group_warning(monkeypatch) -> None:
         activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
     )
 
-    assert any("Не удалось отправить ЛС" in text for text in bot.group_messages), bot.group_messages
+    assert any("ЛС недоступно" in text for text in bot.group_messages), bot.group_messages
 
 
 @pytest.mark.asyncio
@@ -126,4 +126,4 @@ async def test_no_warning_when_all_night_dms_succeed(monkeypatch) -> None:
         activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
     )
 
-    assert not any("Не удалось отправить ЛС" in text for text in bot.group_messages)
+    assert not any("ЛС недоступно" in text for text in bot.group_messages)

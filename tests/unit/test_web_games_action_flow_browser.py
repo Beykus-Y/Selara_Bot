@@ -133,7 +133,7 @@ async def _web_client(monkeypatch, state: WebRepoState, *, store: GameStore | No
     monkeypatch.setattr(web_app_module, "GAME_STORE", store)
     monkeypatch.setattr(web_app_module.game_router_module, "GAME_STORE", store)
     monkeypatch.setattr(web_app_module.game_router_module, "_safe_edit_or_send_game_board", AsyncMock())
-    monkeypatch.setattr(web_app_module.game_router_module, "_send_roles_to_private", AsyncMock(return_value=0))
+    monkeypatch.setattr(web_app_module.game_router_module, "_send_roles_to_private", AsyncMock(return_value=[]))
     monkeypatch.setattr(web_app_module.game_router_module, "_send_game_feed_event", AsyncMock())
     monkeypatch.setattr(web_app_module.game_router_module, "_grant_game_rewards_if_needed", AsyncMock(return_value=None))
     monkeypatch.setattr(web_app_module.game_router_module, "_schedule_phase_timer", lambda bot, game, chat_settings: None)
