@@ -43,7 +43,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 
 ## Functional gaps (not security issues, flagged during the same review)
 
-### 4. [ ] Video circle messages ("кружки" / `video_note`) are never transcribed
+### 4. [x] Video circle messages ("кружки" / `video_note`) are never transcribed — FIXED 2026-08-20 (P2)
 `voice.py`'s handler is registered with `F.voice` only — no `F.video_note` handler exists anywhere in the codebase. Voice messages get transcribed; video notes silently don't. If this is meant to work, needs a dedicated handler (video notes carry audio too, same Whisper pipeline should apply after extracting/passing the audio track).
 
 ### 5. [ ] Glossary lookup is strict exact-match, not fuzzy
