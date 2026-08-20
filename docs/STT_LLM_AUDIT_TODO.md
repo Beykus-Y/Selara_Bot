@@ -120,7 +120,7 @@ None of `LlmContextMessageModel`/`LlmContextSummaryModel`/`LlmAdminActionModel`/
 ### 7. [ ] STT has no per-chat enable/disable, unlike every other subsystem
 `ChatSettings` has `llm_enabled` but no `stt_enabled`. STT is wired purely at process bootstrap from a single global setting; `voice.py` does zero group/permission checks.
 
-### 8. [ ] STT/LLM hardcoded to Russian despite per-chat locale support elsewhere
+### 8. [x] STT hardcoded to Russian — FIXED 2026-08-20 (P2, auto-detect + ru fallback; LLM prompt text stays Russian per Ilya, no per-chat setting added)
 `stt_language="ru"` is global, no auto-detect. `ADMIN_SYSTEM_PROMPT` hardcodes Russian with no locale variable, even though `text_commands.py` already branches on `chat_settings.text_commands_locale` elsewhere.
 
 ### 9. [ ] `?`/`??` assistant and voice transcription are undocumented
@@ -138,7 +138,7 @@ Only automatic threshold-triggered summarization exists (`context.py::maybe_comp
 ### 13. [ ] No progress indicator during multi-round (up to 8) LLM tool-calling
 Per-tool status text exists but no round counter/elapsed-time, so a user can't tell how far through the loop the assistant is.
 
-### 14. [ ] Whisper silently mis-transcribes non-Russian audio instead of erroring
+### 14. [x] Whisper silently mis-transcribes non-Russian audio instead of erroring — FIXED 2026-08-20 (side effect of #8's auto-detect)
 `language="ru"` is passed unconditionally — non-Russian speech produces garbled "successful" Russian text rather than a clear failure. Compounds gap #8.
 
 ### 16. [x] `list_glossary` repository method exists but is completely unwired — FIXED 2026-08-20 (wired up as a new LLM tool)
