@@ -1966,9 +1966,11 @@ def _render_game_text(
             actor_label = "-"
             if game.bunker_current_actor_user_id is not None:
                 actor_label = game.players.get(game.bunker_current_actor_user_id, f"user:{game.bunker_current_actor_user_id}")
-            lines.append(f"<i>Сейчас раскрывает характеристику: {escape(actor_label)} (в ЛС).</i>")
+            lines.append(f"<b>Сейчас:</b> раскрытие характеристик, ход {escape(actor_label)}.")
+            lines.append(f"<b>Что делать:</b> ждём выбор {escape(actor_label)} в ЛС; остальные пока не ходят.")
         elif game.phase == "bunker_vote":
-            lines.append("<i>Идёт голосование на выбывание (голоса в ЛС, анонс в группе).</i>")
+            lines.append("<b>Сейчас:</b> голосование на выбывание.")
+            lines.append("<b>Что делать:</b> голосуйте в ЛС (анонс результата придёт в группу).")
             lines.append(_render_bunker_vote_status(game))
         if game.bunker_pool_overflow_fields:
             labels = ", ".join(_bunker_field_label(field_key) for field_key in sorted(game.bunker_pool_overflow_fields))
@@ -2528,13 +2530,14 @@ async def _send_bunker_card_to_user(bot: Bot, game: GroupGame, user_id: int) -> 
         return False
 
 
-async def _notify_bunker_reveal_turn(bot: Bot, game: GroupGame) -> bool:
+async def _notify_bunker_reveal_turn(bot: Bot, game: GroupGame) -> list[int]:
     if game.kind != "bunker" or game.status != "started" or game.phase != "bunker_reveal":
-        return True
+        return []
     actor_user_id = game.bunker_current_actor_user_id
     if actor_user_id is None:
-        return True
-    return await _send_bunker_card_to_user(bot, game, actor_user_id)
+        return []
+    ok = await _send_bunker_card_to_user(bot, game, actor_user_id)
+    return [] if ok else [actor_user_id]
 
 
 async def _notify_bunker_vote_private(bot: Bot, game: GroupGame) -> int:
@@ -3576,13 +3579,9 @@ async def _resolve_bunker_vote(
             note="\n".join(note_parts),
         )
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-        ok = await _notify_bunker_reveal_turn(bot, game)
-        if not ok:
-            await _send_game_feed_event(
-                bot,
-                game,
-                text="<b>ЛС недоступно:</b> текущий игрок не получил карточку хода.",
-            )
+        failed_reveal_dm = await _notify_bunker_reveal_turn(bot, game)
+        if failed_reveal_dm:
+            await _notify_private_delivery_warning(bot, game, failed_reveal_dm)
     elif resolution.next_phase == "bunker_vote":
         note_parts.append("<b>Этап:</b> все характеристики раскрыты, стартовало новое голосование.")
         failed_dm = await _notify_bunker_vote_private(bot, game)
@@ -4549,7 +4548,9 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 chat_settings,
                 note=f"<b>Первый ход раскрытия:</b> {escape(actor_label)} раскрывает характеристику в ЛС.",
             )
-            await _notify_bunker_reveal_turn(bot, started_game)
+            failed_reveal_dm = await _notify_bunker_reveal_turn(bot, started_game)
+            if failed_reveal_dm:
+                await _notify_private_delivery_warning(bot, started_game, failed_reveal_dm)
             return
 
         return
@@ -4703,7 +4704,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                         note_lines.append(f"<b>ЛС недоступно:</b> {failed_dm} игрок(ов) не получили карточку голосования.")
                 elif result.next_actor_label is not None:
                     note_lines.append(f"<b>Следующий ход:</b> {escape(result.next_actor_label)} раскрывает характеристику в ЛС.")
-                    await _notify_bunker_reveal_turn(bot, updated_game)
 
                 await _safe_edit_or_send_game_board(
                     bot,
@@ -4711,6 +4711,10 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     chat_settings,
                     note="\n".join(note_lines),
                 )
+                if result.next_actor_label is not None and not result.vote_opened:
+                    failed_reveal_dm = await _notify_bunker_reveal_turn(bot, updated_game)
+                    if failed_reveal_dm:
+                        await _notify_private_delivery_warning(bot, updated_game, failed_reveal_dm)
                 await query.answer("Ход переключён", show_alert=False)
                 return
 
@@ -5449,9 +5453,6 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
             note_lines.append(f"<b>ЛС недоступно:</b> {failed_dm} игрок(ов) не получили голосование.")
     elif result.next_actor_label is not None:
         note_lines.append(f"<b>Следующий ход:</b> {escape(result.next_actor_label)} раскрывает характеристику в ЛС.")
-        ok = await _notify_bunker_reveal_turn(bot, game)
-        if not ok:
-            note_lines.append("<b>ЛС недоступно:</b> следующий игрок не получил карточку хода.")
 
     await _safe_edit_or_send_game_board(
         bot,
@@ -5459,6 +5460,11 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         chat_settings,
         note="\n".join(note_lines),
     )
+
+    if result.next_actor_label is not None and not result.vote_opened:
+        failed_reveal_dm = await _notify_bunker_reveal_turn(bot, game)
+        if failed_reveal_dm:
+            await _notify_private_delivery_warning(bot, game, failed_reveal_dm)
     await _send_game_feed_event(bot, game, text="\n".join(note_lines))
 
     if result.vote_opened:
