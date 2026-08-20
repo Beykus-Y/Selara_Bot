@@ -97,6 +97,10 @@ async def _handle(
     if message.from_user is None:
         return
 
+    # #34: moderate_users OR the lesser use_llm_readonly permission grants
+    # entry to the assistant. Every mutating tool independently re-checks
+    # moderate_users (or manage_roles for set_rank) inside execute_tool
+    # regardless of which permission got the actor in here.
     allowed, _, _ = await has_permission(
         activity_repo,
         chat_id=message.chat.id,
@@ -110,6 +114,20 @@ async def _handle(
         permission="moderate_users",
         bootstrap_if_missing_owner=False,
     )
+    if not allowed:
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+            permission="use_llm_readonly",
+            bootstrap_if_missing_owner=False,
+        )
     if not allowed:
         await message.reply("⛔ Недостаточно прав для AI-ассистента (нужна роль junior_admin и выше).")
         return

@@ -12,6 +12,12 @@ PERM_MODERATE_USERS = "moderate_users"
 PERM_ANNOUNCE = "announce"
 PERM_MANAGE_COMMAND_ACCESS = "manage_command_access"
 PERM_MANAGE_ROLE_TEMPLATES = "manage_role_templates"
+# #34: lets an actor invoke the LLM assistant (?/??) for informational
+# queries without also being trusted with moderate_users -- every mutating
+# tool still independently requires moderate_users (or manage_roles for
+# set_rank) regardless of this permission, enforced in
+# infrastructure/llm/tools.py.
+PERM_USE_LLM_READONLY = "use_llm_readonly"
 
 BOT_PERMISSIONS: tuple[BotPermissionName, ...] = (
     PERM_MANAGE_ROLES,
@@ -21,6 +27,7 @@ BOT_PERMISSIONS: tuple[BotPermissionName, ...] = (
     PERM_ANNOUNCE,
     PERM_MANAGE_COMMAND_ACCESS,
     PERM_MANAGE_ROLE_TEMPLATES,
+    PERM_USE_LLM_READONLY,
 )
 
 
@@ -97,6 +104,7 @@ PERMISSION_LABELS_RU: dict[BotPermissionName, str] = {
     PERM_ANNOUNCE: "объявления",
     PERM_MANAGE_COMMAND_ACCESS: "доступ к командам",
     PERM_MANAGE_ROLE_TEMPLATES: "шаблоны и кастомные роли",
+    PERM_USE_LLM_READONLY: "AI-ассистент (только чтение)",
 }
 
 

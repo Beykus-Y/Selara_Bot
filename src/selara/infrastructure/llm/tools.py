@@ -1366,9 +1366,22 @@ async def _exec_add_to_glossary(
     call: ToolCall,
     *,
     chat_snapshot: ChatSnapshot,
+    actor_snapshot: UserSnapshot,
+    activity_repo: Any,
     llm_repo: LlmRepository,
     **_: Any,
 ) -> ToolResult:
+    # #34: add_to_glossary had no permission check of its own (any invoker
+    # that got past the entry gate could write); now that a lesser
+    # use_llm_readonly permission can grant entry without moderate_users,
+    # this must be checked explicitly -- otherwise a read-only-tier actor
+    # could poison the persistent, LLM-re-read glossary (reopens #2).
+    actor_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_snapshot.telegram_chat_id, user_id=actor_snapshot.telegram_user_id,
+    )
+    if actor_role is None or "moderate_users" not in set(actor_role.permissions):
+        return _err(call.call_id, call.name, "Недостаточно прав для записи в словарь.")
+
     term = call.arguments.get("term", "").strip()
     definition = call.arguments.get("definition", "").strip()
     if not term or not definition:

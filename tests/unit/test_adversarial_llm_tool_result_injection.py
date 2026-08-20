@@ -25,6 +25,7 @@ that gets fed back to the LLM.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -132,6 +133,11 @@ async def test_add_to_glossary_allows_persistent_injection_content(chat_snapshot
     llm_repo.upsert_glossary_term = AsyncMock(return_value=stored)
     llm_repo.list_glossary = AsyncMock(return_value=[])
 
+    activity_repo = MagicMock()
+    activity_repo.get_effective_role_definition = AsyncMock(
+        return_value=SimpleNamespace(role_code="senior_admin", rank=20, permissions=["moderate_users"])
+    )
+
     call = ToolCall(
         name="add_to_glossary",
         arguments={"term": "рест", "definition": INJECTION_PAYLOAD},
@@ -141,7 +147,7 @@ async def test_add_to_glossary_allows_persistent_injection_content(chat_snapshot
         call,
         chat_snapshot=chat_snapshot,
         actor_snapshot=actor_snapshot,
-        activity_repo=MagicMock(),
+        activity_repo=activity_repo,
         llm_repo=llm_repo,
     )
 
