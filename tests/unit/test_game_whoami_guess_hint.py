@@ -79,3 +79,35 @@ async def test_off_pattern_message_from_current_actor_gets_a_hint(monkeypatch) -
     assert message.replies, "expected a hint reply"
     assert "?" in message.replies[0]
     assert "догадка" in message.replies[0]
+
+
+def test_group_board_status_shows_the_guess_example_before_any_mistake() -> None:
+    # Ilya's follow-up request: discoverability must not depend only on the
+    # error-hint path -- the concrete guess phrasing must already be
+    # visible on the board during the actor's turn, before any wrong input.
+    from selara.presentation.game_state import GroupGame
+
+    game = GroupGame(
+        game_id="g1", kind="whoami", chat_id=-100, chat_title="chat", owner_user_id=1,
+        players={1: "A", 2: "B", 3: "C"}, status="started", phase="whoami_ask",
+        whoami_current_actor_user_id=1,
+    )
+    status_text = game_router._render_whoami_status(game)
+    assert "Я думаю, что я" in status_text
+
+
+@pytest.mark.asyncio
+async def test_actors_private_deep_link_view_shows_the_guess_example_too() -> None:
+    # Same requirement, but for the current actor's own private view
+    # (reached via the "🪪 Карточки" deep-link button) -- this is what the
+    # actor is actually looking at right before acting, distinct from the
+    # shared group board.
+    from selara.presentation.game_state import GroupGame
+
+    game = GroupGame(
+        game_id="g1", kind="whoami", chat_id=-100, chat_title="chat", owner_user_id=1,
+        players={1: "A", 2: "B", 3: "C"}, status="started", phase="whoami_ask",
+        whoami_current_actor_user_id=1,
+    )
+    private_text = game_router._render_whoami_private_view(game, actor_user_id=1)
+    assert "Я думаю, что я" in private_text

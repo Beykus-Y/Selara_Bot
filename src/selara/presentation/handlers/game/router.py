@@ -2542,7 +2542,10 @@ def _render_whoami_private_view(game: GroupGame, *, actor_user_id: int) -> str:
         lines.append(f"<b>Активный вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<i>Стол должен ответить «да / нет / не знаю / неважно» в группе или на сайте.</i>")
     else:
-        lines.append("<i>Если сейчас ваш ход, задайте вопрос сообщением в группу с вопросительным знаком или попробуйте угадать себя.</i>")
+        lines.append(
+            "<i>Если сейчас ваш ход: вопрос — сообщение с «?» в группу. "
+            "Догадка — например: «Я думаю, что я [ответ]».</i>"
+        )
     return "\n".join(lines)
 
 
