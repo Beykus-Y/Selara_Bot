@@ -140,11 +140,15 @@ async def test_transcribe_uses_confidently_detected_non_russian_language():
 
 
 @pytest.mark.asyncio
-async def test_transcribe_falls_back_to_configured_language_when_detection_yields_no_language():
+async def test_transcribe_falls_back_to_configured_language_when_text_present_but_language_undetected():
+    """Retry only makes sense when the model actually transcribed something
+    but couldn't identify the language -- forcing a different language on
+    genuinely empty output (see the silence test below) can't produce audio
+    content that isn't there, so it must not trigger a second billed call."""
     client = SttClient(_config())
     responses = [
-        SimpleNamespaceLike(text="", language=""),
-        SimpleNamespaceLike(text="привет", language="russian"),
+        SimpleNamespaceLike(text="привет как дела", language=""),
+        SimpleNamespaceLike(text="привет как дела", language="russian"),
     ]
 
     async def fake_create(**kwargs):
@@ -154,14 +158,17 @@ async def test_transcribe_falls_back_to_configured_language_when_detection_yield
 
     result = await client.transcribe(b"audio-bytes")
 
-    assert result == "привет"
+    assert result == "привет как дела"
     assert client._client.audio.transcriptions.create.await_count == 2
     second_call_kwargs = client._client.audio.transcriptions.create.await_args.kwargs
     assert second_call_kwargs.get("language") == "ru"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_raises_if_both_auto_detect_and_fallback_are_empty():
+async def test_transcribe_does_not_retry_on_genuinely_silent_audio():
+    """Empty text + empty language is almost always real silence/noise, not
+    a fixable detection failure -- retrying with a forced language would
+    just double the billed cost for no benefit (found in review)."""
     client = SttClient(_config())
     response = SimpleNamespaceLike(text="", language="")
     client._client.audio.transcriptions.create = AsyncMock(return_value=response)
@@ -169,7 +176,7 @@ async def test_transcribe_raises_if_both_auto_detect_and_fallback_are_empty():
     with pytest.raises(SttClientError):
         await client.transcribe(b"audio-bytes")
 
-    assert client._client.audio.transcriptions.create.await_count == 2
+    assert client._client.audio.transcriptions.create.await_count == 1
 
 
 class SimpleNamespaceLike:

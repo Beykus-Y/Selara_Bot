@@ -84,7 +84,12 @@ class SttClient:
 
         text, detected_language = await self._transcribe_once(audio_bytes, filename, language=None)
 
-        if not text and not detected_language:
+        # Retry only when the model actually transcribed something but
+        # couldn't identify the language -- if text is empty too, that's
+        # almost always real silence/noise, and forcing a different
+        # language can't produce audio content that isn't there, so
+        # retrying would just double the billed cost for no benefit.
+        if text and not detected_language:
             log.debug("STT: автоопределение языка не удалось, повтор с language=%s", self._config.language)
             text, detected_language = await self._transcribe_once(
                 audio_bytes, filename, language=self._config.language,
