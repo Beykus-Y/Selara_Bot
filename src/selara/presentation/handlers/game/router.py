@@ -417,11 +417,118 @@ def _parse_kind(raw: str | None) -> GameKind | None:
     return aliases.get(value)
 
 
-def _build_game_selection_keyboard(*, requester_user_id: int) -> InlineKeyboardMarkup:
+_GAME_CATALOG_PAGE_SIZE = 4
+
+_GAME_RULES_TEXT: dict[GameKind, str] = {
+    "zlobcards": (
+        "Ведущий показывает чёрную карту с шуткой или вопросом.\n"
+        "Остальные в ЛС выбирают белую карту (или несколько) для ответа.\n"
+        "Все варианты выходят на голосование анонимно — самый смешной побеждает в раунде.\n"
+        "Раунды повторяются, побеждает набравший больше всего очков."
+    ),
+    "spy": (
+        "Все, кроме одного игрока, знают общую локацию — шпион не знает.\n"
+        "По кругу задавайте друг другу вопросы о локации, не выдавая себя.\n"
+        "В любой момент можно проголосовать за подозреваемого шпиона.\n"
+        "Большинство голосов решает — верно назвали шпиона или нет."
+    ),
+    "whoami": (
+        "Каждому достаётся карточка персонажа, которую видят все, кроме него самого.\n"
+        "По очереди задавайте вопросы о себе, отвечают «да / нет / не знаю».\n"
+        "Как только уверены — называйте свою догадку."
+    ),
+    "mafia": (
+        "Ночью мафия тайно выбирает жертву, у мирных есть особые роли (например шериф).\n"
+        "Днём все обсуждают и голосуют, кого исключить из игры.\n"
+        "Мафия побеждает, если её остаётся не меньше, чем мирных; мирные — когда вся мафия исключена."
+    ),
+    "dice": "Каждый бросает кубик один раз. Побеждает тот, у кого выпало больше.",
+    "quiz": (
+        "Несколько раундов вопросов с вариантами ответов.\n"
+        "За правильный ответ начисляются очки — побеждает набравший больше всех."
+    ),
+    "bredovukha": (
+        "В каждом раунде один игрок получает вопрос с пропуском и придумывает правдоподобный обман.\n"
+        "Остальные видят все варианты ответа, включая правильный, и голосуют, какой из них правда."
+    ),
+    "bunker": (
+        "После катастрофы у каждого есть скрытая карточка (профессия, здоровье и другое).\n"
+        "По очереди раскрывайте по одной характеристике остальным.\n"
+        "Затем голосуйте, кого исключить — пока не останется нужное число мест в бункере."
+    ),
+}
+
+
+def _catalog_page_count() -> int:
+    total = len(GAME_LAUNCHABLE_KINDS)
+    return max(1, -(-total // _GAME_CATALOG_PAGE_SIZE))
+
+
+def _catalog_kinds_for_page(page: int) -> tuple[GameKind, ...]:
+    start = page * _GAME_CATALOG_PAGE_SIZE
+    return GAME_LAUNCHABLE_KINDS[start : start + _GAME_CATALOG_PAGE_SIZE]
+
+
+def _build_game_catalog_keyboard(*, requester_user_id: int, page: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for kind in GAME_LAUNCHABLE_KINDS:
+    kinds = _catalog_kinds_for_page(page)
+    for kind in kinds:
         definition = GAME_DEFINITIONS[kind]  # type: ignore[index]
-        builder.button(text=definition.title, callback_data=f"game:new:{kind}:u{requester_user_id}")
+        builder.button(
+            text=definition.title,
+            callback_data=f"game:detail:{kind}:{page}:u{requester_user_id}",
+        )
+
+    last_page = _catalog_page_count() - 1
+    nav_row = 0
+    if page > 0:
+        builder.button(text="◀️", callback_data=f"game:list:{page - 1}:u{requester_user_id}")
+        nav_row += 1
+    builder.button(
+        text=f"{page + 1} / {last_page + 1}",
+        callback_data=f"game:list:noop:u{requester_user_id}",
+    )
+    nav_row += 1
+    if page < last_page:
+        builder.button(text="▶️", callback_data=f"game:list:{page + 1}:u{requester_user_id}")
+        nav_row += 1
+
+    builder.adjust(*([1] * len(kinds) + [nav_row]))
+    return builder.as_markup()
+
+
+def _render_game_catalog_text(*, page: int) -> str:
+    return "<b>Выберите игру:</b>"
+
+
+def _render_game_detail_text(kind: GameKind) -> str:
+    definition = GAME_DEFINITIONS[kind]  # type: ignore[index]
+    lines = [
+        f"<b>{definition.title}</b>",
+        f"{definition.min_players}+ игроков" + (" · роли в ЛС" if definition.secret_roles else ""),
+        definition.short_description,
+    ]
+    return "\n".join(lines)
+
+
+def _build_game_detail_keyboard(*, kind: GameKind, page: int, requester_user_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="▶️ Создать игру", callback_data=f"game:new:{kind}:u{requester_user_id}")
+    builder.button(text="❓ Как играть", callback_data=f"game:rules:{kind}:{page}:u{requester_user_id}")
+    builder.button(text="← К списку игр", callback_data=f"game:list:{page}:u{requester_user_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _render_game_rules_text(kind: GameKind) -> str:
+    definition = GAME_DEFINITIONS[kind]  # type: ignore[index]
+    rules = _GAME_RULES_TEXT.get(kind, definition.short_description)
+    return f"<b>❓ {definition.title} — как играть</b>\n\n{rules}"
+
+
+def _build_game_rules_keyboard(*, kind: GameKind, page: int, requester_user_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="← Назад", callback_data=f"game:detail:{kind}:{page}:u{requester_user_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -3564,9 +3671,9 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
     explicit_kind = _parse_kind(command.args)
     if explicit_kind is None:
         await message.answer(
-            "<b>Выберите игру:</b>",
+            _render_game_catalog_text(page=0),
             parse_mode="HTML",
-            reply_markup=_build_game_selection_keyboard(requester_user_id=message.from_user.id),
+            reply_markup=_build_game_catalog_keyboard(requester_user_id=message.from_user.id, page=0),
         )
         return
     if explicit_kind not in GAME_LAUNCHABLE_KINDS:
@@ -3955,6 +4062,126 @@ async def game_config_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     await query.answer("Неизвестная настройка", show_alert=False)
+
+
+def _extract_requester_id(raw: str) -> int | None:
+    if raw.startswith("u") and raw[1:].isdigit():
+        return int(raw[1:])
+    return None
+
+
+@router.callback_query(F.data.startswith("game:list:"))
+async def game_list_callback(query: CallbackQuery, bot: Bot) -> None:
+    if query.message is None or not query.data or query.from_user is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await query.answer("Некорректная страница", show_alert=False)
+        return
+
+    _, _, raw_page, raw_requester = parts
+    requester_id = _extract_requester_id(raw_requester)
+    if requester_id is None or requester_id != query.from_user.id:
+        await query.answer("Каталог игр доступен только тому, кто вызвал /game.", show_alert=True)
+        return
+
+    if raw_page == "noop":
+        await query.answer()
+        return
+
+    if not raw_page.lstrip("-").isdigit():
+        await query.answer("Некорректная страница", show_alert=False)
+        return
+    page = max(0, min(int(raw_page), _catalog_page_count() - 1))
+
+    try:
+        await bot.edit_message_text(
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            text=_render_game_catalog_text(page=page),
+            parse_mode="HTML",
+            reply_markup=_build_game_catalog_keyboard(requester_user_id=requester_id, page=page),
+        )
+    except TelegramBadRequest as exc:
+        if not _is_stale_callback_query_error(exc):
+            raise
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("game:detail:"))
+async def game_detail_callback(query: CallbackQuery, bot: Bot) -> None:
+    if query.message is None or not query.data or query.from_user is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 5:
+        await query.answer("Некорректный выбор", show_alert=False)
+        return
+
+    _, _, raw_kind, raw_page, raw_requester = parts
+    requester_id = _extract_requester_id(raw_requester)
+    if requester_id is None or requester_id != query.from_user.id:
+        await query.answer("Каталог игр доступен только тому, кто вызвал /game.", show_alert=True)
+        return
+
+    kind = _parse_kind(raw_kind)
+    if kind is None or kind not in GAME_LAUNCHABLE_KINDS or not raw_page.isdigit():
+        await query.answer("Неизвестная игра", show_alert=False)
+        return
+    page = int(raw_page)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            text=_render_game_detail_text(kind),
+            parse_mode="HTML",
+            reply_markup=_build_game_detail_keyboard(kind=kind, page=page, requester_user_id=requester_id),
+        )
+    except TelegramBadRequest as exc:
+        if not _is_stale_callback_query_error(exc):
+            raise
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("game:rules:"))
+async def game_rules_callback(query: CallbackQuery, bot: Bot) -> None:
+    if query.message is None or not query.data or query.from_user is None:
+        await query.answer()
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 5:
+        await query.answer("Некорректный выбор", show_alert=False)
+        return
+
+    _, _, raw_kind, raw_page, raw_requester = parts
+    requester_id = _extract_requester_id(raw_requester)
+    if requester_id is None or requester_id != query.from_user.id:
+        await query.answer("Каталог игр доступен только тому, кто вызвал /game.", show_alert=True)
+        return
+
+    kind = _parse_kind(raw_kind)
+    if kind is None or kind not in GAME_LAUNCHABLE_KINDS or not raw_page.isdigit():
+        await query.answer("Неизвестная игра", show_alert=False)
+        return
+    page = int(raw_page)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            text=_render_game_rules_text(kind),
+            parse_mode="HTML",
+            reply_markup=_build_game_rules_keyboard(kind=kind, page=page, requester_user_id=requester_id),
+        )
+    except TelegramBadRequest as exc:
+        if not _is_stale_callback_query_error(exc):
+            raise
+    await query.answer()
 
 
 @router.callback_query(F.data.startswith("game:"))
