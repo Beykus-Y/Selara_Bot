@@ -499,15 +499,27 @@ no push/deploy without separate permission.
    Do this classification as part of the Mafia implementation work (Stage 3),
    not as a separate architecture change.
 
-### Stage 1 — shared navigation foundation
-- [ ] Paginated game catalog, 3-5 games/page
-- [ ] `◀️ page/total ▶️` bottom nav row
-- [ ] Game detail card (title, min_players, secret_roles/DM note,
-  `short_description` — all already-existing unrendered data)
-- [ ] `← К списку игр` returns to the **origin page**, not always page 1
-- [ ] Rules access from detail/lobby (not from an active game — see
-  correction #4)
-- [ ] Everything via edit-in-place on the existing catalog message
+### Stage 1 — shared navigation foundation — DONE (2026-08-20, commit 6591334)
+- [x] Paginated game catalog, 4 games/page (`_GAME_CATALOG_PAGE_SIZE = 4`,
+  within Ilya's 3-5 range; 8 launchable kinds → 2 pages today)
+- [x] `◀️ N / total ▶️` bottom nav row (arrows hidden, not disabled, at the
+  respective bound)
+- [x] Game detail card (title, min_players, secret_roles/DM note,
+  `short_description` — all already-existing data, now actually rendered)
+- [x] `← К списку игр` returns to the **origin page** (page threaded through
+  every `game:detail:`/`game:rules:` callback)
+- [x] Rules access from detail (`❓ Как играть` → short per-game rules text,
+  authored as a first draft per Ilya's "текст не финальный" note — not from
+  an active game board, per correction #4)
+- [x] Everything via `bot.edit_message_text` on the existing catalog message;
+  ownership restricted to whoever ran `/game` (same `:u{id}` convention as
+  the existing `game:new:` callback)
+- Tests: `test_game_catalog_pagination.py` (keyboard/text builders, 12 tests),
+  `test_game_catalog_navigation.py` (handler-level, 7 tests), updated
+  `test_game_callbacks.py` for the new contract. Full unit suite green
+  (1371 passed, 1 skipped). Manual textual review of every catalog
+  page/detail/rules render done (Telegram bot UI — no browser/screenshot
+  path applies here; this is the equivalent check).
 
 ### Stage 2 — Spy as the reference game
 - [ ] New lobby UX (leave button, single-row numeric config where applicable)
