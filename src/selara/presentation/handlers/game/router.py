@@ -1524,7 +1524,6 @@ def _render_bred_question(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.bred_lies
         ]
-        lines.append("<i>Придумайте правдоподобную ложь и сдайте её боту в ЛС или на сайте.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже ответили:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
         if waiting_user_ids:
@@ -1545,7 +1544,7 @@ def _render_bred_question(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Выберите вариант кнопками ниже. Голос можно менять до конца этапа.</i>")
+        lines.append("<i>Голос можно менять до конца этапа.</i>")
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1920,11 +1919,14 @@ def _render_game_text(
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.bred_rounds}")
         lines.append("<i>Очки: +2 за правду, +1 за каждого, кто попался на вашу ложь.</i>")
         if game.phase == "category_pick":
-            lines.append("<b>Сейчас:</b> выбранный игрок задаёт тему раунда кнопками ниже.")
+            lines.append("<b>Сейчас:</b> выбор темы раунда.")
+            lines.append("<b>Что делать:</b> выбранный игрок жмёт тему кнопками ниже.")
         elif game.phase == "private_answers":
-            lines.append("<b>Сейчас:</b> придумайте фальшивый ответ и сдайте его боту в ЛС или на сайте.")
+            lines.append("<b>Сейчас:</b> сбор ответов в ЛС.")
+            lines.append("<b>Что делать:</b> придумайте правдоподобную ложь и сдайте её боту в ЛС или на сайте.")
         elif game.phase == "public_vote":
-            lines.append("<b>Сейчас:</b> голосуйте за вариант, который кажется настоящим.")
+            lines.append("<b>Сейчас:</b> голосование за самый правдоподобный вариант.")
+            lines.append("<b>Что делать:</b> голосуйте кнопкой за тот, что кажется настоящим.")
         question_block = _render_bred_question(game)
         if question_block:
             lines.append("")
