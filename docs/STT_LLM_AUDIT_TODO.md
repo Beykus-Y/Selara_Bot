@@ -71,7 +71,7 @@ Only `get_user_info`/`grant_rest`/`revoke_rest`/`list_bot_docs`/`read_bot_doc` +
 
 ## Pass 4 — missing-functionality / UX completeness (2026-08-20, read-only)
 
-### 27. [ ] HIGH — permission-denial message names the wrong role as sufficient
+### 27. [x] LOW/MEDIUM — permission-denial message names the wrong role as sufficient — FIXED 2026-08-20 (P2)
 `llm_admin.py:107` tells a denied user "нужна роль junior_admin и выше" but the actual gate is `moderate_users`, which `junior_admin`'s default template (`roles.py:45-51`) does **not** grant (only `PERM_ANNOUNCE`) — only `senior_admin`+ has it by default. A real trap for admins configuring roles who'll promote someone to junior_admin expecting it to unlock the assistant.
 
 ### 28. [ ] HIGH — LLM assistant has zero visibility into economy, gacha, family, or games
