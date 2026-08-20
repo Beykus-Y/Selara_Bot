@@ -63,7 +63,7 @@ The whole handler runs in one DB transaction (commit only at the end), but tool 
 ### 24. [x] HIGH — context compression can permanently elevate injected content to system-level trust — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth: escaped join + explicit untrusted-data framing on both compress and reload)
 `maybe_compress` joins messages as `"[role]: content"` with no delimiter/escaping — a message containing a literal `"\n[assistant]: ..."` sequence can forge fake role boundaries in what the summarizer model sees. The resulting summary is then reloaded as a **system**-role message on every future turn — ordinary tool/user content gets permanently promoted to system trust once compressed. A distinct, more serious escalation path beyond the per-turn injection in findings #1/#2.
 
-### 25. [ ] LOW/MEDIUM — inconsistent error handling; STT retry logic is coupled to translated UI text, not exception types
+### 25. [x] LOW/MEDIUM — inconsistent error handling; STT retry logic is coupled to translated UI text, not exception types — FIXED 2026-08-20
 `chat_with_tools` translates API errors to safe user-facing text; `chat_simple`/`summarize` don't (raw SDK exception text — low-stakes for `summarize`, but `chat_simple` backs the DM-summary path). `stt/client.py`'s retry decision substring-matches the already-*translated Russian* error string rather than the exception type — any future edit to those message strings silently breaks retry behavior with no test to catch it.
 
 ### 26. [ ] LOW — most `tools.py` executors have zero unit test coverage
