@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# Selara — фронтенд
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite Mini App/веб-панель для Selara Bot. Собирается в
+статику и раздаётся через nginx (см. `Dockerfile`, `nginx/default.conf.template`),
+проксируясь к FastAPI-бэкенду бота (`APP_UPSTREAM`, см. `docker-compose.yml`
+в корне репозитория — сервис `web`).
 
-Currently, two official plugins are available:
+## Разработка
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev      # dev-сервер с HMR
+npm run build    # tsc -b && vite build
+npm run preview  # предпросмотр production-сборки
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Lint
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+`npm run lint` запускает не только фронтенд-линт (`eslint .`), но и
+`lint:server-ui` — отдельный набор проверок для **серверного** Jinja/JS/CSS
+UI бота (`src/selara/web/templates`, `src/selara/web/static/*.js/css`):
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- `lint:server-ui:jinja` — `djlint` по Jinja-шаблонам.
+- `lint:server-ui:js` — ESLint по статическим JS-файлам серверного UI.
+- `lint:server-ui:css` — Stylelint по CSS-файлам серверного UI.
+- `lint:server-ui:html` — рендерит фикстуры (`scripts/render_*_fixture.py`)
+  и прогоняет их через HTMLHint.
+
+Это одна из причин, почему `pip install -e .[dev]` нужен даже для чисто
+фронтенд-разработки — часть lint-пайплайна вызывает Python-скрипты
+основного бота (`${SELARA_PYTHON:-.venv/bin/python}`).
+
+## Как это связано с основным ботом
+
+- Этот каталог — Mini App/PC-панель (`selara-web` контейнер), отдельный
+  сервис от основного бота (`selara-app`). Полная схема — в
+  `../docker-compose.yml` и `INSTALLATION.md`.
+- Не путать с server-side rendered страницами бота (`/app/*`,
+  Jinja-шаблоны в `src/selara/web/templates`) — они лежат в основном
+  Python-репозитории, но их frontend-инструментарий (lint/тесты фикстур)
+  живёт здесь же, в этом каталоге.
