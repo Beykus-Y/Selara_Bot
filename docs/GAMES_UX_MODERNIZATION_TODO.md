@@ -454,44 +454,103 @@ other game's board is comparatively short.
 
 ---
 
-## 12. Roadmap
+## 12. Roadmap — approved by Ilya (2026-08-20), staged implementation order
 
-### P0 — foundational, blocks or undermines everything else if left alone
-- [x] `manage_games` gate on `/game` — **резолюция Ilya: так и задумано, не
-  трогаем.** No code task.
-- [ ] WhoAmI: add a guess button / in-context example phrase for the
-  identity-guess mechanic (the single most concrete example Ilya named).
-- [ ] Fix Mafia's silent night-phase DM-failure (add the same board warning
-  the other 3 secret-role games already have).
-- [ ] Fix Bredovukha's DM button missing its `?start=game_{id}` payload.
-- [ ] Turn the existing failed-DM warning into a deep-link button +
-  `@mention`-specific-players message, everywhere it already exists
-  (bunker/zlobcards/bredovukha) rather than a bare count.
+Ilya accepted the audit direction and made 5 corrections before implementation,
+plus set a strict stage order (below). These corrections **override** the P0/P1/P2
+sketch from the original audit — the staged plan is now the source of truth for
+implementation order. Rule for the whole implementation: failing test →
+implementation → relevant tests → visual/manual review, small logical commits,
+no push/deploy without separate permission.
 
-### P1 — the interaction-pattern shift Ilya explicitly asked for
-- [ ] Paginated game catalog + detail card (§4) — 3-5 per page, `short_description`/
-  `min_players`/DM-note surfaced, edit-in-place, `← К списку игр` returns to
-  origin page.
-- [ ] Lobby "➖ Покинуть" (leave) button (§5).
-- [ ] Rematch button on every finished board (§10).
-- [ ] `❓ Как играть` progressive-disclosure button + short rules text, one per
-  game (§3).
-- [ ] Collapse the 3 lobby stepper-triples (bredovukha/zlobcards/bunker) into
-  single cycling buttons.
-- [ ] Extend phase timers to Bredovukha/Bunker/Quiz, or at minimum add a
-  visible "waiting for X" reminder where no timer exists (§9).
+### Corrections to the original audit (apply throughout, not stage-specific)
 
-### P2 — consolidation and cleanup once the pattern is proven
-- [ ] Factor out the shared "vote with live tally" component (§7.1) — after,
-  not before, at least one real game (e.g. Spy) is modernized using it, so the
-  abstraction is drawn from working code rather than guessed upfront.
-- [ ] Factor out the "private-hand-as-buttons, edit-in-place" component using
-  Zlobcards' existing implementation as the reference (§7.2).
-- [ ] Delete the orphaned "Number" game (§2) — **резолюция Ilya: удалить**.
-- [ ] Investigate whether private per-actor phase keyboards go stale after a
-  phase moves on (§9, unconfirmed).
-- [ ] Wire up `spy_guess_location` (§2, Spy section) — **резолюция Ilya:
-  подключить, но позже, не в текущем заходе.**
+1. **Timers (Bredovukha/Bunker/Quiz) — NOT added in this pass.** Auto-advancing
+   a phase via a server timer is a game-behavior change, not pure UX, even
+   though §9 originally proposed it as a UX fix. This round only adds clear
+   waiting/progress *state text* ("Ждём: <actor>", "Ответили 3/5") — no new
+   auto-advance logic. Automatic timers for these 3 games are moved to a
+   **new [?] #4, deferred to a future round**, not part of this roadmap.
+2. **Lobby steppers — do not blanket-replace with single cycling buttons.**
+   The real problem is a vertical wall of buttons, not the existence of −/+.
+   Preferred pattern for numeric settings: `➖ Раунды: 5 ➕` as **three buttons
+   in one row** (`builder.adjust(3)` for that row), not three stacked rows.
+   Only use a single cycling button where it's genuinely clearer for that
+   specific parameter (e.g. a short enum like category, not a numeric range).
+3. **Rematch — exact behavior:** `🔁 Ещё раз` creates a **new lobby of the
+   same game kind, with settings copied from the just-finished game**
+   (category/rounds/seats/target-score etc., whatever that kind has).
+   Previous participants are **not** auto-added to the new lobby — everyone,
+   including the same players, joins again via the normal join button. No
+   game-mechanic changes.
+4. **`❓ Как играть` — scoped by context.** Catalog/detail/lobby screens can
+   freely use edit-in-place + a "← назад" button for rules. **During an
+   already-active game, do not replace the state-board with a long rules
+   text** — that risks conflicting with in-flight phase edits/timers (mafia,
+   zlobcards). An active board's primary job stays: **что происходит сейчас →
+   что нужно сделать → чего ждём**, kept short; rules access during an active
+   game (if added at all) must not compete with that board for space/edits.
+5. **Mafia feed-events — no "collapsible history" yet.** Classify each
+   existing feed-event message against this rule during implementation:
+   - current state → **edit** the existing board (no new message)
+   - an important game event worth preserving in the chat's history → a
+     **new** message (kept)
+   - duplicate/technical noise → **don't send at all**
+   Do this classification as part of the Mafia implementation work (Stage 3),
+   not as a separate architecture change.
+
+### Stage 1 — shared navigation foundation
+- [ ] Paginated game catalog, 3-5 games/page
+- [ ] `◀️ page/total ▶️` bottom nav row
+- [ ] Game detail card (title, min_players, secret_roles/DM note,
+  `short_description` — all already-existing unrendered data)
+- [ ] `← К списку игр` returns to the **origin page**, not always page 1
+- [ ] Rules access from detail/lobby (not from an active game — see
+  correction #4)
+- [ ] Everything via edit-in-place on the existing catalog message
+
+### Stage 2 — Spy as the reference game
+- [ ] New lobby UX (leave button, single-row numeric config where applicable)
+- [ ] Leave button
+- [ ] DM/deep-link recovery (button + @mention, reusing the existing
+  `?start=game_{id}` mechanism)
+- [ ] Clear current-state instructions on the board (что происходит →
+  что делать → чего ждём)
+- [ ] Result screen
+- [ ] Rematch (`🔁 Ещё раз`, per correction #3)
+
+**STOP after Stage 2.** Screenshots + manual UX review required before
+touching any other game. Do not propagate the pattern to the remaining games
+until the Spy reference is verified.
+
+### Stage 3 — low-risk fixes (independent of Stage 1/2, can land any time)
+- [ ] WhoAmI guess UX (button/hint for the identity-guess mechanic)
+- [ ] Mafia DM-failure warning (add the missing night-phase board line)
+- [ ] Bredovukha deep-link fix (`?start=game_{id}` payload missing on its
+  private-submission button)
+- [ ] Unified failed-DM recovery (button + @mention) applied everywhere it
+  already partially exists (bunker/zlobcards/bredovukha)
+- [ ] Mafia feed-event classification per correction #5
+
+### Stage 4 — remaining games
+- [ ] Port the Spy-verified pattern to the other games **one at a time**,
+  preserving each game's unique mechanic (§2 "Что уникально" per game).
+
+### Stage 5 — consolidation
+- [ ] Only after the pattern has actually repeated across multiple games,
+  extract shared reusable game-UI helpers/components (§7) — drawn from
+  working code, not guessed upfront.
+
+### Separate small cleanup commits (not tied to a stage)
+- [ ] Delete the orphaned "Number" game — **резолюция Ilya: удалить**, own
+  small commit.
+- [ ] `spy_guess_location` — **резолюция Ilya: подключить позже** — not part
+  of this roadmap, remains deferred.
+
+### New deferred item
+- [?] **#4** Automatic phase timers for Bredovukha/Bunker/Quiz — explicitly
+  out of scope for this round (correction #1 above); revisit as its own,
+  separate product decision later.
 
 ---
 
