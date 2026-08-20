@@ -237,16 +237,24 @@ def _build_home_keyboard(
     miniapp_url: str | None = None,
     miniapp_webapp_url: str | None = None,
     desktop_url: str | None = None,
+    getting_started_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if has_admin_groups:
-        builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
-    if has_user_groups:
-        builder.button(text="👤 Мои группы", callback_data=encode_pm_callback("ul", 0))
+    # #Discoverability/Onboarding: "Как начать" is the one maximally obvious
+    # button, always first, when the public getting-started page is
+    # reachable (i.e. the web panel is enabled).
+    if getting_started_url:
+        builder.button(text="🚀 Как начать", url=getting_started_url)
     if miniapp_webapp_url:
         builder.button(text="📱 Mini App", web_app=WebAppInfo(url=miniapp_webapp_url))
     elif miniapp_url:
         builder.button(text="📱 Mini App", url=miniapp_url)
+    if getting_started_url:
+        builder.button(text="📖 Документация", url=getting_started_url.rsplit("/getting-started", 1)[0] + "/user")
+    if has_admin_groups:
+        builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
+    if has_user_groups:
+        builder.button(text="👤 Мои группы", callback_data=encode_pm_callback("ul", 0))
     if desktop_url:
         builder.button(text="🖥 ПК-панель", url=desktop_url)
     builder.button(text="🔄 Обновить", callback_data=encode_pm_callback("h"))
@@ -373,8 +381,18 @@ async def _edit_or_answer(query: CallbackQuery, text: str, reply_markup: InlineK
 
 async def _render_home_text(*, user, admin_groups: list[UserChatOverview], user_groups: list[UserChatOverview]) -> str:
     display_name = escape(_user_label_from_telegram_user(user))
+    # #Discoverability/Onboarding: the first thing a new user sees must be a
+    # short, plain-language intro -- not a technical panel. Kept deliberately
+    # short (this is not the place for documentation); group counts and the
+    # "это ЛС-панель" line stay, just visually below the intro instead of
+    # being the headline.
     lines = [
-        f"<b>Привет, {display_name}!</b>",
+        f"<b>💜 Привет, {display_name}! Это Selara</b>",
+        "",
+        "Бот для групповых чатов: игры, статистика, экономика, отношения, гача "
+        "и другие развлечения.",
+        "Если ты здесь впервые — открой короткую инструкцию «🚀 Как начать» ниже. "
+        "За минуту будет понятно, как пользоваться ботом.",
         "",
         "Это ЛС-панель Selara.",
         f"<b>Группы, где у вас админ-права бота:</b> <code>{len(admin_groups)}</code>",
@@ -412,6 +430,12 @@ def _build_web_panel_url(settings: Settings) -> str | None:
     return f"{settings.resolved_web_base_url}/login"
 
 
+def _build_getting_started_url(settings: Settings) -> str | None:
+    if not settings.web_enabled:
+        return None
+    return f"{settings.resolved_web_base_url}/app/docs/getting-started"
+
+
 def _append_web_panel_info(text: str, *, miniapp_url: str | None, desktop_url: str | None) -> str:
     if not miniapp_url and not desktop_url:
         return text
@@ -443,6 +467,7 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
     miniapp_url = _build_miniapp_url(settings)
     miniapp_webapp_url = _build_miniapp_webapp_url(settings)
     desktop_url = _build_web_panel_url(settings)
+    getting_started_url = _build_getting_started_url(settings)
     text = _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url)
 
     await message.answer(
@@ -454,6 +479,7 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
             miniapp_url=miniapp_url,
             miniapp_webapp_url=miniapp_webapp_url,
             desktop_url=desktop_url,
+            getting_started_url=getting_started_url,
         ),
     )
 
