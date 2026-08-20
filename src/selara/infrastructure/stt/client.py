@@ -65,6 +65,12 @@ class SttClient:
     async def transcribe(self, audio_bytes: bytes, *, filename: str = "voice.ogg") -> str:
         """Транскрибировать аудио из байт. Возвращает текст или кидает SttClientError.
 
+        #8: язык больше не зашит жёстко в ru. Первая попытка не указывает
+        language вовсе — Whisper сам определяет язык по содержимому.
+        Если определение не удалось (модель не смогла определить язык и
+        текст пуст) — один повтор с принудительным self._config.language
+        (по умолчанию "ru") как fallback.
+
         Args:
             audio_bytes: Сырые байты аудиофайла (ogg, mp3, wav, m4a, webm).
             filename: Имя файла с расширением — нужно для определения формата API.
@@ -76,12 +82,29 @@ class SttClient:
 
         log.debug("STT: отправка %d байт, модель=%s", len(audio_bytes), self._config.model)
 
+        text, detected_language = await self._transcribe_once(audio_bytes, filename, language=None)
+
+        if not text and not detected_language:
+            log.debug("STT: автоопределение языка не удалось, повтор с language=%s", self._config.language)
+            text, detected_language = await self._transcribe_once(
+                audio_bytes, filename, language=self._config.language,
+            )
+
+        if len(text) < _MIN_TEXT_LENGTH:
+            raise SttClientError("Не удалось распознать речь — аудио слишком тихое или пустое.")
+
+        log.debug("STT: распознано %d символов, язык=%s", len(text), detected_language or "?")
+        return text
+
+    async def _transcribe_once(
+        self, audio_bytes: bytes, filename: str, *, language: str | None,
+    ) -> tuple[str, str]:
         try:
             result = await self._client.audio.transcriptions.create(
                 model=self._config.model,
                 file=(filename, io.BytesIO(audio_bytes)),
-                language=self._config.language,
-                response_format="text",
+                language=language,
+                response_format="verbose_json",
             )
         except APITimeoutError as exc:
             raise SttTransientError("STT-сервис не ответил вовремя.") from exc
@@ -90,13 +113,9 @@ class SttClient:
         except APIStatusError as exc:
             raise SttClientError(_extract_api_error(exc)) from exc
 
-        text = result.strip() if isinstance(result, str) else ""
-
-        if len(text) < _MIN_TEXT_LENGTH:
-            raise SttClientError("Не удалось распознать речь — аудио слишком тихое или пустое.")
-
-        log.debug("STT: распознано %d символов", len(text))
-        return text
+        text = (getattr(result, "text", "") or "").strip()
+        detected_language = (getattr(result, "language", "") or "").strip()
+        return text, detected_language
 
     async def transcribe_with_retry(
         self,

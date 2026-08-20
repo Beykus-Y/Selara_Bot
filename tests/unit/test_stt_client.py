@@ -32,7 +32,7 @@ async def test_retries_on_timeout_error_regardless_of_message_text():
         attempts += 1
         if attempts < 3:
             raise APITimeoutError(request=request)
-        return "привет"
+        return SimpleNamespaceLike(text="привет", language="russian")
 
     client._client.audio.transcriptions.create = AsyncMock(side_effect=fake_create)
 
@@ -53,7 +53,7 @@ async def test_retries_on_connection_error_regardless_of_message_text():
         attempts += 1
         if attempts < 2:
             raise APIConnectionError(request=request)
-        return "привет"
+        return SimpleNamespaceLike(text="привет", language="russian")
 
     client._client.audio.transcriptions.create = AsyncMock(side_effect=fake_create)
 
@@ -106,3 +106,73 @@ async def test_gives_up_after_exhausting_retries_on_persistent_timeout():
         await client.transcribe_with_retry(b"audio-bytes", retries=2, retry_delay=0)
 
     assert client._client.audio.transcriptions.create.await_count == 3
+
+
+# --- #8: STT auto-detects language instead of hardcoded ru ---
+
+
+@pytest.mark.asyncio
+async def test_transcribe_does_not_force_language_on_first_attempt():
+    """Auto-detection: the first API call must not pin language=ru (or any
+    fixed language) -- Whisper auto-detects when language is omitted."""
+    client = SttClient(_config())
+    response = SimpleNamespaceLike(text="hello world", language="english")
+    client._client.audio.transcriptions.create = AsyncMock(return_value=response)
+
+    result = await client.transcribe(b"audio-bytes")
+
+    assert result == "hello world"
+    kwargs = client._client.audio.transcriptions.create.await_args.kwargs
+    assert kwargs.get("language") is None
+    assert client._client.audio.transcriptions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_transcribe_uses_confidently_detected_non_russian_language():
+    client = SttClient(_config())
+    response = SimpleNamespaceLike(text="bonjour le monde", language="french")
+    client._client.audio.transcriptions.create = AsyncMock(return_value=response)
+
+    result = await client.transcribe(b"audio-bytes")
+
+    assert result == "bonjour le monde"
+    assert client._client.audio.transcriptions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_transcribe_falls_back_to_configured_language_when_detection_yields_no_language():
+    client = SttClient(_config())
+    responses = [
+        SimpleNamespaceLike(text="", language=""),
+        SimpleNamespaceLike(text="привет", language="russian"),
+    ]
+
+    async def fake_create(**kwargs):
+        return responses.pop(0)
+
+    client._client.audio.transcriptions.create = AsyncMock(side_effect=fake_create)
+
+    result = await client.transcribe(b"audio-bytes")
+
+    assert result == "привет"
+    assert client._client.audio.transcriptions.create.await_count == 2
+    second_call_kwargs = client._client.audio.transcriptions.create.await_args.kwargs
+    assert second_call_kwargs.get("language") == "ru"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_raises_if_both_auto_detect_and_fallback_are_empty():
+    client = SttClient(_config())
+    response = SimpleNamespaceLike(text="", language="")
+    client._client.audio.transcriptions.create = AsyncMock(return_value=response)
+
+    with pytest.raises(SttClientError):
+        await client.transcribe(b"audio-bytes")
+
+    assert client._client.audio.transcriptions.create.await_count == 2
+
+
+class SimpleNamespaceLike:
+    def __init__(self, *, text: str, language: str) -> None:
+        self.text = text
+        self.language = language
