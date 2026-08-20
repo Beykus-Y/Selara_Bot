@@ -38,7 +38,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 ### 2. [x] MEDIUM/HIGH — second-order injection via tool results (list_members/get_top/glossary) — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth trust-tagging)
 `tools.py`'s `_exec_list_members`/`_exec_get_top` return raw `first_name`/`username`/`persona_label` (attacker-controlled via their own Telegram profile) unescaped as tool-result content fed back into the LLM's next round. A crafted display name can bias the assistant into autonomously calling a moderation tool against a victim the attacker chose, using the real admin's authority. `add_to_glossary` is worse — the LLM itself writes and later re-reads it, so an injection there is *persistent* across sessions. Fix direction: mark tool-result content as clearly-delimited untrusted data in the prompt, and/or sanitize free-text fields (names, glossary definitions) before they re-enter LLM context.
 
-### 3. [ ] MEDIUM — no rate limiting on STT or LLM → cost DoS
+### 3. [x] MEDIUM — no rate limiting on STT or LLM → cost DoS — FIXED 2026-08-20 (commit 5739a9c)
 `voice.py`'s handler has no permission check, no group-only gate, and no per-user/per-chat cooldown — any user in any chat can spam voice messages (≤25MB each), each triggering a paid Whisper call (with up to 2 retries, amplifying cost further). `Settings` has no STT/LLM cooldown field at all (only `economy_tap_cooldown_seconds`, unrelated). The `?`/`??` LLM path is at least gated on `moderate_users`, but a single message can already fan out to ~10 billed API calls (up to 8 tool-calling rounds + summary + context compression), with no cooldown against repeating it immediately. Fix direction: add `STT_COOLDOWN_SECONDS`/`LLM_COOLDOWN_SECONDS` settings and enforce them in `voice.py`/`llm_admin.py`, mirroring the existing `economy_tap_cooldown_seconds` pattern.
 
 ## Functional gaps (not security issues, flagged during the same review)
@@ -57,7 +57,7 @@ Overall verdict (Ilya's words): *"тудушку принять как осно�
 ### 22. [x] HIGH — crash mid-tool-loop can leave a real Telegram ban/mute with zero DB/audit record — FIXED 2026-08-20 (commit 1c85442)
 The whole handler runs in one DB transaction (commit only at the end), but tool calls can trigger real, non-transactional Telegram actions (e.g. `bot.ban_chat_member`) mid-loop. `bot.send_chat_action("typing")` is called every round with no try/except (unlike `edit_text`, which is guarded everywhere). If it raises after a real ban already happened, the DB rolls back — the action/audit rows vanish, but the user stays banned with no record of who/why, and no rollback button (since there's no DB row to attach it to).
 
-### 23. [ ] MEDIUM/HIGH — `get_history` tool has no range/row-count bound, unlike every other list tool
+### 23. [x] MEDIUM/HIGH — `get_history` tool has no range/row-count bound, unlike every other list tool — FIXED 2026-08-20 (commit 5739a9c)
 `_exec_get_history` accepts arbitrary `period_start`/`period_end` with zero limit clause (`get_top`/`list_members`/`get_audit_log` all clamp their limits). Can be used to pull a chat's entire LLM interaction history into one tool result — a cost/context-bloat vector distinct from #3/#19. No test coverage.
 
 ### 24. [x] HIGH — context compression can permanently elevate injected content to system-level trust — MITIGATED 2026-08-20 (commit 54a39a4, defense-in-depth: escaped join + explicit untrusted-data framing on both compress and reload)
@@ -103,7 +103,7 @@ The "already rolled back" check is a plain read before the real side effect, wit
 ### 36. [x] HIGH — chat migration (group→supergroup) orphans all 4 LLM tables, and rollback clicked post-migration reports false success — FIXED 2026-08-20 (commit da5025b)
 None of `LlmContextMessageModel`/`LlmContextSummaryModel`/`LlmAdminActionModel`/`LlmChatGlossaryModel` appear anywhere in `chat_migration.py` (confirmed: zero matches), unlike essentially every other chat-scoped table. Consequence: all prior context/glossary becomes silently inaccessible under the new chat_id. Worse — a pre-migration rollback button, if tapped afterward, still finds its (orphaned, not deleted) audit row, runs against the dead old chat_id, DB writes "succeed" into a phantom row nothing will ever read again, the real Telegram API call fails against the invalidated old id but that failure is caught-and-swallowed (`log.warning` only), and the handler unconditionally reports "✅ Откат выполнен." Net effect: the admin is told the rollback worked and every DB write reports success, but nothing changed in the live chat — a silent false-positive on exactly the safety mechanism (#21/#29) the system relies on when automod misfires. Distinct from #22 (that's a crash; this is a silent false-success with no crash at all).
 
-### 37. [ ] MEDIUM — `chat_with_tools` (the highest-fan-out call, up to 8x per query) has no `max_tokens` cap, unlike its two sibling methods
+### 37. [x] MEDIUM — `chat_with_tools` (the highest-fan-out call, up to 8x per query) has no `max_tokens` cap, unlike its two sibling methods — FIXED 2026-08-20 (commit 5739a9c)
 `chat_simple` and `summarize` both accept/forward `max_tokens`; `chat_with_tools` omits it entirely. Orthogonal to #3 (call *frequency*) — this is the *magnitude* dimension: a single one of the up to 8 rounds can itself produce an unbounded-length completion, limited only by the provider's model-level ceiling. Trivial fix, mirror the pattern already used two functions below it in the same file.
 
 ## Test coverage already in place (from the review, not yet acted on)
@@ -150,7 +150,7 @@ Per-tool status text exists but no round counter/elapsed-time, so a user can't t
 ### 18. [ ] Glossary has no version history — updates silently overwrite
 `upsert_glossary_term` does `on_conflict_do_update`, fully replacing `definition` with no history table. Once an entry is edited (maliciously or not), the previous value is unrecoverable — no way to see what a poisoned entry looked like before, or roll back.
 
-### 19. [ ] No length/count limits on glossary entries
+### 19. [x] No length/count limits on glossary entries — FIXED 2026-08-20 (commit 5739a9c)
 `definition` is an unbounded `Text` column, and there's no per-chat cap on the number of glossary rows the LLM can create via `add_to_glossary`. Both allow unbounded growth of what gets injected into every future context that triggers a glossary lookup — a cost/context-bloat risk independent of the injection-content-quality concern in finding #2.
 
 ### 20. [ ] `?`/`??` trigger fires on bare punctuation with no real query, wasting admin API calls
