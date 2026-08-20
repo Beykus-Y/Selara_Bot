@@ -1905,7 +1905,8 @@ def _render_game_text(
 
     if game.kind == "quiz" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
-        lines.append("<i>Выбирайте ответ кнопками под этим сообщением.</i>")
+        lines.append("<b>Сейчас:</b> идёт вопрос, все отвечают одновременно.")
+        lines.append("<b>Что делать:</b> выбирайте ответ кнопками под этим сообщением.")
         question_block = _render_quiz_question(game)
         if question_block:
             lines.append("")
@@ -4857,15 +4858,16 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         )
         return
 
+    choice_label = _quiz_choice_label(option_index)
     if result.previous_answer_index is None:
-        await query.answer("Ответ принят", show_alert=False)
+        await query.answer(f"Ответ принят: {choice_label}", show_alert=False)
         return
 
     if result.previous_answer_index == option_index:
-        await query.answer("Ответ уже учтён", show_alert=False)
+        await query.answer(f"Ответ уже учтён: {choice_label}", show_alert=False)
         return
 
-    await query.answer("Ответ обновлён", show_alert=False)
+    await query.answer(f"Ответ обновлён: {choice_label}", show_alert=False)
 
 
 @router.callback_query(F.data.startswith("gdice:"))
