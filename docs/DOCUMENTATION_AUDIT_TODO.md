@@ -181,6 +181,21 @@ feature: the fix is a real onboarding path, not a standalone patch.
   unit suite green (1348 passed, 1 skipped) after bumping the
   `test_server_ui_baseline.py` template inventory/`panel.css` line-count
   budget to account for the new template and CSS. `git diff --check` clean.
+  Independent adversarial self-review (fresh-context agent) found 2 real
+  bugs before this was reported done: (1) `getting_started_url` was only
+  threaded into the `/start` call site of `_build_home_keyboard` — the
+  other 6 places that rebuild the same home screen ("🔄 Обновить" and every
+  cancel/empty-state path) silently dropped the "Как начать" button on
+  every re-render; (2) `_render_home_text` unconditionally told the user to
+  tap "🚀 Как начать" even when `WEB_ENABLED=False` and no such button
+  exists. Both fixed (all 7 call sites now thread the URL through;
+  the text line is now conditional on the URL being present), with a
+  failing-test-first regression guard for each (including a static
+  AST-based check that every `_build_home_keyboard` call site passes
+  `getting_started_url`, so a future call site can't silently reintroduce
+  the same class of bug) — verified failing on the pre-fix code before
+  re-verifying green after. Full suite green again after the fix
+  (1351 passed, 1 skipped).
 - [ ] Scope discipline: no opportunistic changes outside documentation/
   onboarding. If a genuine product decision comes up that can't be
   unambiguously derived from current behavior, mark it `[?]` here and ask

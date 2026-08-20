@@ -7,6 +7,8 @@ an obvious "Как начать" button linking to a real public route, and that
 existing panel info (group counts, Mini App, PC-panel) is preserved."""
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,8 @@ from selara.presentation.handlers.private_panel import (
     _build_home_keyboard,
     _render_home_text,
 )
+
+_PRIVATE_PANEL_SOURCE = Path(__file__).resolve().parents[2] / "src/selara/presentation/handlers/private_panel.py"
 
 
 def _settings(**overrides) -> Settings:
@@ -92,6 +96,60 @@ def test_home_keyboard_omits_getting_started_button_when_web_disabled():
     )
     buttons = [button for row in markup.inline_keyboard for button in row]
     assert not any("начать" in b.text.lower() for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_home_text_omits_getting_started_line_when_url_is_absent():
+    # Regression: the button is only shown when settings.web_enabled is
+    # true (getting_started_url truthy) -- the text pointing at it must
+    # never claim otherwise, or a user with the web panel disabled is told
+    # to tap a button that doesn't exist.
+    text = await _render_home_text(user=_user(), admin_groups=[], user_groups=[], getting_started_url=None)
+    assert "Как начать" not in text
+
+
+@pytest.mark.asyncio
+async def test_home_text_includes_getting_started_line_when_url_is_present():
+    text = await _render_home_text(
+        user=_user(),
+        admin_groups=[],
+        user_groups=[],
+        getting_started_url="https://selara.example/app/docs/getting-started",
+    )
+    assert "Как начать" in text
+
+
+def _build_home_keyboard_call_sites() -> list[ast.Call]:
+    tree = ast.parse(_PRIVATE_PANEL_SOURCE.read_text(encoding="utf-8"))
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_build_home_keyboard"
+        ):
+            calls.append(node)
+    return calls
+
+
+def test_every_build_home_keyboard_call_site_threads_getting_started_url():
+    # Regression: an earlier revision added `getting_started_url` to
+    # `_build_home_keyboard` but only threaded it through the /start call
+    # site -- the six other places that rebuild the same home screen (the
+    # "🔄 Обновить" callback and every cancel/empty-state path back to home)
+    # silently dropped the button on every re-render. This statically
+    # proves every call site passes the keyword, so a new call site that
+    # forgets it fails immediately instead of only failing at runtime for
+    # users who tap "Обновить".
+    call_sites = _build_home_keyboard_call_sites()
+    assert len(call_sites) >= 7, "expected at least the 7 known call sites -- update this test if that's wrong"
+
+    missing = [
+        call.lineno
+        for call in call_sites
+        if not any(keyword.arg == "getting_started_url" for keyword in call.keywords)
+    ]
+    assert not missing, f"_build_home_keyboard call sites missing getting_started_url at lines: {missing}"
 
 
 def test_home_keyboard_still_has_miniapp_and_desktop_buttons():

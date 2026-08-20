@@ -379,25 +379,38 @@ async def _edit_or_answer(query: CallbackQuery, text: str, reply_markup: InlineK
     await query.answer()
 
 
-async def _render_home_text(*, user, admin_groups: list[UserChatOverview], user_groups: list[UserChatOverview]) -> str:
+async def _render_home_text(
+    *,
+    user,
+    admin_groups: list[UserChatOverview],
+    user_groups: list[UserChatOverview],
+    getting_started_url: str | None = None,
+) -> str:
     display_name = escape(_user_label_from_telegram_user(user))
     # #Discoverability/Onboarding: the first thing a new user sees must be a
     # short, plain-language intro -- not a technical panel. Kept deliberately
     # short (this is not the place for documentation); group counts and the
     # "это ЛС-панель" line stay, just visually below the intro instead of
-    # being the headline.
+    # being the headline. The "Как начать" line only appears when the button
+    # it refers to actually exists (web panel enabled) -- otherwise it would
+    # point a user at a button that isn't there.
     lines = [
         f"<b>💜 Привет, {display_name}! Это Selara</b>",
         "",
         "Бот для групповых чатов: игры, статистика, экономика, отношения, гача "
         "и другие развлечения.",
-        "Если ты здесь впервые — открой короткую инструкцию «🚀 Как начать» ниже. "
-        "За минуту будет понятно, как пользоваться ботом.",
+    ]
+    if getting_started_url:
+        lines.append(
+            "Если ты здесь впервые — открой короткую инструкцию «🚀 Как начать» ниже. "
+            "За минуту будет понятно, как пользоваться ботом."
+        )
+    lines.extend([
         "",
         "Это ЛС-панель Selara.",
         f"<b>Группы, где у вас админ-права бота:</b> <code>{len(admin_groups)}</code>",
         f"<b>Группы из вашей активности:</b> <code>{len(user_groups)}</code>",
-    ]
+    ])
     if not admin_groups and not user_groups:
         lines.extend(
             [
@@ -463,11 +476,16 @@ async def send_private_start_panel(message: Message, activity_repo, economy_repo
 
     admin_groups = await activity_repo.list_user_admin_chats(user_id=message.from_user.id)
     user_groups = await activity_repo.list_user_activity_chats(user_id=message.from_user.id, limit=100)
-    text = await _render_home_text(user=message.from_user, admin_groups=admin_groups, user_groups=user_groups)
+    getting_started_url = _build_getting_started_url(settings)
+    text = await _render_home_text(
+        user=message.from_user,
+        admin_groups=admin_groups,
+        user_groups=user_groups,
+        getting_started_url=getting_started_url,
+    )
     miniapp_url = _build_miniapp_url(settings)
     miniapp_webapp_url = _build_miniapp_webapp_url(settings)
     desktop_url = _build_web_panel_url(settings)
-    getting_started_url = _build_getting_started_url(settings)
     text = _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url)
 
     await message.answer(
@@ -896,7 +914,13 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
     if route == "h":
         admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-        text = await _render_home_text(user=query.from_user, admin_groups=admin_groups, user_groups=user_groups)
+        getting_started_url = _build_getting_started_url(settings)
+        text = await _render_home_text(
+            user=query.from_user,
+            admin_groups=admin_groups,
+            user_groups=user_groups,
+            getting_started_url=getting_started_url,
+        )
         miniapp_url = _build_miniapp_url(settings)
         miniapp_webapp_url = _build_miniapp_webapp_url(settings)
         desktop_url = _build_web_panel_url(settings)
@@ -909,6 +933,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                 miniapp_url=miniapp_url,
                 miniapp_webapp_url=miniapp_webapp_url,
                 desktop_url=desktop_url,
+                getting_started_url=getting_started_url,
             ),
         )
         return
@@ -930,6 +955,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     miniapp_url=miniapp_url,
                     miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
+                    getting_started_url=_build_getting_started_url(settings),
                 ),
             )
             return
@@ -1023,6 +1049,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     miniapp_url=miniapp_url,
                     miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
+                    getting_started_url=_build_getting_started_url(settings),
                 ),
             )
             return
@@ -1083,6 +1110,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     miniapp_url=miniapp_url,
                     miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
+                    getting_started_url=_build_getting_started_url(settings),
                 ),
             )
             return
@@ -1230,6 +1258,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                 miniapp_url=miniapp_url,
                 miniapp_webapp_url=miniapp_webapp_url,
                 desktop_url=desktop_url,
+                getting_started_url=_build_getting_started_url(settings),
             ),
         )
         return
@@ -1251,6 +1280,7 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
                     miniapp_url=miniapp_url,
                     miniapp_webapp_url=miniapp_webapp_url,
                     desktop_url=desktop_url,
+                    getting_started_url=_build_getting_started_url(settings),
                 ),
             )
             return
