@@ -1576,7 +1576,7 @@ def _render_zlob_round_status(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.zlob_submissions
         ]
-        lines.append("<i>Выберите карту(ы) из руки в ЛС или на сайте. Ответы публикуются анонимно.</i>")
+        lines.append("<i>Ответы публикуются анонимно.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже сдали:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
         if waiting_user_ids:
@@ -1597,7 +1597,7 @@ def _render_zlob_round_status(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голосуйте за самый смешной ответ. Голос можно менять до закрытия раунда.</i>")
+        lines.append("<i>Голос можно менять до закрытия раунда.</i>")
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1942,9 +1942,11 @@ def _render_game_text(
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.zlob_rounds}")
         lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
         if game.phase == "private_answers":
-            lines.append("<b>Сейчас:</b> выберите карту(ы) из руки в ЛС или на сайте.")
+            lines.append("<b>Сейчас:</b> сбор карт в ЛС.")
+            lines.append("<b>Что делать:</b> выберите карту(ы) из руки в ЛС или на сайте.")
         elif game.phase == "public_vote":
-            lines.append("<b>Сейчас:</b> голосуйте за лучший анонимный вариант.")
+            lines.append("<b>Сейчас:</b> голосование за лучший анонимный вариант.")
+            lines.append("<b>Что делать:</b> голосуйте кнопкой за лучший вариант.")
         zlob_block = _render_zlob_round_status(game)
         if zlob_block:
             lines.append("")
@@ -1993,45 +1995,68 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
     builder = InlineKeyboardBuilder()
 
     if game.status == "lobby":
+        # Explicit per-row sizing (not the blanket adjust(2) used below for
+        # "started"/DM buttons): numeric ➖/value/➕ steppers must land on
+        # one row together, per Ilya's correction #2 -- the old adjust(2)
+        # blanket split them across row boundaries (e.g. "➕ Раунды" ending
+        # up next to "➖ Цель", a real misclick risk), which is the actual
+        # bug behind the "vertical wall of buttons" complaint, not merely
+        # the existence of separate −/+ buttons.
+        lobby_row_sizes: list[int] = []
+
         builder.button(text="➕ Присоединиться", callback_data=f"game:join:{game.game_id}")
         builder.button(text="➖ Покинуть", callback_data=f"game:leave:{game.game_id}")
+        lobby_row_sizes.append(2)
         builder.button(text="❓ Как играть", callback_data=f"game:lrules:{game.game_id}")
+        lobby_row_sizes.append(1)
 
         if game.kind == "mafia":
             reveal_text = "вкл" if game.reveal_eliminated_role else "выкл"
             builder.button(text=f"🎭 Роль выбывшего: {reveal_text}", callback_data=f"gcfg:{game.game_id}:reveal_elim")
+            lobby_row_sizes.append(1)
         if game.kind == "bredovukha":
             builder.button(text="➖ Раунды", callback_data=f"gcfg:{game.game_id}:bred_rounds_dec")
             builder.button(text=f"🔢 Раундов: {game.bred_rounds}", callback_data=f"gcfg:{game.game_id}:bred_rounds_noop")
             builder.button(text="➕ Раунды", callback_data=f"gcfg:{game.game_id}:bred_rounds_inc")
+            lobby_row_sizes.append(3)
         if game.kind == "spy":
             category_text = _spy_category_label(game)
             if len(category_text) > 18:
                 category_text = f"{category_text[:15]}..."
             builder.button(text=f"🗺 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:spy_cat_next")
+            lobby_row_sizes.append(1)
         if game.kind == "whoami":
             category_text = _whoami_category_label(game)
             if len(category_text) > 18:
                 category_text = f"{category_text[:15]}..."
             builder.button(text=f"🧠 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:whoami_cat_next")
+            lobby_row_sizes.append(1)
         if game.kind == "zlobcards":
             category_text = _zlob_category_label(game)
             if len(category_text) > 18:
                 category_text = f"{category_text[:15]}..."
             builder.button(text=f"😈 Тема: {category_text}", callback_data=f"gcfg:{game.game_id}:zlob_cat_next")
+            lobby_row_sizes.append(1)
             builder.button(text="➖ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_dec")
             builder.button(text=f"🔢 Раунды: {game.zlob_rounds}", callback_data=f"gcfg:{game.game_id}:zlob_rounds_noop")
             builder.button(text="➕ Раунды", callback_data=f"gcfg:{game.game_id}:zlob_rounds_inc")
+            lobby_row_sizes.append(3)
             builder.button(text="➖ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_dec")
             builder.button(text=f"🏁 Цель: {game.zlob_target_score}", callback_data=f"gcfg:{game.game_id}:zlob_target_noop")
             builder.button(text="➕ Цель", callback_data=f"gcfg:{game.game_id}:zlob_target_inc")
+            lobby_row_sizes.append(3)
         if game.kind == "bunker":
             builder.button(text="➖ Места", callback_data=f"gcfg:{game.game_id}:bunker_seats_dec")
             builder.button(text=f"🏚 Мест: {game.bunker_seats}", callback_data=f"gcfg:{game.game_id}:bunker_seats_noop")
             builder.button(text="➕ Места", callback_data=f"gcfg:{game.game_id}:bunker_seats_inc")
+            lobby_row_sizes.append(3)
 
         builder.button(text="🎬 Старт", callback_data=f"game:start:{game.game_id}")
         builder.button(text="🛑 Отменить", callback_data=f"game:cancel:{game.game_id}")
+        lobby_row_sizes.append(2)
+
+        builder.adjust(*lobby_row_sizes)
+        return builder.as_markup()
 
     elif game.status == "started":
         if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
