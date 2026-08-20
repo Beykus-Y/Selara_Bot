@@ -92,7 +92,7 @@ The only way to see the assistant's action history is to ask it (costs an API ca
 ### 33. [ ] LOW — confirmed reactive-only design (likely fine as-is given open injection findings)
 No proactive/background LLM trigger path exists. Flagged for confirmation only — adding one now would expand the injection surface before findings #1/#2/#24 are fixed, so this is arguably a reasonable current constraint, not a gap.
 
-### 34. [ ] LOW — confirmed all-or-nothing permission model, no read-only "ask without moderation power" tier
+### 34. [x] LOW — confirmed all-or-nothing permission model, no read-only "ask without moderation power" tier — FIXED 2026-08-20 (new PERM_USE_LLM_READONLY, purely additive/opt-in)
 `moderate_users` is the single gate for both invoking `?`/`??` and for the assistant's ability to act. No way to let a trusted member query stats/history via the assistant without also trusting them to have it ban people.
 
 ## Pass 5 — final lateral-thinking pass (2026-08-20, read-only)
