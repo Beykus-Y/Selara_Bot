@@ -50,6 +50,45 @@ _MAX_TOOL_ROUNDS = 8
 
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
+    F.text.regexp(r"^\?reset\s*$"),
+)
+async def llm_context_reset_handler(
+    message: Message,
+    activity_repo: Any,
+    db_session: AsyncSession,
+) -> None:
+    """#11: manual escape hatch for a poisoned/bad conversation context --
+    only automatic threshold-triggered summarization existed before, which
+    rolls forward potentially-bad context rather than discarding it.
+    Registered before the generic `?(?!\\?)` handler so `?reset` is matched
+    here first, not treated as a query to the assistant."""
+    if message.from_user is None:
+        return
+
+    allowed, _, _ = await has_permission(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_bot=bool(message.from_user.is_bot),
+        permission="moderate_users",
+        bootstrap_if_missing_owner=False,
+    )
+    if not allowed:
+        await message.reply("⛔ Недостаточно прав для сброса контекста AI-ассистента.")
+        return
+
+    llm_repo = LlmRepository(db_session)
+    cleared = await llm_repo.reset_context(chat_id=message.chat.id)
+    await message.reply(f"✅ Контекст AI-ассистента сброшен ({cleared} сообщений очищено).")
+
+
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
     F.text.regexp(r"^\?\?"),
 )
 async def llm_admin_context_handler(

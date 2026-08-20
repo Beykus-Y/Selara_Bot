@@ -96,3 +96,38 @@ async def test_delete_glossary_term_removes_the_row():
             assert deleted_again is False
     finally:
         await engine.dispose()
+
+
+# --- #11: manual context reset ---
+
+
+@pytest.mark.asyncio
+async def test_reset_context_clears_uncompressed_messages_and_summaries():
+    from datetime import datetime, timezone
+    from selara.infrastructure.db.models import LlmContextMessageModel, LlmContextSummaryModel
+
+    engine, session_factory = await _session_factory()
+    try:
+        async with session_factory() as session:
+            session.add(ChatModel(telegram_chat_id=4, type="supergroup", title="Chat"))
+            session.add(UserModel(telegram_user_id=401, username="admin1", is_bot=False))
+            await session.commit()
+
+            repo = LlmRepository(session)
+            await repo.add_context_message(chat_id=4, role="user", content="hi", is_context=True, admin_user_id=401)
+            await repo.add_summary(
+                chat_id=4, content="old summary", period_start=datetime.now(timezone.utc),
+                period_end=datetime.now(timezone.utc), messages_count=1, level=1,
+            )
+            await session.commit()
+
+            reset_count = await repo.reset_context(chat_id=4)
+            await session.commit()
+            assert reset_count == 1
+
+            remaining_uncompressed = await repo.get_uncompressed_context_messages(chat_id=4)
+            assert remaining_uncompressed == []
+
+            assert await repo.get_latest_summary(chat_id=4) is None
+    finally:
+        await engine.dispose()

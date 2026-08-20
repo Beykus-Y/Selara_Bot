@@ -89,6 +89,29 @@ class LlmRepository:
         )
         await self._session.execute(stmt)
 
+    async def reset_context(self, *, chat_id: int) -> int:
+        """#11: manual escape hatch -- unlike the automatic
+        threshold-triggered summarization (maybe_compress), which rolls
+        forward potentially-bad context, this discards it outright. Marks
+        remaining uncompressed context messages as compressed (so
+        load_context stops returning them) and deletes any summaries for
+        the chat, rather than deleting the message rows themselves (keeps
+        them available via get_history)."""
+        result = await self._session.execute(
+            update(LlmContextMessageModel)
+            .where(
+                LlmContextMessageModel.chat_id == chat_id,
+                LlmContextMessageModel.is_context.is_(True),
+                LlmContextMessageModel.compressed.is_(False),
+            )
+            .values(compressed=True)
+        )
+        await self._session.execute(
+            delete(LlmContextSummaryModel).where(LlmContextSummaryModel.chat_id == chat_id)
+        )
+        await self._session.flush()
+        return result.rowcount
+
     async def get_all_messages_in_range(
         self,
         *,
