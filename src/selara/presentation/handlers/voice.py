@@ -43,12 +43,9 @@ def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
     return chunks
 
 
-@router.message(F.voice)
-async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
-    voice = message.voice
-    if voice is None:
-        return
-
+async def _transcribe_and_reply(
+    message: Message, bot: Bot, stt_client: SttClient, settings: Settings, *, file_id: str, filename: str,
+) -> None:
     if message.from_user is not None:
         key = (message.chat.id, message.from_user.id)
         now = time.monotonic()
@@ -60,7 +57,7 @@ async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClien
     status = await message.reply(_PENDING_TEXT)
 
     try:
-        file = await bot.get_file(voice.file_id)
+        file = await bot.get_file(file_id)
         audio_bytes = await bot.download_file(file.file_path)  # type: ignore[arg-type]
         raw = audio_bytes.read() if hasattr(audio_bytes, "read") else bytes(audio_bytes)
     except Exception as exc:
@@ -69,7 +66,7 @@ async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClien
         return
 
     try:
-        text = await stt_client.transcribe_with_retry(raw, filename="voice.ogg")
+        text = await stt_client.transcribe_with_retry(raw, filename=filename)
     except SttClientError as exc:
         log.warning("voice: STT ошибка: %s", exc.message)
         await status.edit_text(f"❌ Не удалось распознать: {exc.message}")
@@ -79,3 +76,25 @@ async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClien
     await status.edit_text(chunks[0])
     for chunk in chunks[1:]:
         await message.reply(chunk)
+
+
+@router.message(F.voice)
+async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
+    voice = message.voice
+    if voice is None:
+        return
+    await _transcribe_and_reply(message, bot, stt_client, settings, file_id=voice.file_id, filename="voice.ogg")
+
+
+@router.message(F.video_note)
+async def video_note_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
+    """#4: video circle messages ("кружки") carry an audio track in the same
+    mp4 container Telegram voice notes don't use but Whisper already
+    accepts (see SttClient._validate_audio's allowed formats) -- no
+    separate audio-extraction step needed, just pass the file through."""
+    video_note = message.video_note
+    if video_note is None:
+        return
+    await _transcribe_and_reply(
+        message, bot, stt_client, settings, file_id=video_note.file_id, filename="video_note.mp4",
+    )

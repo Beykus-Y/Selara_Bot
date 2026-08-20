@@ -30,11 +30,13 @@ from selara.presentation.handlers.voice import voice_message_handler
 
 def test_voice_router_filter_has_no_permission_or_group_restriction():
     """The only registered filter on the voice handler is `F.voice` - it fires for
-    any user, in any chat type (group or private), regardless of bot-level role."""
+    any user, in any chat type (group or private), regardless of bot-level role.
+    (#4 added a second handler, for F.video_note, with the same lack of
+    permission/group restriction -- only the voice one is checked here.)"""
     from selara.presentation.handlers.voice import router
 
     # aiogram stores registered handlers/filters on the observer.
-    handlers = router.message.handlers
+    handlers = [h for h in router.message.handlers if h.callback.__name__ == "voice_message_handler"]
     assert len(handlers) == 1
     filters = handlers[0].filters
     # Exactly one filter, and it is the bare voice-presence check - nothing else
