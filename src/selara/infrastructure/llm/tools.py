@@ -969,7 +969,7 @@ async def _exec_get_current_time(call: ToolCall, **_: Any) -> ToolResult:
             "type": "object",
             "properties": {
                 "target": {"type": "string", "description": "@username, образ или user_id"},
-                "rank": {"type": "string", "description": "participant | junior_admin | senior_admin | owner"},
+                "rank": {"type": "string", "description": "participant | junior_admin | senior_admin | co_owner | owner"},
             },
             "required": ["target", "rank"],
         },
