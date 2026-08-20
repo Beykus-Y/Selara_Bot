@@ -173,6 +173,23 @@ def test_admin_guide_smart_triggers_match_catalog() -> None:
     _assert_all_present(section, _base_words("admin_smart_triggers"), context="ADMIN_GUIDE.md 9.1 (smart triggers)")
 
 
+def test_admin_guide_web_panel_section_cites_real_permission_codes() -> None:
+    """ADMIN_GUIDE.md 10.2 (added with the Getting Started onboarding work)
+    tells admins which bot permissions gate web-panel actions -- if any of
+    those codes were ever renamed in code, the doc would be pointing admins
+    at a permission that no longer exists."""
+    from selara.core.roles import (
+        PERM_MANAGE_COMMAND_ACCESS,
+        PERM_MANAGE_ROLE_TEMPLATES,
+        PERM_MANAGE_SETTINGS,
+    )
+
+    section = _section(ADMIN_GUIDE, "## 10.2. Веб-панель (Mini App и ПК-панель)")
+    for perm in (PERM_MANAGE_SETTINGS, PERM_MANAGE_COMMAND_ACCESS, PERM_MANAGE_ROLE_TEMPLATES):
+        assert perm in section, f"ADMIN_GUIDE.md 10.2: missing permission code {perm!r}"
+    assert "/login" in section, "ADMIN_GUIDE.md 10.2: must document the /login command that issues the PC-panel code"
+
+
 def test_admin_guide_settings_section_lists_every_chat_setting_key() -> None:
     """ADMIN_GUIDE.md's `/setcfg <key> <value>` section must mention every
     real chat-settings key, or an admin has no way to discover it exists

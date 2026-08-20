@@ -225,7 +225,16 @@ feature: the fix is a real onboarding path, not a standalone patch.
 - [x] ADMIN_GUIDE.md §7/§10.1 — minor alias completeness (missing
   разпред/анпред/разварн/анварн/анбан + English forms), subscription-gate
   wording precision.
-- [ ] ADMIN_GUIDE.md — a proper first-class Mini App / web panel section.
+- [x] ADMIN_GUIDE.md — a proper first-class Mini App / web panel section.
+  Added §10.2 "Веб-панель (Mini App и ПК-панель)": the two entry paths
+  (Mini App button, no separate login; `/login` bot command → one-time
+  code → PC-panel), what's inside the cabinet (group list, per-group
+  overview/achievements/settings/audit+aliases/triggers tabs, games,
+  account achievements, docs incl. the new Getting Started page), and that
+  web actions require the same bot permissions as chat commands. Drift-guard
+  test added (`test_admin_guide_web_panel_section_cites_real_permission_codes`
+  in `test_guide_docs_match_catalog.py`) checking the cited permission codes
+  and `/login` are real.
 
 ## Confirmed accurate, no change needed
 
