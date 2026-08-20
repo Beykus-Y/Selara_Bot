@@ -1386,6 +1386,24 @@ class GameStore:
             game.bunker_seats_tuned = True
             return game, None
 
+    async def carry_over_bunker_seats(self, *, game_id: str, seats: int) -> tuple[GroupGame | None, str | None]:
+        """Copy a manually-tuned seat count onto a freshly-created rematch
+        lobby. Unlike set_bunker_seats(), this is not a live-lobby edit --
+        the new lobby only has its owner at this point, so the usual
+        seats < players_count guard would always reject the copy. Only call
+        this when the source game's seats were genuinely tuned by a human;
+        an auto-computed count should be left alone so the new lobby keeps
+        auto-scaling as players join."""
+        async with self._lock:
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "Игра не найдена"
+            if game.kind != "bunker" or game.status != "lobby" or seats < 2:
+                return game, None
+            game.bunker_seats = seats
+            game.bunker_seats_tuned = True
+            return game, None
+
     async def set_spy_category(
         self,
         *,

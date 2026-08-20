@@ -4389,8 +4389,8 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if game.kind == "zlobcards":
             new_game, _ = await GAME_STORE.set_zlob_rounds(game_id=new_game.game_id, rounds=game.zlob_rounds)
             new_game, _ = await GAME_STORE.set_zlob_target_score(game_id=new_game.game_id, target_score=game.zlob_target_score)
-        if game.kind == "bunker":
-            new_game, _ = await GAME_STORE.set_bunker_seats(game_id=new_game.game_id, seats=game.bunker_seats)
+        if game.kind == "bunker" and game.bunker_seats_tuned:
+            new_game, _ = await GAME_STORE.carry_over_bunker_seats(game_id=new_game.game_id, seats=game.bunker_seats)
         if new_game is None:
             await query.answer("Не удалось создать новую игру", show_alert=False)
             return

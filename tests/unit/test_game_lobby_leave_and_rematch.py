@@ -267,3 +267,79 @@ def test_finished_board_has_a_rematch_button_and_no_other_action_buttons() -> No
     assert markup is not None
     callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
     assert callbacks == ["game:rematch:g2"]
+
+
+@pytest.mark.asyncio
+async def test_bunker_rematch_keeps_auto_scaling_seats_when_original_was_never_tuned(monkeypatch) -> None:
+    # Cold-review finding: rematch always calls set_bunker_seats() to copy
+    # the previous game's seat count, which as a side effect marks the new
+    # lobby's seats as manually "tuned" (bunker_seats_tuned=True) even if
+    # the original lobby's seat count was purely auto-computed from player
+    # count and never touched by a human. That would silently break
+    # auto-scaling for every Bunker rematch. Only carry the seat count over
+    # when it was genuinely tuned in the finished game.
+    store = GameStore()
+    monkeypatch.setattr(game_router, "GAME_STORE", store)
+    safe_edit_mock = AsyncMock()
+    monkeypatch.setattr(game_router, "_safe_edit_or_send_game_board", safe_edit_mock)
+
+    game, error = await store.create_lobby(
+        kind="bunker", chat_id=-100, chat_title="chat",
+        owner_user_id=1, owner_label="owner", reveal_eliminated_role=True,
+    )
+    assert error is None
+    for uid in range(2, 7):
+        await store.join(game_id=game.game_id, user_id=uid, user_label=f"u{uid}")
+    assert game.bunker_seats_tuned is False  # never manually set
+
+    started, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    finished = await store.finish(game_id=started.game_id, winner_text="done")
+    assert finished is not None
+    assert finished.bunker_seats_tuned is False
+
+    query = FakeQuery(user_id=1, data=f"game:rematch:{finished.game_id}")
+    await game_router.game_callback(
+        query, bot=SimpleNamespace(), chat_settings=_chat_settings(),
+        activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
+    )
+
+    new_game = safe_edit_mock.await_args.args[1]
+    assert new_game.bunker_seats_tuned is False, (
+        "rematching a never-tuned Bunker game must not lock in a fixed seat "
+        "count -- the new lobby should keep auto-scaling as players join"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bunker_rematch_preserves_a_manually_tuned_seat_count(monkeypatch) -> None:
+    store = GameStore()
+    monkeypatch.setattr(game_router, "GAME_STORE", store)
+    safe_edit_mock = AsyncMock()
+    monkeypatch.setattr(game_router, "_safe_edit_or_send_game_board", safe_edit_mock)
+
+    game, error = await store.create_lobby(
+        kind="bunker", chat_id=-100, chat_title="chat",
+        owner_user_id=1, owner_label="owner", reveal_eliminated_role=True,
+    )
+    assert error is None
+    for uid in range(2, 7):
+        await store.join(game_id=game.game_id, user_id=uid, user_label=f"u{uid}")
+    tuned, tune_error = await store.set_bunker_seats(game_id=game.game_id, seats=3)
+    assert tune_error is None
+    assert tuned.bunker_seats_tuned is True
+
+    started, start_error = await store.start(game_id=game.game_id)
+    assert start_error is None
+    finished = await store.finish(game_id=started.game_id, winner_text="done")
+    assert finished is not None
+
+    query = FakeQuery(user_id=1, data=f"game:rematch:{finished.game_id}")
+    await game_router.game_callback(
+        query, bot=SimpleNamespace(), chat_settings=_chat_settings(),
+        activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
+    )
+
+    new_game = safe_edit_mock.await_args.args[1]
+    assert new_game.bunker_seats == 3
+    assert new_game.bunker_seats_tuned is True
