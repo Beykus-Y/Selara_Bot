@@ -1950,6 +1950,14 @@ class LlmChatGlossaryModel(Base):
     )
     term: Mapped[str] = mapped_column(String(256), nullable=False)
     definition: Mapped[str] = mapped_column(Text, nullable=False)
+    # #17: author tracking -- who added/last edited this entry, relevant
+    # for tracing back a glossary-poisoning incident (#2).
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True,
+    )
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1960,6 +1968,32 @@ class LlmChatGlossaryModel(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "term", name="uq_llm_glossary_chat_term"),
         Index("idx_llm_glossary_chat", "chat_id"),
+    )
+
+
+class LlmChatGlossaryHistoryModel(Base):
+    """#18: records the definition being replaced before each overwrite, so
+    a poisoned or otherwise-bad edit can be inspected/recovered rather than
+    silently lost."""
+    __tablename__ = "llm_chat_glossary_history"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    term: Mapped[str] = mapped_column(String(256), nullable=False)
+    previous_definition: Mapped[str] = mapped_column(Text, nullable=False)
+    changed_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True,
+    )
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_llm_glossary_history_chat_term", "chat_id", "term"),
     )
 
 

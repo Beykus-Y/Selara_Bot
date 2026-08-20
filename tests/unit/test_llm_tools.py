@@ -786,3 +786,116 @@ async def test_set_rank_success(chat_snapshot, actor_snapshot, target_user, acti
     data = json.loads(result.result_text)
     assert data["new_rank"] == "junior_admin"
     assert data["previous_rank"] == "participant"
+
+
+# --- #6/#16/#17: glossary management tools (remove_from_glossary, list_glossary), author tracking ---
+
+
+@pytest.mark.asyncio
+async def test_add_to_glossary_records_actor_as_author(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    llm_repo.list_glossary = AsyncMock(return_value=[])
+    llm_repo.upsert_glossary_term = AsyncMock(return_value=SimpleNamespace(term="рест", definition="def"))
+
+    await execute_tool(
+        ToolCall(name="add_to_glossary", arguments={"term": "рест", "definition": "def"}, call_id="ag-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    kwargs = llm_repo.upsert_glossary_term.await_args.kwargs
+    assert kwargs["actor_user_id"] == actor_snapshot.telegram_user_id
+
+
+@pytest.mark.asyncio
+async def test_remove_from_glossary_requires_moderate_users(chat_snapshot, actor_snapshot, llm_repo):
+    activity_repo = MagicMock()
+    activity_repo.get_effective_role_definition = AsyncMock(
+        return_value=_role(chat_snapshot.telegram_chat_id, "participant", 0)
+    )
+    llm_repo.delete_glossary_term = AsyncMock()
+
+    result = await execute_tool(
+        ToolCall(name="remove_from_glossary", arguments={"term": "рест"}, call_id="rg-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is False
+    llm_repo.delete_glossary_term.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remove_from_glossary_success_offers_restore_undo(
+    chat_snapshot, actor_snapshot, activity_repo, llm_repo
+):
+    llm_repo.lookup_glossary_term = AsyncMock(
+        return_value=SimpleNamespace(term="рест", definition="official definition")
+    )
+    llm_repo.delete_glossary_term = AsyncMock(return_value=True)
+
+    result = await execute_tool(
+        ToolCall(name="remove_from_glossary", arguments={"term": "рест"}, call_id="rg-2"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    llm_repo.delete_glossary_term.assert_awaited_once()
+    assert result.undo_payload == {
+        "tool": "restore_glossary_term", "term": "рест", "definition": "official definition",
+        "chat_id": chat_snapshot.telegram_chat_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_remove_from_glossary_not_found(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    llm_repo.lookup_glossary_term = AsyncMock(return_value=None)
+
+    result = await execute_tool(
+        ToolCall(name="remove_from_glossary", arguments={"term": "нет такого"}, call_id="rg-3"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_list_glossary_success(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    llm_repo.list_glossary = AsyncMock(
+        return_value=[SimpleNamespace(term="рест", definition="отпуск от нормы")]
+    )
+
+    result = await execute_tool(
+        ToolCall(name="list_glossary", arguments={}, call_id="lgl-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["terms"][0]["term"] == "рест"
+    assert "отпуск" in data["terms"][0]["definition"]
+
+
+@pytest.mark.asyncio
+async def test_rollback_restores_deleted_glossary_term(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    """The restore-glossary-term rollback (via build_rollback_call) must go
+    through the same moderate_users check as the forward remove_from_glossary."""
+    llm_repo.upsert_glossary_term = AsyncMock(return_value=SimpleNamespace(term="рест", definition="official definition"))
+
+    call = build_rollback_call(
+        {"tool": "restore_glossary_term", "term": "рест", "definition": "official definition"},
+        call_id="rollback:1",
+    )
+    result = await execute_tool(
+        call,
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    llm_repo.upsert_glossary_term.assert_awaited_once()
+    kwargs = llm_repo.upsert_glossary_term.await_args.kwargs
+    assert kwargs["term"] == "рест"
+    assert kwargs["definition"] == "official definition"

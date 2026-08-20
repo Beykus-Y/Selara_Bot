@@ -141,6 +141,7 @@ _UNDO_TOOL_TO_REGISTERED: dict[str, str] = {
     "unpred": "remove_pred",
     "revoke_persona": "revoke_persona",
     "set_rank": "set_rank",
+    "restore_glossary_term": "add_to_glossary",
 }
 
 
@@ -150,10 +151,17 @@ def build_rollback_call(payload: dict, *, call_id: str) -> ToolCall:
     choke point as the original forward action (fixes #21 -- the rollback
     handler used to call repository methods directly, bypassing authorization
     entirely and re-implementing only the set_rank check by hand)."""
-    undo_tool = payload.get("tool")
-    registered_name = _UNDO_TOOL_TO_REGISTERED.get(str(undo_tool))
+    undo_tool = str(payload.get("tool"))
+    registered_name = _UNDO_TOOL_TO_REGISTERED.get(undo_tool)
     if registered_name is None:
         raise ValueError(f"Неизвестный тип отката: {undo_tool}")
+
+    if undo_tool == "restore_glossary_term":
+        return ToolCall(
+            name=registered_name,
+            arguments={"term": payload.get("term", ""), "definition": payload.get("definition", "")},
+            call_id=call_id,
+        )
 
     target_user_id = payload.get("target_user_id")
     if target_user_id is None:
@@ -1404,12 +1412,92 @@ async def _exec_add_to_glossary(
         chat_id=chat_snapshot.telegram_chat_id,
         term=term,
         definition=definition,
+        actor_user_id=actor_snapshot.telegram_user_id,
     )
     return _ok(
         call.call_id, call.name,
         {"ok": True, "term": row.term, "definition": _untrusted(row.definition)},
         f"Словарь: '{row.term}' записан",
     )
+
+
+@register_tool(
+    "remove_from_glossary",
+    schema={
+        "description": (
+            "Удалить термин из словаря чата. Используй для восстановления после "
+            "ошибочной или вредоносной записи в словаре."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "term": {"type": "string", "description": "Термин для удаления"},
+            },
+            "required": ["term"],
+        },
+    },
+    status_text="Удаляю из словаря: {term}...",
+)
+async def _exec_remove_from_glossary(
+    call: ToolCall,
+    *,
+    chat_snapshot: ChatSnapshot,
+    actor_snapshot: UserSnapshot,
+    activity_repo: Any,
+    llm_repo: LlmRepository,
+    **_: Any,
+) -> ToolResult:
+    # #6: recovery path for a poisoned glossary entry -- same permission
+    # bar as writing (#34: not available to use_llm_readonly-only actors).
+    actor_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_snapshot.telegram_chat_id, user_id=actor_snapshot.telegram_user_id,
+    )
+    if actor_role is None or "moderate_users" not in set(actor_role.permissions):
+        return _err(call.call_id, call.name, "Недостаточно прав для удаления из словаря.")
+
+    term = call.arguments.get("term", "").strip()
+    if not term:
+        return _err(call.call_id, call.name, "Термин не указан.")
+
+    existing = await llm_repo.lookup_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term)
+    if existing is None:
+        return _err(call.call_id, call.name, f"Термин '{term}' не найден.")
+
+    await llm_repo.delete_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term)
+
+    return _ok(
+        call.call_id, call.name,
+        {"ok": True, "term": existing.term},
+        f"Словарь: '{existing.term}' удалён",
+        undo={
+            "tool": "restore_glossary_term",
+            "term": existing.term,
+            "definition": existing.definition,
+            "chat_id": chat_snapshot.telegram_chat_id,
+        },
+    )
+
+
+@register_tool(
+    "list_glossary",
+    schema={
+        "description": "Список всех терминов в словаре чата с определениями.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    status_text="Загружаю словарь чата...",
+)
+async def _exec_list_glossary(
+    call: ToolCall,
+    *,
+    chat_snapshot: ChatSnapshot,
+    llm_repo: LlmRepository,
+    **_: Any,
+) -> ToolResult:
+    # #16: list_glossary the repository method already existed but had zero
+    # call sites -- no way to see what's in a chat's glossary at all.
+    rows = await llm_repo.list_glossary(chat_id=chat_snapshot.telegram_chat_id)
+    terms = [{"term": r.term, "definition": _untrusted(r.definition)} for r in rows]
+    return _ok(call.call_id, call.name, {"terms": terms, "count": len(terms)}, f"Словарь чата ({len(terms)})")
 
 
 @register_tool(

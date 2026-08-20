@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.infrastructure.db.models import (
     LlmAdminActionModel,
+    LlmChatGlossaryHistoryModel,
     LlmChatGlossaryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
@@ -234,25 +234,81 @@ class LlmRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def upsert_glossary_term(self, *, chat_id: int, term: str, definition: str) -> LlmChatGlossaryModel:
+    async def upsert_glossary_term(
+        self, *, chat_id: int, term: str, definition: str, actor_user_id: int | None = None,
+    ) -> LlmChatGlossaryModel:
+        """#17/#18: tracks who wrote/last edited an entry, and records the
+        replaced definition in llm_chat_glossary_history before overwriting
+        it, so a poisoned or otherwise-bad edit can be inspected/recovered
+        instead of silently lost. Uses a plain select-then-write (not the
+        previous single-statement upsert) because capturing the pre-update
+        value for history requires seeing it before the overwrite -- a
+        narrow TOCTOU window on concurrent writes to the *same* term is
+        acceptable here (audit trail, not a security/consistency-critical
+        path like the moderation-action locks elsewhere in this codebase)."""
         normalized = term.lower().strip()
-        stmt = (
-            pg_insert(LlmChatGlossaryModel)
-            .values(chat_id=chat_id, term=normalized, definition=definition)
-            .on_conflict_do_update(
-                constraint="uq_llm_glossary_chat_term",
-                set_={"definition": definition, "updated_at": datetime.now(timezone.utc)},
+        existing = await self._session.execute(
+            select(LlmChatGlossaryModel).where(
+                LlmChatGlossaryModel.chat_id == chat_id,
+                LlmChatGlossaryModel.term == normalized,
             )
-            .returning(LlmChatGlossaryModel)
         )
-        result = await self._session.execute(stmt)
+        row = existing.scalar_one_or_none()
+        if row is not None:
+            self._session.add(LlmChatGlossaryHistoryModel(
+                chat_id=chat_id,
+                term=normalized,
+                previous_definition=row.definition,
+                changed_by_user_id=actor_user_id,
+            ))
+            row.definition = definition
+            row.updated_by_user_id = actor_user_id
+            row.updated_at = datetime.now(timezone.utc)
+        else:
+            row = LlmChatGlossaryModel(
+                chat_id=chat_id,
+                term=normalized,
+                definition=definition,
+                created_by_user_id=actor_user_id,
+                updated_by_user_id=actor_user_id,
+            )
+            self._session.add(row)
         await self._session.flush()
-        return result.scalar_one()
+        return row
 
     async def list_glossary(self, *, chat_id: int) -> list[LlmChatGlossaryModel]:
         stmt = (
             select(LlmChatGlossaryModel)
             .where(LlmChatGlossaryModel.chat_id == chat_id)
             .order_by(LlmChatGlossaryModel.term.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def delete_glossary_term(self, *, chat_id: int, term: str) -> bool:
+        """#6: recovery path for a poisoned glossary entry."""
+        normalized = term.lower().strip()
+        result = await self._session.execute(
+            delete(LlmChatGlossaryModel).where(
+                LlmChatGlossaryModel.chat_id == chat_id,
+                LlmChatGlossaryModel.term == normalized,
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def get_glossary_history(
+        self, *, chat_id: int, term: str, limit: int = 10,
+    ) -> list[LlmChatGlossaryHistoryModel]:
+        """#18: lets an admin see what a poisoned/bad entry looked like
+        before the most recent edit(s)."""
+        normalized = term.lower().strip()
+        stmt = (
+            select(LlmChatGlossaryHistoryModel)
+            .where(
+                LlmChatGlossaryHistoryModel.chat_id == chat_id,
+                LlmChatGlossaryHistoryModel.term == normalized,
+            )
+            .order_by(LlmChatGlossaryHistoryModel.changed_at.desc())
+            .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
