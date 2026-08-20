@@ -279,9 +279,19 @@ chance(rarity) = sum(weight карт этой редкости) / sum(weight в�
 
 `POST /v1/gacha/pull`
 
+`POST /v1/gacha/pull/purchase` — платная крутка (за валюту гачи, а не за бесплатный кулдаун).
+
+`GET /v1/gacha/banners/{banner}/cards` — список всех карт баннера с их редкостью.
+
+`GET /v1/gacha/users/{user_id}/collection` — коллекция карт пользователя (какие есть и в каком количестве).
+
+`POST /v1/gacha/pulls/{pull_id}/sell` — продать конкретную крутку (обычно дубль карты) за валюту гачи.
+
 `POST /v1/gacha/admin/cooldowns/reset`
 
 `POST /v1/gacha/admin/give`
+
+`POST /v1/gacha/admin/currency/grant` — идемпотентное начисление валюты гачи пользователю (для интеграции с основным ботом).
 
 `POST /v1/gacha/admin/backup`
 
