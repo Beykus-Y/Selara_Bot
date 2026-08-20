@@ -547,3 +547,241 @@ async def test_add_to_glossary_allows_updating_existing_term_when_chat_glossary_
     )
     assert result.success is True
     llm_repo.upsert_glossary_term.assert_awaited_once()
+
+
+# --- #26: success-path coverage for previously-untested executors ---
+
+
+@pytest.mark.asyncio
+async def test_warn_user_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.apply_moderation_action = AsyncMock(
+        return_value=SimpleNamespace(state=SimpleNamespace(warn_count=1), auto_ban_triggered=False)
+    )
+
+    result = await execute_tool(
+        ToolCall(name="warn_user", arguments={"target": "@target_user", "reason": "spam"}, call_id="w-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["warn_count"] == 1
+    assert result.undo_payload == {"tool": "unwarn", "target_user_id": 222, "chat_id": -100123}
+    activity_repo.apply_moderation_action.assert_awaited_once()
+    assert activity_repo.apply_moderation_action.await_args.kwargs["action"] == "warn"
+
+
+@pytest.mark.asyncio
+async def test_ban_user_success_calls_telegram_and_records_undo(
+    chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo
+):
+    activity_repo.apply_moderation_action = AsyncMock(return_value=SimpleNamespace())
+    bot = AsyncMock()
+
+    result = await execute_tool(
+        ToolCall(name="ban_user", arguments={"target": "@target_user", "reason": "abuse"}, call_id="b-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo, bot=bot,
+    )
+
+    assert result.success is True
+    bot.ban_chat_member.assert_awaited_once_with(chat_id=-100123, user_id=222)
+    assert result.undo_payload == {"tool": "unban", "target_user_id": 222, "chat_id": -100123}
+
+
+@pytest.mark.asyncio
+async def test_unwarn_user_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.apply_moderation_action = AsyncMock(
+        return_value=SimpleNamespace(state=SimpleNamespace(warn_count=0))
+    )
+
+    result = await execute_tool(
+        ToolCall(name="unwarn_user", arguments={"target": "@target_user"}, call_id="uw-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    assert result.undo_payload is None
+    assert activity_repo.apply_moderation_action.await_args.kwargs["action"] == "unwarn"
+
+
+@pytest.mark.asyncio
+async def test_unban_user_success_calls_telegram_unban(
+    chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo
+):
+    activity_repo.apply_moderation_action = AsyncMock(return_value=SimpleNamespace())
+    bot = AsyncMock()
+
+    result = await execute_tool(
+        ToolCall(name="unban_user", arguments={"target": "@target_user"}, call_id="ub-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo, bot=bot,
+    )
+
+    assert result.success is True
+    bot.unban_chat_member.assert_awaited_once_with(chat_id=-100123, user_id=222)
+
+
+@pytest.mark.asyncio
+async def test_apply_pred_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.apply_moderation_action = AsyncMock(
+        return_value=SimpleNamespace(state=SimpleNamespace(pending_preds=1), auto_warns_added=0)
+    )
+
+    result = await execute_tool(
+        ToolCall(name="apply_pred", arguments={"target": "@target_user"}, call_id="p-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    assert result.undo_payload == {"tool": "unpred", "target_user_id": 222, "chat_id": -100123}
+
+
+@pytest.mark.asyncio
+async def test_remove_pred_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.apply_moderation_action = AsyncMock(
+        return_value=SimpleNamespace(state=SimpleNamespace(pending_preds=0))
+    )
+
+    result = await execute_tool(
+        ToolCall(name="remove_pred", arguments={"target": "@target_user"}, call_id="rp-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    assert result.undo_payload is None
+
+
+@pytest.mark.asyncio
+async def test_grant_persona_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.set_chat_persona_label = AsyncMock(return_value="Дракон")
+
+    result = await execute_tool(
+        ToolCall(name="grant_persona", arguments={"target": "@target_user", "label": "Дракон"}, call_id="gp-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    activity_repo.set_chat_persona_label.assert_awaited_once()
+    assert result.undo_payload == {"tool": "revoke_persona", "target_user_id": 222, "chat_id": -100123}
+
+
+@pytest.mark.asyncio
+async def test_revoke_persona_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.get_chat_persona_label = AsyncMock(return_value="Дракон")
+    activity_repo.clear_chat_persona_label = AsyncMock(return_value=True)
+
+    result = await execute_tool(
+        ToolCall(name="revoke_persona", arguments={"target": "@target_user"}, call_id="rvp-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["removed_label"] == "Дракон"
+
+
+@pytest.mark.asyncio
+async def test_get_chat_stats_success(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    execute_results = [
+        MagicMock(scalar_one=MagicMock(return_value=10)),
+        MagicMock(scalar_one=MagicMock(return_value=7)),
+        MagicMock(scalar_one=MagicMock(return_value=2)),
+    ]
+    activity_repo._session = SimpleNamespace(execute=AsyncMock(side_effect=execute_results))
+
+    result = await execute_tool(
+        ToolCall(name="get_chat_stats", arguments={}, call_id="gcs-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data == {"total_members": 10, "active_members": 7, "currently_rested": 2}
+
+
+@pytest.mark.asyncio
+async def test_get_audit_log_success(chat_snapshot, actor_snapshot, activity_repo, llm_repo):
+    entry = SimpleNamespace(
+        action_code="ban", description="Бан за спам", actor_user_id=111, target_user_id=222,
+        created_at="2026-08-20T00:00:00Z",
+    )
+    activity_repo.list_audit_logs = AsyncMock(return_value=[entry])
+
+    result = await execute_tool(
+        ToolCall(name="get_audit_log", arguments={"limit": 5}, call_id="gal-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["log"][0]["action"] == "ban"
+    activity_repo.list_audit_logs.assert_awaited_once_with(chat_id=-100123, limit=5)
+
+
+@pytest.mark.asyncio
+async def test_lookup_glossary_found(chat_snapshot, actor_snapshot, llm_repo):
+    llm_repo.lookup_glossary_term = AsyncMock(
+        return_value=SimpleNamespace(term="рест", definition="отпуск от нормы активности")
+    )
+
+    result = await execute_tool(
+        ToolCall(name="lookup_glossary", arguments={"term": "рест"}, call_id="lg-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(), llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["found"] is True
+    assert "отпуск" in data["definition"]
+
+
+@pytest.mark.asyncio
+async def test_lookup_glossary_not_found(chat_snapshot, actor_snapshot, llm_repo):
+    llm_repo.lookup_glossary_term = AsyncMock(return_value=None)
+
+    result = await execute_tool(
+        ToolCall(name="lookup_glossary", arguments={"term": "неизвестный"}, call_id="lg-2"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(), llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["found"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_rank_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+    activity_repo.get_effective_role_definition = AsyncMock(
+        side_effect=[
+            _role(chat_snapshot.telegram_chat_id, "owner", 40, "manage_roles"),
+            _role(chat_snapshot.telegram_chat_id, "participant", 0),
+        ]
+    )
+    activity_repo.get_chat_role_definition = AsyncMock(
+        return_value=_role(chat_snapshot.telegram_chat_id, "junior_admin", 10, "moderate_users")
+    )
+    activity_repo.get_bot_role = AsyncMock(return_value=None)
+    activity_repo.set_bot_role = AsyncMock()
+
+    result = await execute_tool(
+        ToolCall(name="set_rank", arguments={"target": "@target_user", "rank": "junior_admin"}, call_id="sr-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    activity_repo.set_bot_role.assert_awaited_once()
+    data = json.loads(result.result_text)
+    assert data["new_rank"] == "junior_admin"
+    assert data["previous_rank"] == "participant"
