@@ -40,6 +40,13 @@ class SttClientError(RuntimeError):
         self.message = message
 
 
+class SttTransientError(SttClientError):
+    """Raised for genuinely transient failures (timeout, connection error) --
+    #25: retryability must be decided by exception type, not by
+    substring-matching the already-translated Russian error text (fragile:
+    any future edit to those strings silently breaks retry behavior)."""
+
+
 class SttClient:
     """Клиент для распознавания голосовых сообщений через Whisper-совместимый API.
 
@@ -77,9 +84,9 @@ class SttClient:
                 response_format="text",
             )
         except APITimeoutError as exc:
-            raise SttClientError("STT-сервис не ответил вовремя.") from exc
+            raise SttTransientError("STT-сервис не ответил вовремя.") from exc
         except APIConnectionError as exc:
-            raise SttClientError("Не удалось подключиться к STT-сервису.") from exc
+            raise SttTransientError("Не удалось подключиться к STT-сервису.") from exc
         except APIStatusError as exc:
             raise SttClientError(_extract_api_error(exc)) from exc
 
@@ -113,10 +120,7 @@ class SttClient:
             except SttClientError as exc:
                 last_error = exc
                 is_last = attempt == retries
-                is_retryable = any(
-                    keyword in exc.message
-                    for keyword in ("не ответил", "подключиться")
-                )
+                is_retryable = isinstance(exc, SttTransientError)
                 if is_last or not is_retryable:
                     raise
                 log.warning("STT: попытка %d/%d не удалась: %s", attempt + 1, retries + 1, exc.message)

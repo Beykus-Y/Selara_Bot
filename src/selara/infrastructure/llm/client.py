@@ -77,8 +77,12 @@ class LlmClient:
                 max_tokens=max_tokens,
             )
             return response.choices[0].message.content or ""
-        except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
-            raise LlmClientError(str(exc)) from exc
+        except APITimeoutError as exc:
+            raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
+        except APIConnectionError as exc:
+            raise LlmClientError("Не удалось подключиться к LLM-сервису.") from exc
+        except APIStatusError as exc:
+            raise LlmClientError(_extract_api_error(exc)) from exc
 
     async def summarize(self, messages: list[dict], *, max_tokens: int | None = None) -> str:
         try:
@@ -88,8 +92,12 @@ class LlmClient:
                 max_tokens=max_tokens,
             )
             return response.choices[0].message.content or ""
-        except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
-            raise LlmClientError(str(exc)) from exc
+        except APITimeoutError as exc:
+            raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
+        except APIConnectionError as exc:
+            raise LlmClientError("Не удалось подключиться к LLM-сервису.") from exc
+        except APIStatusError as exc:
+            raise LlmClientError(_extract_api_error(exc)) from exc
 
 
 def _extract_api_error(exc: APIStatusError) -> str:
