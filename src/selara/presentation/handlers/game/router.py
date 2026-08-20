@@ -533,6 +533,13 @@ def _build_game_rules_keyboard(*, kind: GameKind, page: int, requester_user_id: 
     return builder.as_markup()
 
 
+def _build_lobby_rules_keyboard(*, game_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="← Назад", callback_data=f"game:lback:{game_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _build_mafia_day_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
     if game.kind != "mafia" or game.phase != "day_vote" or game.status != "started":
         return None
@@ -1959,6 +1966,7 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
     if game.status == "lobby":
         builder.button(text="➕ Присоединиться", callback_data=f"game:join:{game.game_id}")
         builder.button(text="➖ Покинуть", callback_data=f"game:leave:{game.game_id}")
+        builder.button(text="❓ Как играть", callback_data=f"game:lrules:{game.game_id}")
 
         if game.kind == "mafia":
             reveal_text = "вкл" if game.reveal_eliminated_role else "выкл"
@@ -4324,6 +4332,29 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await GAME_STORE.set_message_id(game_id=new_game.game_id, message_id=query.message.message_id)
         await _safe_edit_or_send_game_board(bot, new_game, chat_settings)
         await query.answer("Новая игра создана", show_alert=False)
+        return
+
+    if action == "lrules":
+        if game.status != "lobby":
+            await query.answer("Правила доступны до старта игры — используйте кнопку «Моя роль»/доску игры.", show_alert=True)
+            return
+        try:
+            await bot.edit_message_text(
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id,
+                text=_render_game_rules_text(game.kind),
+                parse_mode="HTML",
+                reply_markup=_build_lobby_rules_keyboard(game_id=game.game_id),
+            )
+        except TelegramBadRequest as exc:
+            if not _is_stale_callback_query_error(exc):
+                raise
+        await query.answer()
+        return
+
+    if action == "lback":
+        await _safe_edit_or_send_game_board(bot, game, chat_settings)
+        await query.answer()
         return
 
     if action in {"cancel", "advance", "reveal"}:
