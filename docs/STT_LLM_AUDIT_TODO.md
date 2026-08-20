@@ -66,7 +66,7 @@ The whole handler runs in one DB transaction (commit only at the end), but tool 
 ### 25. [x] LOW/MEDIUM — inconsistent error handling; STT retry logic is coupled to translated UI text, not exception types — FIXED 2026-08-20
 `chat_with_tools` translates API errors to safe user-facing text; `chat_simple`/`summarize` don't (raw SDK exception text — low-stakes for `summarize`, but `chat_simple` backs the DM-summary path). `stt/client.py`'s retry decision substring-matches the already-*translated Russian* error string rather than the exception type — any future edit to those message strings silently breaks retry behavior with no test to catch it.
 
-### 26. [ ] LOW — most `tools.py` executors have zero unit test coverage
+### 26. [x] LOW — most `tools.py` executors have zero unit test coverage — FIXED 2026-08-20
 Only `get_user_info`/`grant_rest`/`revoke_rest`/`list_bot_docs`/`read_bot_doc` + the generic rank-rejection/`set_rank` guard are tested. `warn_user`, `ban_user`, `unwarn_user`, `unban_user`, `apply_pred`, `remove_pred`, `grant_persona`, `revoke_persona`, `get_top`, `list_members`, `get_audit_log`, `get_chat_stats`, `add_to_glossary`, `lookup_glossary`, `get_history`, and `set_rank`'s success path have no dedicated tests — against the project's own "tests before logic, every slice" convention. This gap is exactly where #21 should have surfaced.
 
 ## Pass 4 — missing-functionality / UX completeness (2026-08-20, read-only)
