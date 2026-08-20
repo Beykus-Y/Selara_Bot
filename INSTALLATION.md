@@ -59,6 +59,31 @@ WEB_SESSION_COOKIE_SECURE=false
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
 - При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
 
+### 3.3 Опционально: AI-ассистент и голос (STT/LLM)
+
+Обе подсистемы по умолчанию **выключены** (`STT_ENABLED=false`,
+`LLM_ENABLED=false`) — без этого блока в `.env` бот запустится и будет
+работать как обычно, просто без расшифровки голосовых/кружков и без
+`?`/`??`-ассистента.
+
+```env
+STT_ENABLED=true
+STT_API_KEY=<ключ_whisper-совместимого_провайдера>
+STT_BASE_URL=https://api.groq.com/openai/v1
+STT_MODEL=whisper-large-v3
+STT_COOLDOWN_SECONDS=8
+
+LLM_ENABLED=true
+LLM_API_KEY=<ключ_openai-совместимого_провайдера>
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+LLM_COOLDOWN_SECONDS=5
+```
+
+Оба блока принимают любой OpenAI-совместимый API (OpenAI, Groq и т.д.) —
+достаточно поменять `*_BASE_URL`/`*_MODEL`/`*_API_KEY` под своего
+провайдера. Полный список параметров — в `.env.example`.
+
 ---
 
 ## 4. Локальный запуск через Docker Compose
