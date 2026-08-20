@@ -66,33 +66,33 @@ self-review.
 
 ## P1 — real gaps, no active harm but limit users/admins
 
-- [ ] Gacha animated-pull reel + the "🎬 Анимация" per-user toggle button —
+- [x] Gacha animated-pull reel + the "🎬 Анимация" per-user toggle button —
   document in USER_GUIDE.md §6.4 (what it is, that it can be turned off) and
   ADMIN_GUIDE.md §10.1 (that it exists, default-on, per-user not per-chat).
-- [ ] ADMIN_GUIDE.md §6 — add the ~36 missing chat settings keys
+- [x] ADMIN_GUIDE.md §6 — add the ~36 missing chat settings keys
   (welcome/goodbye, entry captcha, antiraid, titles, auctions, craft,
   family tree, custom RP, interesting facts, persona display,
   llm_enabled/llm_context_threshold, etc. — full list in `chat_settings.py`
   `CHAT_SETTINGS_KEYS`). Put the welcome/captcha/antiraid *trigger words*
   here too (admin-configured, not user-facing), not in USER_GUIDE.
-- [ ] ADMIN_GUIDE.md §7 — add rest/persona as direct admin text commands
+- [x] ADMIN_GUIDE.md §7 — add rest/persona as direct admin text commands
   ("выдать рест", "ресты", "забрать рест", "выдать образ", "снять образ",
   "образы"), not just as things the AI assistant can do.
-- [ ] USER_GUIDE.md — add family commands `/adoptdaughter`, `/escapefamily`,
+- [x] USER_GUIDE.md — add family commands `/adoptdaughter`, `/escapefamily`,
   `/escapepet` (§7/§9.5); add "цитировать" (§9.4). These are things a
   regular member directly does, so USER_GUIDE, not ADMIN_GUIDE.
-- [ ] USER_GUIDE.md — remove "gacha-сервис" phrasing and any other
+- [x] USER_GUIDE.md — remove "gacha-сервис" phrasing and any other
   internal/technical wording; rephrase in plain terms a non-developer would
   use.
-- [ ] README.md / INSTALLATION.md — add an STT/LLM env var + opt-in section
+- [x] README.md / INSTALLATION.md — add an STT/LLM env var + opt-in section
   (currently zero mentions despite `.env.example` already documenting them).
-- [ ] docs/bot_docs/glossary.md + capabilities.md — add `remove_from_glossary`,
+- [x] docs/bot_docs/glossary.md + capabilities.md — add `remove_from_glossary`,
   `list_glossary`, `get_current_time` (all real, currently-undocumented tools).
-- [ ] ADMIN_GUIDE.md §13 — mention `get_current_time`.
-- [ ] gacha/README.md — add the 5 missing API endpoints (`/pull/purchase`,
+- [x] ADMIN_GUIDE.md §13 — mention `get_current_time`.
+- [x] gacha/README.md — add the 5 missing API endpoints (`/pull/purchase`,
   `/banners/{banner}/cards`, `/users/{id}/collection`,
   `/admin/currency/grant`, `/pulls/{id}/sell`).
-- [ ] FUNCTIONAL_GAPS_ANALYSIS.md — resolve the internal self-contradiction
+- [x] FUNCTIONAL_GAPS_ANALYSIS.md — resolve the internal self-contradiction (archived with a correcting note rather than rewritten in place)
   (item #3 vs #8 on lastseen) and correct item #1 (chat_write_locked already
   exists and works, `chat_write_lock.py`).
 
@@ -166,7 +166,7 @@ feature: the fix is a real onboarding path, not a standalone patch.
 
 ## P2 — cleanup, no confusion caused today
 
-- [ ] Archive (date + pointer to current source, not delete) unless a file
+- [x] Archive (date + pointer to current source, not delete) unless a file
   has zero remaining value even as a historical record:
   - CONTRADICTIONS.md — all 4 items resolved; archive with a note pointing
     at README.md/INSTALLATION.md as the now-current source.
@@ -177,15 +177,15 @@ feature: the fix is a real onboarding path, not a standalone patch.
   - ACTIONS.md — diverged from the code-generated action list
     (`build_social_action_docs()` / `/app/docs/user`); either resync or
     archive with a pointer to the generator as the real source of truth.
-- [ ] CHANGELOG.md — resume or archive-with-date (currently 6+ days /
+- [x] CHANGELOG.md — resume or archive-with-date (currently 6+ days /
   40+ commits stale).
-- [ ] docs/GACHA_MODERNIZATION_TODO.md — reconcile the self-contradicting
+- [x] docs/GACHA_MODERNIZATION_TODO.md — reconcile the self-contradicting
   status section (top says "all closed", later entries say "in progress"/
   "not fixed" for something the code shows is actually done) before any
   archiving decision.
-- [ ] frontend/README.md — replace the unedited Vite scaffold text with a
+- [x] frontend/README.md — replace the unedited Vite scaffold text with a
   real description (lint pipeline, Docker/nginx deploy, backend relationship).
-- [ ] ADMIN_GUIDE.md §7/§10.1 — minor alias completeness (missing
+- [x] ADMIN_GUIDE.md §7/§10.1 — minor alias completeness (missing
   разпред/анпред/разварн/анварн/анбан + English forms), subscription-gate
   wording precision.
 - [ ] ADMIN_GUIDE.md — a proper first-class Mini App / web panel section.
