@@ -918,6 +918,49 @@ async def _exec_get_chat_stats(
     }, "Статистика чата")
 
 
+_WEEKDAYS_RU = (
+    "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье",
+)
+
+
+def _now_utc() -> datetime:
+    """Seam for tests -- kept as a thin wrapper so get_current_time stays
+    trivially deterministic/mockable rather than calling datetime.now()
+    inline."""
+    return datetime.now(timezone.utc)
+
+
+@register_tool(
+    "get_current_time",
+    schema={
+        "description": (
+            "Получить точные текущие дату и время (UTC и время сервера). "
+            "Используй когда нужно знать текущую дату/время/день недели — "
+            "не вычисляй и не угадывай их самостоятельно."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    status_text="Смотрю текущее время...",
+)
+async def _exec_get_current_time(call: ToolCall, **_: Any) -> ToolResult:
+    """Deterministic, code-only values -- no LLM computation involved, and
+    (unlike every other tool here) no repository/DB access at all."""
+    utc_now = _now_utc()
+    server_now = datetime.now().astimezone()
+    return _ok(
+        call.call_id, call.name,
+        {
+            "utc_datetime": utc_now.isoformat(),
+            "utc_date": utc_now.strftime("%Y-%m-%d"),
+            "utc_time": utc_now.strftime("%H:%M:%S"),
+            "weekday_utc": _WEEKDAYS_RU[utc_now.weekday()],
+            "server_datetime": server_now.isoformat(),
+            "server_timezone": str(server_now.tzinfo),
+        },
+        "Текущее время",
+    )
+
+
 @register_tool(
     "set_rank",
     schema={

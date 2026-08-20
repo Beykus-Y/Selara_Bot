@@ -899,3 +899,49 @@ async def test_rollback_restores_deleted_glossary_term(chat_snapshot, actor_snap
     kwargs = llm_repo.upsert_glossary_term.await_args.kwargs
     assert kwargs["term"] == "рест"
     assert kwargs["definition"] == "official definition"
+
+
+# --- get_current_time: deterministic date/time tool (Ilya's request) ---
+
+
+@pytest.mark.asyncio
+async def test_get_current_time_returns_deterministic_utc_and_server_time(
+    chat_snapshot, actor_snapshot, activity_repo, llm_repo, monkeypatch
+):
+    import selara.infrastructure.llm.tools as tools_module
+    from datetime import datetime, timezone as dt_timezone
+
+    fixed_utc = datetime(2026, 8, 20, 15, 30, 45, tzinfo=dt_timezone.utc)
+    monkeypatch.setattr(tools_module, "_now_utc", lambda: fixed_utc)
+
+    result = await execute_tool(
+        ToolCall(name="get_current_time", arguments={}, call_id="t-1"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    data = json.loads(result.result_text)
+    assert data["utc_date"] == "2026-08-20"
+    assert data["utc_time"] == "15:30:45"
+    assert data["weekday_utc"] == "четверг"
+    assert data["utc_datetime"].startswith("2026-08-20T15:30:45")
+    assert "server_datetime" in data
+    assert "server_timezone" in data
+
+
+@pytest.mark.asyncio
+async def test_get_current_time_does_not_call_llm_or_any_repo(chat_snapshot, actor_snapshot):
+    """Must be purely deterministic -- no repo/DB/LLM calls at all."""
+    activity_repo = MagicMock()
+    llm_repo = MagicMock()
+
+    result = await execute_tool(
+        ToolCall(name="get_current_time", arguments={}, call_id="t-2"),
+        chat_snapshot=chat_snapshot, actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo, llm_repo=llm_repo,
+    )
+
+    assert result.success is True
+    activity_repo.assert_not_called()
+    llm_repo.assert_not_called()
