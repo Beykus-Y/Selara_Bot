@@ -521,19 +521,44 @@ no push/deploy without separate permission.
   page/detail/rules render done (Telegram bot UI — no browser/screenshot
   path applies here; this is the equivalent check).
 
-### Stage 2 — Spy as the reference game
-- [ ] New lobby UX (leave button, single-row numeric config where applicable)
-- [ ] Leave button
-- [ ] DM/deep-link recovery (button + @mention, reusing the existing
-  `?start=game_{id}` mechanism)
-- [ ] Clear current-state instructions on the board (что происходит →
-  что делать → чего ждём)
-- [ ] Result screen
-- [ ] Rematch (`🔁 Ещё раз`, per correction #3)
+### Stage 2 — Spy as the reference game — DONE (2026-08-20, commit c4e713f)
+- [x] New lobby UX — Spy has no numeric config (only a category-cycle
+  button), so there was no stepper-triple to row-pack here; leave button
+  added (see below).
+- [x] Leave button — `GameStore.leave()` (mirrors `join()`, rejects the
+  owner and rejects once started) + `game:leave:` callback +
+  `➖ Покинуть` in the lobby keyboard. This is shared lobby infra (same
+  code path as join/start), so every game's lobby gets it, not just
+  Spy's — consistent with Stage 1's catalog being shared infra too.
+- [x] DM/deep-link recovery — verified already correct for Spy (the
+  `?start=game_{id}` mechanism + "🕵️ Моя роль" button both work as-is,
+  per the original audit). No code change needed here; the broader
+  unified-warning fix (button + @mention replacing the bare-count
+  message) is explicitly Stage 3 scope, not Stage 2.
+- [x] Clear current-state instructions — Spy's board text now separates
+  "Сейчас: обсуждение..." from "Что делать: задавайте вопросы...
+  голосуйте кнопкой ниже." instead of one blended sentence.
+- [x] Result screen — verified already clear for Spy (reveals who was
+  the spy, whether the accusation was correct, the location, plus the
+  generic "Итог:" winner line). No change needed.
+- [x] Rematch (`🔁 Ещё раз`, per correction #3) — `game:rematch:`
+  callback + button on finished boards. New lobby, same kind, settings
+  copied (category/rounds/target-score/seats where the kind has them),
+  players NOT carried over. Shared infra like leave — applies to every
+  game's finished board.
+- Tests: `test_game_lobby_leave_and_rematch.py` (10 tests: GameStore
+  methods, handler-level leave/rematch, keyboard presence). Full unit
+  suite green (1381 passed, 1 skipped).
+- Manual review: full Spy walkthrough (empty lobby → 3-player lobby →
+  started/freeplay → finished) rendered and read end-to-end — board
+  text, keyboard rows, and the finished state (rematch button only, no
+  leftover vote buttons) all confirmed correct. Telegram bot UI has no
+  browser/screenshot path; direct board+keyboard text rendering is the
+  equivalent manual check here.
 
-**STOP after Stage 2.** Screenshots + manual UX review required before
-touching any other game. Do not propagate the pattern to the remaining games
-until the Spy reference is verified.
+**STOPPED after Stage 2 per Ilya's instruction.** Sent for his review before
+starting Stage 3 — do not propagate anything further until he confirms the
+Spy reference.
 
 ### Stage 3 — low-risk fixes (independent of Stage 1/2, can land any time)
 - [ ] WhoAmI guess UX (button/hint for the identity-guess mechanic)
