@@ -2052,7 +2052,7 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
         if game.kind == "whoami":
             builder.button(text="🪪 Карточки", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
         if game.kind == "bredovukha" and game.phase == "private_answers":
-            builder.button(text="✍️ Сдать ложь в ЛС", url=f"https://t.me/{bot_username}")
+            builder.button(text="✍️ Сдать ложь в ЛС", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
         if game.kind == "zlobcards" and game.phase == "private_answers":
             builder.button(text="🃏 Рука в ЛС", url=f"https://t.me/{bot_username}?start=game_{game.game_id}")
         if game.kind == "bunker":
@@ -2298,6 +2298,26 @@ async def _notify_mafia_day_vote_private(bot: Bot, game: GroupGame) -> None:
             continue
 
 
+def _render_bred_private_status_text(game: GroupGame) -> str:
+    lines = [
+        f"<b>{escape(GAME_DEFINITIONS[game.kind].title)}</b>",
+        f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
+        f"<b>Раунд:</b> {game.round_no}/{game.bred_rounds}",
+        f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
+    ]
+    if game.phase == "private_answers" and game.bred_question_prompt:
+        lines.append("<b>Факт с пропуском:</b>")
+        lines.append(escape(game.bred_question_prompt))
+        lines.append("<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>")
+    elif game.phase == "category_pick":
+        lines.append("<i>Ждём, пока выбранный игрок выберет тему раунда в группе.</i>")
+    elif game.phase == "public_vote":
+        lines.append("<i>Идёт голосование в группе за самый правдоподобный вариант.</i>")
+    else:
+        lines.append("<i>Сейчас нет действия, требующего вашего ответа в ЛС.</i>")
+    return "\n".join(lines)
+
+
 async def _send_bred_question_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
     if game.kind != "bredovukha" or game.status != "started" or game.phase != "private_answers":
         return True
@@ -2305,17 +2325,8 @@ async def _send_bred_question_to_user(bot: Bot, game: GroupGame, user_id: int) -
     if not game.bred_question_prompt:
         return True
 
-    lines = [
-        f"<b>{escape(GAME_DEFINITIONS[game.kind].title)}</b>",
-        f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
-        f"<b>Раунд:</b> {game.round_no}/{game.bred_rounds}",
-        f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
-        "<b>Факт с пропуском:</b>",
-        escape(game.bred_question_prompt),
-        "<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>",
-    ]
     try:
-        await bot.send_message(user_id, "\n".join(lines), parse_mode="HTML")
+        await bot.send_message(user_id, _render_bred_private_status_text(game), parse_mode="HTML")
         return True
     except TelegramForbiddenError:
         return False
@@ -3610,6 +3621,13 @@ async def _show_role_for_user(message: Message, *, game_id: str) -> None:
             parse_mode="HTML",
             reply_markup=_build_private_phase_keyboard(game, actor_user_id=message.from_user.id),
         )
+        return
+
+    if game.kind == "bredovukha":
+        if message.from_user.id not in game.players:
+            await message.answer("Вы не участвуете в этой игре.")
+            return
+        await message.answer(_render_bred_private_status_text(game), parse_mode="HTML")
         return
 
     if game.kind not in {"spy", "mafia"}:
