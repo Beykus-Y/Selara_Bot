@@ -171,3 +171,15 @@ def test_admin_guide_announcements_match_catalog() -> None:
 def test_admin_guide_smart_triggers_match_catalog() -> None:
     section = _section(ADMIN_GUIDE, "## 9.1. Смарт-триггеры и шаблонные переменные")
     _assert_all_present(section, _base_words("admin_smart_triggers"), context="ADMIN_GUIDE.md 9.1 (smart triggers)")
+
+
+def test_admin_guide_settings_section_lists_every_chat_setting_key() -> None:
+    """ADMIN_GUIDE.md's `/setcfg <key> <value>` section must mention every
+    real chat-settings key, or an admin has no way to discover it exists
+    (found in the 2026-08-20 documentation audit: ~36 of 60+ keys were
+    missing entirely)."""
+    from selara.core.chat_settings import CHAT_SETTINGS_KEYS
+
+    section = _section(ADMIN_GUIDE, "## 6. Настройки группы")
+    missing = [key for key in CHAT_SETTINGS_KEYS if key not in section]
+    assert not missing, f"ADMIN_GUIDE.md 6: missing settings keys {missing}"
