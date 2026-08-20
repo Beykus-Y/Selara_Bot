@@ -1035,7 +1035,8 @@ def _render_whoami_status(game: GroupGame) -> str:
         f"<b>Разгадали себя:</b> {len(game.whoami_solved_user_ids)}/{len(game.players)}",
     ]
     if game.phase == "whoami_ask":
-        lines.append("<b>Сейчас:</b> текущий игрок задаёт вопрос сообщением в чат или делает догадку.")
+        lines.append("<b>Сейчас:</b> ход текущего игрока.")
+        lines.append("<b>Что делать:</b> задайте вопрос сообщением в чат или сделайте догадку.")
         lines.append(
             "<i>Вопрос — любое сообщение с «?». Догадка — например: "
             "«Я думаю, что я [ответ]», «моя догадка: [ответ]» или «кажется, я [ответ]».</i>"
@@ -1046,7 +1047,8 @@ def _render_whoami_status(game: GroupGame) -> str:
         )
     elif game.phase == "whoami_answer":
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
-        lines.append("<b>Сейчас:</b> стол выбирает ответ кнопками «да / нет / не знаю / неважно».")
+        lines.append("<b>Сейчас:</b> ждём ответ стола.")
+        lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».")
 
     lines.append("")
     lines.append(_render_whoami_history(game))
