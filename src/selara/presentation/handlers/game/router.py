@@ -1062,15 +1062,18 @@ def _render_dice_progress(game: GroupGame) -> str:
     lines = [f"<b>Бросили:</b> {rolled_count}/{total_players}"]
     if not game.dice_scores:
         lines.append("<b>Результаты:</b> пока нет бросков.")
-        return "\n".join(lines)
+    else:
+        ranking = sorted(
+            game.dice_scores.items(),
+            key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
+        )
+        lines.append("<b>Текущие броски:</b>")
+        for idx, (user_id, score) in enumerate(ranking, start=1):
+            lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
 
-    ranking = sorted(
-        game.dice_scores.items(),
-        key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
-    )
-    lines.append("<b>Текущие броски:</b>")
-    for idx, (user_id, score) in enumerate(ranking, start=1):
-        lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
+    waiting_user_ids = [user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.dice_scores]
+    if waiting_user_ids:
+        lines.append(f"<b>Ждём бросок:</b> {_render_player_inline_list(game, waiting_user_ids, limit=5)}")
     return "\n".join(lines)
 
 
@@ -1889,7 +1892,8 @@ def _render_game_text(
         lines.append(_render_roles_reveal(game))
 
     if game.kind == "dice" and game.status == "started":
-        lines.append("<i>Каждый участник делает ровно один бросок кнопкой «Бросить».</i>")
+        lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
+        lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» ниже.")
         lines.append("")
         lines.append(_render_dice_progress(game))
 
