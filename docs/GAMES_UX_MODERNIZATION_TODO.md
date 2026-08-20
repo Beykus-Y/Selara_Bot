@@ -65,6 +65,8 @@ them `manage_games` first. Please confirm whether this is intentional (games are
 meant to be admin-launched events) or a bug/regression, since it changes how much
 the catalog/pagination work below actually matters relative to fixing this gate.
 
+> **Резолюция Ilya:** так и задумано — оставить как есть, не менять.
+
 ---
 
 ## 2. Per-game audit
@@ -110,6 +112,7 @@ the catalog/pagination work below actually matters relative to fixing this gate.
     a "🕵️ Назвать локацию" button shown only to the spy), or leave it
     unreachable (out of scope since "no mechanic changes" — but dead code is
     worth a note either way).
+    > **Резолюция Ilya:** подключить, но позже — не в текущем заходе.
   - No in-game rules explanation of the win condition.
 - **Proposed flow:** keep the button-accusation pattern as-is (it's good). Add
   `❓ Правила`. Location-guess wiring is Ilya's call, not a default UX fix.
@@ -241,6 +244,8 @@ explicit code comment marking it deprecated-but-kept — right now a working
 implementation and an active "not available" refusal coexist, which is
 confusing to any future developer, not to end users. **[?] #3** only if Ilya
 wants it revived; otherwise this is a P2 cleanup, not a UX roadmap item.
+
+> **Резолюция Ilya:** удалить игру.
 
 ---
 
@@ -452,9 +457,8 @@ other game's board is comparatively short.
 ## 12. Roadmap
 
 ### P0 — foundational, blocks or undermines everything else if left alone
-- [?] **#1** Resolve the `manage_games` gate on `/game` — confirm with Ilya
-  whether ordinary participants are meant to be able to open the game catalog
-  at all. (Not a code task until answered — a decision item.)
+- [x] `manage_games` gate on `/game` — **резолюция Ilya: так и задумано, не
+  трогаем.** No code task.
 - [ ] WhoAmI: add a guess button / in-context example phrase for the
   identity-guess mechanic (the single most concrete example Ilya named).
 - [ ] Fix Mafia's silent night-phase DM-failure (add the same board warning
@@ -483,19 +487,18 @@ other game's board is comparatively short.
   abstraction is drawn from working code rather than guessed upfront.
 - [ ] Factor out the "private-hand-as-buttons, edit-in-place" component using
   Zlobcards' existing implementation as the reference (§7.2).
-- [ ] Delete or explicitly mark deprecated the orphaned "Number" game (§2).
+- [ ] Delete the orphaned "Number" game (§2) — **резолюция Ilya: удалить**.
 - [ ] Investigate whether private per-actor phase keyboards go stale after a
   phase moves on (§9, unconfirmed).
-- [?] **#2** Decide whether to wire up `spy_guess_location` or leave it
-  unreachable (§2, Spy section).
+- [ ] Wire up `spy_guess_location` (§2, Spy section) — **резолюция Ilya:
+  подключить, но позже, не в текущем заходе.**
 
 ---
 
 ## 13. Summary
 
 **5 самых болезненных UX-проблем сейчас:**
-1. `/game` may be unreachable for ordinary participants at all (`manage_games`
-   gate) — [?] #1, needs confirmation before anything else here matters.
+1. (Снят — резолюция Ilya: manage_games-гейт задуман, не трогаем.)
 2. WhoAmI's identity-guess requires a memorized magic phrase with zero button
    fallback and zero in-context hint — the exact pattern Ilya named.
 3. The catalog is 8 stacked title-only buttons with no context — users tap
@@ -538,7 +541,10 @@ game today, not invented from scratch.
 
 ---
 
-Открытые вопросы Ilya: **[?] #1** (manage_games gate), **[?] #2** (spy_guess_location
-wire-up or leave dead), **[?] #3** (Number game: delete vs. explicitly deprecate,
-only relevant if reviving is on the table). Всё остальное — read-only находки и
-предложения, ждут ревью плана перед реализацией.
+**Резолюции Ilya по всем 3 открытым вопросам (получены после отправки аудита):**
+1. `manage_games`-гейт на `/game` — так и задумано, не менять.
+2. `spy_guess_location` — подключить, но позже, не в текущем заходе.
+3. "Угадай число" — удалить игру.
+
+Всё остальное в этом документе — read-only находки и предложения, ждут ревью
+плана перед реализацией. Ничего не реализовано, не запушено, не задеплоено.
