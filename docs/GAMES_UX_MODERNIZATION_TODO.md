@@ -698,10 +698,41 @@ Per-game summary (also see the "actual renders" report sent to Ilya):
 changes, actual renders, repeated vs. unique patterns, full test result)
 sent to Ilya. Stage 5 consolidation waits for his separate confirmation.
 
-### Stage 5 — consolidation
-- [ ] Only after the pattern has actually repeated across multiple games,
-  extract shared reusable game-UI helpers/components (§7) — drawn from
-  working code, not guessed upfront.
+### Stage 5 — consolidation — DONE (2026-08-20, commit 5ef50fe)
+Scoped tightly per Ilya's explicit boundaries — 3 helpers, each only where
+duplication was real and verified, nothing guessed upfront:
+
+1. **`_append_waiting_line`** — the "who hasn't answered yet" line, 8
+   duplicate sites across 6 games (Spy, Dice, Bunker vote, Quiz, Bredovukha
+   x2, Zlobcards x2, Mafia x2).
+2. **`_add_stepper_row`** — the ➖/value/➕-one-row lobby shape, 4 duplicate
+   sites (Bredovukha, Zlobcards x2, Bunker) — the exact steppers Stage 4
+   fixed the row-packing bug for. Keyboard output verified byte-identical
+   before/after.
+3. **`_warn_on_failed_dm`** — the "if failed: warn" guard, 7 duplicate
+   sites (game start x2, Mafia night x2, Bunker reveal x3).
+
+**Deliberately NOT touched**, per Ilya's instruction: Сейчас/Что делать
+(stays a convention each renderer writes itself, not an abstraction),
+vote/tally handlers (Mafia/Spy/Bunker/Quiz — too different, would need
+strategy params), private-hand, Mafia night actions, Bunker reveal logic.
+Bunker mobile readability: not touched — left as an unverified visual item
+for a real Telegram smoke test after a future deploy, not something more
+code changes can resolve.
+
+**Honest result, not oversold:** net `+80/-56` lines in router.py —
+roughly line-count-neutral, since each helper's body (with an explanatory
+comment) is about the same size as what it saved per call site. The real
+win is duplicate *logic* going from 19 call sites across 3 patterns down
+to 3 single implementations — a future bug/change in any of the 3 patterns
+now needs fixing once, not N times. Full unit suite green (1431 passed, 1
+skipped) with **zero existing game tests needed changing** — confirms this
+was a behavior-preserving refactor, not a rewrite. 2 new test files cover
+the 2 newly-introduced helpers directly.
+
+**STOPPED after Stage 5 per Ilya's instruction — no push/deploy.** Full
+report (diff review, helper list, duplication removed, full test result)
+sent to Ilya.
 
 ### Separate small cleanup commits (not tied to a stage)
 - [ ] Delete the orphaned "Number" game — **резолюция Ilya: удалить**, own
