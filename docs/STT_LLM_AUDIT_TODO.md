@@ -132,7 +132,7 @@ Zero mentions in `USER_GUIDE.md`, `ADMIN_GUIDE.md`, or `command_catalog.py`, des
 ### 11. [x] No manual "reset conversation context" action — FIXED 2026-08-20 (P2, ?reset command)
 Only automatic threshold-triggered summarization exists (`context.py::maybe_compress`), which rolls forward potentially-bad context rather than discarding it. No `?reset`-style escape hatch.
 
-### 12. [ ] Generic STT download-failure message; size checked only after full download
+### 12. [x] Generic STT download-failure message; size checked only after full download — PARTIALLY FIXED 2026-08-20 (size now checked before download; generic-exception narrowing still open)
 `voice.py` wraps `get_file`/`download_file` in a bare `except Exception` — can't distinguish "file too big" from "network blip." `SttClient._validate_audio`'s size check runs after the file is already downloaded.
 
 ### 13. [ ] No progress indicator during multi-round (up to 8) LLM tool-calling
