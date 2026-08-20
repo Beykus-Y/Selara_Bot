@@ -29,8 +29,21 @@ def test_whoami_group_text_handles_only_current_actor_guess_or_question() -> Non
 
     assert _should_handle_whoami_group_text(game, user_id=1, text="Я думаю, что я кот") is True
     assert _should_handle_whoami_group_text(game, user_id=1, text="Я животное?") is True
-    assert _should_handle_whoami_group_text(game, user_id=1, text="кто я") is False
     assert _should_handle_whoami_group_text(game, user_id=2, text="Я животное?") is False
+
+
+def test_whoami_group_text_handles_the_actors_off_pattern_text_too() -> None:
+    # Games UX audit finding: a message from the current actor that matches
+    # neither a question ("?") nor a guess pattern used to be silently
+    # dropped with zero feedback. It's now handled (the handler replies
+    # with a hint instead of ignoring it) rather than skipped.
+    game = _base_game("whoami")
+    game.phase = "whoami_ask"
+    game.whoami_current_actor_user_id = 1
+
+    assert _should_handle_whoami_group_text(game, user_id=1, text="кто я") is True
+    assert _should_handle_whoami_group_text(game, user_id=1, text="   ") is False
+    assert _should_handle_whoami_group_text(game, user_id=2, text="кто я") is False
 
 
 def test_number_guess_handler_only_captures_active_number_game() -> None:

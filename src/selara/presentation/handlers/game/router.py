@@ -974,13 +974,15 @@ def _should_handle_whoami_group_text(active_game: GroupGame | None, *, user_id: 
         return False
     if user_id != active_game.whoami_current_actor_user_id:
         return False
-
-    normalized = text.strip()
-    if not normalized:
+    if active_game.phase != "whoami_ask":
         return False
-    if _extract_whoami_guess(normalized) is not None:
-        return True
-    return active_game.phase == "whoami_ask" and "?" in normalized
+
+    # Deliberately catches ANY non-empty message from the current actor
+    # during whoami_ask, not just ones already matching a guess/question
+    # shape -- previously a message that matched neither was silently
+    # dropped with zero feedback (found in the games UX audit); now the
+    # handler replies with a hint instead of doing nothing.
+    return bool(text.strip())
 
 
 def _should_handle_number_guess(active_game: GroupGame | None) -> bool:
@@ -1034,6 +1036,10 @@ def _render_whoami_status(game: GroupGame) -> str:
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> текущий игрок задаёт вопрос сообщением в чат или делает догадку.")
+        lines.append(
+            "<i>Вопрос — любое сообщение с «?». Догадка — например: "
+            "«Я думаю, что я [ответ]», «моя догадка: [ответ]» или «кажется, я [ответ]».</i>"
+        )
         lines.append(
             "<i>Если игрок разгадал себя, он выходит из круга вопросов, "
             "но остаётся частью стола. После «нет / не знаю / неважно» ход переходит дальше.</i>"
@@ -5976,6 +5982,13 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
             return
 
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
+        return
+
+    if "?" not in text:
+        await message.reply(
+            "Не понял: вопрос должен содержать «?», а догадка — начинаться с "
+            "«Я думаю, что я …», «моя догадка: …» или «кажется, я …»."
+        )
         return
 
     game, result, error = await GAME_STORE.whoami_submit_question(
