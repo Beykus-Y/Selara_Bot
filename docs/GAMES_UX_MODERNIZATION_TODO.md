@@ -560,6 +560,26 @@ no push/deploy without separate permission.
 starting Stage 3 — do not propagate anything further until he confirms the
 Spy reference.
 
+**Review round 1 (2026-08-20):** Ilya confirmed Stage 1/2 direction is good
+and that shared leave/rematch across all games (not just Spy) is fine, since
+it's genuinely shared lobby/result infra with no per-game mechanic change —
+same category as Stage 1's catalog. He asked for 3 concrete verifications
+before formally accepting:
+- [x] Full catalog walkthrough (page 1 → page 2 → detail → back), confirming
+  the origin page is preserved — verified via actual keyboard callback_data
+  (`game:list:1:u555` encodes page 2, not page 1).
+- [x] Rematch walkthrough via an actual handler call (not just reading code):
+  finished Spy with players `{1,2,3}` and an explicitly-set category
+  ("Отдых и туризм") → `🔁 Ещё раз` by player 1 → new lobby has players
+  `{1}` only and the same category. Both confirmed programmatically.
+- [x] Gap found and fixed: `❓ Как играть` was only reachable from the
+  catalog detail card. Added to the lobby too (`game:lrules:`/`game:lback:`,
+  see commit d87a410) — now available in both places, satisfying "available
+  at least until the game starts."
+
+All 3 sent to Ilya with full text+keyboard output. Waiting for his
+confirmation before Stage 3.
+
 ### Stage 3 — low-risk fixes (independent of Stage 1/2, can land any time)
 - [ ] WhoAmI guess UX (button/hint for the identity-guess mechanic)
 - [ ] Mafia DM-failure warning (add the missing night-phase board line)
