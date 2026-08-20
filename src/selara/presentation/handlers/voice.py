@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
+from selara.core.config import Settings
 from selara.infrastructure.stt import SttClient, SttClientError
 
 router = Router(name="voice")
 log = logging.getLogger(__name__)
 
 _PENDING_TEXT = "🎙 Распознаю..."
+
+# #3: voice.py has no permission/group gate at all, so this in-process
+# per-(chat, user) cooldown is the only thing standing between a careless
+# or malicious user and unlimited paid Whisper calls. Known limitation:
+# resets on restart and isn't shared across multiple bot processes -- a
+# durable, per-chat-configurable version (mirroring economy_tap_cooldown_seconds)
+# is a reasonable fast-follow if that ever matters at this bot's scale.
+_last_request_at: dict[tuple[int, int], float] = {}
 
 
 def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
@@ -34,10 +44,18 @@ def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
 
 
 @router.message(F.voice)
-async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient) -> None:
+async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
     voice = message.voice
     if voice is None:
         return
+
+    if message.from_user is not None:
+        key = (message.chat.id, message.from_user.id)
+        now = time.monotonic()
+        last = _last_request_at.get(key)
+        if last is not None and (now - last) < settings.stt_cooldown_seconds:
+            return
+        _last_request_at[key] = now
 
     status = await message.reply(_PENDING_TEXT)
 

@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram import Bot
@@ -46,6 +46,16 @@ class ToolDefinition:
 
 
 _TOOL_REGISTRY: dict[str, ToolDefinition] = {}
+
+# #23: bounds for get_history (had none at all before).
+_MAX_HISTORY_RANGE_DAYS = 90
+_MAX_HISTORY_ROWS = 500
+
+# #19: glossary had no length/count limits at all -- unbounded growth of
+# content that gets injected into every future context that triggers a
+# lookup.
+_MAX_GLOSSARY_DEFINITION_LENGTH = 2000
+_MAX_GLOSSARY_TERMS = 200
 
 _MODERATION_TARGET_TOOLS: frozenset[str] = frozenset(
     {
@@ -1363,6 +1373,19 @@ async def _exec_add_to_glossary(
     definition = call.arguments.get("definition", "").strip()
     if not term or not definition:
         return _err(call.call_id, call.name, "Термин и определение обязательны.")
+    if len(definition) > _MAX_GLOSSARY_DEFINITION_LENGTH:
+        return _err(
+            call.call_id, call.name,
+            f"Определение слишком длинное (максимум {_MAX_GLOSSARY_DEFINITION_LENGTH} символов).",
+        )
+
+    existing_terms = {row.term for row in await llm_repo.list_glossary(chat_id=chat_snapshot.telegram_chat_id)}
+    if term.lower().strip() not in existing_terms and len(existing_terms) >= _MAX_GLOSSARY_TERMS:
+        return _err(
+            call.call_id, call.name,
+            f"Словарь чата заполнен (максимум {_MAX_GLOSSARY_TERMS} терминов). "
+            "Удалите неиспользуемые термины перед добавлением новых.",
+        )
 
     row = await llm_repo.upsert_glossary_term(
         chat_id=chat_snapshot.telegram_chat_id,
@@ -1404,6 +1427,18 @@ async def _exec_get_history(
     except (KeyError, ValueError) as exc:
         return _err(call.call_id, call.name, f"Неверный формат дат: {exc}")
 
+    # #23: get_history had no bound at all, unlike every other list tool
+    # (get_top/list_members/get_audit_log all clamp their limits) -- a
+    # multi-year period_start/period_end could pull a chat's entire LLM
+    # interaction history into one tool result.
+    if period_end < period_start:
+        return _err(call.call_id, call.name, "period_end раньше period_start.")
+    if (period_end - period_start) > timedelta(days=_MAX_HISTORY_RANGE_DAYS):
+        return _err(
+            call.call_id, call.name,
+            f"Слишком широкий период (максимум {_MAX_HISTORY_RANGE_DAYS} дней). Сузьте период_start/period_end.",
+        )
+
     summaries = await llm_repo.get_summaries_in_range(
         chat_id=chat_snapshot.telegram_chat_id,
         period_start=period_start,
@@ -1413,6 +1448,7 @@ async def _exec_get_history(
         chat_id=chat_snapshot.telegram_chat_id,
         period_start=period_start,
         period_end=period_end,
+        limit=_MAX_HISTORY_ROWS,
     )
 
     result_parts: list[str] = []

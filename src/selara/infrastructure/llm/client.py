@@ -8,6 +8,11 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60.0
+# #37: chat_with_tools has the highest fan-out (up to 8 rounds per admin
+# query) of the three chat methods, but was the only one with no max_tokens
+# cap -- a single round could otherwise produce an unbounded-length
+# completion, limited only by the provider's model-level ceiling.
+_DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS = 4000
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,8 @@ class LlmClient:
         self,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_tokens: int | None = _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS,
     ):
         try:
             return await self._client.chat.completions.create(
@@ -53,6 +60,7 @@ class LlmClient:
                 messages=messages,
                 tools=tools or None,
                 tool_choice="auto" if tools else None,
+                max_tokens=max_tokens,
             )
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc

@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     stt_model: str = Field(default="whisper-large-v3", validation_alias="STT_MODEL")
     stt_language: str = Field(default="ru", validation_alias="STT_LANGUAGE")
     stt_timeout_seconds: float = Field(default=30.0, validation_alias="STT_TIMEOUT_SECONDS")
+    # #3: voice.py has no permission gate at all (any chat member, any chat
+    # type), so this per-(chat, user) cooldown is the only thing standing
+    # between a careless/malicious user and unlimited paid Whisper calls.
+    stt_cooldown_seconds: float = Field(default=8.0, validation_alias="STT_COOLDOWN_SECONDS")
 
     llm_enabled: bool = Field(default=False, validation_alias="LLM_ENABLED")
     llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
@@ -126,6 +130,11 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_MODEL")
     llm_summary_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_SUMMARY_MODEL")
     llm_timeout_seconds: float = Field(default=60.0, validation_alias="LLM_TIMEOUT_SECONDS")
+    # #3: the `?`/`??` assistant is gated on moderate_users, but nothing
+    # stops the same admin repeating it immediately -- a single invocation
+    # can already fan out to ~10 billed calls (up to 8 tool rounds + DM
+    # summary + compression).
+    llm_cooldown_seconds: float = Field(default=5.0, validation_alias="LLM_COOLDOWN_SECONDS")
 
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")

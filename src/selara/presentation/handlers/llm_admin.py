@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -15,6 +16,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.llm.client import LlmClient, LlmClientError
@@ -56,8 +58,9 @@ async def llm_admin_context_handler(
     chat_settings: ChatSettings,
     llm_client: LlmClient,
     db_session: AsyncSession,
+    settings: Settings,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True)
+    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True, settings=settings)
 
 
 @router.message(
@@ -71,8 +74,9 @@ async def llm_admin_nocontext_handler(
     chat_settings: ChatSettings,
     llm_client: LlmClient,
     db_session: AsyncSession,
+    settings: Settings,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False)
+    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False, settings=settings)
 
 
 async def _handle(
@@ -84,6 +88,7 @@ async def _handle(
     db_session: AsyncSession,
     *,
     with_context: bool,
+    settings: Settings | None = None,
 ) -> None:
     if not chat_settings.llm_enabled:
         return
@@ -115,6 +120,27 @@ async def _handle(
         await message.reply(f"Введите запрос после {prefix}")
         return
 
+    llm_repo = LlmRepository(db_session)
+
+    # #3: the assistant is gated on moderate_users, but nothing stopped the
+    # same admin repeating it immediately -- a single invocation can already
+    # fan out to ~10 billed calls (up to 8 tool rounds + DM summary +
+    # compression).
+    if settings is None:
+        from selara.core.config import get_settings
+        settings = get_settings()
+    last_at = await llm_repo.get_last_user_message_at(
+        chat_id=message.chat.id, admin_user_id=message.from_user.id,
+    )
+    if last_at is not None:
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+        if elapsed < settings.llm_cooldown_seconds:
+            wait_left = int(settings.llm_cooldown_seconds - elapsed) + 1
+            await message.reply(f"⏳ Слишком часто. Подожди {wait_left} сек.")
+            return
+
     thinking_msg = await message.reply("⏳ Думаю...")
 
     actor = UserSnapshot(
@@ -129,7 +155,6 @@ async def _handle(
         chat_type=message.chat.type,
         title=message.chat.title,
     )
-    llm_repo = LlmRepository(db_session)
 
     context_messages: list[dict] = []
     if with_context:

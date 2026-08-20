@@ -119,21 +119,22 @@ async def test_llm_admin_handlers_dispatch(chat_settings):
     llm_client = MagicMock()
     db_session = MagicMock()
     message = MagicMock(spec=Message)
+    settings = MagicMock()
 
     with patch("selara.presentation.handlers.llm_admin._handle", new_callable=AsyncMock) as mock_handle:
         await llm_admin_context_handler(
-            message, bot, activity_repo, chat_settings, llm_client, db_session
+            message, bot, activity_repo, chat_settings, llm_client, db_session, settings
         )
         mock_handle.assert_awaited_once_with(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True
+            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True, settings=settings
         )
 
     with patch("selara.presentation.handlers.llm_admin._handle", new_callable=AsyncMock) as mock_handle:
         await llm_admin_nocontext_handler(
-            message, bot, activity_repo, chat_settings, llm_client, db_session
+            message, bot, activity_repo, chat_settings, llm_client, db_session, settings
         )
         mock_handle.assert_awaited_once_with(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False
+            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False, settings=settings
         )
 
 

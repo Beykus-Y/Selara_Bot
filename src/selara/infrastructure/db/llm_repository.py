@@ -42,6 +42,18 @@ class LlmRepository:
         await self._session.flush()
         return row
 
+    async def get_last_user_message_at(self, *, chat_id: int, admin_user_id: int) -> datetime | None:
+        """#3: backs the LLM assistant's per-(chat, admin) cooldown -- DB-backed
+        (unlike the STT cooldown, which has no comparable persisted per-message
+        log) so it survives restarts and works across multiple bot processes."""
+        from sqlalchemy import func as sqlfunc
+        stmt = select(sqlfunc.max(LlmContextMessageModel.created_at)).where(
+            LlmContextMessageModel.chat_id == chat_id,
+            LlmContextMessageModel.admin_user_id == admin_user_id,
+            LlmContextMessageModel.role == "user",
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def count_uncompressed_context_messages(self, *, chat_id: int) -> int:
         from sqlalchemy import func as sqlfunc
         stmt = select(sqlfunc.count()).where(
@@ -83,6 +95,7 @@ class LlmRepository:
         chat_id: int,
         period_start: datetime,
         period_end: datetime,
+        limit: int = 500,
     ) -> list[LlmContextMessageModel]:
         stmt = (
             select(LlmContextMessageModel)
@@ -92,6 +105,7 @@ class LlmRepository:
                 LlmContextMessageModel.created_at <= period_end,
             )
             .order_by(LlmContextMessageModel.created_at.asc())
+            .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
 

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from selara.core.config import Settings
 from selara.presentation.handlers.voice import _split_transcription, voice_message_handler
 
 
@@ -19,6 +20,8 @@ async def test_voice_message_handler_sends_long_transcription_in_plain_text_chun
     message = SimpleNamespace(
         voice=SimpleNamespace(file_id="voice-id"),
         reply=AsyncMock(return_value=status),
+        chat=SimpleNamespace(id=1),
+        from_user=SimpleNamespace(id=1),
     )
     bot = SimpleNamespace(
         get_file=AsyncMock(return_value=SimpleNamespace(file_path="voice.ogg")),
@@ -26,7 +29,10 @@ async def test_voice_message_handler_sends_long_transcription_in_plain_text_chun
     )
     stt_client = SimpleNamespace(transcribe_with_retry=AsyncMock(return_value="word " * 2000))
 
-    await voice_message_handler(message, bot=bot, stt_client=stt_client)
+    from selara.presentation.handlers import voice as voice_module
+    voice_module._last_request_at.clear()
+
+    await voice_message_handler(message, bot=bot, stt_client=stt_client, settings=Settings())
 
     status.edit_text.assert_awaited_once()
     assert len(status.edit_text.await_args.args[0]) <= 4000

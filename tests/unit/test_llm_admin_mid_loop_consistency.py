@@ -129,7 +129,9 @@ async def test_send_chat_action_failure_does_not_crash_the_tool_loop():
          patch.object(llm_admin_module, "load_context", new=AsyncMock(return_value=SimpleNamespace(messages=[]))), \
          patch.object(llm_admin_module, "save_interaction", new=AsyncMock()), \
          patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
-        mock_repo_cls.return_value = MagicMock()
+        repo_mock = MagicMock()
+        repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        mock_repo_cls.return_value = repo_mock
 
         # Must not raise.
         await _handle(
@@ -203,6 +205,7 @@ async def test_completed_moderation_action_is_committed_before_next_round_can_lo
     action_row = SimpleNamespace(id=555)
     llm_repo_instance = MagicMock()
     llm_repo_instance.add_admin_action = AsyncMock(return_value=action_row)
+    llm_repo_instance.get_last_user_message_at = AsyncMock(return_value=None)
 
     message = _admin_message("? выдай рест бобу")
 

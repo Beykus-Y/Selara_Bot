@@ -444,3 +444,106 @@ async def test_glossary_definition_is_wrapped_as_untrusted(
     assert result.success is True
     data = json.loads(result.result_text)
     assert data["definition"].startswith("[ВНИМАНИЕ: пользовательские данные")
+
+
+# --- #23: get_history has no range/row-count bound ---
+
+
+@pytest.mark.asyncio
+async def test_get_history_rejects_range_wider_than_max_span(chat_snapshot, actor_snapshot, llm_repo):
+    result = await execute_tool(
+        ToolCall(
+            name="get_history",
+            arguments={"period_start": "2020-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z"},
+            call_id="h-1",
+        ),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(),
+        llm_repo=llm_repo,
+    )
+    assert result.success is False
+    assert "период" in result.result_text.lower()
+    llm_repo.get_all_messages_in_range.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_history_passes_a_row_limit_to_the_repository(chat_snapshot, actor_snapshot, llm_repo):
+    llm_repo.get_summaries_in_range = AsyncMock(return_value=[])
+    llm_repo.get_all_messages_in_range = AsyncMock(return_value=[])
+
+    result = await execute_tool(
+        ToolCall(
+            name="get_history",
+            arguments={"period_start": "2026-01-01T00:00:00Z", "period_end": "2026-01-02T00:00:00Z"},
+            call_id="h-2",
+        ),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(),
+        llm_repo=llm_repo,
+    )
+    assert result.success is True
+    kwargs = llm_repo.get_all_messages_in_range.await_args.kwargs
+    assert "limit" in kwargs
+    assert 0 < kwargs["limit"] <= 500
+
+
+# --- #19: no length/count limits on glossary entries ---
+
+
+@pytest.mark.asyncio
+async def test_add_to_glossary_rejects_definition_over_max_length(chat_snapshot, actor_snapshot, llm_repo):
+    llm_repo.list_glossary = AsyncMock(return_value=[])
+    too_long = "x" * 5000
+
+    result = await execute_tool(
+        ToolCall(name="add_to_glossary", arguments={"term": "рест", "definition": too_long}, call_id="g-1"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(),
+        llm_repo=llm_repo,
+    )
+    assert result.success is False
+    llm_repo.upsert_glossary_term.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_to_glossary_rejects_new_term_when_chat_glossary_is_full(chat_snapshot, actor_snapshot, llm_repo):
+    from selara.infrastructure.llm.tools import _MAX_GLOSSARY_TERMS
+
+    llm_repo.list_glossary = AsyncMock(
+        return_value=[SimpleNamespace(term=f"term{i}") for i in range(_MAX_GLOSSARY_TERMS)]
+    )
+
+    result = await execute_tool(
+        ToolCall(name="add_to_glossary", arguments={"term": "новый термин", "definition": "def"}, call_id="g-2"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(),
+        llm_repo=llm_repo,
+    )
+    assert result.success is False
+    llm_repo.upsert_glossary_term.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_to_glossary_allows_updating_existing_term_when_chat_glossary_is_full(
+    chat_snapshot, actor_snapshot, llm_repo
+):
+    from selara.infrastructure.llm.tools import _MAX_GLOSSARY_TERMS
+
+    llm_repo.list_glossary = AsyncMock(
+        return_value=[SimpleNamespace(term=f"term{i}") for i in range(_MAX_GLOSSARY_TERMS - 1)] + [SimpleNamespace(term="рест")]
+    )
+    llm_repo.upsert_glossary_term = AsyncMock(return_value=SimpleNamespace(term="рест", definition="updated"))
+
+    result = await execute_tool(
+        ToolCall(name="add_to_glossary", arguments={"term": "рест", "definition": "updated"}, call_id="g-3"),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=MagicMock(),
+        llm_repo=llm_repo,
+    )
+    assert result.success is True
+    llm_repo.upsert_glossary_term.assert_awaited_once()
