@@ -133,6 +133,7 @@ from selara.presentation.handlers.settings_common import (
     settings_to_dict,
 )
 from selara.web.admin_docs import build_admin_docs_context
+from selara.web.getting_started import build_getting_started_context
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
     AUDIT_CATEGORY_OPTIONS,
@@ -7075,6 +7076,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
         assert page_context is not None
         return JSONResponse(content={"ok": True, "page": page_context}, status_code=200)
+
+    @app.get("/app/docs/getting-started", response_class=HTMLResponse)
+    async def getting_started_page():
+        page_context = build_getting_started_context()
+        page_context.update(
+            {
+                "top_links": _top_links(
+                    ("/app/docs/user", "Полная документация", "ghost"),
+                    ("/login", "Войти", "primary"),
+                ),
+                "show_logout": False,
+                "flash": None,
+                "error": None,
+            }
+        )
+        return _render_template("getting_started.html", **page_context)
 
     async def _build_chat_audit_page_context(
         chat_id: int,

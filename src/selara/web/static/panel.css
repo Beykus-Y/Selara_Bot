@@ -2627,3 +2627,60 @@ select option[disabled] {
   border: 1px dashed var(--line);
   background: rgba(255, 255, 255, 0.025);
 }
+
+.onboarding-steps {
+  display: grid;
+  gap: 16px;
+  margin-top: var(--gap);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+}
+
+.onboarding-step {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.onboarding-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+}
+
+.onboarding-step-emoji {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.onboarding-examples {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  color: var(--muted-strong);
+}
+
+.onboarding-examples li {
+  margin: 0;
+}
+
+/* Wraps to multiple rows on narrow viewports instead of scrolling
+   horizontally, so there is no overflow strip to make accessible. */
+.onboarding-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: var(--gap);
+}
+
+.onboarding-nav-link {
+  flex: 1 1 auto;
+  min-width: 180px;
+  justify-content: center;
+}

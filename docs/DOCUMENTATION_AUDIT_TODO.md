@@ -104,7 +104,7 @@ does — bad first-run experience for someone who's never used the bot.
 This is scoped as part of the documentation modernization, not a separate
 feature: the fix is a real onboarding path, not a standalone patch.
 
-- [ ] Redesign `/start` (`src/selara/presentation/handlers/private_panel.py`,
+- [x] Redesign `/start` (`src/selara/presentation/handlers/private_panel.py`,
   `send_private_start_panel`/`_render_home_text`/`_build_home_keyboard`):
   keep it as the existing ЛС-panel entry point for returning users, but make
   the *first* thing a new user sees a short, plain-language intro (what
@@ -113,7 +113,7 @@ feature: the fix is a real onboarding path, not a standalone patch.
   Keep Mini App + PC-panel access. Keep the group-count info, but visually
   below the onboarding block, not as the headline. Short text — this is not
   a place to cram documentation.
-- [ ] New public **Getting Started** page on the same server, using the
+- [x] New public **Getting Started** page on the same server, using the
   existing Web UI/Jinja/design system — study `/app/docs/user` and
   `/app/docs/admin`'s existing architecture first (`build_user_docs_context`/
   `build_admin_docs_context` in `src/selara/web/user_docs.py`/`admin_docs.py`,
@@ -131,18 +131,29 @@ feature: the fix is a real onboarding path, not a standalone patch.
   (4) the bot sometimes DMs you (hidden roles, some game features), in plain
   language; (5) links onward to full docs. Must read in under a minute —
   no walls of text.
-- [ ] Navigation on the Getting Started page into existing docs (e.g. 🚀
+- [x] Navigation on the Getting Started page into existing docs (e.g. 🚀
   Начало / ✨ Возможности / 🎮 Игры / 💰 Экономика и гача / 💞 Общение и семья
   / 🛠 Для администраторов) — reuse existing USER_GUIDE/ADMIN_GUIDE
   sections/anchors where the material already exists rather than duplicating
   content; add anchors only where genuinely missing. If a horizontal
   nav-strip pattern is used, verify mobile overflow/scroll behavior and that
   targets are comfortably tappable.
-- [ ] Wire the full path together: Telegram `/start` → 🚀 Как начать →
+  Implemented with a `flex-wrap` nav (`.onboarding-nav`/`.onboarding-nav-link`
+  in `panel.css`), deliberately *not* a horizontal-scroll strip — it wraps to
+  full-width rows on mobile instead, so there's no scroll-strip accessibility
+  concern to verify in the first place. Verified anyway (no page ever
+  overflows horizontally at 390/820/1440px, every nav link ≥40px tall on
+  mobile) via `tests/unit/test_web_getting_started_browser.py`. Links go to
+  the real `user_docs.py`/`admin_docs.py` anchors (`user-docs-start`,
+  `user-docs-games` — gacha lives here, not under economy —
+  `user-docs-economy`, `user-docs-relationships`, `user-docs-social`,
+  `/app/docs/admin`), resolution proven against the real rendered pages in
+  `tests/unit/test_web_getting_started.py`.
+- [x] Wire the full path together: Telegram `/start` → 🚀 Как начать →
   Getting Started page → the relevant USER_GUIDE/ADMIN_GUIDE section, with a
   way back to general docs from the Getting Started page itself. `/start`
   must never link to raw Markdown/GitHub.
-- [ ] Audience discipline (same rule as the rest of this TODO, reiterated
+- [x] Audience discipline (same rule as the rest of this TODO, reiterated
   because it's easy to violate by accident while wiring links): Getting
   Started and USER-facing docs stay in plain human language — no Python
   function/class names, DB table names, API endpoints, env var names,
@@ -150,7 +161,7 @@ feature: the fix is a real onboarding path, not a standalone patch.
   `text_commands_enabled` where "администратор может отключить текстовые
   команды" says the same thing in plain words. ADMIN_GUIDE is for a regular
   Telegram chat admin, not a developer, same as before.
-- [ ] Verification checklist (regression checks + manual, per Ilya's
+- [x] Verification checklist (regression checks + manual, per Ilya's
   explicit list): `/start` contains the "Как начать" button; the button
   links to a real, existing public route; Getting Started opens with no
   user/admin session; internal doc links/anchors aren't broken; existing
@@ -159,6 +170,17 @@ feature: the fix is a real onboarding path, not a standalone patch.
   After implementation: desktop screenshot, mobile screenshot, manual visual
   check of both, full relevant unit suite, existing docs HTML/anchor tests,
   `git diff --check`, self-review of the whole diff.
+  All done: `tests/unit/test_private_panel_onboarding.py` (7 tests, /start
+  side), `tests/unit/test_web_getting_started.py` (route reachable with a
+  DB-session-factory that raises if touched at all — stricter than the
+  existing `/app/docs/user` anonymous-access test — plus own-page and
+  cross-page anchor soundness), `tests/unit/test_web_getting_started_browser.py`
+  (Playwright: no horizontal overflow at 390/820/1440px, ≥40px nav tap
+  targets, desktop+mobile screenshots reviewed manually — clean single-column
+  stack on mobile, no overflow, four-then-one card grid on desktop). Full
+  unit suite green (1348 passed, 1 skipped) after bumping the
+  `test_server_ui_baseline.py` template inventory/`panel.css` line-count
+  budget to account for the new template and CSS. `git diff --check` clean.
 - [ ] Scope discipline: no opportunistic changes outside documentation/
   onboarding. If a genuine product decision comes up that can't be
   unambiguously derived from current behavior, mark it `[?]` here and ask

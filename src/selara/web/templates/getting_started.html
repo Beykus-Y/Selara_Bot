@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_macros.html" import panel_head %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Как начать</span>
+      <h1>{{ hero_title }}</h1>
+      <p class="lead">{{ hero_subtitle }}</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    {{ panel_head("Коротко о главном") }}
+    <div class="onboarding-steps">
+      {% for step in steps %}
+        <article class="onboarding-step">
+          <div class="onboarding-step-head">
+            <span class="onboarding-step-emoji" aria-hidden="true">{{ step.emoji }}</span>
+            <strong>{{ step.title }}</strong>
+          </div>
+          <p class="docs-copy">{{ step.text }}</p>
+          {% if step.get("examples") %}
+            <ul class="onboarding-examples">
+              {% for trigger, hint in step["examples"] %}
+                <li><code>{{ trigger }}</code>{% if hint %} — {{ hint }}{% endif %}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="panel" id="getting-started-nav">
+    {{ panel_head("Разделы документации") }}
+    <nav class="onboarding-nav" aria-label="Разделы документации">
+      {% for link in nav_links %}
+        <a class="button subtle onboarding-nav-link" href="{{ link.href }}">
+          <span aria-hidden="true">{{ link.emoji }}</span> {{ link.label }}
+        </a>
+      {% endfor %}
+    </nav>
+    <div class="hero-cta-row">
+      <a class="button primary" href="{{ user_docs_href }}">Открыть полную документацию</a>
+    </div>
+  </section>
+{% endblock %}
