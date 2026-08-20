@@ -126,10 +126,10 @@ None of `LlmContextMessageModel`/`LlmContextSummaryModel`/`LlmAdminActionModel`/
 ### 9. [ ] `?`/`??` assistant and voice transcription are undocumented
 Zero mentions in `USER_GUIDE.md`, `ADMIN_GUIDE.md`, or `command_catalog.py`, despite being real permission-gated features.
 
-### 10. [ ] No token/cost usage observability
+### 10. [x] No token/cost usage observability — FIXED 2026-08-20 (P2, log line only, no metrics store)
 `response.usage` is never read/logged anywhere in the LLM/STT path. Only failure-path warnings exist, no success logging, no per-chat/per-admin usage counter — despite a single `??` query fanning out to ~10 billed calls.
 
-### 11. [ ] No manual "reset conversation context" action
+### 11. [x] No manual "reset conversation context" action — FIXED 2026-08-20 (P2, ?reset command)
 Only automatic threshold-triggered summarization exists (`context.py::maybe_compress`), which rolls forward potentially-bad context rather than discarding it. No `?reset`-style escape hatch.
 
 ### 12. [ ] Generic STT download-failure message; size checked only after full download
