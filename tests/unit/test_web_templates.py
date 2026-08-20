@@ -389,7 +389,6 @@ def test_games_template_renders_active_cards() -> None:
                     ]
                 ],
                 "private_rows": [],
-                "show_number_guess": False,
                 "show_bred_answer": False,
                 "game_id": "test",
             }
@@ -482,7 +481,6 @@ def test_games_dashboard_template_renders_safe_only_whoami_lobby_picker() -> Non
                 "vote_buttons": [],
                 "telegram_buttons": [],
                 "private_buttons": [],
-                "show_number_guess": False,
                 "show_bred_answer": False,
                 "game_id": "test",
                 "spy_theme_picker": None,
@@ -636,7 +634,6 @@ def test_games_dashboard_template_renders_spy_lobby_picker() -> None:
                 "vote_buttons": [],
                 "telegram_buttons": [],
                 "private_buttons": [],
-                "show_number_guess": False,
                 "show_bred_answer": False,
                 "game_id": "spy-test",
                 "spy_theme_picker": {
@@ -693,7 +690,6 @@ def test_games_dashboard_template_places_whoami_status_and_actions_before_table(
                 "vote_buttons": [],
                 "telegram_buttons": [],
                 "private_buttons": [],
-                "show_number_guess": False,
                 "show_bred_answer": False,
                 "bred_submission_rows": [],
                 "bred_reveal_rows": [],
@@ -790,7 +786,6 @@ def test_games_dashboard_template_places_bred_active_block_before_scoreboard_and
                 "vote_buttons": [],
                 "telegram_buttons": [],
                 "private_buttons": [],
-                "show_number_guess": False,
                 "show_bred_answer": False,
                 "bred_submission_rows": [],
                 "bred_reveal_rows": [
