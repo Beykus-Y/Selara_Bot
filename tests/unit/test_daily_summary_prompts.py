@@ -16,6 +16,22 @@ def test_segmenter_prompt_loads_and_forbids_counting_stats() -> None:
     assert "НЕ считай" in prompt
 
 
+def test_segmenter_prompt_requires_the_topics_object_envelope() -> None:
+    # production bug: a prompt that only says "return a list" without ever naming
+    # the wrapping key reliably gets a bare JSON array back from the model, which
+    # fails SegmentTopicCardList validation -- the prompt must spell out the exact
+    # envelope, not just describe the per-item fields.
+    prompt = load_segmenter_prompt()
+    assert '{"topics":' in prompt
+    assert "НЕ возвращай голый список" in prompt
+
+
+def test_merge_prompt_requires_the_themes_object_envelope() -> None:
+    prompt = load_merge_prompt()
+    assert '{"themes":' in prompt
+    assert "НЕ возвращай голый список" in prompt
+
+
 def test_merge_prompt_loads_and_mentions_source_card_indexes() -> None:
     prompt = load_merge_prompt()
     assert "source_card_indexes" in prompt

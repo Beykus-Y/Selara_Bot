@@ -99,6 +99,29 @@ async def test_chat_structured_retries_once_on_invalid_json_then_succeeds() -> N
 
 
 @pytest.mark.asyncio
+async def test_chat_structured_retry_message_embeds_the_actual_schema() -> None:
+    # Production bug: a prompt that says "return a list" without ever saying
+    # "wrapped in an object under this key" reliably gets a bare JSON array back.
+    # The corrective round must hand the model the real schema, not just describe
+    # the failure in prose, so it has a concrete shape to conform to.
+    config = LlmConfig(api_key="test-key", model="test-model")
+    client = LlmClient(config)
+    client._client.chat.completions.create = AsyncMock(
+        side_effect=[
+            _response_with_content(json.dumps([{"title": "x", "start_message_id": 1}])),  # bare list, wrong shape
+            _response_with_content(json.dumps({"title": "x", "start_message_id": 1})),
+        ]
+    )
+
+    await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
+
+    second_call_messages = client._client.chat.completions.create.await_args_list[1].kwargs["messages"]
+    correction_message = second_call_messages[-1]["content"]
+    assert "start_message_id" in correction_message
+    assert "properties" in correction_message  # a real JSON schema, not just prose
+
+
+@pytest.mark.asyncio
 async def test_chat_structured_records_zero_retries_on_first_try_success() -> None:
     config = LlmConfig(api_key="test-key", model="test-model")
     client = LlmClient(config)

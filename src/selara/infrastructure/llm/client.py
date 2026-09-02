@@ -177,6 +177,13 @@ class LlmClient:
                 return parsed
             except (json.JSONDecodeError, ValidationError) as exc:
                 if attempt == 0:
+                    # Include the actual schema, not just a description of the
+                    # failure -- a system prompt that never explicitly says "wrap
+                    # the array in an object under this key" reliably produces a
+                    # bare JSON array on the first try (seen in production: the
+                    # model returned `[{...}]` instead of `{"topics": [...]}`).
+                    # Naming the exact schema here gives the corrective round a
+                    # real chance regardless of how the original prompt was worded.
                     request_messages = [
                         *request_messages,
                         {"role": "assistant", "content": content},
@@ -184,7 +191,10 @@ class LlmClient:
                             "role": "user",
                             "content": (
                                 "Ответ не прошёл валидацию по JSON-схеме: "
-                                f"{exc}. Верни ТОЛЬКО валидный JSON по описанной схеме, без пояснений."
+                                f"{exc}. Схема, которой должен соответствовать ответ:\n"
+                                f"{json.dumps(schema, ensure_ascii=False)}\n"
+                                "Верни ТОЛЬКО валидный JSON по этой схеме (это JSON-объект, "
+                                "а не голый список), без пояснений."
                             ),
                         },
                     ]
