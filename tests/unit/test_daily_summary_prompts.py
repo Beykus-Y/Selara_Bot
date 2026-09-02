@@ -59,6 +59,22 @@ def test_writer_prompt_falls_back_to_neutral_for_unknown_style() -> None:
 def test_writer_prompt_forbids_markdown_and_verbatim_quotes() -> None:
     prompt = load_writer_prompt(style="neutral")
     assert "markdown" in prompt.lower()
+
+
+def test_writer_prompt_requires_covering_every_theme_not_just_the_top_ones() -> None:
+    # production bug: "бери не более 3-6 тем" (an upper bound only, no floor) let
+    # the writer pick just 1-2 favorite themes out of 6 it was actually given,
+    # silently dropping the rest of a real, successful analysis.
+    prompt = load_writer_prompt(style="neutral")
+    assert "не более 3-6" not in prompt
+    assert "каждую присланную тему" in prompt.lower()
+
+
+def test_writer_prompt_specifies_the_key_value_output_format() -> None:
+    prompt = load_writer_prompt(style="neutral")
+    assert "title:" in prompt
+    assert "theme1_title:" in prompt
+    assert "theme1_text:" in prompt
     assert "цитируй" in prompt.lower()
 
 

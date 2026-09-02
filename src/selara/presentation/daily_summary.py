@@ -122,7 +122,12 @@ async def _send_and_mark(
             return False
 
         try:
-            await bot.send_message(chat_id=chat_id, text=run.generated_text, disable_web_page_preview=True)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=run.generated_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

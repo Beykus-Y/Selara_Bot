@@ -12,8 +12,10 @@ chat_structured -- are each already unit/integration tested on their own).
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
@@ -52,7 +54,85 @@ MAX_SEGMENTS_PER_RUN = 20
 MAX_ANALYST_TOOL_ROUNDS = 4
 MAX_THEMES_IN_WRITER = 6
 _EPISODE_GAP_MINUTES = 25
-_BETA_DISCLAIMER = "\n\n🧪 Итоги дня — бета-функция Selara, доступна бесплатно на время тестирования."
+_BETA_DISCLAIMER_TEXT = "🧪 Итоги дня — бета-функция Selara, доступна бесплатно на время тестирования."
+
+
+_WRITER_KEY_LINE = re.compile(r"^(title|theme(\d+)_(title|text))\s*:\s?(.*)$")
+
+
+def _parse_writer_output(raw_text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Parse the writer's `key: value` lines into (post_title, [(theme_title, theme_text), ...]).
+
+    A line only starts a new key if it matches one of the exact expected keys
+    (`title`, `themeN_title`, `themeN_text`) -- any other line is treated as a
+    continuation of whatever key came before it, so multi-sentence theme text
+    that itself contains newlines still accumulates under the right key instead
+    of being lost or misparsed as a new field.
+    """
+    values: dict[str, list[str]] = {}
+    current_key: str | None = None
+
+    for line in raw_text.strip().split("\n"):
+        match = _WRITER_KEY_LINE.match(line.strip())
+        if match:
+            current_key = match.group(1)
+            values.setdefault(current_key, []).append(match.group(4))
+        elif current_key is not None:
+            values[current_key].append(line)
+
+    title = "\n".join(values.get("title", [])).strip()
+    theme_numbers = sorted({int(match.group(1)) for key in values if (match := re.match(r"theme(\d+)_", key))})
+    themes = []
+    for number in theme_numbers:
+        theme_title = "\n".join(values.get(f"theme{number}_title", [])).strip()
+        theme_text = "\n".join(values.get(f"theme{number}_text", [])).strip()
+        if theme_title or theme_text:
+            themes.append((theme_title, theme_text))
+
+    return title, themes
+
+
+def _format_final_post(raw_text: str) -> str:
+    """Turn the writer's `key: value` output into the actual Telegram HTML post.
+
+    The writer LLM is never trusted to emit HTML/markdown itself (same
+    "untrusted content" reasoning as everywhere else in this pipeline) -- it
+    returns plain `title:`/`themeN_title:`/`themeN_text:` lines, and this
+    function does the actual formatting deterministically: HTML-escape
+    everything from the model, bold the post title and each theme's own title,
+    italicize the beta footer. Bolding a specific per-theme heading this way
+    doesn't depend on the model correctly producing `<b>` tags, or on matching
+    a theme's title back against free text it might have reworded (which,
+    like the JSON-envelope prompts, is exactly the kind of instruction models
+    silently drop or drift on).
+
+    If the model ignores the format entirely (no recognizable key at all), this
+    falls back to treating the whole first line as the title and the rest as a
+    single plain paragraph, rather than losing the content outright.
+    """
+    post_title, themes = _parse_writer_output(raw_text)
+
+    if not post_title and not themes:
+        stripped = raw_text.strip()
+        if "\n" in stripped:
+            post_title, body = stripped.split("\n", 1)
+            post_title, body = post_title.strip(), body.strip()
+        else:
+            post_title, body = stripped, ""
+        parts = [f"<b>{html.escape(post_title)}</b>"]
+        if body:
+            parts.append(html.escape(body))
+    else:
+        parts = [f"<b>{html.escape(post_title)}</b>"]
+        for theme_title, theme_text in themes:
+            block = f"<b>{html.escape(theme_title)}</b>" if theme_title else ""
+            if theme_text:
+                block = f"{block}\n{html.escape(theme_text)}" if block else html.escape(theme_text)
+            if block:
+                parts.append(block)
+
+    parts.append(f"<i>{html.escape(_BETA_DISCLAIMER_TEXT)}</i>")
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -154,7 +234,7 @@ async def run_daily_summary_pipeline(
     )
     if not messages:
         return DailySummaryPipelineOutput(
-            generated_text="За последние сутки в чате было слишком тихо, чтобы собрать итоги." + _BETA_DISCLAIMER,
+            generated_text=_format_final_post("За последние сутки в чате было слишком тихо, чтобы собрать итоги."),
             topics_json={"themes": []},
             pipeline_cost_usd=0.0,
         )
@@ -223,8 +303,8 @@ async def run_daily_summary_pipeline(
 
     if not all_cards:
         return DailySummaryPipelineOutput(
-            generated_text=(
-                "Не получилось собрать итоги за последние сутки — попробуем снова завтра." + _BETA_DISCLAIMER
+            generated_text=_format_final_post(
+                "Не получилось собрать итоги за последние сутки — попробуем снова завтра."
             ),
             topics_json={"themes": []},
             pipeline_cost_usd=sum(u.estimated_cost_usd for u in stage_usages),
@@ -300,8 +380,8 @@ async def run_daily_summary_pipeline(
 
     if not final_themes:
         return DailySummaryPipelineOutput(
-            generated_text=(
-                "Не получилось собрать итоги за последние сутки — попробуем снова завтра." + _BETA_DISCLAIMER
+            generated_text=_format_final_post(
+                "Не получилось собрать итоги за последние сутки — попробуем снова завтра."
             ),
             topics_json={"themes": []},
             pipeline_cost_usd=sum(u.estimated_cost_usd for u in stage_usages),
@@ -336,7 +416,7 @@ async def run_daily_summary_pipeline(
     )
 
     return DailySummaryPipelineOutput(
-        generated_text=generated_text + _BETA_DISCLAIMER,
+        generated_text=_format_final_post(generated_text),
         topics_json={"themes": final_themes},
         pipeline_cost_usd=sum(u.estimated_cost_usd for u in stage_usages),
         stage_usages=stage_usages,

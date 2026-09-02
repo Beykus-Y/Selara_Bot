@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from selara.application.daily_summary.participants import ChatMemberInfo
-from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
+from selara.application.daily_summary.pipeline import _format_final_post, run_daily_summary_pipeline
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
 from selara.domain.entities import ActivityWindowStats, ArchivedMessageView
 from selara.infrastructure.llm.client import LlmClientError
@@ -146,8 +146,9 @@ async def test_pipeline_happy_path_produces_writer_text_and_cost() -> None:
         glossary_terms=[("DPI", "система глубокого анализа пакетов")],
     )
 
-    assert result.generated_text.startswith("Итоги дня: обсудили сериал и VPN.")
+    assert result.generated_text.startswith("<b>Итоги дня: обсудили сериал и VPN.</b>")
     assert "бета" in result.generated_text.lower()
+    assert "<i>" in result.generated_text  # disclaimer is italicized
     assert result.topics_json["themes"][0]["title"] == "Сериал"
     assert result.topics_json["themes"][0]["episode_count"] == 1
     # segment_topics + merge + analyst (1 tool-loop round, no tool calls) + writer
@@ -269,3 +270,74 @@ async def test_pipeline_diagnostics_counts_segment_failures() -> None:
     assert result.diagnostics.segments_processed == 2
     assert result.diagnostics.segment_failures == 1
     assert result.diagnostics.cards_before_merge_count == 1
+
+
+def test_format_final_post_bolds_post_title_and_each_theme_title() -> None:
+    raw = (
+        "title: Итоги дня: чат разрывался между гачей и алгеброй\n"
+        "theme1_title: Сяо в ударе\n"
+        "theme1_text: Сегодня Сяо много жаловался на учёбу, но его поддержали Альбедо и Панталоне.\n"
+        "theme2_title: Гача-страдания\n"
+        "theme2_text: Участники делились результатами тапов и разочарованиями."
+    )
+
+    result = _format_final_post(raw)
+
+    assert result.startswith("<b>Итоги дня: чат разрывался между гачей и алгеброй</b>\n\n")
+    assert "<b>Сяо в ударе</b>\nСегодня Сяо много жаловался" in result
+    assert "<b>Гача-страдания</b>\nУчастники делились результатами" in result
+    assert "<i>" in result and "бета" in result.lower()
+
+
+def test_format_final_post_preserves_multiline_theme_text() -> None:
+    # a theme's text can itself span several lines/sentences with embedded
+    # newlines -- lines that don't match a known key must keep accumulating
+    # under the last key seen, not get dropped or mistaken for a new field.
+    raw = (
+        "title: Итоги дня\n"
+        "theme1_title: Длинная тема\n"
+        "theme1_text: Первое предложение.\n"
+        "Второе предложение той же темы.\n"
+        "theme2_title: Вторая тема\n"
+        "theme2_text: Просто текст."
+    )
+
+    result = _format_final_post(raw)
+
+    assert "Первое предложение.\nВторое предложение той же темы." in result
+    assert "<b>Вторая тема</b>\nПросто текст." in result
+
+
+def test_format_final_post_escapes_html_special_characters_from_the_model() -> None:
+    # the writer is told never to emit HTML, but its content is still untrusted --
+    # a literal "<" or "&" in the model's own output must not break parse_mode=HTML
+    # or be interpreted as a tag.
+    raw = (
+        "title: Заголовок с <тегом> & амперсандом\n"
+        "theme1_title: Тема\n"
+        "theme1_text: Обсуждали C++ и A<B."
+    )
+
+    result = _format_final_post(raw)
+
+    assert "<тегом>" not in result
+    assert "&lt;тегом&gt;" in result
+    assert "&amp;" in result
+    assert "A&lt;B" in result
+
+
+def test_format_final_post_falls_back_to_free_text_when_model_ignores_the_format() -> None:
+    # if the model doesn't use any recognizable key at all, don't lose the
+    # content -- degrade to "first line is the title, rest is one paragraph"
+    result = _format_final_post("Просто свободный текст без ключей.\n\nВторая строка.")
+
+    assert result.startswith("<b>Просто свободный текст без ключей.</b>")
+    assert "Вторая строка." in result
+
+
+def test_format_final_post_handles_single_line_output_with_no_body() -> None:
+    result = _format_final_post("Просто одна строка без темы.")
+
+    assert result.startswith("<b>Просто одна строка без темы.</b>")
+    # no stray empty body paragraph between the title and the disclaimer
+    assert "<b>Просто одна строка без темы.</b>\n\n<i>" in result
