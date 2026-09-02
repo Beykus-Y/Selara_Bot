@@ -76,6 +76,12 @@ class ChatSettings:
     llm_enabled: bool = False
     llm_context_threshold: int = 30
     cleanup_leave_service_messages: bool = False
+    daily_summary_enabled: bool = False
+    daily_summary_hour: int = 3
+    daily_summary_min_messages: int = 50
+    daily_summary_style: str = "neutral"
+    daily_summary_include_voice: bool = False
+    daily_summary_include_video_notes: bool = False
 
 
 PERSONA_DISPLAY_MODE_IMAGE_ONLY = "image_only"
@@ -87,6 +93,16 @@ PERSONA_DISPLAY_MODE_VALUES: tuple[str, ...] = (
     PERSONA_DISPLAY_MODE_TITLE_IMAGE_NAME,
 )
 DEFAULT_PERSONA_DISPLAY_MODE = PERSONA_DISPLAY_MODE_IMAGE_NAME
+
+
+DAILY_SUMMARY_STYLE_NEUTRAL = "neutral"
+DAILY_SUMMARY_STYLE_LIVELY = "lively"
+DAILY_SUMMARY_STYLE_SNARKY = "snarky"
+DAILY_SUMMARY_STYLE_VALUES: tuple[str, ...] = (
+    DAILY_SUMMARY_STYLE_NEUTRAL,
+    DAILY_SUMMARY_STYLE_LIVELY,
+    DAILY_SUMMARY_STYLE_SNARKY,
+)
 
 
 CHAT_SETTINGS_KEYS: tuple[str, ...] = (
@@ -152,6 +168,12 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     "cleanup_economy_commands",
     "llm_enabled",
     "llm_context_threshold",
+    "daily_summary_enabled",
+    "daily_summary_hour",
+    "daily_summary_min_messages",
+    "daily_summary_style",
+    "daily_summary_include_voice",
+    "daily_summary_include_video_notes",
 )
 
 
@@ -285,6 +307,28 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
             raise ValueError("Значение должно быть в диапазоне 5..500")
         return parsed
 
+    if key == "daily_summary_hour":
+        if not value.isdigit():
+            raise ValueError("Значение должно быть целым числом")
+        parsed = int(value)
+        if not 0 <= parsed <= 23:
+            raise ValueError("Значение должно быть в диапазоне 0..23")
+        return parsed
+
+    if key == "daily_summary_min_messages":
+        if not value.isdigit():
+            raise ValueError("Значение должно быть целым числом")
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("Значение должно быть > 0")
+        return parsed
+
+    if key == "daily_summary_style":
+        lowered = value.lower()
+        if lowered not in DAILY_SUMMARY_STYLE_VALUES:
+            raise ValueError("Поддерживаются только стили: neutral, lively, snarky")
+        return lowered
+
     if key in {
         "text_commands_enabled",
         "leaderboard_hybrid_buttons_enabled",
@@ -310,6 +354,9 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "auctions_enabled",
         "cleanup_economy_commands",
         "llm_enabled",
+        "daily_summary_enabled",
+        "daily_summary_include_voice",
+        "daily_summary_include_video_notes",
     }:
         lowered = value.lower()
         if lowered in {"true", "1", "yes", "on"}:

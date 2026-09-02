@@ -76,6 +76,9 @@ def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> d
     if snapshot_at is None:
         snapshot_at = message.date
 
+    reply_to_message = getattr(message, "reply_to_message", None)
+    reply_to_telegram_message_id = getattr(reply_to_message, "message_id", None)
+
     return {
         "snapshot_kind": snapshot_kind,
         "snapshot_at": snapshot_at,
@@ -86,6 +89,9 @@ def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> d
         "caption": message.caption,
         "raw_message_json": raw_message_json,
         "snapshot_hash": hashlib.sha256(canonical_snapshot.encode("utf-8")).hexdigest(),
+        "reply_to_telegram_message_id": (
+            int(reply_to_telegram_message_id) if reply_to_telegram_message_id is not None else None
+        ),
     }
 
 
@@ -221,5 +227,8 @@ class ActivityTrackerMiddleware(BaseMiddleware):
             caption=archive_payload["caption"] if archive_payload is not None else None,
             raw_message_json=archive_payload["raw_message_json"] if archive_payload is not None else None,
             snapshot_hash=archive_payload["snapshot_hash"] if archive_payload is not None else None,
+            reply_to_telegram_message_id=(
+                archive_payload["reply_to_telegram_message_id"] if archive_payload is not None else None
+            ),
         )
         return result

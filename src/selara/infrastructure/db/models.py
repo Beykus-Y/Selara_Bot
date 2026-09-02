@@ -315,10 +315,17 @@ class MessageArchiveModel(Base):
     raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Daily summary feature fields (see docs/DAILY_SUMMARY_TODO.md). transcribed_at is
+    # tracked separately from snapshot_at because a transcript can be produced later
+    # than the message itself -- TTL cleanup keys off transcribed_at, not snapshot_at.
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reply_to_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint("snapshot_kind IN ('created', 'edited')", name="ck_messages_snapshot_kind"),
         UniqueConstraint("chat_id", "telegram_message_id", "snapshot_hash", name="uq_messages_chat_message_snapshot"),
+        Index("idx_messages_chat_reply_to", "chat_id", "reply_to_telegram_message_id"),
     )
 
 
@@ -863,6 +870,14 @@ class ChatSettingsModel(Base):
     gacha_restore_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     llm_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     llm_context_threshold: Mapped[int] = mapped_column(BigInteger, nullable=False, default=30, server_default="30")
+    daily_summary_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    daily_summary_hour: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3, server_default="3")
+    daily_summary_min_messages: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50, server_default="50")
+    daily_summary_style: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral", server_default="neutral")
+    daily_summary_include_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    daily_summary_include_video_notes: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -2100,4 +2115,87 @@ class GachaAnimationVariantModel(Base):
     cache_version: Mapped[str] = mapped_column(String(32), nullable=False, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DailySummaryRunModel(Base):
+    """One "Итоги дня" run — see docs/DAILY_SUMMARY_TODO.md and the approved plan.
+
+    `summary_date` is only the claim/dedup key (one row per chat per calendar day
+    per trigger); the actual analysed period is the rolling `window_from..window_to`,
+    which for a scheduled run is the PLANNED fire time, not when the scheduler
+    actually got to it (so a restart/downtime doesn't shift the window forward).
+    `claimed_at`/`lease_until` implement atomic claim + reclaim of a dead run: see
+    `status`.
+    """
+
+    __tablename__ = "daily_summary_runs"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    summary_date: Mapped[date] = mapped_column(Date, nullable=False)
+    window_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_to: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="claimed", server_default="claimed")
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generated_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    topics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    # Per-run volume/reliability counters (segments, cards, structured-output
+    # retries, analyst tool calls/fallbacks, ...) -- see
+    # application/daily_summary/pipeline.py's DailySummaryDiagnostics and
+    # docs/DAILY_SUMMARY_TODO.md's beta observability wishlist.
+    diagnostics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    pipeline_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    context_stt_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("trigger IN ('scheduled', 'manual')", name="ck_daily_summary_runs_trigger"),
+        CheckConstraint(
+            "status IN ('claimed', 'generating', 'generated', 'sent', 'send_failed', 'failed')",
+            name="ck_daily_summary_runs_status",
+        ),
+        UniqueConstraint("chat_id", "summary_date", "trigger", name="uq_daily_summary_runs_chat_date_trigger"),
+    )
+
+
+class LlmUsageLogModel(Base):
+    """Per-call cost accounting for the daily summary feature (docs/DAILY_SUMMARY_TODO.md).
+
+    Exactly one of `summary_run_id` / `message_archive_id` is set, never both: an LLM
+    pipeline stage (segment_topics/merge/analyst/writer) belongs to one run, while an
+    STT transcription happens asynchronously against one archived message, long before
+    any run for that day exists. A run's cost is attributed by joining back on
+    whichever of these two is populated -- see `pipeline_cost_usd`/`context_stt_cost_usd`
+    on `DailySummaryRunModel`.
+    """
+
+    __tablename__ = "llm_usage_log"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    summary_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="CASCADE"), nullable=True
+    )
+    message_archive_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    audio_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    estimated_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_llm_usage_log_summary_run", "summary_run_id"),
+        Index("idx_llm_usage_log_message_archive", "message_archive_id"),
     )

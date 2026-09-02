@@ -27,6 +27,7 @@ class ActivityBatchMessage:
     caption: str | None = None
     raw_message_json: dict[str, Any] | None = None
     snapshot_hash: str | None = None
+    reply_to_telegram_message_id: int | None = None
 
 
 @dataclass(frozen=True)

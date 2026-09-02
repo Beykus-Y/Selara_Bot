@@ -126,7 +126,33 @@ async def test_activity_tracker_enqueues_after_successful_handler() -> None:
         caption=None,
         raw_message_json=None,
         snapshot_hash=None,
+        reply_to_telegram_message_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_archive_payload_captures_reply_to_message_id() -> None:
+    # daily summary reply-thread reconstruction depends on this being captured at
+    # archive time -- it is not derivable later without re-parsing raw_message_json.
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value="handled")
+    event = _event(text="согласен")
+    event.reply_to_message = SimpleNamespace(message_id=555)
+    raw_payload = {"message_id": 777, "text": "согласен"}
+    event.model_dump.return_value = raw_payload
+
+    await middleware(
+        handler,
+        event,
+        {
+            "settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"}),
+            "chat_settings": SimpleNamespace(save_message=True),
+        },
+    )
+
+    _, kwargs = batcher.enqueue_message.await_args
+    assert kwargs["reply_to_telegram_message_id"] == 555
 
 
 @pytest.mark.asyncio
@@ -172,6 +198,7 @@ async def test_activity_tracker_enqueues_archive_payload_when_save_message_enabl
         caption=None,
         raw_message_json=raw_payload,
         snapshot_hash=expected_hash,
+        reply_to_telegram_message_id=None,
     )
 
 
@@ -218,6 +245,7 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
         caption=None,
         raw_message_json=raw_payload,
         snapshot_hash=expected_hash,
+        reply_to_telegram_message_id=None,
     )
 
 

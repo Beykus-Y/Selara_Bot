@@ -15,12 +15,14 @@ from selara.infrastructure.db.session import create_engine, create_session_facto
 from selara.infrastructure.llm import LlmClient, LlmConfig
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
+from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
 from selara.presentation.gacha_reel_orchestration import (
     is_gacha_animation_cache_ready,
     warm_up_gacha_animation_cache,
 )
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
+from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
 
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 def build_bot_commands() -> list[BotCommand]:
     return [
         BotCommand(command="help", description="Справка"),
+        BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
         BotCommand(command="game", description="Выбрать и запустить игру в чате"),
@@ -83,6 +86,7 @@ def _build_llm_client(settings) -> LlmClient | None:
             base_url=settings.llm_base_url or None,
             timeout_seconds=settings.llm_timeout_seconds,
             summary_model=settings.llm_summary_model,
+            supports_structured_output=settings.llm_supports_structured_output,
         )
         return LlmClient(config)
     except ValueError as exc:
@@ -162,12 +166,29 @@ async def _run_bot(settings, session_factory) -> None:
     gacha_warmup_task = asyncio.create_task(
         _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
     )
+    daily_summary_task = None
+    if llm_client is not None:
+        daily_summary_task = asyncio.create_task(
+            run_daily_summary_scheduler(bot=bot, session_factory=session_factory, llm_client=llm_client, settings=settings),
+            name="daily-summary",
+        )
+    else:
+        logger.warning("Daily summary scheduler is disabled because the LLM client is not configured.")
+
+    daily_summary_stt_queue: DailySummaryTranscriptionQueue | None = None
+    if stt_client is not None:
+        daily_summary_stt_queue = DailySummaryTranscriptionQueue(
+            bot=bot, stt_client=stt_client, session_factory=session_factory, settings=settings,
+        )
+        await daily_summary_stt_queue.start()
 
     polling_kwargs: dict = {"settings": settings}
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:
         polling_kwargs["llm_client"] = llm_client
+    if daily_summary_stt_queue is not None:
+        polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)
@@ -179,6 +200,11 @@ async def _run_bot(settings, session_factory) -> None:
             await asyncio.gather(backup_task, return_exceptions=True)
         gacha_warmup_task.cancel()
         await asyncio.gather(gacha_warmup_task, return_exceptions=True)
+        if daily_summary_task is not None:
+            daily_summary_task.cancel()
+            await asyncio.gather(daily_summary_task, return_exceptions=True)
+        if daily_summary_stt_queue is not None:
+            await daily_summary_stt_queue.close()
         await activity_batcher.close()
         await bot.session.close()
 

@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     # type), so this per-(chat, user) cooldown is the only thing standing
     # between a careless/malicious user and unlimited paid Whisper calls.
     stt_cooldown_seconds: float = Field(default=8.0, validation_alias="STT_COOLDOWN_SECONDS")
+    # Guardrails for the daily summary voice/video-note transcription queue (see
+    # docs/DAILY_SUMMARY_TODO.md) -- separate from the instant-reply transcription
+    # above, which has no such cap since it's one call per user request.
+    daily_summary_stt_concurrency: int = Field(default=2, validation_alias="DAILY_SUMMARY_STT_CONCURRENCY")
+    daily_summary_max_transcription_seconds_per_chat_per_day: int = Field(
+        default=1800, validation_alias="DAILY_SUMMARY_MAX_TRANSCRIPTION_SECONDS_PER_CHAT_PER_DAY"
+    )
 
     llm_enabled: bool = Field(default=False, validation_alias="LLM_ENABLED")
     llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
@@ -130,6 +137,13 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_MODEL")
     llm_summary_model: str = Field(default="gpt-4o-mini", validation_alias="LLM_SUMMARY_MODEL")
     llm_timeout_seconds: float = Field(default=60.0, validation_alias="LLM_TIMEOUT_SECONDS")
+    # Whether the configured provider/summary_model actually supports native
+    # response_format={"type": "json_schema", ...} structured output. Not every
+    # OpenAI-compatible endpoint implements this the same way, so it's an explicit
+    # opt-in rather than guessed from the base_url/model name -- see
+    # LlmClient.chat_structured (used by the daily summary pipeline's segment/merge
+    # stages, docs/DAILY_SUMMARY_TODO.md).
+    llm_supports_structured_output: bool = Field(default=False, validation_alias="LLM_SUPPORTS_STRUCTURED_OUTPUT")
     # #3: the `?`/`??` assistant is gated on moderate_users, but nothing
     # stops the same admin repeating it immediately -- a single invocation
     # can already fan out to ~10 billed calls (up to 8 tool rounds + DM

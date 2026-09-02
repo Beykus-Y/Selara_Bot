@@ -45,6 +45,7 @@ from selara.domain.entities import (
     AchievementAward,
     ActiveRestEntry,
     ActivityStats,
+    ActivityWindowStats,
     AdminBroadcast,
     AdminBroadcastDelivery,
     AdminBroadcastOverview,
@@ -52,6 +53,7 @@ from selara.domain.entities import (
     AdminBroadcastReactionCount,
     AdminBroadcastReply,
     AdminBroadcastTarget,
+    ArchivedMessageView,
     BotRole,
     ChatActivitySummary,
     ChatAuditLogEntry,
@@ -64,6 +66,7 @@ from selara.domain.entities import (
     ChatTextAliasUpsertResult,
     ChatTrigger,
     CustomSocialAction,
+    DailySummaryRun,
     FamilyBundle,
     FamilyGraph,
     FamilyGraphEdge,
@@ -129,6 +132,7 @@ from selara.infrastructure.db.models import (
     ChatTextAliasModel,
     ChatTextAliasSettingsModel,
     ChatTriggerModel,
+    DailySummaryRunModel,
     DisabledRpActionModel,
     EconomyAccountModel,
     EconomyFarmModel,
@@ -143,6 +147,7 @@ from selara.infrastructure.db.models import (
     GachaAnimationVariantModel,
     GlobalAchievementStatsModel,
     InlinePrivateMessageModel,
+    LlmUsageLogModel,
     MarriageModel,
     MessageArchiveModel,
     PairModel,
@@ -176,6 +181,12 @@ _ACTIVITY_EVENT_SOURCE_LEGACY_DAY = "legacy_day"
 _ACTIVITY_EVENT_SOURCE_LEGACY_TOTAL = "legacy_total"
 _ACTIVITY_EVENT_SOURCE_IMPORT_MINUTE = "import_minute"
 _ACTIVITY_EVENT_SOURCE_IMPORT_TOTAL = "import_total"
+
+# How long a daily-summary transcription claim (see claim_message_for_transcription)
+# is honored before it's considered dead and can be reclaimed -- protects against a
+# worker crashing between claiming a message and finishing/releasing it. Comfortably
+# above how long a single voice/video_note download+transcribe should ever take.
+STT_CLAIM_STALE_AFTER_SECONDS = 600
 
 _CHAT_SETTINGS_INSERT_DEFAULTS: dict[str, object] = {
     "top_limit_default": 10,
@@ -790,6 +801,7 @@ class SqlAlchemyActivityRepository:
                     "caption": event.caption,
                     "raw_message_json": event.raw_message_json,
                     "snapshot_hash": event.snapshot_hash,
+                    "reply_to_telegram_message_id": event.reply_to_telegram_message_id,
                 }
             )
         return rows
@@ -833,6 +845,7 @@ class SqlAlchemyActivityRepository:
             caption=event.caption,
             raw_message_json=event.raw_message_json,
             snapshot_hash=event.snapshot_hash,
+            reply_to_telegram_message_id=event.reply_to_telegram_message_id,
         )
 
     async def _get_existing_activity_state_batch_postgresql(
@@ -928,6 +941,7 @@ class SqlAlchemyActivityRepository:
         caption: str | None,
         raw_message_json: dict[str, object],
         snapshot_hash: str,
+        reply_to_telegram_message_id: int | None = None,
     ) -> bool:
         normalized_snapshot_at = _coerce_utc_datetime(snapshot_at)
         normalized_sent_at = _coerce_utc_datetime(sent_at)
@@ -948,6 +962,7 @@ class SqlAlchemyActivityRepository:
                 caption=caption,
                 raw_message_json=raw_message_json,
                 snapshot_hash=snapshot_hash,
+                reply_to_telegram_message_id=reply_to_telegram_message_id,
             )
             stmt = stmt.on_conflict_do_nothing(
                 index_elements=[
@@ -985,6 +1000,7 @@ class SqlAlchemyActivityRepository:
                 caption=caption,
                 raw_message_json=raw_message_json,
                 snapshot_hash=snapshot_hash,
+                reply_to_telegram_message_id=reply_to_telegram_message_id,
             )
         )
         return True
@@ -2420,6 +2436,22 @@ class SqlAlchemyActivityRepository:
             for chat_id, chat_type, chat_title in rows
         ]
 
+    async def list_chats_with_daily_summary_enabled(self) -> list[ChatSnapshot]:
+        stmt = (
+            select(ChatModel.telegram_chat_id, ChatModel.type, ChatModel.title)
+            .join(ChatSettingsModel, ChatSettingsModel.chat_id == ChatModel.telegram_chat_id)
+            .where(
+                ChatSettingsModel.daily_summary_enabled.is_(True),
+                ChatModel.type.in_(("group", "supergroup")),
+            )
+            .order_by(ChatModel.telegram_chat_id.asc())
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ChatSnapshot(telegram_chat_id=int(chat_id), chat_type=str(chat_type), title=chat_title)
+            for chat_id, chat_type, chat_title in rows
+        ]
+
     async def get_chat_interesting_fact_state(self, *, chat_id: int) -> ChatInterestingFactState | None:
         row = await self._session.get(ChatInterestingFactStateModel, chat_id)
         if row is None:
@@ -2480,6 +2512,747 @@ class SqlAlchemyActivityRepository:
         if state is None:
             raise RuntimeError("Failed to load interesting fact state after upsert")
         return state
+
+    @staticmethod
+    def _to_daily_summary_run(row: DailySummaryRunModel) -> DailySummaryRun:
+        return DailySummaryRun(
+            id=int(row.id),
+            chat_id=int(row.chat_id),
+            summary_date=row.summary_date,
+            window_from=_coerce_utc_datetime(row.window_from),
+            window_to=_coerce_utc_datetime(row.window_to),
+            trigger=str(row.trigger),
+            status=str(row.status),
+            claimed_at=_coerce_utc_datetime(row.claimed_at),
+            lease_until=_coerce_utc_datetime(row.lease_until),
+            generated_text=row.generated_text,
+            topics_json=row.topics_json,
+            diagnostics_json=row.diagnostics_json,
+            pipeline_cost_usd=float(row.pipeline_cost_usd),
+            context_stt_cost_usd=float(row.context_stt_cost_usd),
+            created_at=_coerce_utc_datetime(row.created_at),
+            sent_at=_normalize_optional_datetime(row.sent_at),
+            error=row.error,
+        )
+
+    async def list_archived_messages_in_window(
+        self,
+        *,
+        chat_id: int,
+        window_from: datetime,
+        window_to: datetime,
+        max_rows: int = 20_000,
+    ) -> list[ArchivedMessageView]:
+        """Human, non-edit-snapshot archived messages in [window_from, window_to),
+        ordered chronologically -- the raw input to `segmentation.segment_messages`.
+
+        `max_rows` is a hard safety net (not the same as the pipeline's own,
+        smaller "guardrail" cap on how many segments it will actually run LLM #1
+        over) against a single pathologically active chat pulling in an unbounded
+        result set.
+        """
+        rows = (
+            (
+                await self._session.execute(
+                    select(MessageArchiveModel)
+                    .join(UserModel, UserModel.telegram_user_id == MessageArchiveModel.user_id)
+                    .where(
+                        MessageArchiveModel.chat_id == chat_id,
+                        MessageArchiveModel.snapshot_kind == "created",
+                        MessageArchiveModel.snapshot_at >= _coerce_utc_datetime(window_from),
+                        MessageArchiveModel.snapshot_at < _coerce_utc_datetime(window_to),
+                        UserModel.is_bot.is_(False),
+                    )
+                    .order_by(MessageArchiveModel.snapshot_at.asc())
+                    .limit(max_rows)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [self._to_archived_message_view(row) for row in rows]
+
+    async def get_daily_summary_member_info(
+        self,
+        *,
+        chat_id: int,
+        user_ids: Sequence[int],
+    ) -> list["ChatMemberInfo"]:
+        """Membership/persona info for exactly the given user_ids in this chat --
+        used to build the author-token map and alias index for one daily summary
+        run (see application/daily_summary/sanitize.py). Callers pass the set of
+        user_ids that actually authored messages in the analysed window, not
+        "every member ever" -- a member who never posted needs no token."""
+        from selara.application.daily_summary.participants import ChatMemberInfo
+
+        if not user_ids:
+            return []
+
+        stmt = select(
+            UserModel.telegram_user_id,
+            UserChatActivityModel.is_active_member,
+            UserModel.username,
+            UserModel.first_name,
+            UserModel.last_name,
+            UserChatActivityModel.persona_label,
+        ).join(
+            UserChatActivityModel,
+            and_(
+                UserChatActivityModel.user_id == UserModel.telegram_user_id,
+                UserChatActivityModel.chat_id == chat_id,
+            ),
+        ).where(UserModel.telegram_user_id.in_(list(user_ids)))
+
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ChatMemberInfo(
+                user_id=int(user_id),
+                is_active_member=bool(is_active_member),
+                username=username,
+                display_name=" ".join(part for part in (first_name, last_name) if part).strip() or None,
+                persona_label=persona_label,
+            )
+            for user_id, is_active_member, username, first_name, last_name, persona_label in rows
+        ]
+
+    async def count_archived_messages_in_window(
+        self,
+        *,
+        chat_id: int,
+        window_from: datetime,
+        window_to: datetime,
+    ) -> int:
+        """Count human, non-edit-snapshot archived messages in [window_from, window_to).
+
+        This drives the daily summary `daily_summary_min_messages` eligibility gate.
+        It deliberately reads the `messages` archive table (not the general activity
+        event counters `count_human_messages_since` uses) because the summary
+        pipeline can only ever see what `save_message` actually archived -- the two
+        counts can otherwise disagree (e.g. right after `save_message` is turned on).
+        """
+        stmt = (
+            select(func.count(MessageArchiveModel.id))
+            .join(UserModel, UserModel.telegram_user_id == MessageArchiveModel.user_id)
+            .where(
+                MessageArchiveModel.chat_id == chat_id,
+                MessageArchiveModel.snapshot_kind == "created",
+                MessageArchiveModel.snapshot_at >= _coerce_utc_datetime(window_from),
+                MessageArchiveModel.snapshot_at < _coerce_utc_datetime(window_to),
+                UserModel.is_bot.is_(False),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
+    @staticmethod
+    def _to_archived_message_view(row: MessageArchiveModel) -> ArchivedMessageView:
+        return ArchivedMessageView(
+            telegram_message_id=int(row.telegram_message_id),
+            user_id=int(row.user_id),
+            sent_at=_coerce_utc_datetime(row.sent_at),
+            text=row.text,
+            transcript=row.transcript,
+            reply_to_telegram_message_id=(
+                int(row.reply_to_telegram_message_id) if row.reply_to_telegram_message_id is not None else None
+            ),
+        )
+
+    async def get_message_context(
+        self,
+        *,
+        chat_id: int,
+        around_telegram_message_id: int,
+        limit: int | None = None,
+    ) -> list[ArchivedMessageView]:
+        """Up to `limit` archived messages around one message, split roughly evenly
+        before/after it in time. Backs the `get_message_context` analyst tool."""
+        from selara.application.daily_summary.tool_limits import (
+            GET_MESSAGE_CONTEXT_MAX_ROWS,
+            clamp_row_limit,
+        )
+
+        effective_limit = clamp_row_limit(limit, max_rows=GET_MESSAGE_CONTEXT_MAX_ROWS)
+
+        anchor_at = (
+            await self._session.execute(
+                select(MessageArchiveModel.snapshot_at)
+                .where(
+                    MessageArchiveModel.chat_id == chat_id,
+                    MessageArchiveModel.telegram_message_id == around_telegram_message_id,
+                )
+                .order_by(MessageArchiveModel.snapshot_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if anchor_at is None:
+            return []
+
+        before_limit = max(1, effective_limit // 2)
+        after_limit = max(0, effective_limit - before_limit)
+
+        before_rows = list(
+            reversed(
+                (
+                    await self._session.execute(
+                        select(MessageArchiveModel)
+                        .where(
+                            MessageArchiveModel.chat_id == chat_id,
+                            MessageArchiveModel.snapshot_kind == "created",
+                            MessageArchiveModel.snapshot_at <= anchor_at,
+                        )
+                        .order_by(MessageArchiveModel.snapshot_at.desc())
+                        .limit(before_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
+        after_rows = (
+            (
+                await self._session.execute(
+                    select(MessageArchiveModel)
+                    .where(
+                        MessageArchiveModel.chat_id == chat_id,
+                        MessageArchiveModel.snapshot_kind == "created",
+                        MessageArchiveModel.snapshot_at > anchor_at,
+                    )
+                    .order_by(MessageArchiveModel.snapshot_at.asc())
+                    .limit(after_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [self._to_archived_message_view(row) for row in (*before_rows, *after_rows)]
+
+    async def get_reply_thread(
+        self,
+        *,
+        chat_id: int,
+        root_telegram_message_id: int,
+        limit: int | None = None,
+    ) -> list[ArchivedMessageView]:
+        """Breadth-first walk of everything replying (directly or transitively) to
+        `root_telegram_message_id`, capped at `limit` rows. Backs the
+        `get_reply_thread` analyst tool -- several conversations can interleave in
+        one Telegram chat, so following reply edges is far more reliable than a
+        plain time window for reconstructing one thread."""
+        from selara.application.daily_summary.tool_limits import (
+            GET_REPLY_THREAD_MAX_ROWS,
+            clamp_row_limit,
+        )
+
+        effective_limit = clamp_row_limit(limit, max_rows=GET_REPLY_THREAD_MAX_ROWS)
+        _MAX_DEPTH = 10  # replies rarely nest deeper than this; a hard stop against pathological loops
+
+        collected: list[MessageArchiveModel] = []
+        seen_message_ids: set[int] = set()
+        frontier = {root_telegram_message_id}
+
+        for _ in range(_MAX_DEPTH):
+            if not frontier or len(collected) >= effective_limit:
+                break
+            rows = (
+                (
+                    await self._session.execute(
+                        select(MessageArchiveModel)
+                        .where(
+                            MessageArchiveModel.chat_id == chat_id,
+                            MessageArchiveModel.snapshot_kind == "created",
+                            MessageArchiveModel.reply_to_telegram_message_id.in_(frontier),
+                        )
+                        .order_by(MessageArchiveModel.snapshot_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            next_frontier: set[int] = set()
+            for row in rows:
+                if row.telegram_message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(row.telegram_message_id)
+                collected.append(row)
+                next_frontier.add(row.telegram_message_id)
+                if len(collected) >= effective_limit:
+                    break
+            frontier = next_frontier
+
+        return [self._to_archived_message_view(row) for row in collected[:effective_limit]]
+
+    async def search_messages(
+        self,
+        *,
+        chat_id: int,
+        query: str,
+        window_from: datetime,
+        window_to: datetime,
+        limit: int | None = None,
+    ) -> list[ArchivedMessageView]:
+        """Plain ILIKE substring search over text/transcript in [window_from,
+        window_to) -- v1 has no embeddings/semantic search (see
+        docs/DAILY_SUMMARY_TODO.md). Backs the `search_messages` analyst tool."""
+        from selara.application.daily_summary.tool_limits import (
+            SEARCH_MESSAGES_MAX_ROWS,
+            clamp_row_limit,
+        )
+
+        effective_limit = clamp_row_limit(limit, max_rows=SEARCH_MESSAGES_MAX_ROWS)
+        normalized_query = query.strip()
+        if not normalized_query:
+            return []
+
+        pattern = f"%{normalized_query}%"
+        rows = (
+            (
+                await self._session.execute(
+                    select(MessageArchiveModel)
+                    .where(
+                        MessageArchiveModel.chat_id == chat_id,
+                        MessageArchiveModel.snapshot_kind == "created",
+                        MessageArchiveModel.snapshot_at >= _coerce_utc_datetime(window_from),
+                        MessageArchiveModel.snapshot_at < _coerce_utc_datetime(window_to),
+                        or_(
+                            MessageArchiveModel.text.ilike(pattern),
+                            MessageArchiveModel.transcript.ilike(pattern),
+                        ),
+                    )
+                    .order_by(MessageArchiveModel.snapshot_at.asc())
+                    .limit(effective_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [self._to_archived_message_view(row) for row in rows]
+
+    async def get_activity_stats_in_window(
+        self,
+        *,
+        chat_id: int,
+        window_from: datetime,
+        window_to: datetime,
+    ) -> ActivityWindowStats:
+        """No-LLM aggregate stats for an arbitrary sub-range. Backs the
+        `get_activity_stats` analyst tool -- lets the model check "is this really
+        as big a topic as it looks" without trusting its own read of the text."""
+        normalized_from = _coerce_utc_datetime(window_from)
+        normalized_to = _coerce_utc_datetime(window_to)
+        base_filter = and_(
+            MessageArchiveModel.chat_id == chat_id,
+            MessageArchiveModel.snapshot_kind == "created",
+            MessageArchiveModel.snapshot_at >= normalized_from,
+            MessageArchiveModel.snapshot_at < normalized_to,
+        )
+
+        message_count = int(
+            (await self._session.execute(select(func.count(MessageArchiveModel.id)).where(base_filter))).scalar_one()
+            or 0
+        )
+        participant_count = int(
+            (
+                await self._session.execute(
+                    select(func.count(func.distinct(MessageArchiveModel.user_id))).where(base_filter)
+                )
+            ).scalar_one()
+            or 0
+        )
+        reply_count = int(
+            (
+                await self._session.execute(
+                    select(func.count(MessageArchiveModel.id)).where(
+                        base_filter, MessageArchiveModel.reply_to_telegram_message_id.is_not(None)
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        return ActivityWindowStats(
+            message_count=message_count,
+            participant_count=participant_count,
+            reply_count=reply_count,
+        )
+
+    async def get_daily_summary_run(
+        self,
+        *,
+        chat_id: int,
+        summary_date: date,
+        trigger: str,
+    ) -> DailySummaryRun | None:
+        row = (
+            await self._session.execute(
+                select(DailySummaryRunModel).where(
+                    DailySummaryRunModel.chat_id == chat_id,
+                    DailySummaryRunModel.summary_date == summary_date,
+                    DailySummaryRunModel.trigger == trigger,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return self._to_daily_summary_run(row)
+
+    async def get_daily_summary_run_by_id(self, *, run_id: int) -> DailySummaryRun | None:
+        row = await self._session.get(DailySummaryRunModel, run_id)
+        if row is None:
+            return None
+        return self._to_daily_summary_run(row)
+
+    async def claim_daily_summary_run(
+        self,
+        *,
+        chat: ChatSnapshot,
+        summary_date: date,
+        window_from: datetime,
+        window_to: datetime,
+        trigger: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> DailySummaryRun | None:
+        """Atomically claim the right to generate this run, or return None.
+
+        A claim succeeds either by inserting the first row for this
+        (chat, summary_date, trigger), or by reclaiming an existing row whose
+        `status` is still 'claimed'/'generating' but whose `lease_until` has
+        already expired (a worker died mid-run). Any other existing row
+        (a live claim, or a final status like 'generated'/'sent'/'failed') is
+        left untouched and this returns None -- callers should then use
+        `get_daily_summary_run` to see what state it's actually in (e.g. to
+        just resend an already-`generated` run instead of regenerating it).
+
+        This must stay a single atomic statement on Postgres (INSERT ... ON
+        CONFLICT ... DO UPDATE ... WHERE ...) -- a read-then-write here would
+        reopen exactly the race this exists to prevent.
+        """
+        if trigger not in ("scheduled", "manual"):
+            raise ValueError("trigger must be 'scheduled' or 'manual'")
+
+        await self._upsert_chat(chat)
+        claimed_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        lease_until = claimed_at + timedelta(seconds=lease_seconds)
+        normalized_window_from = _coerce_utc_datetime(window_from)
+        normalized_window_to = _coerce_utc_datetime(window_to)
+
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if dialect == "postgresql":
+            stmt = pg_insert(DailySummaryRunModel).values(
+                chat_id=chat.telegram_chat_id,
+                summary_date=summary_date,
+                window_from=normalized_window_from,
+                window_to=normalized_window_to,
+                trigger=trigger,
+                status="claimed",
+                claimed_at=claimed_at,
+                lease_until=lease_until,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    DailySummaryRunModel.chat_id,
+                    DailySummaryRunModel.summary_date,
+                    DailySummaryRunModel.trigger,
+                ],
+                set_={
+                    "claimed_at": claimed_at,
+                    "lease_until": lease_until,
+                    "status": "claimed",
+                },
+                where=and_(
+                    DailySummaryRunModel.status.in_(("claimed", "generating")),
+                    DailySummaryRunModel.lease_until < claimed_at,
+                ),
+            )
+            row = (await self._session.execute(stmt.returning(DailySummaryRunModel))).scalar_one_or_none()
+            if row is None:
+                return None
+            await self._session.flush()
+            return self._to_daily_summary_run(row)
+
+        # Non-postgres fallback (sqlite, used only by unit tests): best-effort,
+        # not atomic under real concurrency -- production always runs postgres.
+        existing = (
+            await self._session.execute(
+                select(DailySummaryRunModel).where(
+                    DailySummaryRunModel.chat_id == chat.telegram_chat_id,
+                    DailySummaryRunModel.summary_date == summary_date,
+                    DailySummaryRunModel.trigger == trigger,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            row = DailySummaryRunModel(
+                chat_id=chat.telegram_chat_id,
+                summary_date=summary_date,
+                window_from=normalized_window_from,
+                window_to=normalized_window_to,
+                trigger=trigger,
+                status="claimed",
+                claimed_at=claimed_at,
+                lease_until=lease_until,
+            )
+            self._session.add(row)
+            await self._session.flush()
+            return self._to_daily_summary_run(row)
+
+        if existing.status in ("claimed", "generating") and _coerce_utc_datetime(existing.lease_until) < claimed_at:
+            existing.status = "claimed"
+            existing.claimed_at = claimed_at
+            existing.lease_until = lease_until
+            await self._session.flush()
+            return self._to_daily_summary_run(existing)
+
+        return None
+
+    async def finalize_daily_summary_run_generated(
+        self,
+        *,
+        run_id: int,
+        generated_text: str,
+        topics_json: object,
+        pipeline_cost_usd: float,
+        context_stt_cost_usd: float,
+        diagnostics_json: object | None = None,
+    ) -> None:
+        await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(DailySummaryRunModel.id == run_id)
+            .values(
+                status="generated",
+                generated_text=generated_text,
+                topics_json=topics_json,
+                diagnostics_json=diagnostics_json,
+                pipeline_cost_usd=pipeline_cost_usd,
+                context_stt_cost_usd=context_stt_cost_usd,
+            )
+        )
+
+    async def mark_daily_summary_run_sent(self, *, run_id: int, sent_at: datetime) -> None:
+        await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(DailySummaryRunModel.id == run_id)
+            .values(status="sent", sent_at=_coerce_utc_datetime(sent_at))
+        )
+
+    async def mark_daily_summary_run_send_failed(self, *, run_id: int, error: str) -> None:
+        await self._session.execute(
+            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="send_failed", error=error)
+        )
+
+    async def mark_daily_summary_run_failed(self, *, run_id: int, error: str) -> None:
+        await self._session.execute(
+            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="failed", error=error)
+        )
+
+    async def record_llm_usage(
+        self,
+        *,
+        chat_id: int,
+        feature: str,
+        stage: str,
+        model: str,
+        estimated_cost_usd: float,
+        summary_run_id: int | None = None,
+        message_archive_id: int | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        audio_seconds: float | None = None,
+    ) -> None:
+        if (summary_run_id is None) == (message_archive_id is None):
+            raise ValueError("exactly one of summary_run_id/message_archive_id must be set")
+
+        self._session.add(
+            LlmUsageLogModel(
+                summary_run_id=summary_run_id,
+                message_archive_id=message_archive_id,
+                chat_id=chat_id,
+                feature=feature,
+                stage=stage,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                audio_seconds=audio_seconds,
+                estimated_cost_usd=estimated_cost_usd,
+            )
+        )
+        await self._session.flush()
+
+    async def sum_context_stt_cost_in_window(
+        self,
+        *,
+        chat_id: int,
+        window_from: datetime,
+        window_to: datetime,
+    ) -> float:
+        """Sum of STT costs for messages in [window_from, window_to) -- this is
+        `context_stt_cost_usd` for a run with this window, and it is expected to
+        legitimately overlap with another run's sum when scheduled/manual windows
+        for the same chat overlap (see docs/DAILY_SUMMARY_TODO.md)."""
+        stmt = (
+            select(func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0))
+            .select_from(LlmUsageLogModel)
+            .join(MessageArchiveModel, MessageArchiveModel.id == LlmUsageLogModel.message_archive_id)
+            .where(
+                LlmUsageLogModel.stage == "stt",
+                MessageArchiveModel.chat_id == chat_id,
+                MessageArchiveModel.snapshot_at >= _coerce_utc_datetime(window_from),
+                MessageArchiveModel.snapshot_at < _coerce_utc_datetime(window_to),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return float(result.scalar_one())
+
+    async def sum_transcription_seconds_in_window(
+        self,
+        *,
+        chat_id: int,
+        window_from: datetime,
+        window_to: datetime,
+    ) -> float:
+        """Seconds of audio already transcribed for the daily summary in this
+        window -- the per-chat transcription budget guardrail reads this before
+        spending STT on one more job (see `DailySummaryTranscriptionQueue`)."""
+        stmt = select(func.coalesce(func.sum(LlmUsageLogModel.audio_seconds), 0)).where(
+            LlmUsageLogModel.stage == "stt",
+            LlmUsageLogModel.chat_id == chat_id,
+            LlmUsageLogModel.created_at >= _coerce_utc_datetime(window_from),
+            LlmUsageLogModel.created_at < _coerce_utc_datetime(window_to),
+        )
+        result = await self._session.execute(stmt)
+        return float(result.scalar_one())
+
+    async def claim_message_for_transcription(
+        self,
+        *,
+        chat_id: int,
+        telegram_message_id: int,
+        now: datetime | None = None,
+        stale_after_seconds: int = STT_CLAIM_STALE_AFTER_SECONDS,
+    ) -> int | None:
+        """Atomically claim the right to transcribe one archived message for the
+        daily summary, or return None if it's already claimed/transcribed/missing.
+
+        Reuses `transcribed_at` itself as the claim marker (set to "now" the
+        moment a worker wins the claim, overwritten with the real completion time
+        once transcription actually finishes) rather than adding a dedicated
+        column -- this is what prevents a live job and a recovery-scan job for the
+        same message from both paying for a Whisper call: whichever one runs this
+        UPDATE first wins, the other gets NULL back. Scoped to `snapshot_kind =
+        'created'` -- a caption edit on a voice message produces a separate
+        'edited' snapshot row that has no transcript of its own to claim.
+
+        A claim older than `stale_after_seconds` with still no `transcript` is
+        treated as dead (the worker that made it crashed/was killed before
+        finishing) and can be reclaimed here too -- without this, a hard crash
+        right after claiming (before `finalize_message_transcript` or
+        `release_transcription_claim` ever runs) would leave the message claimed
+        forever, invisible to the recovery scan.
+        """
+        claim_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        stale_before = claim_at - timedelta(seconds=stale_after_seconds)
+        stmt = (
+            update(MessageArchiveModel)
+            .where(
+                MessageArchiveModel.chat_id == chat_id,
+                MessageArchiveModel.telegram_message_id == telegram_message_id,
+                MessageArchiveModel.snapshot_kind == "created",
+                MessageArchiveModel.transcript.is_(None),
+                or_(
+                    MessageArchiveModel.transcribed_at.is_(None),
+                    MessageArchiveModel.transcribed_at < stale_before,
+                ),
+            )
+            .values(transcribed_at=claim_at)
+            .returning(MessageArchiveModel.id)
+        )
+        result = await self._session.execute(stmt)
+        row_id = result.scalar_one_or_none()
+        await self._session.flush()
+        return int(row_id) if row_id is not None else None
+
+    async def release_transcription_claim(self, *, archive_row_id: int) -> None:
+        """Undo a claim after a failed/skipped transcription attempt, so a later
+        recovery scan can retry this message. A no-op if the row somehow already
+        has a real transcript (never clobber a finished result)."""
+        await self._session.execute(
+            update(MessageArchiveModel)
+            .where(MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None))
+            .values(transcribed_at=None)
+        )
+        await self._session.flush()
+
+    async def finalize_message_transcript(
+        self,
+        *,
+        archive_row_id: int,
+        transcript: str,
+        transcribed_at: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(MessageArchiveModel)
+            .where(MessageArchiveModel.id == archive_row_id)
+            .values(transcript=transcript, transcribed_at=_coerce_utc_datetime(transcribed_at))
+        )
+        await self._session.flush()
+
+    async def list_pending_voice_transcription_candidates(
+        self,
+        *,
+        since: datetime,
+        limit: int = 500,
+        stale_after_seconds: int = STT_CLAIM_STALE_AFTER_SECONDS,
+        now: datetime | None = None,
+    ) -> list["PendingTranscriptionCandidate"]:
+        """Recently-archived voice/video_note messages with no transcript and no
+        LIVE claim on them (a claim older than `stale_after_seconds` counts as
+        dead, same cutoff `claim_message_for_transcription` itself uses -- a
+        message claimed by a worker that then hard-crashed before finishing must
+        still surface here, or it would be stuck forever). Used only by the STT
+        queue's startup recovery scan (docs/DAILY_SUMMARY_TODO.md)."""
+        from selara.domain.entities import PendingTranscriptionCandidate
+
+        reference_now = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        stale_before = reference_now - timedelta(seconds=stale_after_seconds)
+        stmt = (
+            select(
+                MessageArchiveModel.id,
+                MessageArchiveModel.chat_id,
+                MessageArchiveModel.telegram_message_id,
+                MessageArchiveModel.message_type,
+                MessageArchiveModel.raw_message_json,
+            )
+            .join(ChatSettingsModel, ChatSettingsModel.chat_id == MessageArchiveModel.chat_id)
+            .where(
+                MessageArchiveModel.snapshot_kind == "created",
+                MessageArchiveModel.transcript.is_(None),
+                or_(
+                    MessageArchiveModel.transcribed_at.is_(None),
+                    MessageArchiveModel.transcribed_at < stale_before,
+                ),
+                MessageArchiveModel.snapshot_at >= _coerce_utc_datetime(since),
+                or_(
+                    and_(
+                        MessageArchiveModel.message_type == "voice",
+                        ChatSettingsModel.daily_summary_include_voice.is_(True),
+                    ),
+                    and_(
+                        MessageArchiveModel.message_type == "video_note",
+                        ChatSettingsModel.daily_summary_include_video_notes.is_(True),
+                    ),
+                ),
+            )
+            .order_by(MessageArchiveModel.snapshot_at.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            PendingTranscriptionCandidate(
+                chat_id=int(chat_id),
+                telegram_message_id=int(telegram_message_id),
+                message_type=str(message_type),
+                raw_message_json=raw_message_json or {},
+            )
+            for _row_id, chat_id, telegram_message_id, message_type, raw_message_json in rows
+        ]
 
     async def get_chat_alias_mode(self, *, chat_id: int) -> TextAliasMode:
         row = await self._session.get(ChatTextAliasSettingsModel, chat_id)
@@ -7914,6 +8687,12 @@ class SqlAlchemyActivityRepository:
             gacha_restore_at=_normalize_optional_datetime(row.gacha_restore_at),
             llm_enabled=bool(getattr(row, "llm_enabled", False)),
             llm_context_threshold=int(getattr(row, "llm_context_threshold", 30)),
+            daily_summary_enabled=bool(getattr(row, "daily_summary_enabled", False)),
+            daily_summary_hour=int(getattr(row, "daily_summary_hour", 3)),
+            daily_summary_min_messages=int(getattr(row, "daily_summary_min_messages", 50)),
+            daily_summary_style=str(getattr(row, "daily_summary_style", "neutral") or "neutral"),
+            daily_summary_include_voice=bool(getattr(row, "daily_summary_include_voice", False)),
+            daily_summary_include_video_notes=bool(getattr(row, "daily_summary_include_video_notes", False)),
         )
 
     @staticmethod

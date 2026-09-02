@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
+from typing import TypeVar
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger(__name__)
+
+_StructuredModel = TypeVar("_StructuredModel", bound=BaseModel)
 
 _DEFAULT_TIMEOUT = 60.0
 # #37: chat_with_tools has the highest fan-out (up to 8 rounds per admin
@@ -22,6 +27,7 @@ class LlmConfig:
     base_url: str | None = None
     timeout_seconds: float = _DEFAULT_TIMEOUT
     summary_model: str = "gpt-4o-mini"
+    supports_structured_output: bool = False
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -46,6 +52,15 @@ class LlmClient:
             base_url=config.base_url,
             timeout=config.timeout_seconds,
         )
+        # Usage of the most recent chat_* call, for callers (the daily summary
+        # pipeline) that need per-call token counts for cost accounting without
+        # changing what each method returns. None until a call succeeds.
+        self.last_usage: tuple[int | None, int | None] | None = None
+        self.last_model: str | None = None
+        # How many corrective retries chat_structured needed for its most recent
+        # call (0 = first attempt parsed/validated cleanly). Read by the daily
+        # summary pipeline for its per-run reliability diagnostics.
+        self.last_retry_count: int = 0
 
     async def chat_with_tools(
         self,
@@ -62,7 +77,7 @@ class LlmClient:
                 tool_choice="auto" if tools else None,
                 max_tokens=max_tokens,
             )
-            _log_usage("chat_with_tools", response)
+            self._record_usage("chat_with_tools", response, model=self._config.model)
             return response
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
@@ -78,7 +93,7 @@ class LlmClient:
                 messages=messages,
                 max_tokens=max_tokens,
             )
-            _log_usage("chat_simple", response)
+            self._record_usage("chat_simple", response, model=self._config.model)
             return response.choices[0].message.content or ""
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
@@ -94,7 +109,7 @@ class LlmClient:
                 messages=messages,
                 max_tokens=max_tokens,
             )
-            _log_usage("summarize", response)
+            self._record_usage("summarize", response, model=self._config.summary_model)
             return response.choices[0].message.content or ""
         except APITimeoutError as exc:
             raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
@@ -102,6 +117,90 @@ class LlmClient:
             raise LlmClientError("Не удалось подключиться к LLM-сервису.") from exc
         except APIStatusError as exc:
             raise LlmClientError(_extract_api_error(exc)) from exc
+
+    async def chat_structured(
+        self,
+        messages: list[dict],
+        *,
+        response_model: type[_StructuredModel],
+        max_tokens: int | None = None,
+    ) -> _StructuredModel:
+        """Get a schema-validated response from the cheap summary_model.
+
+        Used by the daily summary pipeline's non-tool stages (per-segment topic
+        extraction, theme merge -- see docs/DAILY_SUMMARY_TODO.md), which need
+        reliable structured JSON, not a text answer or a tool call.
+
+        If `LlmConfig.supports_structured_output` is set, this uses the provider's
+        native `response_format={"type": "json_schema", ...}` -- but the response is
+        ALWAYS re-validated against `response_model` afterwards regardless, since a
+        provider can claim schema support and still drift. On the first validation
+        failure, one corrective follow-up round is attempted before giving up.
+        """
+        schema = response_model.model_json_schema()
+        request_messages = list(messages)
+
+        for attempt in range(2):
+            try:
+                if self._config.supports_structured_output:
+                    response = await self._client.chat.completions.create(
+                        model=self._config.summary_model,
+                        messages=request_messages,
+                        max_tokens=max_tokens,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": response_model.__name__,
+                                "schema": schema,
+                                "strict": True,
+                            },
+                        },
+                    )
+                else:
+                    response = await self._client.chat.completions.create(
+                        model=self._config.summary_model,
+                        messages=request_messages,
+                        max_tokens=max_tokens,
+                    )
+                self._record_usage("chat_structured", response, model=self._config.summary_model)
+            except APITimeoutError as exc:
+                raise LlmClientError("LLM-сервис не ответил вовремя.") from exc
+            except APIConnectionError as exc:
+                raise LlmClientError("Не удалось подключиться к LLM-сервису.") from exc
+            except APIStatusError as exc:
+                raise LlmClientError(_extract_api_error(exc)) from exc
+
+            content = response.choices[0].message.content or ""
+            try:
+                parsed = response_model.model_validate(json.loads(content))
+                self.last_retry_count = attempt
+                return parsed
+            except (json.JSONDecodeError, ValidationError) as exc:
+                if attempt == 0:
+                    request_messages = [
+                        *request_messages,
+                        {"role": "assistant", "content": content},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Ответ не прошёл валидацию по JSON-схеме: "
+                                f"{exc}. Верни ТОЛЬКО валидный JSON по описанной схеме, без пояснений."
+                            ),
+                        },
+                    ]
+                    continue
+                raise LlmClientError(f"LLM вернула невалидный структурированный ответ: {exc}") from exc
+
+        raise AssertionError("unreachable")  # loop always returns or raises
+
+    def _record_usage(self, method: str, response: object, *, model: str) -> None:
+        _log_usage(method, response)
+        usage = getattr(response, "usage", None)
+        self.last_model = model
+        if usage is None:
+            self.last_usage = None
+            return
+        self.last_usage = (getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
 
 
 def _log_usage(method: str, response: object) -> None:

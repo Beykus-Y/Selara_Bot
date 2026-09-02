@@ -35,12 +35,16 @@ CFG_BOOL_KEYS: set[str] = {
     "auctions_enabled",
     "economy_enabled",
     "cleanup_economy_commands",
+    "daily_summary_enabled",
+    "daily_summary_include_voice",
+    "daily_summary_include_video_notes",
 }
 
 CFG_ENUM_VALUES: dict[str, tuple[str, ...]] = {
     "text_commands_locale": ("ru", "en"),
     "economy_mode": ("global", "local"),
     "persona_display_mode": ("image_only", "image_name", "title_image_name"),
+    "daily_summary_style": ("neutral", "lively", "snarky"),
 }
 
 CFG_TEXTAREA_KEYS: set[str] = {
@@ -421,6 +425,42 @@ SETTING_META: dict[str, SettingMeta] = {
         description_ru="Удалять успешную эконом-команду пользователя и ответ бота через короткую задержку, чтобы чат не захламлялся.",
         value_hint_ru="true/false.",
     ),
+    "daily_summary_enabled": SettingMeta(
+        title_ru="Итоги дня (бета)",
+        short_ru="Итоги дня",
+        description_ru="Присылать ежедневную AI-сводку жизни чата за последние сутки. Требует включённый save_message.",
+        value_hint_ru="true/false.",
+    ),
+    "daily_summary_hour": SettingMeta(
+        title_ru="Час отправки итогов дня",
+        short_ru="Время итогов",
+        description_ru="В какой час по времени бота присылать ежедневную сводку.",
+        value_hint_ru="Целое число 0..23.",
+    ),
+    "daily_summary_min_messages": SettingMeta(
+        title_ru="Порог активности для итогов дня",
+        short_ru="Порог итогов",
+        description_ru="Минимум сообщений за последние сутки, чтобы сводка вообще формировалась.",
+        value_hint_ru="Целое число > 0.",
+    ),
+    "daily_summary_style": SettingMeta(
+        title_ru="Стиль итогов дня",
+        short_ru="Стиль итогов",
+        description_ru="Тон, которым Selara пишет ежедневную сводку.",
+        value_hint_ru="neutral, lively или snarky.",
+    ),
+    "daily_summary_include_voice": SettingMeta(
+        title_ru="Учитывать голосовые в итогах дня",
+        short_ru="Голосовые в итогах",
+        description_ru="Расшифровывать голосовые сообщения и учитывать их содержание при формировании сводки.",
+        value_hint_ru="true/false.",
+    ),
+    "daily_summary_include_video_notes": SettingMeta(
+        title_ru="Учитывать кружки в итогах дня",
+        short_ru="Кружки в итогах",
+        description_ru="Расшифровывать видео-кружки и учитывать их содержание при формировании сводки.",
+        value_hint_ru="true/false.",
+    ),
 }
 
 
@@ -609,6 +649,12 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "cleanup_economy_commands": value.cleanup_economy_commands,
         "llm_enabled": value.llm_enabled,
         "llm_context_threshold": value.llm_context_threshold,
+        "daily_summary_enabled": value.daily_summary_enabled,
+        "daily_summary_hour": value.daily_summary_hour,
+        "daily_summary_min_messages": value.daily_summary_min_messages,
+        "daily_summary_style": value.daily_summary_style,
+        "daily_summary_include_voice": value.daily_summary_include_voice,
+        "daily_summary_include_video_notes": value.daily_summary_include_video_notes,
     }
 
 

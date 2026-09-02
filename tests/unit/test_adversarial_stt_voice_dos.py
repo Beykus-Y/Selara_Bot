@@ -46,10 +46,14 @@ def test_voice_router_filter_has_no_permission_or_group_restriction():
 
 
 def test_voice_message_handler_signature_has_settings_dependency_for_cooldown():
-    """#3 fix: the handler now also depends on settings (stt_cooldown_seconds)."""
+    """#3 fix: the handler now also depends on settings (stt_cooldown_seconds).
+
+    chat_settings/daily_summary_stt_queue were added later for the daily summary
+    voice transcription queue (docs/DAILY_SUMMARY_TODO.md) -- both optional,
+    unrelated to the cooldown this test guards."""
     sig = inspect.signature(voice_message_handler)
     params = set(sig.parameters.keys())
-    assert params == {"message", "bot", "stt_client", "settings"}
+    assert params == {"message", "bot", "stt_client", "settings", "chat_settings", "daily_summary_stt_queue"}
 
 
 def test_settings_defines_stt_and_llm_cooldown_fields():

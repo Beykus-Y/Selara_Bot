@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 
@@ -48,6 +48,67 @@ class ChatInterestingFactState:
     last_fact_id: str | None
     used_fact_ids: tuple[str, ...]
     updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class DailySummaryRun:
+    id: int
+    chat_id: int
+    summary_date: date
+    window_from: datetime
+    window_to: datetime
+    trigger: str
+    status: str
+    claimed_at: datetime
+    lease_until: datetime
+    generated_text: str | None
+    topics_json: Any | None
+    diagnostics_json: Any | None
+    pipeline_cost_usd: float
+    context_stt_cost_usd: float
+    created_at: datetime
+    sent_at: datetime | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ArchivedMessageView:
+    """A read-only projection of one archived message for the daily summary tools.
+
+    Deliberately narrower than `MessageArchiveModel` -- no `raw_message_json`, no
+    snapshot bookkeeping -- this is exactly the shape the 4 analyst tools
+    (get_message_context/get_reply_thread/search_messages) are allowed to hand back
+    to the LLM, already scoped to one chat and one analysis window.
+    """
+
+    telegram_message_id: int
+    user_id: int
+    sent_at: datetime
+    text: str | None
+    transcript: str | None
+    reply_to_telegram_message_id: int | None
+
+
+@dataclass(frozen=True)
+class PendingTranscriptionCandidate:
+    """A recently-archived voice/video_note message still missing a transcript,
+    found by the daily summary STT queue's startup recovery scan (a live job's
+    asyncio.Queue does not survive a restart -- see
+    infrastructure/stt/daily_summary_queue.py). Still goes through the same
+    `claim_message_for_transcription` as a live job before any work happens --
+    this is a candidate to (re-)enqueue, not something already claimed."""
+
+    chat_id: int
+    telegram_message_id: int
+    message_type: str
+    raw_message_json: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ActivityWindowStats:
+    message_count: int
+    participant_count: int
+    reply_count: int
 
 
 LeaderboardMode = Literal["mix", "activity", "karma"]

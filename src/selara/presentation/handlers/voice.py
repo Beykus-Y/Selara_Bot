@@ -6,9 +6,12 @@ import time
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
+from selara.application.daily_summary.transcription import TranscriptionJob, is_transcription_enabled
+from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.infrastructure.stt import SttClient, SttClientError
 from selara.infrastructure.stt.client import _MAX_FILE_SIZE
+from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
 
 router = Router(name="voice")
 log = logging.getLogger(__name__)
@@ -88,18 +91,74 @@ async def _transcribe_and_reply(
         await message.reply(chunk)
 
 
+def _maybe_enqueue_for_daily_summary(
+    message: Message,
+    *,
+    chat_settings: ChatSettings | None,
+    daily_summary_stt_queue: DailySummaryTranscriptionQueue | None,
+    message_type: str,
+    file_id: str,
+    filename: str,
+    duration: int | None,
+) -> None:
+    """Fire-and-forget enqueue for the daily summary's own transcription --
+    entirely separate from the instant reply above: it never blocks it, never
+    reuses its result, and a failure here is invisible to the user. See
+    infrastructure/stt/daily_summary_queue.py for why this can't just transcribe
+    inline (the archive row for this message doesn't exist yet at this point)."""
+    if daily_summary_stt_queue is None or chat_settings is None:
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        return
+    if not chat_settings.save_message or not is_transcription_enabled(chat_settings, message_type=message_type):
+        return
+    daily_summary_stt_queue.enqueue(
+        TranscriptionJob(
+            chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            file_id=file_id,
+            filename=filename,
+            message_type=message_type,
+            duration_seconds=float(duration or 0),
+        )
+    )
+
+
 @router.message(F.voice)
-async def voice_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
+async def voice_message_handler(
+    message: Message,
+    bot: Bot,
+    stt_client: SttClient,
+    settings: Settings,
+    chat_settings: ChatSettings | None = None,
+    daily_summary_stt_queue: DailySummaryTranscriptionQueue | None = None,
+) -> None:
     voice = message.voice
     if voice is None:
         return
+    _maybe_enqueue_for_daily_summary(
+        message,
+        chat_settings=chat_settings,
+        daily_summary_stt_queue=daily_summary_stt_queue,
+        message_type="voice",
+        file_id=voice.file_id,
+        filename="voice.ogg",
+        duration=getattr(voice, "duration", None),
+    )
     await _transcribe_and_reply(
         message, bot, stt_client, settings, file_id=voice.file_id, filename="voice.ogg", file_size=voice.file_size,
     )
 
 
 @router.message(F.video_note)
-async def video_note_message_handler(message: Message, bot: Bot, stt_client: SttClient, settings: Settings) -> None:
+async def video_note_message_handler(
+    message: Message,
+    bot: Bot,
+    stt_client: SttClient,
+    settings: Settings,
+    chat_settings: ChatSettings | None = None,
+    daily_summary_stt_queue: DailySummaryTranscriptionQueue | None = None,
+) -> None:
     """#4: video circle messages ("кружки") carry an audio track in the same
     mp4 container Telegram voice notes don't use but Whisper already
     accepts (see SttClient._validate_audio's allowed formats) -- no
@@ -107,6 +166,15 @@ async def video_note_message_handler(message: Message, bot: Bot, stt_client: Stt
     video_note = message.video_note
     if video_note is None:
         return
+    _maybe_enqueue_for_daily_summary(
+        message,
+        chat_settings=chat_settings,
+        daily_summary_stt_queue=daily_summary_stt_queue,
+        message_type="video_note",
+        file_id=video_note.file_id,
+        filename="video_note.mp4",
+        duration=getattr(video_note, "duration", None),
+    )
     await _transcribe_and_reply(
         message, bot, stt_client, settings,
         file_id=video_note.file_id, filename="video_note.mp4", file_size=video_note.file_size,

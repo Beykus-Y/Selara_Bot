@@ -76,6 +76,7 @@ class ActivityBatcher:
         caption: str | None = None,
         raw_message_json: dict[str, object] | None = None,
         snapshot_hash: str | None = None,
+        reply_to_telegram_message_id: int | None = None,
     ) -> None:
         if self._closed:
             raise RuntimeError("ActivityBatcher is closed.")
@@ -107,6 +108,7 @@ class ActivityBatcher:
                         caption=caption,
                         raw_message_json=raw_message_json,
                         snapshot_hash=snapshot_hash,
+                        reply_to_telegram_message_id=reply_to_telegram_message_id,
                     )
                 )
                 should_wake = len(self._pending) >= self._max_events

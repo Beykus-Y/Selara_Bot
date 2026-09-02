@@ -62,6 +62,12 @@ class SttClient:
             timeout=config.timeout_seconds,
         )
 
+    @property
+    def model(self) -> str:
+        """Public accessor for cost-accounting callers (daily summary STT queue)
+        that need to record which model actually did the transcription."""
+        return self._config.model
+
     async def transcribe(self, audio_bytes: bytes, *, filename: str = "voice.ogg") -> str:
         """Транскрибировать аудио из байт. Возвращает текст или кидает SttClientError.
 
