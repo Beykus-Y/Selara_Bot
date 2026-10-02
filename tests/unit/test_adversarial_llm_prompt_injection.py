@@ -155,6 +155,7 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
         mock_load_ctx.return_value = SimpleNamespace(messages=[])
         repo_mock = MagicMock()
         repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        repo_mock.search_glossary = AsyncMock(return_value=[])
         mock_repo_cls.return_value = repo_mock
 
         await _handle(

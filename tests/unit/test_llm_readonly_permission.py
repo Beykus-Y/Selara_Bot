@@ -101,6 +101,7 @@ async def test_actor_with_only_readonly_permission_can_invoke_the_assistant(chat
          patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
         repo_mock = MagicMock()
         repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        repo_mock.search_glossary = AsyncMock(return_value=[])
         mock_repo_cls.return_value = repo_mock
 
         await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False)
@@ -184,6 +185,8 @@ async def test_moderate_users_actor_can_still_write_to_glossary():
     )
     llm_repo = MagicMock()
     llm_repo.list_glossary = AsyncMock(return_value=[])
+    llm_repo.lock_glossary = AsyncMock()
+    llm_repo.add_admin_action = AsyncMock(return_value=SimpleNamespace(id=1))
     llm_repo.upsert_glossary_term = AsyncMock(return_value=SimpleNamespace(term="рест", definition="def"))
 
     result = await execute_tool(

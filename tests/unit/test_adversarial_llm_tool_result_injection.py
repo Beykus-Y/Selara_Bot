@@ -132,6 +132,8 @@ async def test_add_to_glossary_allows_persistent_injection_content(chat_snapshot
     stored = MagicMock(term="рест", definition=INJECTION_PAYLOAD)
     llm_repo.upsert_glossary_term = AsyncMock(return_value=stored)
     llm_repo.list_glossary = AsyncMock(return_value=[])
+    llm_repo.lock_glossary = AsyncMock()
+    llm_repo.add_admin_action = AsyncMock(return_value=SimpleNamespace(id=1))
 
     activity_repo = MagicMock()
     activity_repo.get_effective_role_definition = AsyncMock(

@@ -5,8 +5,15 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from selara.domain.glossary import (
+    GlossaryEntry, GlossaryMatch, MAX_ALIASES, MAX_DEFINITION_LENGTH,
+    MAX_GLOSSARY_TERMS, MAX_TERM_LENGTH, normalize_glossary_text, rank_glossary,
+)
+
 from selara.infrastructure.db.models import (
     LlmAdminActionModel,
+    ChatModel,
+    LlmChatGlossaryAliasModel,
     LlmChatGlossaryHistoryModel,
     LlmChatGlossaryModel,
     LlmContextMessageModel,
@@ -249,39 +256,70 @@ class LlmRepository:
 
     # --- Glossary ---
 
+    async def lock_glossary(self, *, chat_id: int) -> None:
+        await self._session.execute(select(ChatModel.telegram_chat_id).where(
+            ChatModel.telegram_chat_id == chat_id,
+        ).with_for_update())
+
     async def lookup_glossary_term(self, *, chat_id: int, term: str) -> LlmChatGlossaryModel | None:
-        normalized = term.lower().strip()
-        stmt = select(LlmChatGlossaryModel).where(
-            LlmChatGlossaryModel.chat_id == chat_id,
-            LlmChatGlossaryModel.term == normalized,
-        )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        normalized = normalize_glossary_text(term)
+        matches = [row for row in await self.list_glossary(chat_id=chat_id)
+                   if normalized in {normalize_glossary_text(row.term), *(a.alias for a in row.aliases)}]
+        # Legacy records may collide after stronger normalization. Never
+        # silently choose one definition; search exposes both candidates.
+        return matches[0] if len(matches) == 1 else None
+
+    async def search_glossary(self, *, chat_id: int, query: str, limit: int = 5) -> list[GlossaryMatch]:
+        rows = await self.list_glossary(chat_id=chat_id)
+        return rank_glossary([
+            GlossaryEntry(row.term, row.definition, tuple(a.alias for a in row.aliases)) for row in rows
+        ], query, limit=limit)
 
     async def upsert_glossary_term(
         self, *, chat_id: int, term: str, definition: str, actor_user_id: int | None = None,
+        aliases: list[str] | None = None, mode: str = "upsert",
     ) -> LlmChatGlossaryModel:
-        """#17/#18: tracks who wrote/last edited an entry, and records the
-        replaced definition in llm_chat_glossary_history before overwriting
-        it, so a poisoned or otherwise-bad edit can be inspected/recovered
-        instead of silently lost. Uses a plain select-then-write (not the
-        previous single-statement upsert) because capturing the pre-update
-        value for history requires seeing it before the overwrite -- a
-        narrow TOCTOU window on concurrent writes to the *same* term is
-        acceptable here (audit trail, not a security/consistency-critical
-        path like the moderation-action locks elsewhere in this codebase)."""
-        normalized = term.lower().strip()
-        existing = await self._session.execute(
-            select(LlmChatGlossaryModel).where(
-                LlmChatGlossaryModel.chat_id == chat_id,
-                LlmChatGlossaryModel.term == normalized,
-            )
-        )
-        row = existing.scalar_one_or_none()
+        """Serialize writes per chat and preserve definitions and aliases."""
+        await self.lock_glossary(chat_id=chat_id)
+        normalized = normalize_glossary_text(term)
+        if not normalized or len(normalized) > MAX_TERM_LENGTH:
+            raise ValueError(f"Термин должен содержать 1–{MAX_TERM_LENGTH} символов.")
+        if not definition.strip() or len(definition) > MAX_DEFINITION_LENGTH:
+            raise ValueError(f"Определение должно содержать 1–{MAX_DEFINITION_LENGTH} символов.")
+        if mode not in {"upsert", "create", "update"}:
+            raise ValueError("Режим записи: create или update.")
+        rows = await self.list_glossary(chat_id=chat_id)
+        existing = [item for item in rows if normalize_glossary_text(item.term) == normalized]
+        if len(existing) > 1:
+            raise ValueError("Несколько записей совпадают после нормализации; исправьте дубликаты.")
+        row = existing[0] if existing else None
+        if mode == "create" and row is not None:
+            raise ValueError("Термин уже существует; используйте update.")
+        if mode == "update" and row is None:
+            raise ValueError("Термин не найден; используйте каноническое название или create.")
+        if row is None and len(rows) >= MAX_GLOSSARY_TERMS:
+            raise ValueError("Словарь чата заполнен.")
+        if aliases is not None and (not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases)):
+            raise ValueError("Алиасы должны быть списком строк.")
+        alias_names = sorted({normalize_glossary_text(a) for a in aliases or []} - {normalized})
+        if any(not a or len(a) > MAX_TERM_LENGTH for a in alias_names) or len(alias_names) > MAX_ALIASES:
+            raise ValueError(f"Допустимо до {MAX_ALIASES} непустых алиасов длиной до {MAX_TERM_LENGTH} символов.")
+        claimed = {normalized, *alias_names}
+        for other in rows:
+            if other is row:
+                continue
+            names = {normalize_glossary_text(other.term), *(a.alias for a in other.aliases)}
+            if claimed & names:
+                raise ValueError(f"Термин или алиас уже принадлежит записи '{other.term}'.")
         if row is not None:
+            previous_aliases = [a.alias for a in row.aliases]
+            if row.definition == definition and (aliases is None or sorted(previous_aliases) == alias_names):
+                return row
             self._session.add(LlmChatGlossaryHistoryModel(
                 chat_id=chat_id,
-                term=normalized,
+                term=row.term,
                 previous_definition=row.definition,
+                previous_aliases=previous_aliases,
                 changed_by_user_id=actor_user_id,
             ))
             row.definition = definition
@@ -294,8 +332,15 @@ class LlmRepository:
                 definition=definition,
                 created_by_user_id=actor_user_id,
                 updated_by_user_id=actor_user_id,
+                aliases=[],
             )
             self._session.add(row)
+        if aliases is not None:
+            # Flush deletions before replacements to avoid transient unique
+            # conflicts when retaining an alias during an update.
+            row.aliases.clear()
+            await self._session.flush()
+            row.aliases.extend(LlmChatGlossaryAliasModel(chat_id=chat_id, alias=a) for a in alias_names)
         await self._session.flush()
         return row
 
@@ -304,34 +349,51 @@ class LlmRepository:
             select(LlmChatGlossaryModel)
             .where(LlmChatGlossaryModel.chat_id == chat_id)
             .order_by(LlmChatGlossaryModel.term.asc())
+            .execution_options(populate_existing=True)
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    async def delete_glossary_term(self, *, chat_id: int, term: str) -> bool:
+    async def delete_glossary_term(self, *, chat_id: int, term: str, actor_user_id: int | None = None) -> bool:
         """#6: recovery path for a poisoned glossary entry."""
-        normalized = term.lower().strip()
-        result = await self._session.execute(
-            delete(LlmChatGlossaryModel).where(
-                LlmChatGlossaryModel.chat_id == chat_id,
-                LlmChatGlossaryModel.term == normalized,
-            )
-        )
+        await self.lock_glossary(chat_id=chat_id)
+        row = await self.lookup_glossary_term(chat_id=chat_id, term=term)
+        if row is None or normalize_glossary_text(row.term) != normalize_glossary_text(term):
+            return False
+        self._session.add(LlmChatGlossaryHistoryModel(
+            chat_id=chat_id, term=row.term, previous_definition=row.definition,
+            previous_aliases=[a.alias for a in row.aliases],
+            changed_by_user_id=actor_user_id,
+        ))
+        await self._session.delete(row)
         await self._session.flush()
-        return result.rowcount == 1
+        return True
 
     async def get_glossary_history(
         self, *, chat_id: int, term: str, limit: int = 10,
     ) -> list[LlmChatGlossaryHistoryModel]:
         """#18: lets an admin see what a poisoned/bad entry looked like
         before the most recent edit(s)."""
-        normalized = term.lower().strip()
+        row = await self.lookup_glossary_term(chat_id=chat_id, term=term)
+        normalized = row.term if row is not None else normalize_glossary_text(term)
         stmt = (
             select(LlmChatGlossaryHistoryModel)
             .where(
                 LlmChatGlossaryHistoryModel.chat_id == chat_id,
                 LlmChatGlossaryHistoryModel.term == normalized,
             )
-            .order_by(LlmChatGlossaryHistoryModel.changed_at.desc())
-            .limit(limit)
+            .order_by(LlmChatGlossaryHistoryModel.changed_at.desc(), LlmChatGlossaryHistoryModel.id.desc())
+            .limit(max(1, min(50, limit)))
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get_glossary_revision(
+        self, *, chat_id: int, term: str, revision_id: int,
+    ) -> LlmChatGlossaryHistoryModel | None:
+        stmt = select(LlmChatGlossaryHistoryModel).where(
+            LlmChatGlossaryHistoryModel.chat_id == chat_id,
+            LlmChatGlossaryHistoryModel.id == revision_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None or normalize_glossary_text(row.term) != normalize_glossary_text(term):
+            return None
+        return row

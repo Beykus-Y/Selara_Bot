@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -21,6 +21,7 @@ from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.llm.client import LlmClient, LlmClientError
 from selara.infrastructure.llm.context import (
+    build_glossary_context,
     load_context,
     maybe_compress,
     save_interaction,
@@ -40,6 +41,7 @@ from selara.infrastructure.llm.tools import (
     get_tool_status,
 )
 from selara.presentation.auth import has_permission
+from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
 
 log = logging.getLogger(__name__)
 
@@ -260,10 +262,12 @@ async def _handle(
     )
 
     user_content = f"[{message.from_user.first_name or admin_tag}] {admin_tag}: {query}"
+    glossary_context = await build_glossary_context(chat_id=message.chat.id, query=query, llm_repo=llm_repo)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         *context_messages,
+        *([glossary_context] if glossary_context else []),
         {"role": "user", "content": user_content},
     ]
 
@@ -337,12 +341,7 @@ async def _handle(
     else:
         final_answer = "Ассистент не смог завершить задачу за отведённое число шагов."
 
-    display_text = final_answer or "Ассистент не дал ответа."
-    try:
-        await thinking_msg.edit_text(display_text)
-    except Exception:
-        if final_answer:
-            await message.reply(final_answer)
+    await _send_formatted_answer(message, thinking_msg, final_answer or "Ассистент не дал ответа.")
 
     await save_interaction(
         chat_id=message.chat.id,
@@ -371,6 +370,21 @@ async def _handle(
         final_answer=final_answer,
         llm_client=llm_client,
     )
+
+
+async def _send_formatted_answer(message: Message, thinking_msg: Message, text: str) -> None:
+    for index, chunk in enumerate(render_llm_html(text)):
+        if index == 0:
+            try:
+                await thinking_msg.edit_text(chunk, parse_mode="HTML")
+                continue
+            except Exception as exc:
+                log.warning("llm_admin: editing answer failed, sending reply: %s", exc)
+        try:
+            await message.reply(chunk, parse_mode="HTML")
+        except TelegramBadRequest:
+            # Preserve the answer if Telegram rejects a particular entity.
+            await message.reply(html_to_plain_text(chunk), parse_mode=None)
 
 
 async def _send_dm_summary(
@@ -413,11 +427,12 @@ async def _send_dm_summary(
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
     try:
-        await bot.send_message(
-            chat_id=admin_user_id,
-            text=f"AI-ассистент: сводка\n\n{dm_text}",
-            reply_markup=keyboard,
-        )
+        for index, chunk in enumerate(render_llm_html(f"AI-ассистент: сводка\n\n{dm_text}")):
+            kwargs = {"chat_id": admin_user_id, "reply_markup": keyboard if index == 0 else None}
+            try:
+                await bot.send_message(text=chunk, parse_mode="HTML", **kwargs)
+            except TelegramBadRequest:
+                await bot.send_message(text=html_to_plain_text(chunk), parse_mode=None, **kwargs)
     except TelegramForbiddenError:
         log.warning("llm_admin: не удалось отправить DM администратору %d (бот заблокирован)", admin_user_id)
     except Exception as exc:

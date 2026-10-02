@@ -148,6 +148,7 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
          patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
         repo_mock = MagicMock()
         repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        repo_mock.search_glossary = AsyncMock(return_value=[])
         mock_repo_cls.return_value = repo_mock
 
         await _handle(
@@ -202,6 +203,7 @@ async def test_llm_cooldown_throttles_immediate_repeat_invocation_by_same_admin(
 
     llm_repo_instance = MagicMock()
     llm_repo_instance.get_last_user_message_at = fake_get_last_user_message_at
+    llm_repo_instance.search_glossary = AsyncMock(return_value=[])
     llm_repo_instance.add_context_message = fake_add_context_message
 
     with patch.object(llm_admin_module, "has_permission", new=AsyncMock(return_value=(True, None, None))), \

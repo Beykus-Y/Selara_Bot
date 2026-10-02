@@ -14,6 +14,7 @@ from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
 from selara.application.daily_summary.schedule import compute_scheduled_window_to
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, DailySummaryRun
+from selara.domain.glossary import GlossaryEntry
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
@@ -38,10 +39,10 @@ def _resolve_timezone(timezone_name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-async def _fetch_glossary_terms(session: AsyncSession, *, chat_id: int) -> list[tuple[str, str]]:
+async def _fetch_glossary_terms(session: AsyncSession, *, chat_id: int) -> list[GlossaryEntry]:
     try:
         rows = await LlmRepository(session).list_glossary(chat_id=chat_id)
-        return [(row.term, row.definition) for row in rows]
+        return [GlossaryEntry(row.term, row.definition, tuple(a.alias for a in row.aliases)) for row in rows]
     except Exception:
         logger.exception("daily summary chat_id=%s: failed to load glossary, continuing without it", chat_id)
         return []

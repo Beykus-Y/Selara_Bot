@@ -535,12 +535,12 @@ async def test_add_to_glossary_allows_updating_existing_term_when_chat_glossary_
     from selara.infrastructure.llm.tools import _MAX_GLOSSARY_TERMS
 
     llm_repo.list_glossary = AsyncMock(
-        return_value=[SimpleNamespace(term=f"term{i}") for i in range(_MAX_GLOSSARY_TERMS - 1)] + [SimpleNamespace(term="рест")]
+        return_value=[SimpleNamespace(term=f"term{i}") for i in range(_MAX_GLOSSARY_TERMS - 1)] + [SimpleNamespace(term="рест", definition="old")]
     )
     llm_repo.upsert_glossary_term = AsyncMock(return_value=SimpleNamespace(term="рест", definition="updated"))
 
     result = await execute_tool(
-        ToolCall(name="add_to_glossary", arguments={"term": "рест", "definition": "updated"}, call_id="g-3"),
+        ToolCall(name="add_to_glossary", arguments={"term": "рест", "definition": "updated", "mode": "update"}, call_id="g-3"),
         chat_snapshot=chat_snapshot,
         actor_snapshot=actor_snapshot,
         activity_repo=activity_repo,
@@ -843,7 +843,7 @@ async def test_remove_from_glossary_success_offers_restore_undo(
     llm_repo.delete_glossary_term.assert_awaited_once()
     assert result.undo_payload == {
         "tool": "restore_glossary_term", "term": "рест", "definition": "official definition",
-        "chat_id": chat_snapshot.telegram_chat_id,
+        "aliases": [], "chat_id": chat_snapshot.telegram_chat_id,
     }
 
 

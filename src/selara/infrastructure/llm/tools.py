@@ -10,6 +10,9 @@ from typing import Any
 from aiogram import Bot
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.domain.glossary import (
+    MAX_DEFINITION_LENGTH, MAX_GLOSSARY_TERMS, MAX_TERM_LENGTH, normalize_glossary_text,
+)
 from selara.infrastructure.db.llm_repository import LlmRepository
 
 log = logging.getLogger(__name__)
@@ -54,8 +57,8 @@ _MAX_HISTORY_ROWS = 500
 # #19: glossary had no length/count limits at all -- unbounded growth of
 # content that gets injected into every future context that triggers a
 # lookup.
-_MAX_GLOSSARY_DEFINITION_LENGTH = 2000
-_MAX_GLOSSARY_TERMS = 200
+_MAX_GLOSSARY_DEFINITION_LENGTH = MAX_DEFINITION_LENGTH
+_MAX_GLOSSARY_TERMS = MAX_GLOSSARY_TERMS
 
 _MODERATION_TARGET_TOOLS: frozenset[str] = frozenset(
     {
@@ -142,6 +145,7 @@ _UNDO_TOOL_TO_REGISTERED: dict[str, str] = {
     "revoke_persona": "revoke_persona",
     "set_rank": "set_rank",
     "restore_glossary_term": "add_to_glossary",
+    "remove_glossary_term": "remove_from_glossary",
 }
 
 
@@ -159,9 +163,13 @@ def build_rollback_call(payload: dict, *, call_id: str) -> ToolCall:
     if undo_tool == "restore_glossary_term":
         return ToolCall(
             name=registered_name,
-            arguments={"term": payload.get("term", ""), "definition": payload.get("definition", "")},
+            arguments={"term": payload.get("term", ""), "definition": payload.get("definition", ""),
+                       "aliases": payload.get("aliases", []), "mode": "upsert"},
             call_id=call_id,
         )
+
+    if undo_tool == "remove_glossary_term":
+        return ToolCall(name=registered_name, arguments={"term": payload.get("term", "")}, call_id=call_id)
 
     target_user_id = payload.get("target_user_id")
     if target_user_id is None:
@@ -1361,8 +1369,9 @@ async def _exec_list_members(
     "lookup_glossary",
     schema={
         "description": (
-            "Найти значение термина или сленга в словаре чата. "
-            "Используй перед тем как применять незнакомые понятия (рест, варн, образ и т.д.)."
+            "Получить точное значение термина или алиаса в словаре текущего чата. "
+            "Проверяй и знакомые слова: у них бывает локальное значение. "
+            "При found=false проверь candidates или вызови search_glossary с более широким запросом."
         ),
         "parameters": {
             "type": "object",
@@ -1387,10 +1396,16 @@ async def _exec_lookup_glossary(
 
     row = await llm_repo.lookup_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term)
     if row is None:
-        return _ok(call.call_id, call.name, {"found": False, "term": term}, f"Термин '{term}' не найден")
+        candidates = await llm_repo.search_glossary(chat_id=chat_snapshot.telegram_chat_id, query=term, limit=5)
+        return _ok(call.call_id, call.name, {
+            "found": False, "term": _untrusted(term),
+            "candidates": _bounded_glossary_matches(candidates),
+            "next_step": "Уточни значение по кандидатам или используй search_glossary. Не считай похожее совпадение точным.",
+        }, f"Термин '{term}' не найден точно")
     return _ok(
         call.call_id, call.name,
-        {"found": True, "term": row.term, "definition": _untrusted(row.definition)},
+        {"found": True, "data_notice": _UNTRUSTED_MARKER, "term": row.term,
+         "aliases": [a.alias for a in getattr(row, "aliases", [])], "definition": _untrusted(row.definition)},
         f"Термин '{term}'",
     )
 
@@ -1399,14 +1414,18 @@ async def _exec_lookup_glossary(
     "add_to_glossary",
     schema={
         "description": (
-            "Добавить или обновить термин в словаре чата. "
-            "Записывай туда специфичный сленг, правила чата, значения команд — всё что может понадобиться в будущем."
+            "Создать (mode=create) или заменить определение (mode=update) записи словаря. "
+            "Сначала проверь дубликаты через search_glossary. Сохраняй только явно сообщённые значения, "
+            "не собственные догадки. Требует moderate_users. Для update используй канонический термин."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "term": {"type": "string", "description": "Термин (будет нормализован в нижний регистр)"},
                 "definition": {"type": "string", "description": "Определение или описание термина"},
+                "mode": {"type": "string", "enum": ["create", "update"], "description": "create — новая запись; update — замена существующей"},
+                "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 20,
+                            "description": "Варианты написания, сокращения, падежные формы. При update отсутствие сохраняет алиасы; [] удаляет их."},
             },
             "required": ["term", "definition"],
         },
@@ -1443,25 +1462,47 @@ async def _exec_add_to_glossary(
             f"Определение слишком длинное (максимум {_MAX_GLOSSARY_DEFINITION_LENGTH} символов).",
         )
 
-    existing_terms = {row.term for row in await llm_repo.list_glossary(chat_id=chat_snapshot.telegram_chat_id)}
-    if term.lower().strip() not in existing_terms and len(existing_terms) >= _MAX_GLOSSARY_TERMS:
+    if len(normalize_glossary_text(term)) > MAX_TERM_LENGTH:
+        return _err(call.call_id, call.name, f"Термин слишком длинный (максимум {MAX_TERM_LENGTH} символов).")
+    await llm_repo.lock_glossary(chat_id=chat_snapshot.telegram_chat_id)
+    rows = await llm_repo.list_glossary(chat_id=chat_snapshot.telegram_chat_id)
+    existing_terms = {normalize_glossary_text(row.term) for row in rows}
+    if normalize_glossary_text(term) not in existing_terms and len(existing_terms) >= _MAX_GLOSSARY_TERMS:
         return _err(
             call.call_id, call.name,
             f"Словарь чата заполнен (максимум {_MAX_GLOSSARY_TERMS} терминов). "
             "Удалите неиспользуемые термины перед добавлением новых.",
         )
 
+    previous = next((row for row in rows if normalize_glossary_text(row.term) == normalize_glossary_text(term)), None)
+    mode = call.arguments.get("mode", "create")
+    if mode == "create" and previous is not None:
+        return _err(call.call_id, call.name, "Термин уже существует. Для изменения используй mode=update.")
+    if mode == "update" and previous is None:
+        return _err(call.call_id, call.name, "Термин не найден. Укажи каноническое название или mode=create.")
+    undo = ({"tool": "restore_glossary_term", "term": previous.term, "definition": previous.definition,
+             "aliases": [a.alias for a in getattr(previous, "aliases", [])], "chat_id": chat_snapshot.telegram_chat_id}
+            if previous is not None else
+            {"tool": "remove_glossary_term", "term": term, "chat_id": chat_snapshot.telegram_chat_id})
     row = await llm_repo.upsert_glossary_term(
         chat_id=chat_snapshot.telegram_chat_id,
         term=term,
         definition=definition,
         actor_user_id=actor_snapshot.telegram_user_id,
+        aliases=call.arguments.get("aliases"), mode=mode,
     )
-    return _ok(
+    result = _ok(
         call.call_id, call.name,
-        {"ok": True, "term": row.term, "definition": _untrusted(row.definition)},
+        {"ok": True, "data_notice": _UNTRUSTED_MARKER, "term": row.term, "definition": _untrusted(row.definition)},
         f"Словарь: '{row.term}' записан",
+        undo=undo,
     )
+    action = await llm_repo.add_admin_action(
+        chat_id=chat_snapshot.telegram_chat_id, admin_user_id=actor_snapshot.telegram_user_id,
+        tool_name=call.name, action_description=result.action_description, undo_payload=undo,
+    )
+    result.db_action_id = action.id
+    return result
 
 
 @register_tool(
@@ -1502,13 +1543,20 @@ async def _exec_remove_from_glossary(
     if not term:
         return _err(call.call_id, call.name, "Термин не указан.")
 
+    await llm_repo.lock_glossary(chat_id=chat_snapshot.telegram_chat_id)
     existing = await llm_repo.lookup_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term)
     if existing is None:
         return _err(call.call_id, call.name, f"Термин '{term}' не найден.")
+    if normalize_glossary_text(term) != normalize_glossary_text(existing.term):
+        return _err(call.call_id, call.name, "Для удаления укажи каноническое название записи, а не алиас.")
 
-    await llm_repo.delete_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term)
+    aliases = [a.alias for a in getattr(existing, "aliases", [])]
+    deleted = await llm_repo.delete_glossary_term(chat_id=chat_snapshot.telegram_chat_id, term=term,
+                                               actor_user_id=actor_snapshot.telegram_user_id)
+    if not deleted:
+        return _err(call.call_id, call.name, "Запись не удалена; проверь каноническое название.")
 
-    return _ok(
+    result = _ok(
         call.call_id, call.name,
         {"ok": True, "term": existing.term},
         f"Словарь: '{existing.term}' удалён",
@@ -1516,16 +1564,26 @@ async def _exec_remove_from_glossary(
             "tool": "restore_glossary_term",
             "term": existing.term,
             "definition": existing.definition,
+            "aliases": aliases,
             "chat_id": chat_snapshot.telegram_chat_id,
         },
     )
+    action = await llm_repo.add_admin_action(
+        chat_id=chat_snapshot.telegram_chat_id, admin_user_id=actor_snapshot.telegram_user_id,
+        tool_name=call.name, action_description=result.action_description, undo_payload=result.undo_payload,
+    )
+    result.db_action_id = action.id
+    return result
 
 
 @register_tool(
     "list_glossary",
     schema={
-        "description": "Список всех терминов в словаре чата с определениями.",
-        "parameters": {"type": "object", "properties": {}},
+        "description": "Просмотр словаря страницами. По умолчанию краткие определения; для полного значения вызови lookup_glossary.",
+        "parameters": {"type": "object", "properties": {
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        }},
     },
     status_text="Загружаю словарь чата...",
 )
@@ -1539,8 +1597,93 @@ async def _exec_list_glossary(
     # #16: list_glossary the repository method already existed but had zero
     # call sites -- no way to see what's in a chat's glossary at all.
     rows = await llm_repo.list_glossary(chat_id=chat_snapshot.telegram_chat_id)
-    terms = [{"term": r.term, "definition": _untrusted(r.definition)} for r in rows]
-    return _ok(call.call_id, call.name, {"terms": terms, "count": len(terms)}, f"Словарь чата ({len(terms)})")
+    offset = max(0, int(call.arguments.get("offset", 0)))
+    limit = max(1, min(20, int(call.arguments.get("limit", 20))))
+    page = rows[offset:offset + limit]
+    terms = []
+    for row in page:
+        item = {"term": row.term, "definition": _untrusted(row.definition[:160]),
+                "aliases": [a.alias[:80] for a in getattr(row, "aliases", [])[:5]],
+                "aliases_truncated": len(getattr(row, "aliases", [])) > 5 or any(len(a.alias) > 80 for a in getattr(row, "aliases", []))}
+        if terms and len(json.dumps([*terms, item], ensure_ascii=False)) > 6000:
+            break
+        terms.append(item)
+    return _ok(call.call_id, call.name, {
+        "terms": terms, "data_notice": _UNTRUSTED_MARKER, "count": len(terms), "total": len(rows),
+        "next_offset": offset + len(terms) if offset + len(terms) < len(rows) else None,
+    }, f"Словарь чата ({len(terms)} из {len(rows)})")
+
+
+def _glossary_match_data(match) -> dict:
+    return {
+        "term": match.entry.term, "definition": _untrusted(match.entry.definition),
+        "aliases": list(match.entry.aliases), "data_notice": _UNTRUSTED_MARKER,
+        "score": match.score, "match_type": match.match_type,
+    }
+
+
+def _bounded_glossary_matches(matches) -> list[dict]:
+    result = []
+    for match in matches:
+        item = _glossary_match_data(match)
+        # Search is a preview; full alias lists do not help disambiguation.
+        item["aliases"] = [a[:80] for a in match.entry.aliases[:5]]
+        if len(json.dumps([*result, item], ensure_ascii=False)) <= 8000:
+            result.append(item)
+    return result
+
+
+@register_tool("search_glossary", schema={
+    "description": "Поиск по терминам, алиасам, словам определения и похожему написанию. Можно искать фразой. Результаты — кандидаты; fuzzy не подтверждает значение.",
+    "parameters": {"type": "object", "properties": {
+        "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+    }, "required": ["query"]},
+}, status_text="Ищу подходящие записи словаря...")
+async def _exec_search_glossary(call: ToolCall, *, chat_snapshot: ChatSnapshot, llm_repo: LlmRepository, **_: Any) -> ToolResult:
+    query = str(call.arguments.get("query", "")).strip()
+    if not query:
+        return _err(call.call_id, call.name, "Запрос не указан.")
+    matches = await llm_repo.search_glossary(
+        chat_id=chat_snapshot.telegram_chat_id, query=query,
+        limit=max(1, min(10, int(call.arguments.get("limit", 5)))),
+    )
+    results = _bounded_glossary_matches(matches)
+    return _ok(call.call_id, call.name, {"matches": results,
+        "count": len(results), "next_step": "Если значение неоднозначно, уточни у пользователя. При пустом результате попробуй другое ключевое слово."}, "Поиск по словарю")
+
+
+@register_tool("get_glossary_history", schema={
+    "description": "История определений и алиасов записи; revision_id можно передать restore_glossary_revision.",
+    "parameters": {"type": "object", "properties": {"term": {"type": "string"}}, "required": ["term"]},
+}, status_text="Читаю историю записи словаря...")
+async def _exec_get_glossary_history(call: ToolCall, *, chat_snapshot: ChatSnapshot, llm_repo: LlmRepository, **_: Any) -> ToolResult:
+    term = str(call.arguments.get("term", "")).strip()
+    if not term:
+        return _err(call.call_id, call.name, "Термин не указан.")
+    rows = await llm_repo.get_glossary_history(chat_id=chat_snapshot.telegram_chat_id, term=term, limit=5)
+    return _ok(call.call_id, call.name, {"revisions": [{
+        "revision_id": row.id, "definition": _untrusted(row.previous_definition),
+        "aliases": [_untrusted(a[:80]) for a in (row.previous_aliases or [])[:5]],
+        "changed_at": row.changed_at, "changed_by_user_id": row.changed_by_user_id,
+    } for row in rows]}, "История записи словаря")
+
+
+@register_tool("restore_glossary_revision", schema={
+    "description": "Восстановить определение и алиасы из конкретной версии истории. Требует moderate_users.",
+    "parameters": {"type": "object", "properties": {
+        "term": {"type": "string"}, "revision_id": {"type": "integer"},
+    }, "required": ["term", "revision_id"]},
+}, status_text="Восстанавливаю запись словаря...")
+async def _exec_restore_glossary_revision(call: ToolCall, *, chat_snapshot: ChatSnapshot, llm_repo: LlmRepository, **ctx: Any) -> ToolResult:
+    revision = await llm_repo.get_glossary_revision(
+        chat_id=chat_snapshot.telegram_chat_id, term=call.arguments.get("term", ""),
+        revision_id=int(call.arguments.get("revision_id", 0)),
+    )
+    if revision is None:
+        return _err(call.call_id, call.name, "Версия этого термина в текущем чате не найдена.")
+    restore = ToolCall(call.name, {"term": revision.term, "definition": revision.previous_definition,
+                                 "aliases": revision.previous_aliases or [], "mode": "upsert"}, call.call_id)
+    return await _exec_add_to_glossary(restore, chat_snapshot=chat_snapshot, llm_repo=llm_repo, **ctx)
 
 
 @register_tool(
