@@ -347,14 +347,21 @@ async def _handle(
             }
             messages.append(tool_msg)
             tool_messages.append(tool_msg)
+            if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
+                # The caption is the answer. Do not request another completion or
+                # execute trailing tools after a confirmed delivered answer.
+                final_answer = str(call.arguments.get("caption", ""))
+                break
+        if artifact_context.sent_artifacts and result.success and call.name == "send_artifact":
+            break
     else:
         final_answer = "Ассистент не смог завершить задачу за отведённое число шагов."
 
-    if artifact_context.sent_artifacts and not final_answer.strip():
+    if artifact_context.sent_artifacts:
         try:
             await thinking_msg.delete()
         except Exception:
-            await thinking_msg.edit_text("Артефакт отправлен.")
+            log.warning("Could not remove artifact progress message", exc_info=True)
     else:
         await _send_formatted_answer(message, thinking_msg, final_answer or "Ассистент не дал ответа.")
     if artifact_context.sent_artifacts:

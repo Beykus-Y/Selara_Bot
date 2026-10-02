@@ -46,8 +46,8 @@ def keyboard(row, *, page=0):
             buttons.append([InlineKeyboardButton(text='Сохранить', callback_data=_data(row, 'save'))])
         buttons.append([InlineKeyboardButton(text='Продолжить настройку', callback_data=_data(row, 'continue'))])
     elif row.state == 'active':
-        buttons.append([InlineKeyboardButton(text='К сводке', callback_data=_data(row, 'review'))])
-    buttons.append([InlineKeyboardButton(text='Отменить все настройки', callback_data=_data(row, 'cancel'))])
+        buttons.append([InlineKeyboardButton(text='Проверить изменения', callback_data=_data(row, 'review'))])
+    buttons.append([InlineKeyboardButton(text='Отменить изменения', callback_data=_data(row, 'cancel'))])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -178,7 +178,7 @@ async def action(callback: CallbackQuery, bot: Bot, db_session, activity_repo, s
         row.chat_id, row.baseline, row.draft, row.state = chat.telegram_chat_id, current, dict(current), 'active'
         row.revision += 1
         await db_session.commit()
-        await callback.message.answer(f'<b>Настраиваем: {escape(chat.title or str(chat.telegram_chat_id))}</b>\nЧасовой пояс расписания: {escape(settings.bot_timezone)}.\nОпиши, что хочешь изменить. Например: «Выключи экономику и включи итоги дня в 21:00».\nПока меняется только черновик. Скажи «На этом завершим» или нажми «К сводке», когда закончишь.',
+        await callback.message.answer(f'<b>Настраиваем: {escape(chat.title or str(chat.telegram_chat_id))}</b>\nЧасовой пояс расписания: {escape(settings.bot_timezone)}.\nОпиши, что хочешь изменить. Например: «Выключи экономику и включи итоги дня в 21:00».\nИзменения пока не сохраняются. Скажи «На этом завершим» или нажми «Проверить изменения», когда закончишь. Если время местное, укажи город.',
             parse_mode='HTML', reply_markup=keyboard(row))
         return
     chat = await db_session.get(ChatModel, row.chat_id)
@@ -314,7 +314,12 @@ async def talk(message: Message, bot: Bot, db_session, activity_repo, settings: 
             actor_user_id=message.from_user.id, action_code='autocfg_usage',
             description='Использование AI-мастера настроек (без применения параметров).', meta_json={'usages': usages})
     await db_session.commit()
-    await thinking.edit_text('Черновик обновлён.' if not result.finished else 'Диалог завершён. Настройки ещё не применены.', reply_markup=None)
+    # The assistant's answer/review carries the actual outcome; avoid a second
+    # unconditional 'updated' message when nothing was changed or a tool failed.
+    try:
+        await thinking.delete()
+    except Exception:
+        await thinking.edit_text('Проверка изменений.' if result.finished else 'Ответ подготовлен.', reply_markup=None)
     if result.finished:
         await show_review(message, row, chat, timezone_name=settings.bot_timezone)
     else:

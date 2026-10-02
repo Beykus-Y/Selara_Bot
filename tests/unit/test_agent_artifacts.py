@@ -332,3 +332,61 @@ async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
     assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
     bot.send_photo.assert_not_called()
     assert bot.send_message.call_args.kwargs['text'] == '<b>Итоги</b>'
+
+
+def test_svg_typography_and_namespace_are_supported():
+    validate_source(['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 200">'
+        '<text x="20" y="50" font-size="24" font-family="sans-serif" font-weight="bold">Топ</text>'
+        '<line x1="20" x2="600" y1="70" y2="70" stroke="black" stroke-dasharray="4 2"/></svg>'], '')
+
+
+@pytest.mark.parametrize('source', [
+    '<svg xmlns="https://evil.example"></svg>', '<div xmlns="http://www.w3.org/2000/svg">x</div>',
+    '<svg><text font-family="url(http://internal)">x</text></svg>',
+    '<svg><text font-size="expression(alert(1))">x</text></svg>',
+    '<svg><text href="http://internal" onload="alert(1)">x</text></svg>',
+])
+def test_svg_allowlist_still_rejects_active_attributes(source):
+    with pytest.raises(ValueError):
+        validate_source([source], '')
+
+
+def test_reports_multiple_unsupported_attributes_in_one_check():
+    with pytest.raises(ValueError, match='href, onload'):
+        validate_source(['<svg href="x" onload="x"></svg>'], '')
+
+
+async def test_source_errors_do_not_exhaust_render_budget(context, monkeypatch):
+    from unittest.mock import MagicMock
+    import httpx
+    from selara.infrastructure.llm import artifact_tools
+    await read_skill(call('read_skill', name='artifacts'), artifact_context=context)
+    client = AsyncMock()
+    client.post.return_value = httpx.Response(200, json={'pages': [png()]})
+    factory = MagicMock()
+    factory.return_value.__aenter__.return_value = client
+    monkeypatch.setattr(artifact_tools.httpx, 'AsyncClient', factory)
+    for pages in ['<p>wrong type</p>', ['<svg><text href="x">x</text></svg>'], [{'html': '<p>x</p>'}]]:
+        result = await create_artifact(call('create_artifact', title='Топ', pages=pages), artifact_context=context)
+        assert not result.success and 'Исправь причину' in result.result_text
+    assert context.create_attempts == 0
+    client.post.assert_not_awaited()
+    assert (await create_artifact(call('create_artifact', title='Топ', pages=['<p>Топ</p>']), artifact_context=context)).success
+    assert client.post.await_count == 1
+
+
+async def test_source_validation_budget_is_bounded(context):
+    await read_skill(call('read_skill', name='artifacts'), artifact_context=context)
+    for _ in range(7):
+        result = await create_artifact(call('create_artifact', title='Топ', pages='bad'), artifact_context=context)
+        assert not result.success
+    assert context.validation_attempts == 6 and context.create_attempts == 0
+    assert 'Создание недоступно' in result.result_text
+
+
+async def test_render_real_svg_with_standard_text_attributes():
+    result = await render_static_pages(['<h1>Активность</h1>'
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 160">'
+        '<rect x="0" y="0" width="400" height="60" fill="#5577cc"/>'
+        '<text x="10" y="100" font-size="24" font-family="sans-serif" font-weight="bold">42 сообщения</text></svg>'], '')
+    assert result['dimensions'][0]['width'] == 1600

@@ -63,4 +63,4 @@ async def test_tool_loop_is_bounded(context, monkeypatch):
     monkeypatch.setitem(__import__('selara.application.daily_summary.artifacts', fromlist=['_ALLOWED'])._ALLOWED, 'create_artifact', handler)
     client = SimpleNamespace(chat_with_tools=AsyncMock(return_value=response(('create_artifact', '{}'))))
     assert await run(client, context, Mock()) is None
-    assert client.chat_with_tools.call_count == 4
+    assert client.chat_with_tools.call_count == 7
