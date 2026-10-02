@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from html import escape
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -29,8 +30,6 @@ from selara.infrastructure.llm.context import (
 )
 from selara.infrastructure.llm.prompts import (
     ADMIN_SYSTEM_PROMPT,
-    DM_SUMMARY_SYSTEM_PROMPT,
-    MAX_TOKENS_DM_SUMMARY,
 )
 from selara.infrastructure.llm.tools import (
     ToolCall,
@@ -42,7 +41,7 @@ from selara.infrastructure.llm.tools import (
     get_tool_status,
 )
 from selara.presentation.auth import has_permission
-from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
+from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
 
@@ -275,6 +274,7 @@ async def _handle(
     tool_results: list[ToolResult] = []
     tool_messages: list[dict] = []
     final_answer = ""
+    empty_completions = 0
 
     from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
     artifact_context = ArtifactRequestContext(
@@ -308,19 +308,35 @@ async def _handle(
             return
 
         if not response or not response.choices:
-            final_answer = "Ассистент не вернул ответ (пустой choices)."
+            log.warning("llm_admin: empty choices after %d tools", len(tool_results))
+            if empty_completions < 2:
+                empty_completions += 1
+                messages.append(_empty_answer_recovery())
+                continue
+            final_answer = _verified_fallback(tool_results)
             break
 
         choice = response.choices[0]
         msg = choice.message
 
-        msg_dict = msg.model_dump(exclude_none=True)
-        messages.append(msg_dict)
-
-        if choice.finish_reason == "stop" or not msg.tool_calls:
-            final_answer = msg.content or ""
+        # Some compatible providers report stop even with executable tool calls.
+        # Actual calls take precedence over that metadata.
+        if not msg.tool_calls:
+            if (msg.content or "").strip():
+                final_answer = msg.content
+                break
+            log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
+                choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
+                len(artifact_context.sent_artifacts))
+            if empty_completions < 2:
+                empty_completions += 1
+                # Do not send a null assistant message back to strict providers.
+                messages.append(_empty_answer_recovery())
+                continue
+            final_answer = _verified_fallback(tool_results)
             break
 
+        messages.append(msg.model_dump(exclude_none=True))
         for tc in msg.tool_calls:
             call = ToolCall(
                 name=tc.function.name,
@@ -355,7 +371,7 @@ async def _handle(
         if artifact_context.sent_artifacts and result.success and call.name == "send_artifact":
             break
     else:
-        final_answer = "Ассистент не смог завершить задачу за отведённое число шагов."
+        final_answer = _verified_fallback(tool_results)
 
     if artifact_context.sent_artifacts:
         try:
@@ -363,7 +379,9 @@ async def _handle(
         except Exception:
             log.warning("Could not remove artifact progress message", exc_info=True)
     else:
-        await _send_formatted_answer(message, thinking_msg, final_answer or "Ассистент не дал ответа.")
+        final_answer = final_answer.strip() or _verified_fallback(tool_results)
+        await _send_formatted_answer(message, thinking_msg, final_answer)
+    chat_answer = final_answer
     if artifact_context.sent_artifacts:
         final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
 
@@ -391,9 +409,54 @@ async def _handle(
         chat_title=message.chat.title or str(message.chat.id),
         query=query,
         tool_results=tool_results,
-        final_answer=final_answer,
+        final_answer=chat_answer,
         llm_client=llm_client,
+        sent_artifacts=artifact_context.sent_artifacts,
     )
+
+
+def _empty_answer_recovery() -> dict:
+    return {"role": "user", "content": (
+        "Предыдущий шаг не вернул текста или инструментов. Продолжи исходный запрос, используя уже полученные результаты. "
+        "Не повторяй выполненные действия. Если нужен артефакт, создай его по прочитанному скиллу и отправь через send_artifact; "
+        "если уже создан — используй его известный ID. Не повторяй отправку со статусом uncertain. "
+        "Если выполнить запрос не можешь, дай честный непустой ответ с доступными данными. "
+        "Не заявляй, что картинка отправлена, без успешного send_artifact.")}
+
+
+def _verified_fallback(tool_results: list[ToolResult]) -> str:
+    lines = ["Не удалось завершить подготовку ответа."]
+    tops = {}
+    for tr in tool_results:
+        if tr.name != "get_top" or not tr.success:
+            continue
+        try:
+            data = json.loads(tr.result_text)
+            if data.get("mode") in {"activity", "karma"} and isinstance(data.get("top"), list):
+                tops[(data["mode"], data.get("period"))] = data
+        except (ValueError, TypeError, AttributeError):
+            continue
+    if tops:
+        lines.append("Показываю полученные данные текстом.")
+    periods = {"30d": "последние 30 дней", "7d": "последние 7 дней", "all_time": "всё время"}
+    for (mode, period), data in tops.items():
+        lines.append("\n" + ("Активность" if mode == "activity" else "Карма") + " — " + periods.get(period, "указанный период") + ":")
+        if not data["top"]:
+            lines.append("Участников в этом топе нет.")
+        for i, row in enumerate(data["top"][:10], 1):
+            if not isinstance(row, dict):
+                continue
+            value = row.get("messages" if mode == "activity" else "karma")
+            if type(value) not in {int, float}:
+                continue
+            name = row.get("username") or f"Участник {row.get('user_id', i)}"
+            lines.append(f"{i}. {name} — {value}" + (" сообщений" if mode == "activity" else ""))
+    actions = [tr.action_description for tr in tool_results if tr.success and tr.db_action_id is not None]
+    if actions:
+        lines.append("\nПодтверждённые действия: " + "; ".join(actions))
+    if any(tr.name in {"read_skill", "create_artifact", "send_artifact"} for tr in tool_results):
+        lines.append("\nОтправка изображения не подтверждена.")
+    return "\n".join(lines)
 
 
 async def _send_formatted_answer(message: Message, thinking_msg: Message, text: str) -> None:
@@ -420,25 +483,28 @@ async def _send_dm_summary(
     tool_results: list[ToolResult],
     final_answer: str,
     llm_client: LlmClient,
+    sent_artifacts: list[str] | None = None,
 ) -> None:
-    trace_parts = [
-        f"Чат: {chat_title}",
-        f"Запрос: {query}",
-    ]
+    # This is an operational receipt, not a generative retelling. Preserve
+    # actual outcomes and the actual sent answer, including failures.
+    lines = [f"Чат: {chat_title[:200]}", f"Запрос: {query[:500]}"]
     for tr in tool_results:
-        trace_parts.append(f"Вызван инструмент: {tr.name}\nРезультат: {tr.result_text[:500]}")
-    trace_parts.append(f"Ответ в чате: {final_answer[:500]}")
-    trace_text = "\n\n".join(trace_parts)
-
-    summary_prompt = [
-        {"role": "system", "content": DM_SUMMARY_SYSTEM_PROMPT},
-        {"role": "user", "content": trace_text},
-    ]
-
-    try:
-        dm_text = await llm_client.chat_simple(summary_prompt, max_tokens=MAX_TOKENS_DM_SUMMARY)
-    except LlmClientError:
-        dm_text = trace_text[:2000]
+        if tr.success:
+            lines.append(f"Получен результат: {tr.action_description or tr.name}")
+        else:
+            try:
+                error = json.loads(tr.result_text).get("error", tr.result_text)
+            except (ValueError, AttributeError):
+                error = tr.result_text
+            lines.append(f"Ошибка {tr.name}: {str(error)[:700]}")
+    if not tool_results:
+        lines.append("Инструменты не выполнялись.")
+    if sent_artifacts or any(tr.name in {"read_skill", "create_artifact", "send_artifact"} for tr in tool_results):
+        lines.append(f"Подтверждённо отправлено артефактов: {len(sent_artifacts or [])}.")
+        if not sent_artifacts:
+            lines.append("Отправка изображения не подтверждена.")
+    lines.append("Ответ в чате:\n" + (final_answer[:2000] or "Текстовый ответ отсутствует."))
+    dm_text = "\n\n".join(lines)
 
     reversible = [tr for tr in tool_results if tr.undo_payload is not None and tr.success and tr.db_action_id is not None]
     buttons: list[list[InlineKeyboardButton]] = [
@@ -451,7 +517,7 @@ async def _send_dm_summary(
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
     try:
-        for index, chunk in enumerate(render_llm_html(f"AI-ассистент: сводка\n\n{dm_text}")):
+        for index, chunk in enumerate(split_telegram_html(escape(f"AI-ассистент: сводка\n\n{dm_text}"))):
             kwargs = {"chat_id": admin_user_id, "reply_markup": keyboard if index == 0 else None}
             try:
                 await bot.send_message(text=chunk, parse_mode="HTML", **kwargs)

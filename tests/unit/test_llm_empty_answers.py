@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from selara.core.chat_settings import default_chat_settings
+from selara.core.config import Settings
+from selara.infrastructure.llm.tools import ToolResult
+from selara.presentation.handlers import llm_admin as handler
+from selara.presentation.llm_formatting import html_to_plain_text
+
+
+def response(content=None, calls=None, finish='stop'):
+    message = SimpleNamespace(content=content, tool_calls=calls,
+        model_dump=lambda **_: {'role': 'assistant', 'content': content, 'tool_calls': [
+            {'id': c.id, 'type': 'function', 'function': {'name': c.function.name, 'arguments': c.function.arguments}}
+            for c in calls or []]})
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)])
+
+
+def call(name, **arguments):
+    return SimpleNamespace(id=name, function=SimpleNamespace(name=name, arguments=json.dumps(arguments)))
+
+
+def top_result():
+    return ToolResult('get_top', 'get_top', json.dumps({'mode': 'karma', 'period': '30d',
+        'top': [{'user_id': 1, 'username': '@one', 'messages': 436, 'karma': 2}]}), 'Получен топ по карме')
+
+
+async def run(responses, execute=None):
+    settings = Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:')
+    message = SimpleNamespace(text='?? Покажи таблицу и график топа', message_id=1, message_thread_id=None,
+        chat=SimpleNamespace(id=-100123, type='supergroup', title='Чат'),
+        from_user=SimpleNamespace(id=1, username='one', first_name='Один', last_name=None, is_bot=False),
+        reply=AsyncMock(return_value=AsyncMock()))
+    client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=responses), chat_simple=AsyncMock())
+    repo = MagicMock()
+    repo.get_last_user_message_at = AsyncMock(return_value=None)
+    repo.search_glossary = AsyncMock(return_value=[])
+    execute = execute or AsyncMock(return_value=top_result())
+    with patch.object(handler, 'has_permission', AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, 'LlmRepository', return_value=repo), \
+         patch.object(handler, 'load_context', AsyncMock(return_value=SimpleNamespace(messages=[]))), \
+         patch.object(handler, 'execute_tool', execute), \
+         patch.object(handler, '_send_formatted_answer', AsyncMock()) as sent, \
+         patch.object(handler, '_send_dm_summary', AsyncMock()) as summary, \
+         patch.object(handler, 'save_interaction', AsyncMock()) as saved:
+        await handler._handle(message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True), client,
+            AsyncMock(), with_context=False, settings=settings)
+    return client, execute, sent, summary, saved
+
+
+async def test_stop_metadata_does_not_discard_tool_calls():
+    client, execute, sent, _, _ = await run([response(calls=[call('get_top')], finish='stop'), response('Готовый ответ')])
+    execute.assert_awaited_once()
+    assert sent.call_args.args[2] == 'Готовый ответ' and client.chat_with_tools.await_count == 2
+
+
+@pytest.mark.parametrize('empty', [response(''), response('   '), response(), SimpleNamespace(choices=[])])
+async def test_empty_completion_recovers_without_replaying_tools(empty):
+    client, execute, sent, _, _ = await run([response(calls=[call('get_top')]), empty, response('Полученные результаты')])
+    assert execute.await_count == 1 and client.chat_with_tools.await_count == 3
+    assert sent.call_args.args[2] == 'Полученные результаты'
+    messages = client.chat_with_tools.call_args.kwargs['messages']
+    assert not any(m['role'] == 'assistant' and not m.get('content') and not m.get('tool_calls') for m in messages)
+
+
+async def test_persistent_empty_output_uses_verified_numbers_and_saves_actual_reply():
+    client, execute, sent, summary, saved = await run([
+        response(calls=[call('get_top')]), response(), response(), response()])
+    assert client.chat_with_tools.await_count == 4 and execute.await_count == 1
+    answer = sent.call_args.args[2]
+    assert 'Карма — последние 30 дней' in answer and '@one — 2' in answer
+    assert '436' not in answer and 'Ассистент не дал ответа' not in answer
+    assert saved.call_args.kwargs['assistant_response'] == answer
+    assert summary.call_args.kwargs['final_answer'] == answer
+
+
+async def test_recovered_artifact_delivery_is_terminal_and_not_repeated():
+    async def execute(request, **ctx):
+        if request.name == 'get_top':
+            return top_result()
+        ctx['artifact_context'].sent_artifacts.append('current')
+        return ToolResult(request.call_id, request.name, '{"status":"sent"}', 'Ответ отправлен')
+    c, execute, sent, summary, _ = await run([response(calls=[call('get_top')]), response(),
+        response(calls=[call('send_artifact', artifact_id='current', caption='Пояснение')], finish='stop')], execute)
+    assert c.chat_with_tools.await_count == 3
+    sent.assert_not_awaited()
+    assert summary.call_args.kwargs['sent_artifacts'] == ['current']
+
+
+async def test_empty_recovery_stays_inside_total_round_budget():
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * handler._MAX_TOOL_ROUNDS)
+    assert c.chat_with_tools.await_count == handler._MAX_TOOL_ROUNDS
+    assert 'полученные данные' in sent.call_args.args[2]
+
+
+async def test_private_summary_does_not_invent_delivery_or_call_a_model():
+    bot, client = AsyncMock(), SimpleNamespace(chat_simple=AsyncMock(return_value='Задача выполнена, картинка отправлена'))
+    await handler._send_dm_summary(bot, admin_user_id=1, chat_title='<script>чат</script>',
+        query='Покажи топ', tool_results=[ToolResult('skill', 'read_skill', '{}', 'Навык прочитан'), top_result()], final_answer='Не удалось подготовить картинку.',
+        llm_client=client, sent_artifacts=[])
+    client.chat_simple.assert_not_awaited()
+    text = html_to_plain_text(bot.send_message.call_args.kwargs['text'])
+    assert 'Подтверждённо отправлено артефактов: 0' in text
+    assert 'Отправка изображения не подтверждена' in text and 'Не удалось подготовить картинку.' in text
+    assert 'Задача выполнена' not in text and '<script>' not in bot.send_message.call_args.kwargs['text']
+
+
+async def test_private_summary_keeps_errors_and_confirmed_delivery_with_rollback_button():
+    bot = AsyncMock()
+    results = [ToolResult('a', 'warn_user', '{}', 'Выдано предупреждение', success=True,
+        db_action_id=42, undo_payload={'x': 1}),
+        ToolResult('b', 'create_artifact', '{"error":"Ошибка <svg>"}', '', success=False)]
+    await handler._send_dm_summary(bot, admin_user_id=1, chat_title='Чат', query='Запрос',
+        tool_results=results, final_answer='Пояснение', llm_client=SimpleNamespace(), sent_artifacts=['id'])
+    text = html_to_plain_text(bot.send_message.call_args.kwargs['text'])
+    assert 'Подтверждённо отправлено артефактов: 1' in text and 'Ошибка <svg>' in text
+    assert bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data == 'llm_rollback:42'
