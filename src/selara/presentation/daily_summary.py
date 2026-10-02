@@ -12,9 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
 from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
 from selara.application.daily_summary.schedule import compute_scheduled_window_to
-from selara.core.config import Settings
+from selara.core.config import Settings, get_settings
 from selara.domain.entities import ChatSnapshot, DailySummaryRun
 from selara.domain.glossary import GlossaryEntry
+from selara.infrastructure.db.artifact_repository import ArtifactRepository
+from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext, deliver_artifact
+from selara.infrastructure.llm.tools import ToolCall
+from selara.presentation.llm_formatting import split_telegram_html
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
@@ -75,6 +79,10 @@ async def _generate_and_finalize(
                 style=style,
                 persona_enabled=persona_enabled,
                 glossary_terms=glossary_terms,
+                artifact_context=ArtifactRequestContext(
+                    repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
+                    chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
+                ),
             )
         except Exception as exc:
             logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
@@ -119,16 +127,25 @@ async def _send_and_mark(
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
         run = await repo.get_daily_summary_run_by_id(run_id=run_id)
-        if run is None or not run.generated_text:
+        if run is None or run.chat_id != chat_id or not run.generated_text:
             return False
 
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=run.generated_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            artifact_id = (run.topics_json or {}).get("artifact_id")
+            artifact_repo = ArtifactRepository(session)
+            artifact = await artifact_repo.get(artifact_id=str(artifact_id), chat_id=chat_id, thread_id=None) if artifact_id else None
+            if artifact is not None and artifact.source.get("summary_run_id") == run_id:
+                result = await deliver_artifact(
+                    call=ToolCall("send_artifact", {"artifact_id": artifact_id}, f"summary-{run_id}"),
+                    ctx=ArtifactRequestContext(repository=artifact_repo, renderer_url="", chat_id=chat_id,
+                        creator_id=0, message_id=None, summary_run_id=run_id),
+                    bot=bot, caption=run.generated_text, caption_is_html=True, fallback_to_text=True,
+                )
+                if not result.success:
+                    raise RuntimeError(result.result_text)
+            else:
+                for chunk in split_telegram_html(run.generated_text):
+                    await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

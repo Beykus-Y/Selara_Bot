@@ -220,3 +220,115 @@ async def test_caption_change_after_partial_delivery_is_rejected(context):
     assert not (await send_artifact(call("send_artifact", artifact_id=row.id, caption="Первый"), artifact_context=context, bot=bot)).success
     assert not (await send_artifact(call("send_artifact", artifact_id=row.id, caption="Другой"), artifact_context=context, bot=bot)).success
     assert bot.send_photo.await_count == 2
+
+
+def test_infographic_rejects_copied_prose_but_allows_shared_labels():
+    from selara.application.artifact_content import reject_copied_prose
+    prose = 'Сегодня обсуждали новую систему артефактов которая будет показывать связи между темами вместо длинного пересказа текста'
+    with pytest.raises(ValueError, match='повторяет'):
+        reject_copied_prose(['<p>' + prose + '</p>'], prose)
+    reject_copied_prose(['<h1>Артефакты</h1><p>A → B</p>'], prose)
+
+
+@pytest.mark.parametrize(('chat_id', 'expected'), [
+    (-1001234567890, 'https://t.me/c/1234567890/7/42'), (1, None), (-12345, None),
+])
+def test_message_links_are_scoped_to_supported_chats(chat_id, expected):
+    from selara.infrastructure.llm.artifact_tools import message_link
+    assert message_link(chat_id, 42, 7) == expected
+
+
+async def test_delivery_adds_mutual_links_only_after_acknowledgement(context):
+    from selara.infrastructure.llm.artifact_tools import _link_delivered_messages
+    context.chat_id = -1001234567890
+    row = SimpleNamespace(pages=['image'])
+    bot = SimpleNamespace(edit_message_caption=AsyncMock(), edit_message_text=AsyncMock())
+    state = {'message_ids': [21, 22]}
+    assert await _link_delivered_messages(bot=bot, ctx=context, row=row, state=state,
+        captions=[None], texts=['<b>Пояснение</b>']) is None
+    assert 'https://t.me/c/1234567890/7/22' in bot.edit_message_caption.call_args.kwargs['caption']
+    assert 'https://t.me/c/1234567890/7/21' in bot.edit_message_text.call_args.kwargs['text']
+    bot.edit_message_text.side_effect = RuntimeError('edit failed')
+    assert await _link_delivered_messages(bot=bot, ctx=context, row=row, state=state,
+        captions=[None], texts=['Пояснение']) is not None
+
+
+async def test_summary_photo_rejection_falls_back_to_formatted_text(context):
+    from selara.infrastructure.llm.artifact_tools import deliver_artifact
+    row = await artifact(context)
+    context.summary_run_id = 12
+    row.source = {**row.source, 'summary_run_id': 12}
+    await context.repository.session.commit()
+    bot = SimpleNamespace(send_photo=AsyncMock(side_effect=TelegramBadRequest(method=SendPhoto(chat_id=1, photo='x'), message='PHOTO_INVALID')),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)))
+    result = await deliver_artifact(call=call('send_artifact', artifact_id=row.id), ctx=context, bot=bot,
+        caption='<b>Итоги</b> дня', caption_is_html=True, fallback_to_text=True)
+    assert result.success
+    assert bot.send_message.call_args.kwargs['text'] == '<b>Итоги</b> дня'
+    assert bot.send_message.call_args.kwargs['parse_mode'] == 'HTML'
+    assert row.delivery['text_only'] and row.delivery['complete']
+    assert (await deliver_artifact(call=call('send_artifact', artifact_id=row.id), ctx=context, bot=bot,
+        caption='<b>Итоги</b> дня', caption_is_html=True, fallback_to_text=True)).success
+    assert bot.send_photo.call_count == bot.send_message.call_count == 1
+
+
+async def test_summary_cannot_send_another_runs_artifact(context):
+    from selara.infrastructure.llm.artifact_tools import deliver_artifact
+    row = await artifact(context)
+    context.summary_run_id = 42
+    bot = SimpleNamespace(send_photo=AsyncMock())
+    result = await deliver_artifact(call=call('send_artifact', artifact_id=row.id), ctx=context, bot=bot,
+        caption='Итоги', caption_is_html=True, fallback_to_text=True)
+    assert not result.success
+    bot.send_photo.assert_not_called()
+
+
+async def test_send_rejects_prose_duplication(context):
+    row = await artifact(context)
+    prose = 'Один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать тринадцать'
+    row.source = {'pages': ['<p>' + prose + '</p>']}
+    await context.repository.session.commit()
+    bot = SimpleNamespace(send_photo=AsyncMock())
+    result = await send_artifact(call('send_artifact', artifact_id=row.id, caption=prose), artifact_context=context, bot=bot)
+    assert not result.success and 'повторяет' in result.result_text
+    bot.send_photo.assert_not_called()
+
+
+async def test_daily_summary_refuses_wrong_chat(context, monkeypatch):
+    from selara.presentation.daily_summary import _send_and_mark
+    repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=2, generated_text='Итоги')))
+    monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+    assert not await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    bot.send_message.assert_not_called()
+    bot.send_photo.assert_not_called()
+
+
+async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch):
+    from selara.presentation.daily_summary import _send_and_mark
+    context.thread_id = None
+    row = await context.repository.create(chat_id=1, thread_id=None, creator_id=0, title='Summary',
+        pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
+    await context.repository.session.commit()
+    repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
+        mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
+    monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(return_value=SimpleNamespace(message_id=10)))
+    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    bot.send_message.assert_not_called()
+    assert bot.send_photo.call_args.kwargs['caption'] == '<b>Итоги</b>'
+    assert 'reply_parameters' not in bot.send_photo.call_args.kwargs
+    repo.mark_daily_summary_run_sent.assert_called_once()
+
+
+async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
+    from selara.presentation.daily_summary import _send_and_mark
+    repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
+        mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
+    monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    bot.send_photo.assert_not_called()
+    assert bot.send_message.call_args.kwargs['text'] == '<b>Итоги</b>'
