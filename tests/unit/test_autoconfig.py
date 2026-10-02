@@ -63,7 +63,7 @@ async def test_finish_stops_all_subsequent_tools_and_never_saves():
     assert result.finished and result.draft['economy_enabled'] is False
     assert c.chat_with_tools.call_count == 1
     assert {t['function']['name'] for t in c.chat_with_tools.call_args.kwargs['tools']} == {
-        'read_settings', 'update_settings_draft', 'finish_configuration'}
+        'read_settings', 'update_settings_draft', 'convert_schedule_time', 'finish_configuration'}
 
 
 async def test_model_cannot_use_live_registry_or_cross_chat_arguments():
@@ -351,6 +351,36 @@ async def test_autocfg_recovery_shows_full_review_even_without_model(db, monkeyp
     row = await make_draft(db)
     message = SimpleNamespace(chat=SimpleNamespace(type='private'), from_user=user(), answer=AsyncMock())
     await handler.start(message, SimpleNamespace(), db, SqlAlchemyActivityRepository(db), llm_client=None)
-    assert 'Черновик настроек' in message.answer.call_args.args[0]
+    assert 'Проверка изменений' in message.answer.call_args.args[0]
     assert '→' in message.answer.call_args.args[0]
     assert (await AutoConfigRepository(db).get(1)).id == row.id
+
+
+def test_plain_review_formats_enums_and_hours():
+    baseline = defaults()
+    draft = {**baseline, 'economy_mode': 'local', 'daily_summary_hour': 20, 'daily_summary_style': 'snarky'}
+    text = review_text(title='Группа', baseline=baseline, draft=draft, touched=[])
+    assert 'отдельный баланс этой группы' in text and '20:00' in text and 'с иронией' in text
+    assert 'global' not in text and 'local' not in text and 'snarky' not in text and 'API' not in text
+
+
+def test_barnaul_schedule_conversion_wraps_day():
+    from selara.application.autoconfig import convert_schedule_time
+    result = convert_schedule_time(3, 'Asia/Barnaul', 'UTC')
+    assert result['schedule_hour'] == 20 and result['day_offset'] == -1
+    assert result['local_time'] == '03:00'
+
+
+@pytest.mark.parametrize('hour,zone', [(24, 'Asia/Barnaul'), (True, 'UTC'), (3, 'Invalid/City'), (3, 'Asia/Kolkata'), (3, 'Europe/Berlin')])
+def test_unsupported_schedule_conversions_require_clarification(hour, zone):
+    from selara.application.autoconfig import convert_schedule_time
+    with pytest.raises(ValueError):
+        convert_schedule_time(hour, zone, 'UTC')
+
+
+async def test_conversion_tool_does_not_change_draft():
+    c = client(response(('convert_schedule_time', {'hour': 3, 'timezone': 'Asia/Barnaul'})), response(content='Итоги в 03:00 по Барнаулу?'))
+    result = await run(c)
+    assert result.draft == defaults()
+    tools = [json.loads(m['content']) for m in c.chat_with_tools.call_args.kwargs['messages'] if m['role'] == 'tool']
+    assert tools[0]['result']['schedule_hour'] == 20

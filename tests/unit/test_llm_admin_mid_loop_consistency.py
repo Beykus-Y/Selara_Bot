@@ -229,3 +229,46 @@ async def test_completed_moderation_action_is_committed_before_next_round_can_lo
         "committed before round 2 started -- a crash in round 2 would roll it back "
         "along with the real, already-completed action"
     )
+
+
+@pytest.mark.parametrize('delivered', [True, False])
+async def test_artifact_delivery_is_terminal_only_on_confirmed_success(delivered):
+    from selara.infrastructure.llm.tools import ToolResult
+    from selara.core.config import Settings
+    calls = [SimpleNamespace(id='photo', function=SimpleNamespace(name='send_artifact',
+        arguments='{"artifact_id":"current","caption":"Краткое пояснение"}')),
+        SimpleNamespace(id='trailing', function=SimpleNamespace(name='get_top', arguments='{}'))]
+    msg = SimpleNamespace(content='Лишний текст', tool_calls=calls,
+        model_dump=lambda **_: {'role': 'assistant', 'content': 'Лишний текст'})
+    final = SimpleNamespace(content='Не удалось отправить', tool_calls=None,
+        model_dump=lambda **_: {'role': 'assistant', 'content': 'Не удалось отправить'})
+    c = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=[
+        SimpleNamespace(choices=[SimpleNamespace(finish_reason='tool_calls', message=msg)]),
+        SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=final)])]))
+    executed = []
+    async def execute(call, **ctx):
+        executed.append(call.name)
+        if delivered and call.name == 'send_artifact':
+            ctx['artifact_context'].sent_artifacts.append('current')
+        return ToolResult(call.call_id, call.name, '{}', '', success=delivered)
+    repo = MagicMock()
+    repo.get_last_user_message_at = AsyncMock(return_value=None)
+    repo.search_glossary = AsyncMock(return_value=[])
+    message = _admin_message('?? нарисуй топ')
+    with patch.object(llm_admin_module, 'has_permission', AsyncMock(return_value=(True, None, None))), \
+         patch.object(llm_admin_module, 'LlmRepository', return_value=repo), \
+         patch.object(llm_admin_module, 'load_context', AsyncMock(return_value=SimpleNamespace(messages=[]))), \
+         patch.object(llm_admin_module, 'execute_tool', execute), \
+         patch.object(llm_admin_module, '_send_formatted_answer', AsyncMock()) as send_text, \
+         patch.object(llm_admin_module, 'save_interaction', AsyncMock()) as saved, \
+         patch.object(llm_admin_module, '_send_dm_summary', AsyncMock()):
+        await _handle(message, AsyncMock(), MagicMock(), _chat_settings(), c, AsyncMock(),
+            with_context=False, settings=Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:'))
+    if delivered:
+        assert c.chat_with_tools.await_count == 1 and executed == ['send_artifact']
+        send_text.assert_not_awaited()
+        message.reply.return_value.delete.assert_awaited_once()
+        assert 'Краткое пояснение' in saved.call_args.kwargs['assistant_response']
+    else:
+        assert c.chat_with_tools.await_count == 2 and executed == ['send_artifact', 'get_top']
+        send_text.assert_awaited_once()

@@ -19,7 +19,7 @@ from selara.infrastructure.llm.artifact_rendering import validate_source, MAX_IM
 from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, register_tool
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
-SKILL_VERSION = 2
+SKILL_VERSION = 3
 SKILLS = {"artifacts": "Инфографика, таблицы, графики и схемы как фото в Telegram, дополняющие текст."}
 
 
@@ -33,6 +33,7 @@ class ArtifactRequestContext:
     thread_id: int | None = None
     loaded_skills: set[str] = field(default_factory=set)
     create_attempts: int = 0
+    validation_attempts: int = 0
     sent_artifacts: list[str] = field(default_factory=list)
     created_artifacts: list[str] = field(default_factory=list)
     accompanying_text: str = ""
@@ -64,16 +65,16 @@ async def read_skill(call: ToolCall, *, artifact_context: ArtifactRequestContext
     "Создать статический артефакт и получить ID после проверок, без отправки. Сначала read_skill(name=artifacts).",
     {"title": {"type": "string", "maxLength": 200},
      "pages": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string"},
-               "description": "HTML-фрагменты страниц. Подробные требования в навыке artifacts."},
+               "description": 'Массив HTML-строк: ["<h1>Топ</h1><p>Данные</p>"]. Не строка и не объекты. Требования в навыке artifacts.'},
      "css": {"type": "string", "maxLength": 12000},
      "accompanying_text": {"type": "string", "maxLength": 12000, "description": "Планируемое пояснение: инфографика должна дополнять его, без копирования абзацев."}}, ["title", "pages"]), "Создаю и проверяю артефакт...")
 async def create_artifact(call: ToolCall, *, artifact_context: ArtifactRequestContext | None = None, **_) -> ToolResult:
     ctx = artifact_context
     if ctx is None or "artifacts" not in ctx.loaded_skills:
         return _err(call.call_id, call.name, "Сначала прочитай read_skill(name=artifacts) в этом запросе.")
-    if ctx.create_attempts >= 3:
-        return _err(call.call_id, call.name, "Лимит: три попытки создания за запрос.")
-    ctx.create_attempts += 1
+    if ctx.create_attempts >= 3 or ctx.validation_attempts >= 6:
+        return _err(call.call_id, call.name, "Создание недоступно: лимит 3 отрисовок или 6 проверок исходника. Не обещай успех повторного запроса; верни проверенные данные текстом.")
+    ctx.validation_attempts += 1
     try:
         title = call.arguments.get("title")
         pages, css = call.arguments.get("pages"), call.arguments.get("css", "")
@@ -86,6 +87,7 @@ async def create_artifact(call: ToolCall, *, artifact_context: ArtifactRequestCo
         if not isinstance(accompanying, str) or len(accompanying) > 12000:
             raise ValueError("Пояснение должно быть строкой до 12000 символов.")
         reject_copied_prose(pages, accompanying)
+        ctx.create_attempts += 1
         async with httpx.AsyncClient(timeout=25, follow_redirects=False, trust_env=False) as client:
             response = await client.post(ctx.renderer_url.rstrip("/") + "/render", json={"pages": pages, "css": css})
         if response.status_code != 200:
@@ -113,7 +115,9 @@ async def create_artifact(call: ToolCall, *, artifact_context: ArtifactRequestCo
                 "summary_run_id": ctx.summary_run_id})
         await ctx.repository.session.commit()
     except (ValueError, KeyError, TypeError, httpx.HTTPError) as exc:
-        return _err(call.call_id, call.name, str(exc)[:700])
+        return _err(call.call_id, call.name, str(exc)[:700] +
+            f" Исправь причину в текущем запросе. Осталось проверок: {6 - ctx.validation_attempts}; отрисовок: {3 - ctx.create_attempts}. "
+            "При сложной композиции используй простую HTML-таблицу и полосы div вместо SVG; не выдумывай данные.")
     ctx.created_artifacts.append(row.id)
     return _ok(call.call_id, call.name, {"artifact_id": row.id, "title": title.strip(), "dimensions": dimensions,
         "checks": "passed", "sent": False, "expires_in_days": 7}, "Артефакт создан")

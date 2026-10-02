@@ -30,7 +30,7 @@ async def create_daily_infographic(*, client, context, text: str, themes: list[d
     ]
     definitions = [t for t in get_tool_definitions() if t["function"]["name"] in _ALLOWED]
     try:
-        for _ in range(4):  # read + up to three corrected creations
+        for _ in range(7):  # skill read + six bounded source checks; at most three renders
             response = await client.chat_with_tools(messages, tools=definitions)
             record_usage()
             message = response.choices[0].message

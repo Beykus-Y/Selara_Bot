@@ -11,7 +11,7 @@ Say “На этом завершим” or press “К сводке”. The mod
 ordinary messages in review do not call it. The server renders old → new values,
 inspected-but-unchanged parameters, affected sections and relevant dependency
 notes. Settings remain live exactly as before until “Сохранить”. “Продолжить
-настройку” resumes the same draft; “Отменить все настройки” discards the draft,
+настройку” resumes the same draft; “Отменить изменения” discards the draft,
 not the group's current configuration. `/autocfgcancel` is an independent exit.
 Calling `/autocfg` again recovers the open draft rather than silently replacing it.
 
@@ -68,3 +68,13 @@ responses are safely split for Telegram. At review, a save button is absent when
 there are no changes. Cancel/review also work when the model becomes unavailable.
 Deploy remains manual; apply the normal `alembic upgrade head` before using the
 new version.
+
+## Plain-language interaction
+
+The assistant speaks in human setting names and confirmed outcomes, without raw
+keys, true/false, API jargon or timezone arithmetic. The read-only
+convert_schedule_time tool translates a supplied IANA local timezone into the
+configured bot schedule timezone; it never changes global or group timezones.
+Schedules currently store whole hours. Fractional offsets and differing seasonal
+time changes require clarification rather than silently promising a local schedule.
+Prepared changes remain drafts; only the user's Save button applies them.

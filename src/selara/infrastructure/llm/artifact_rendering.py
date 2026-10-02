@@ -13,7 +13,7 @@ MAX_CSS = 12000
 MAX_PAGES = 3
 MAX_IMAGE_BYTES = 2_000_000
 _ALLOWED_TAGS = frozenset("div span p h1 h2 h3 h4 section article header footer main aside table thead tbody tfoot tr th td ul ol li strong b em i small br hr pre code style svg g path rect circle ellipse line polyline polygon text tspan defs lineargradient radialgradient stop title desc".split())
-_ALLOWED_ATTRS = frozenset("class id style colspan rowspan viewbox width height x y x1 x2 y1 y2 cx cy r rx ry d points fill stroke stroke-width stroke-linecap stroke-linejoin opacity transform text-anchor dominant-baseline offset stop-color stop-opacity preserveaspectratio role aria-label".split())
+_ALLOWED_ATTRS = frozenset("class id style colspan rowspan viewbox width height x y x1 x2 y1 y2 cx cy r rx ry d points fill stroke stroke-width stroke-linecap stroke-linejoin opacity transform text-anchor dominant-baseline offset stop-color stop-opacity preserveaspectratio role aria-label xmlns font-size font-family font-weight font-style letter-spacing fill-opacity stroke-opacity stroke-dasharray stroke-dashoffset".split())
 _VOID_TAGS = frozenset({"br", "hr"})
 
 
@@ -39,9 +39,15 @@ class _StaticHTML(HTMLParser):
         self.nodes += 1
         if self.nodes > 1500 or len(self.stack) > 40:
             raise ValueError("HTML: слишком сложная композиция.")
+        unsupported = [key for key, _ in attrs if key not in _ALLOWED_ATTRS]
+        if unsupported:
+            raise ValueError("HTML: атрибуты не разрешены: " + ", ".join(unsupported) +
+                ". Удали их; оформление текста задавай через style или css.")
         for key, value in attrs:
-            if key not in _ALLOWED_ATTRS:
-                raise ValueError(f"HTML: атрибут {key} не разрешён.")
+            if key == "xmlns" and (tag != "svg" or value != "http://www.w3.org/2000/svg"):
+                raise ValueError("SVG: xmlns допустим только на svg и только http://www.w3.org/2000/svg.")
+            if key in {"font-size", "font-family", "font-weight", "font-style", "letter-spacing"}:
+                validate_css(value or "")
             if key == "style":
                 validate_css(value or "")
             if key in {"fill", "stroke"} and "url" in (value or "").lower():
@@ -77,7 +83,7 @@ class _StaticHTML(HTMLParser):
 
 def validate_source(pages: list[str], css: str) -> None:
     if not isinstance(pages, list) or not 1 <= len(pages) <= MAX_PAGES or any(not isinstance(p, str) for p in pages):
-        raise ValueError("Нужны 1–3 HTML-страницы.")
+        raise ValueError('pages должен быть массивом из 1–3 HTML-строк, например ["<h1>Топ</h1><p>Данные</p>"], а не строкой или массивом объектов.')
     if not isinstance(css, str) or len(css) > MAX_CSS or sum(map(len, pages)) > MAX_HTML:
         raise ValueError("Превышен лимит HTML/CSS.")
     validate_css(css)
