@@ -18,7 +18,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from selara.infrastructure.db.base import Base
 
@@ -1965,6 +1965,9 @@ class LlmChatGlossaryModel(Base):
     )
     term: Mapped[str] = mapped_column(String(256), nullable=False)
     definition: Mapped[str] = mapped_column(Text, nullable=False)
+    aliases: Mapped[list["LlmChatGlossaryAliasModel"]] = relationship(
+        lazy="selectin", cascade="all, delete-orphan",
+    )
     # #17: author tracking -- who added/last edited this entry, relevant
     # for tracing back a glossary-poisoning incident (#2).
     created_by_user_id: Mapped[int | None] = mapped_column(
@@ -1986,6 +1989,24 @@ class LlmChatGlossaryModel(Base):
     )
 
 
+class LlmChatGlossaryAliasModel(Base):
+    __tablename__ = "llm_chat_glossary_aliases"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    glossary_id: Mapped[int] = mapped_column(
+        ForeignKey("llm_chat_glossary.id", ondelete="CASCADE"), nullable=False,
+    )
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False,
+    )
+    alias: Mapped[str] = mapped_column(String(256), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "alias", name="uq_llm_glossary_chat_alias"),
+        Index("idx_llm_glossary_alias_entry", "glossary_id"),
+    )
+
+
 class LlmChatGlossaryHistoryModel(Base):
     """#18: records the definition being replaced before each overwrite, so
     a poisoned or otherwise-bad edit can be inspected/recovered rather than
@@ -2000,6 +2021,7 @@ class LlmChatGlossaryHistoryModel(Base):
     )
     term: Mapped[str] = mapped_column(String(256), nullable=False)
     previous_definition: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_aliases: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     changed_by_user_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True,
     )

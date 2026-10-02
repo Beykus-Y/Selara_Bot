@@ -8,6 +8,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from selara.domain.glossary import normalize_glossary_text
+
 from selara.infrastructure.db.models import (
     ChatActivityEventSyncStateModel,
     ChatModel,
@@ -19,6 +21,7 @@ from selara.infrastructure.db.models import (
     EconomyPrivateContextModel,
     LlmAdminActionModel,
     LlmChatGlossaryModel,
+    LlmChatGlossaryHistoryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
     MarriageModel,
@@ -684,38 +687,39 @@ async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: i
 
 
 async def _merge_llm_glossary_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
-    source = (
-        select(
-            literal(new_chat_id).label("chat_id"),
-            LlmChatGlossaryModel.term,
-            LlmChatGlossaryModel.definition,
-        )
-        .where(LlmChatGlossaryModel.chat_id == old_chat_id)
-    )
-    stmt = pg_insert(LlmChatGlossaryModel).from_select(["chat_id", "term", "definition"], source)
-    # On a (rare) term collision, keep whatever the new chat already has --
-    # migration shouldn't silently overwrite a glossary entry someone
-    # already wrote post-upgrade.
-    stmt = stmt.on_conflict_do_nothing(index_elements=[LlmChatGlossaryModel.chat_id, LlmChatGlossaryModel.term])
-    await session.execute(stmt)
-    await session.execute(delete(LlmChatGlossaryModel).where(LlmChatGlossaryModel.chat_id == old_chat_id))
+    # At most 200 glossary entries; ORM movement preserves IDs, authors,
+    # aliases and history on both dialects instead of copying three fields.
+    await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
 async def _merge_llm_glossary_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
     rows = (await session.execute(
         select(LlmChatGlossaryModel).where(LlmChatGlossaryModel.chat_id == old_chat_id)
     )).scalars().all()
+    destination = list((await session.execute(
+        select(LlmChatGlossaryModel).where(LlmChatGlossaryModel.chat_id == new_chat_id)
+    )).scalars().all())
+    occupied = {normalize_glossary_text(name) for row in destination
+                for name in [row.term, *(a.alias for a in row.aliases)]}
     for row in rows:
-        conflict_exists = (await session.execute(
-            select(exists().where(
-                LlmChatGlossaryModel.chat_id == new_chat_id,
-                LlmChatGlossaryModel.term == row.term,
+        if normalize_glossary_text(row.term) in occupied:
+            session.add(LlmChatGlossaryHistoryModel(
+                chat_id=new_chat_id, term=row.term, previous_definition=row.definition,
+                previous_aliases=[a.alias for a in row.aliases], changed_by_user_id=row.updated_by_user_id,
             ))
-        )).scalar_one()
-        if conflict_exists:
             await session.delete(row)
         else:
             row.chat_id = new_chat_id
+            occupied.add(normalize_glossary_text(row.term))
+            for alias in list(row.aliases):
+                if alias.alias in occupied:
+                    row.aliases.remove(alias)
+                else:
+                    alias.chat_id = new_chat_id
+                    occupied.add(alias.alias)
+    await session.execute(update(LlmChatGlossaryHistoryModel).where(
+        LlmChatGlossaryHistoryModel.chat_id == old_chat_id,
+    ).values(chat_id=new_chat_id))
 
 
 async def _migrate_economy_scopes(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> int:

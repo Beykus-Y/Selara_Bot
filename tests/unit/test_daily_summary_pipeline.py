@@ -11,7 +11,24 @@ from selara.application.daily_summary.participants import ChatMemberInfo
 from selara.application.daily_summary.pipeline import _format_final_post, run_daily_summary_pipeline
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
 from selara.domain.entities import ActivityWindowStats, ArchivedMessageView
+from selara.domain.glossary import GlossaryEntry
 from selara.infrastructure.llm.client import LlmClientError
+
+
+@pytest.mark.asyncio
+async def test_writer_selects_relevant_glossary_past_first_twenty_and_uses_aliases():
+    from unittest.mock import AsyncMock
+    from selara.application.daily_summary.pipeline import _run_writer_stage
+
+    client = SimpleNamespace(chat_simple=AsyncMock(return_value="title: Test"), last_usage=(0, 0), last_model="test")
+    entries = [GlossaryEntry(f"aaa{i}", "не относящееся к теме значение") for i in range(25)]
+    entries.append(GlossaryEntry("сеть", "локальное название VPN", ("VPN",)))
+    await _run_writer_stage(client, style="neutral", themes=[{"title": "VPN", "blurb": "Подключение VPN", "importance": 4}],
+                            participant_directory={}, glossary_terms=entries, stage_usages=[])
+    content = client.chat_simple.await_args.kwargs['messages'][1]['content'].split('\n', 1)[1]
+    glossary = json.loads(content)['glossary']
+    assert [item['term'] for item in glossary] == ['сеть']
+    assert glossary[0]['aliases'] == ['VPN']
 
 _WINDOW_FROM = datetime(2026, 9, 2, 7, 0, tzinfo=timezone.utc)
 _WINDOW_TO = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
