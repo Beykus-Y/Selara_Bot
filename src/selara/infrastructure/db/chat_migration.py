@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from selara.domain.glossary import normalize_glossary_text
 
 from selara.infrastructure.db.models import (
+    AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
     ChatModel,
     ChatSettingsModel,
@@ -685,6 +686,11 @@ async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: i
         .where(LlmAdminActionModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
     )
+
+    # A draft needs a new selection/review after Telegram changes its destination ID.
+    await session.execute(update(AutoConfigSessionModel).where(AutoConfigSessionModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id, state='closed', revision=AutoConfigSessionModel.revision + 1,
+                history=[], candidates=[], baseline={}, draft={}, touched=[], lease_token=None, lease_until=None))
 
     # A Telegram group upgrade preserves the logical chat and its artifacts.
     await session.execute(

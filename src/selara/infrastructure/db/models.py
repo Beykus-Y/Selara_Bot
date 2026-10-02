@@ -2237,3 +2237,24 @@ class LlmArtifactModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (Index("idx_llm_artifacts_chat_expiry", "chat_id", "expires_at"),)
+
+
+class AutoConfigSessionModel(Base):
+    """One private, versioned settings draft per user; never live configuration."""
+    __tablename__ = 'autoconfig_sessions'
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('chats.telegram_chat_id', ondelete='CASCADE'), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidates: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    baseline: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    draft: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    touched: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    history: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_turn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

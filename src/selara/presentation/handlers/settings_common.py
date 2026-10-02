@@ -11,6 +11,7 @@ from selara.core.chat_settings import (
 )
 
 CFG_BOOL_KEYS: set[str] = {
+    "llm_enabled",
     "text_commands_enabled",
     "leaderboard_hybrid_buttons_enabled",
     "mafia_reveal_eliminated_role",
@@ -62,6 +63,16 @@ class SettingMeta:
 
 
 SETTING_META: dict[str, SettingMeta] = {
+    "llm_enabled": SettingMeta(
+        title_ru="AI-ассистент в группе", short_ru="AI в группе",
+        description_ru="Разрешить групповые обращения ? и ?? к AI-ассистенту. Нужны глобально подключённая модель и права пользователя.",
+        value_hint_ru="true/false.",
+    ),
+    "llm_context_threshold": SettingMeta(
+        title_ru="Порог сжатия контекста AI", short_ru="Контекст AI",
+        description_ru="После какого количества сообщений сохранённый контекст AI сжимается в краткую сводку.",
+        value_hint_ru="Целое число 5..500.",
+    ),
     "top_limit_default": SettingMeta(
         title_ru="Топ по умолчанию",
         short_ru="Топ по умолчанию",
@@ -550,6 +561,11 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "cleanup_economy_commands",
         ),
     ),
+    ("AI и итоги дня", (
+        "llm_enabled", "llm_context_threshold", "daily_summary_enabled", "daily_summary_hour",
+        "daily_summary_min_messages", "daily_summary_style", "daily_summary_include_voice",
+        "daily_summary_include_video_notes",
+    )),
 )
 
 
