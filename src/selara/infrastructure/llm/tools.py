@@ -1095,7 +1095,9 @@ async def _exec_get_top(
 
     mode_str = call.arguments.get("mode", "activity")
     period_str = call.arguments.get("period", "all_time")
-    limit = min(int(call.arguments.get("limit", 10)), 50)
+    if mode_str not in {"activity", "karma"} or period_str not in {"all_time", "7d", "30d"}:
+        return _err(call.call_id, call.name, "Поддерживаются только activity/karma и all_time/7d/30d. Другой период недоступен, это не означает отсутствия данных.")
+    limit = max(1, min(int(call.arguments.get("limit", 10)), 50))
 
     now = datetime.now(timezone.utc)
     period_map: dict[str, tuple[LeaderboardPeriod, datetime | None]] = {
@@ -1128,12 +1130,15 @@ async def _exec_get_top(
             "first_name": _untrusted(item.first_name),
             "display_name": _untrusted(item.chat_display_name),
             "messages": item.activity_value,
+            "karma": item.karma_value,
         }
         for i, item in enumerate(items)
     ]
     return _ok(
         call.call_id, call.name,
-        {"mode": mode_str, "period": period_str, "top": top},
+        {"mode": mode_str, "period": period_str, "top": top,
+         "chat_total_messages": None, "scope": "returned_top_only",
+         "note": "Сумма сообщений показанных участников не равна всему трафику чата. Без общего числа сообщений нельзя вычислять долю от всего чата."},
         f"Топ {mode_str} за {period_str} ({len(top)} мест)",
     )
 

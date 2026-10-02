@@ -101,6 +101,7 @@ async def test_get_top_leaks_unescaped_injection_payload_in_tool_result(
         first_name=f"Top Player {INJECTION_PAYLOAD}",
         chat_display_name=None,
         activity_value=42,
+        karma_value=3,
     )
     activity_repo = MagicMock()
     activity_repo.get_leaderboard = AsyncMock(return_value=[leaderboard_item])

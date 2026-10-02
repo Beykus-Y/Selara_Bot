@@ -945,3 +945,27 @@ async def test_get_current_time_does_not_call_llm_or_any_repo(chat_snapshot, act
     assert result.success is True
     activity_repo.assert_not_called()
     llm_repo.assert_not_called()
+
+
+@pytest.mark.parametrize('mode', ['activity', 'karma'])
+async def test_get_top_returns_distinct_measures_without_claiming_chat_total(chat_snapshot, mode):
+    from datetime import datetime, timezone
+    from selara.domain.entities import LeaderboardItem
+    repo = SimpleNamespace(get_leaderboard=AsyncMock(return_value=[LeaderboardItem(
+        user_id=1, username='one', first_name='Один', last_name=None, activity_value=453,
+        karma_value=17, hybrid_score=0, last_seen_at=datetime.now(timezone.utc))]))
+    result = await execute_tool(ToolCall('get_top', {'mode': mode, 'period': '30d'}, 'top'),
+        chat_snapshot=chat_snapshot, activity_repo=repo)
+    assert result.success
+    data = json.loads(result.result_text)
+    assert data['top'][0]['messages'] == 453 and data['top'][0]['karma'] == 17
+    assert data['period'] == '30d' and data['chat_total_messages'] is None
+    assert repo.get_leaderboard.call_args.kwargs['mode'] == mode
+
+
+@pytest.mark.parametrize('args', [{'period': '60d'}, {'mode': 'unknown'}])
+async def test_get_top_rejects_unsupported_period_instead_of_all_time(chat_snapshot, args):
+    repo = SimpleNamespace(get_leaderboard=AsyncMock())
+    result = await execute_tool(ToolCall('get_top', args, 'top'), chat_snapshot=chat_snapshot, activity_repo=repo)
+    assert not result.success
+    repo.get_leaderboard.assert_not_awaited()

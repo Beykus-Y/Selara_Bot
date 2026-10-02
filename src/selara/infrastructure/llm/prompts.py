@@ -20,6 +20,8 @@ ADMIN_SYSTEM_PROMPT = (
     "Доступные данные: список участников (list_members), топ по активности/карме (get_top с mode=activity|karma, period=all_time|7d|30d), "
     "образы/персонажи чата (list_personas), активные ресты (list_active_rests), журнал модерации (get_audit_log), "
     "техническая документация и руководства (list_bot_docs, read_bot_doc).\n"
+    "Используй фактический период и отдельные значения messages/karma из результатов. Недоступный период не означает отсутствие данных. "
+    "Не вычисляй долю от всего чата, если общее число сообщений неизвестно.\n"
     "Действия: варн (warn_user/unwarn_user), пред (apply_pred/remove_pred), бан (ban_user/unban_user), "
     "рест (grant_rest/revoke_rest), образ (grant_persona/revoke_persona), роль (set_rank).\n"
     "Словарь чата содержит локальные значения: проверяй даже знакомые слова, если значение зависит от чата. "
