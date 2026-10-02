@@ -343,3 +343,14 @@ async def test_cancel_does_not_reset_live_configuration(db):
     await cancel(SimpleNamespace(chat=SimpleNamespace(type='private'), from_user=user(), answer=AsyncMock()), db)
     assert (await repo.get_chat_settings(chat_id=-1001)).economy_enabled is False
     assert await AutoConfigRepository(db).get(1) is None
+
+
+async def test_autocfg_recovery_shows_full_review_even_without_model(db, monkeypatch):
+    import selara.presentation.handlers.autoconfig as handler
+    monkeypatch.setattr(handler, 'can_configure', AsyncMock(return_value=True))
+    row = await make_draft(db)
+    message = SimpleNamespace(chat=SimpleNamespace(type='private'), from_user=user(), answer=AsyncMock())
+    await handler.start(message, SimpleNamespace(), db, SqlAlchemyActivityRepository(db), llm_client=None)
+    assert 'Черновик настроек' in message.answer.call_args.args[0]
+    assert '→' in message.answer.call_args.args[0]
+    assert (await AutoConfigRepository(db).get(1)).id == row.id

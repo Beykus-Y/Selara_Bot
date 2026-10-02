@@ -91,21 +91,28 @@ async def show_review(message, row, chat, *, timezone_name='UTC'):
 
 
 @router.message(Command('autocfg'))
-async def start(message: Message, bot: Bot, db_session, activity_repo, llm_client=None):
+async def start(message: Message, bot: Bot, db_session, activity_repo, llm_client=None, settings: Settings | None = None):
     if message.chat.type != 'private':
         await message.answer('Настройка через ИИ доступна в личке с ботом: /autocfg')
         return
     if message.from_user is None:
-        return
-    if llm_client is None:
-        await message.answer('AI-настройка сейчас недоступна: администратор бота должен подключить модель.')
         return
     repository = AutoConfigRepository(db_session)
     # Authorized group roles reference an existing user. Lock serializes repeated /autocfg.
     await db_session.scalar(select(UserModel).where(UserModel.telegram_user_id == message.from_user.id).with_for_update())
     row = await repository.get(message.from_user.id, lock=True)
     if row is not None:
-        await message.answer('У тебя уже есть черновик. Он ещё не применён. Продолжи его или отмени.', reply_markup=keyboard(row))
+        if row.state == 'review':
+            chat = await db_session.get(ChatModel, row.chat_id)
+            if await can_configure(bot=bot, repo=activity_repo, user=message.from_user, chat=chat):
+                await show_review(message, row, chat, timezone_name=settings.bot_timezone if settings else 'UTC')
+            else:
+                await message.answer('Черновик не применён. Не удалось подтвердить права на группу. Его можно отменить командой /autocfgcancel.')
+        else:
+            await message.answer('У тебя уже есть черновик. Он ещё не применён. Продолжи его или отмени.', reply_markup=keyboard(row))
+        return
+    if llm_client is None:
+        await message.answer('AI-настройка сейчас недоступна: администратор бота должен подключить модель.')
         return
     candidates = []
     # Include inherited/default-role permissions, not only explicitly assigned admin roles.
