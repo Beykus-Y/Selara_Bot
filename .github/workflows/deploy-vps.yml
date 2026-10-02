@@ -32,8 +32,8 @@ jobs:
             export SELARA_WEB_IMAGE="${SELARA_WEB_IMAGE:-ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-web:latest}"
             web_port="${WEB_PORT:-8080}"
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
-            docker compose pull app web
-            docker compose up -d app web
+            docker compose pull app web artifact-renderer
+            docker compose up -d app web artifact-renderer
             sleep 10
             if [ "$(docker inspect -f '{{.State.Running}}' selara-app 2>/dev/null)" != "true" ]; then
               echo "selara-app is not running after deploy"

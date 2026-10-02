@@ -47,7 +47,7 @@ where = ["src"]
 "selara" = ["images/*.png", "images/**/*.png"]
 "selara.presentation" = ["*.json"]
 "selara.web" = ["templates/*.html", "static/*.css", "static/*.js"]
-"selara.infrastructure.llm" = ["prompts/*.md", "prompts/daily_summary/*.md"]
+"selara.infrastructure.llm" = ["prompts/*.md", "prompts/daily_summary/*.md", "skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

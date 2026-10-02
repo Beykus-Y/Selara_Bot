@@ -19,6 +19,7 @@ from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
+from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.llm.client import LlmClient, LlmClientError
 from selara.infrastructure.llm.context import (
     build_glossary_context,
@@ -275,7 +276,15 @@ async def _handle(
     tool_messages: list[dict] = []
     final_answer = ""
 
+    from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
+    artifact_context = ArtifactRequestContext(
+        repository=ArtifactRepository(db_session), renderer_url=getattr(settings, "artifact_renderer_url", "http://artifact-renderer:8090"),
+        chat_id=message.chat.id, creator_id=message.from_user.id, message_id=message.message_id,
+        thread_id=message.message_thread_id,
+    )
+
     tool_ctx = dict(
+        artifact_context=artifact_context,
         chat_snapshot=chat_snapshot,
         actor_snapshot=actor,
         activity_repo=activity_repo,
@@ -341,7 +350,15 @@ async def _handle(
     else:
         final_answer = "Ассистент не смог завершить задачу за отведённое число шагов."
 
-    await _send_formatted_answer(message, thinking_msg, final_answer or "Ассистент не дал ответа.")
+    if artifact_context.sent_artifacts and not final_answer.strip():
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            await thinking_msg.edit_text("Артефакт отправлен.")
+    else:
+        await _send_formatted_answer(message, thinking_msg, final_answer or "Ассистент не дал ответа.")
+    if artifact_context.sent_artifacts:
+        final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
 
     await save_interaction(
         chat_id=message.chat.id,

@@ -1832,3 +1832,7 @@ async def _exec_read_bot_doc(
         {"doc_name": doc_name, "content": content},
         f"Документ {doc_name} прочитан",
     )
+
+
+# Register additive skill/artifact capabilities after the base dispatcher is defined.
+from selara.infrastructure.llm import artifact_tools as _artifact_tools  # noqa: E402,F401

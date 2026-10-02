@@ -131,6 +131,8 @@ class Settings(BaseSettings):
         default=1800, validation_alias="DAILY_SUMMARY_MAX_TRANSCRIPTION_SECONDS_PER_CHAT_PER_DAY"
     )
 
+    artifact_renderer_url: str = Field(default="http://artifact-renderer:8090", validation_alias="ARTIFACT_RENDERER_URL")
+
     llm_enabled: bool = Field(default=False, validation_alias="LLM_ENABLED")
     llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://api.openai.com/v1", validation_alias="LLM_BASE_URL")
