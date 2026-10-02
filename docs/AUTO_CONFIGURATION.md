@@ -7,7 +7,7 @@ one draft. It can read settings, atomically update related draft fields and call
 registry access. A group does not need its own llm_enabled flag to use this wizard;
 the global configured LLM client must be available.
 
-Say “На этом завершим” or press “К сводке”. The model stops after the finish tool;
+Say “На этом завершим” or press “Проверить изменения”. The model stops after the finish tool;
 ordinary messages in review do not call it. The server renders old → new values,
 inspected-but-unchanged parameters, affected sections and relevant dependency
 notes. Settings remain live exactly as before until “Сохранить”. “Продолжить

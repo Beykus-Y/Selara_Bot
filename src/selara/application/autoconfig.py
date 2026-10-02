@@ -255,11 +255,12 @@ async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defau
                 except (ValueError, TypeError, KeyError) as exc:
                     output = json.dumps({'error': str(exc)}, ensure_ascii=False)
                 messages.append({'role': 'tool', 'tool_call_id': call.id, 'content': output})
-        result.answer = 'Черновик обновлён. Уточни следующий шаг или открой сводку кнопкой.'
+        result.answer = ('Подготовил изменения. Можем продолжить или проверить их кнопкой «Проверить изменения».'
+            if result.draft != draft else 'Изменений пока нет. Уточни, что нужно настроить, или нажми «Проверить изменения».')
     except Exception:
         logger.exception('AI configuration turn failed; retaining the previous draft')
         # Roll back every draft operation in an interrupted turn, retaining prior turns.
         result.draft = dict(draft)
         result.touched = list(touched)
-        result.answer = 'Ассистент сейчас недоступен. Черновик сохранён; можно повторить запрос, открыть сводку или отменить.'
+        result.answer = 'Ассистент сейчас недоступен. Предыдущие подготовленные изменения остаются; можно повторить запрос, проверить изменения или отменить их.'
     return result

@@ -88,6 +88,7 @@ async def test_read_tracks_inspected_fields_and_loop_is_bounded():
     c = client(*[response(('read_settings', {'keys': ['economy_enabled']}))] * 4)
     result = await run(c)
     assert result.touched == ['economy_enabled'] and c.chat_with_tools.call_count == 4
+    assert 'Изменений пока нет' in result.answer
 
 
 def test_review_escapes_user_content_and_lists_changed_and_inspected():
