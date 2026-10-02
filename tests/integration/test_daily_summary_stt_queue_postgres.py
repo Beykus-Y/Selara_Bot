@@ -32,7 +32,9 @@ from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscript
 
 _CHAT_ID = -100999
 _USER_ID = 2001
-_NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+# The recovery scan uses a rolling lookback from the real current time.
+# Keep sample archive rows inside that window instead of aging out of it.
+_NOW = datetime.now(timezone.utc)
 
 
 async def _database():
