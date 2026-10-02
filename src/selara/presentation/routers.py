@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
+from selara.presentation.handlers.autoconfig import router as autoconfig_router
 from selara.presentation.handlers.aliases import router as aliases_router
 from selara.presentation.handlers.admin_broadcasts import router as admin_broadcasts_router
 from selara.presentation.handlers.chat_assistant import router as chat_assistant_router
@@ -80,6 +81,7 @@ def build_router(
     root.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
 
+    root.include_router(autoconfig_router)
     root.include_router(admin_broadcasts_router)
     root.include_router(message_archive_router)
     root.include_router(help_router)
