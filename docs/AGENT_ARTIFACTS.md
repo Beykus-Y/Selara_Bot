@@ -30,6 +30,35 @@ uncertain delivery refuses automatic replay because Telegram may have accepted
 it. This conservatively favors avoiding duplicate messages over silent retries.
 A completely delivered ID is idempotent; create a new ID for another delivery.
 
+## Complementary infographics and daily summaries
+
+Skill version 2 separates visual relationships, structure and measured comparisons
+from prose explanations. Short labels, names and numbers may overlap. Creation
+checks the supplied accompanying text; delivery checks the actual caption for
+copied sequences of twelve words. This catches literal copying, not semantic
+paraphrases: the skill remains responsible for complementary content.
+
+Long explanations are sent separately. After Telegram acknowledges both messages,
+the bot edits the photo caption and final text chunk to add mutual message links
+in supergroups/channels, including forum topics. Private/legacy-group links are
+not fabricated. Link-edit failures leave the acknowledged delivery successful
+and never resend the messages. A PNG itself cannot contain clickable links;
+short labels can refer to matching labels in the explanation.
+
+Scheduled and manually requested daily summaries share an optional post-writer
+stage, exposing only read_skill/create_artifact, with four bounded tool rounds.
+The model can decline a visual entirely. It receives the ready text, themes and
+backend archive counts/hourly activity, with the retrieval scope made explicit.
+It cannot send messages or call moderation tools. Only an ID actually created
+in that request is saved in topics_json; images are bound to the summary run as
+well as the destination chat/topic. No migration is required.
+
+A renderer/LLM failure preserves the generated text. Delivery uses trusted,
+escaped writer HTML without reinterpreting it as Markdown. Missing/expired or
+mismatched artifact IDs use the text path. Confirmed first-photo rejection can
+fall back to text with persisted progress; uncertain delivery never replays.
+Infographic usage/cost and enabled/created diagnostics are recorded with the run.
+
 ## Deployment
 
 Sync the updated docker-compose.yml to the VPS before the next manual deploy.

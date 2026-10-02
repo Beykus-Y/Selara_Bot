@@ -358,3 +358,26 @@ def test_format_final_post_handles_single_line_output_with_no_body() -> None:
     assert result.startswith("<b>Просто одна строка без темы.</b>")
     # no stray empty body paragraph between the title and the disclaimer
     assert "<b>Просто одна строка без темы.</b>\n\n<i>" in result
+
+
+async def test_pipeline_optional_infographic_records_id_cost_and_diagnostics(monkeypatch):
+    from unittest.mock import AsyncMock
+    from selara.application.daily_summary import artifacts
+    repo = _FakeRepo(messages=[_msg(1, 1, 0, 'обсуждение')], members=_members())
+    cards = SegmentTopicCardList(topics=[SegmentTopicCard(title='Тема', start_message_id=1,
+        end_message_id=1, participant_display_names=['Вася'], blurb='Обсуждение темы')])
+    merged = MergedThemeList(themes=[MergedTheme(title='Тема', source_card_indexes=[0], blurb='Итог', importance=4)])
+    client = _FakeLlmClient(structured_responses=[cards, merged])
+    async def create(**kwargs):
+        assert kwargs['facts']['archived_message_count'] == 1
+        assert '<b>' in kwargs['text']
+        kwargs['record_usage']()
+        return 'created-id'
+    monkeypatch.setattr(artifacts, 'create_daily_infographic', AsyncMock(side_effect=create))
+    result = await run_daily_summary_pipeline(llm_client=client, repo=repo, chat_id=-100,
+        chat_title='Test', summary_run_id=42, window_from=_WINDOW_FROM, window_to=_WINDOW_TO,
+        style='neutral', persona_enabled=True, artifact_context=SimpleNamespace())
+    assert result.topics_json['artifact_id'] == 'created-id'
+    assert result.stage_usages[-1].stage == 'infographic'
+    assert result.pipeline_cost_usd == sum(u.estimated_cost_usd for u in result.stage_usages)
+    assert result.diagnostics.artifact_created and result.diagnostics.artifact_stage_enabled

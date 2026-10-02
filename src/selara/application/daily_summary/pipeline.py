@@ -16,6 +16,7 @@ import html
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
@@ -165,6 +166,8 @@ class DailySummaryDiagnostics:
     analyst_tool_rounds: int = 0
     analyst_tool_calls: int = 0
     analyst_fallback_used: bool = False
+    artifact_stage_enabled: bool = False
+    artifact_created: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,7 @@ async def run_daily_summary_pipeline(
     style: str,
     persona_enabled: bool,
     glossary_terms: list[tuple[str, str] | GlossaryEntry] | None = None,
+    artifact_context=None,
 ) -> DailySummaryPipelineOutput:
     stage_usages: list[DailySummaryStageUsage] = []
     glossary_terms = glossary_terms or []
@@ -416,9 +420,31 @@ async def run_daily_summary_pipeline(
         stage_usages=stage_usages,
     )
 
+    formatted_text = _format_final_post(generated_text)
+    topics_json = {"themes": final_themes}
+    if artifact_context is not None:
+        from selara.application.daily_summary.artifacts import create_daily_infographic
+        diagnostics["artifact_stage_enabled"] = True
+        artifact_id = await create_daily_infographic(
+            client=llm_client, context=artifact_context, text=formatted_text,
+            themes=final_themes, participant_directory=participant_directory,
+            facts={
+                "scope": "retrieved archived messages; themes may cover only processed segments",
+                "window_from": window_from.isoformat(), "window_to": window_to.isoformat(),
+                "archived_message_count": len(messages), "archived_author_count": len(author_ids),
+                "messages_by_hour": dict(sorted(Counter(
+                    m.sent_at.replace(minute=0, second=0, microsecond=0).isoformat() for m in messages
+                ).items())),
+            },
+            record_usage=lambda: stage_usages.append(_record_usage(llm_client, stage="infographic")),
+        )
+        if artifact_id:
+            topics_json["artifact_id"] = artifact_id
+            diagnostics["artifact_created"] = True
+
     return DailySummaryPipelineOutput(
-        generated_text=_format_final_post(generated_text),
-        topics_json={"themes": final_themes},
+        generated_text=formatted_text,
+        topics_json=topics_json,
         pipeline_cost_usd=sum(u.estimated_cost_usd for u in stage_usages),
         stage_usages=stage_usages,
         diagnostics=DailySummaryDiagnostics(**diagnostics),

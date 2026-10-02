@@ -100,10 +100,17 @@ def render_llm_html(text: str, *, max_units: int = 3500) -> list[str]:
     if max_units < 2:
         raise ValueError("max_units must be at least 2")
     rendered = _render(_MARKDOWN(text)).strip()
+    return split_telegram_html(rendered, max_units=max_units) or ["Ассистент не дал ответа."]
+
+
+def split_telegram_html(text: str, *, max_units: int = 3500) -> list[str]:
+    """Split already escaped, trusted Telegram HTML (not arbitrary model markup)."""
+    if max_units < 2:
+        raise ValueError("max_units must be at least 2")
     parser = _Chunker(max_units)
-    parser.feed(rendered)
+    parser.feed(text)
     parser._flush()
-    return parser.chunks or ["Ассистент не дал ответа."]
+    return parser.chunks
 
 
 def html_to_plain_text(text: str) -> str:
