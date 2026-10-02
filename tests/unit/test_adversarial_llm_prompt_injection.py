@@ -118,6 +118,8 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
     db_session = MagicMock()
 
     message = AsyncMock(spec=Message)
+    message.message_id = 100
+    message.message_thread_id = None
     message.chat = SimpleNamespace(id=-100999, type="group", title=malicious_title)
     message.from_user = SimpleNamespace(
         id=111, username="admin", first_name="Admin", last_name=None, is_bot=False

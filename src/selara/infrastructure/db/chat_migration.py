@@ -20,6 +20,7 @@ from selara.infrastructure.db.models import (
     EconomyMarketListingModel,
     EconomyPrivateContextModel,
     LlmAdminActionModel,
+    LlmArtifactModel,
     LlmChatGlossaryModel,
     LlmChatGlossaryHistoryModel,
     LlmContextMessageModel,
@@ -683,6 +684,11 @@ async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: i
         update(LlmAdminActionModel)
         .where(LlmAdminActionModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
+    )
+
+    # A Telegram group upgrade preserves the logical chat and its artifacts.
+    await session.execute(
+        update(LlmArtifactModel).where(LlmArtifactModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
     )
 
 
