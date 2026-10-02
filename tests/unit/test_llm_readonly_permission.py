@@ -61,6 +61,8 @@ def chat_settings():
 
 def _admin_message(text: str) -> AsyncMock:
     message = AsyncMock(spec=Message)
+    message.message_id = 100
+    message.message_thread_id = None
     message.chat = SimpleNamespace(id=-100123, type="group", title="Chat")
     message.from_user = SimpleNamespace(id=111, username="member", first_name="Member", last_name=None, is_bot=False)
     message.text = text

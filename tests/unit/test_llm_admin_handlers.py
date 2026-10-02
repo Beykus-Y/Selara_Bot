@@ -147,6 +147,8 @@ async def test_handle_empty_query(chat_settings):
     
     # Mock message
     message = AsyncMock(spec=Message)
+    message.message_id = 100
+    message.message_thread_id = None
     message.chat = SimpleNamespace(id=-100123, type="group", title="Test group")
     message.from_user = SimpleNamespace(
         id=111, username="admin", first_name="Admin", last_name=None, is_bot=False

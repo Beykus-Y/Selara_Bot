@@ -43,6 +43,7 @@ services:
       DATABASE_URL: ${SELARA_DATABASE_URL:?Set SELARA_DATABASE_URL}
       REDIS_URL: ${SELARA_REDIS_URL:-redis://redis:6379/0}
       GACHA_REEL_CACHE_DIR: /data/gacha_reel_cache
+      ARTIFACT_RENDERER_URL: http://artifact-renderer:8090
     volumes:
       - selara_gacha_reel_cache:/data/gacha_reel_cache
     depends_on:
@@ -50,11 +51,41 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      artifact-renderer:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${WEB_PORT:-8080}:${WEB_PORT:-8080}"
     networks:
       - selara_internal
+      - artifact_rendering
       - edge
+
+  artifact-renderer:
+    image: ${SELARA_IMAGE:-selara:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "selara.infrastructure.llm.artifact_worker"]
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m,mode=1777
+    environment:
+      XDG_CACHE_HOME: /tmp/cache
+      XDG_CONFIG_HOME: /tmp/config
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - artifact_rendering
 
   web:
     image: ${SELARA_WEB_IMAGE:-selara-web:local}
@@ -82,6 +113,8 @@ volumes:
   selara_gacha_reel_cache:
 
 networks:
+  artifact_rendering:
+    internal: true
   selara_internal:
   edge:
     external: true

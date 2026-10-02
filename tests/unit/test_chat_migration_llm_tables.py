@@ -118,3 +118,24 @@ async def test_migrate_chat_id_merges_glossary_without_violating_unique_term_con
             assert len(glossary) == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_group_upgrade_preserves_artifacts_under_new_chat_boundary():
+    from selara.infrastructure.db.artifact_repository import ArtifactRepository
+    engine, factory = await _session_factory()
+    try:
+        async with factory() as session:
+            session.add(ChatModel(telegram_chat_id=503, type="group", title="Old"))
+            await session.commit()
+            repo = ArtifactRepository(session)
+            artifact = await repo.create(chat_id=503, thread_id=None, creator_id=10,
+                title="Test", pages=["image"], source={})
+            artifact_id = artifact.id
+            await session.commit()
+            await migrate_chat_id(session, old_chat_id=503, new_chat_id=1503)
+            await session.commit()
+            assert await repo.get(artifact_id=artifact_id, chat_id=503, thread_id=None) is None
+            assert await repo.get(artifact_id=artifact_id, chat_id=1503, thread_id=None) is not None
+    finally:
+        await engine.dispose()

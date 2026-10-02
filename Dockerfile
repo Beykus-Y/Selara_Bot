@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
@@ -16,7 +17,8 @@ COPY src /app/src
 
 RUN pip install --upgrade pip \
     && pip install . \
-    && playwright install chromium --with-deps
+    && playwright install chromium --with-deps \
+    && chmod -R a+rX /ms-playwright
 
 EXPOSE 8080
 
