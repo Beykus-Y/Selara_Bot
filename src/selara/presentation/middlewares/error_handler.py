@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import re
@@ -11,18 +12,28 @@ from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat, Telegr
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.infrastructure.db.models import AdminRuntimeSettingsModel
 from selara.presentation.chat_migration import apply_chat_migration, extract_migration_ids_from_exception
-from selara.presentation.middlewares.error_alert_config import get_error_alert_config
+from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
 
 logger = logging.getLogger(__name__)
 _ALERT_DEDUPE_WINDOW = timedelta(minutes=15)
 _recent_alerts: dict[str, datetime] = {}
+_alert_delivery_lock = asyncio.Lock()
+_SECRET_BEARER_PATTERN = re.compile(r"(?i)(authorization\s*:\s*bearer\s+|bearer\s+)([^\s,;]+)")
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b([\w.-]*(?:token|password|api[_-]?key|secret))(\s*[:=]\s*)([^\s,;]+)"
+)
+
+
+def _sanitize_operational_alert(text: str) -> str:
+    text = _SECRET_BEARER_PATTERN.sub(r"\1[REDACTED]", text)
+    return _SECRET_ASSIGNMENT_PATTERN.sub(r"\1\2[REDACTED]", text)
 
 
 async def notify_operational_error(
     *, session_factory: async_sessionmaker[AsyncSession] | None, event: Any, exc: Exception, bot: Any = None
 ) -> None:
-    _ = session_factory  # Kept for call-site compatibility; alert routing is cached outside the DB path.
     settings = get_error_alert_config()
     if not settings.enabled or settings.chat_id is None:
         return
@@ -31,14 +42,10 @@ async def notify_operational_error(
         frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
         signature_source = "|".join(
             [type(exc).__module__ + "." + type(exc).__qualname__]
-            + [f"{frame.filename}:{frame.name}" for frame in frames[-8:]]
+            + [f"{frame.filename}:{frame.name}:{frame.lineno}" for frame in frames[-8:]]
             + [re.sub(r"\b-?\d+\b", "<n>", str(exc)).strip()]
         )
         fingerprint = hashlib.sha256(signature_source.encode("utf-8", errors="replace")).hexdigest()[:12]
-        previous = _recent_alerts.get(fingerprint)
-        if previous is not None and now - previous < _ALERT_DEDUPE_WINDOW:
-            return
-
         chat = getattr(event, "chat", None) or getattr(getattr(event, "message", None), "chat", None)
         user = getattr(event, "from_user", None)
         if user is None:
@@ -46,11 +53,8 @@ async def notify_operational_error(
         raw_text = getattr(event, "text", None) or getattr(event, "caption", None)
         if raw_text is None:
             raw_text = getattr(getattr(event, "message", None), "text", None)
-        command = (
-            str(raw_text).strip().splitlines()[0][:180]
-            if raw_text and str(raw_text).strip().startswith("/")
-            else "—"
-        )
+        command_match = re.match(r"^(/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?)", str(raw_text or "").strip())
+        command = command_match.group(1) if command_match else "—"
         lines = [
             "🚨 Selara: ошибка при обработке обновления",
             f"Время: {now.isoformat(timespec='seconds')}",
@@ -62,11 +66,48 @@ async def notify_operational_error(
             f"Отпечаток: {fingerprint}",
         ]
         if frames:
-            lines.extend(["", "Traceback:", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-2200:]])
+            formatted_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-2200:]
+            lines.extend(["", "Traceback:", formatted_traceback])
         target_bot = bot or getattr(event, "bot", None)
-        if target_bot is not None:
-            await target_bot.send_message(chat_id=settings.chat_id, text="\n".join(lines)[:3900])
-            _recent_alerts[fingerprint] = now
+        if target_bot is None:
+            return
+        alert_text = _sanitize_operational_alert("\n".join(lines))[:3900]
+
+        async with _alert_delivery_lock:
+            now = datetime.now(timezone.utc)
+            previous = _recent_alerts.get(fingerprint)
+            if previous is not None and now - previous < _ALERT_DEDUPE_WINDOW:
+                return
+            try:
+                await target_bot.send_message(chat_id=settings.chat_id, text=alert_text)
+            except TelegramMigrateToChat as migration_exc:
+                new_chat_id = getattr(migration_exc, "migrate_to_chat_id", None)
+                if new_chat_id is None:
+                    raise
+                configure_error_alerts(settings.enabled, int(new_chat_id))
+                if session_factory is not None:
+                    try:
+                        async with session_factory() as session:
+                            runtime_settings = await session.get(AdminRuntimeSettingsModel, 1)
+                            if runtime_settings is None:
+                                session.add(
+                                    AdminRuntimeSettingsModel(
+                                        id=1,
+                                        error_alert_chat_id=int(new_chat_id),
+                                        error_alerts_enabled=True,
+                                    )
+                                )
+                                await session.commit()
+                            elif runtime_settings.error_alert_chat_id == settings.chat_id:
+                                runtime_settings.error_alert_chat_id = int(new_chat_id)
+                                await session.commit()
+                    except Exception:
+                        logger.exception(
+                            "Could not persist migrated operational alert chat id",
+                            extra={"old_chat_id": settings.chat_id, "new_chat_id": int(new_chat_id)},
+                        )
+                await target_bot.send_message(chat_id=int(new_chat_id), text=alert_text)
+            _recent_alerts[fingerprint] = datetime.now(timezone.utc)
             for key, sent_at in tuple(_recent_alerts.items()):
                 if now - sent_at >= _ALERT_DEDUPE_WINDOW:
                     _recent_alerts.pop(key, None)

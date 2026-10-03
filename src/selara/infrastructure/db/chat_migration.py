@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from selara.domain.glossary import normalize_glossary_text
 
 from selara.infrastructure.db.models import (
+    AdminRuntimeSettingsModel,
     AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
     ChatModel,
@@ -662,6 +663,11 @@ async def _move_simple_chat_refs(session: AsyncSession, *, old_chat_id: int, new
         update(EconomyPrivateContextModel)
         .where(EconomyPrivateContextModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(AdminRuntimeSettingsModel)
+        .where(AdminRuntimeSettingsModel.error_alert_chat_id == old_chat_id)
+        .values(error_alert_chat_id=new_chat_id)
     )
 
 

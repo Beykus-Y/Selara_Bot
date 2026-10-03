@@ -2444,13 +2444,21 @@ async def _build_gacha_info_view(
     errors: list[str] = []
     for banner, result in zip(banners, results, strict=True):
         if isinstance(result, Exception):
-            if bool(getattr(result, "is_timeout", False)):
+            if isinstance(result, GachaUseCaseError):
+                if result.is_operational:
+                    await notify_operational_error(
+                        session_factory=session_factory,
+                        event=event,
+                        exc=result,
+                    )
+                error_text = result.message
+            else:
                 await notify_operational_error(
                     session_factory=session_factory,
                     event=event,
                     exc=result,
                 )
-            error_text = result.message if isinstance(result, GachaUseCaseError) else str(result)
+                error_text = "Не удалось загрузить данные гачи."
             errors.append(f"❌ {escape(_gacha_banner_label(banner))}: {escape(error_text)}")
             continue
         available_banners.append(banner)
@@ -2659,7 +2667,7 @@ async def _send_gacha_pull_impl(
             banner=banner,
         )
     except GachaUseCaseError as exc:
-        if exc.is_timeout:
+        if exc.is_operational:
             await notify_operational_error(session_factory=session_factory, event=message, exc=exc, bot=bot)
         await _answer_quiet(message, exc.message)
         return
@@ -2708,7 +2716,7 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
             banner=banner,
         )
     except GachaUseCaseError as exc:
-        if exc.is_timeout:
+        if exc.is_operational:
             await notify_operational_error(session_factory=session_factory, event=message, exc=exc)
         await _answer_quiet(message, exc.message)
         return
@@ -3095,6 +3103,7 @@ async def _send_gacha_skip(
     *,
     banner: str,
     target_username: str | None,
+    session_factory=None,
 ) -> None:
     if message.from_user is None:
         return
@@ -3125,6 +3134,8 @@ async def _send_gacha_skip(
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(session_factory=session_factory, event=message, exc=exc)
         await _answer_quiet(message, exc.message)
         return
 
@@ -3138,6 +3149,7 @@ async def gachagive_command(
     bot: Bot,
     activity_repo,
     settings: Settings,
+    session_factory=None,
 ) -> None:
     if message.from_user is None:
         return
@@ -3188,6 +3200,13 @@ async def gachagive_command(
     try:
         response = await give_gacha_card(settings, user_id=target_user_id, banner=None, code=code)
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(
+                session_factory=session_factory,
+                event=message,
+                exc=exc,
+                bot=bot,
+            )
         await _answer_quiet(message, exc.message)
         return
 
@@ -5363,7 +5382,7 @@ async def _gacha_callback_impl(
                 banner=banner,
             )
         except GachaUseCaseError as exc:
-            if exc.is_timeout:
+            if exc.is_operational:
                 await notify_operational_error(
                     session_factory=session_factory, event=query, exc=exc, bot=bot
                 )
@@ -5500,7 +5519,7 @@ async def _gacha_callback_impl(
                 currency_amount=currency_amount,
             )
         except GachaUseCaseError as exc:
-            if exc.is_timeout:
+            if exc.is_operational:
                 await notify_operational_error(
                     session_factory=session_factory, event=query, exc=exc, bot=bot
                 )
@@ -5559,6 +5578,13 @@ async def _gacha_callback_impl(
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(
+                session_factory=session_factory,
+                event=query,
+                exc=exc,
+                bot=bot,
+            )
         await _safe_callback_answer(query, exc.message, show_alert=True)
         return
 
@@ -6104,6 +6130,7 @@ async def text_commands_handler(
             settings,
             banner=str(intent.args.get("banner", "")),
             target_username=intent.args.get("target_username"),
+            session_factory=session_factory,
         )
         return
 

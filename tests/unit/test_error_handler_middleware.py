@@ -1,9 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import SendPhoto
+from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat
+from aiogram.methods import SendMessage, SendPhoto
 from aiogram.types import Message
 
 from selara.core.config import Settings
@@ -121,3 +122,135 @@ async def test_alert_destination_uses_environment_fallback_when_database_is_unav
 
     bot.send_message.assert_awaited_once()
     assert bot.send_message.await_args.kwargs["chat_id"] == -100456
+
+
+@pytest.mark.asyncio
+async def test_concurrent_matching_errors_send_only_one_alert() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    configure_error_alerts(True, -100123)
+    first_send_entered = asyncio.Event()
+    release_first_send = asyncio.Event()
+
+    async def blocked_send(**_kwargs):
+        first_send_entered.set()
+        await release_first_send.wait()
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=blocked_send))
+    event = SimpleNamespace(bot=bot, chat=SimpleNamespace(id=-1001), from_user=None, text="/status")
+    exception = ValueError("same concurrent failure")
+    first = asyncio.create_task(
+        notify_operational_error(session_factory=None, event=event, exc=exception)
+    )
+    await first_send_entered.wait()
+    second = asyncio.create_task(
+        notify_operational_error(session_factory=None, event=event, exc=exception)
+    )
+    await asyncio.sleep(0)
+    release_first_send.set()
+    await asyncio.gather(first, second)
+
+    assert bot.send_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_same_exception_text_at_distinct_raise_lines_is_not_deduplicated() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    configure_error_alerts(True, -100123)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    event = SimpleNamespace(bot=bot, chat=SimpleNamespace(id=-1001), from_user=None, text="/status")
+
+    def raise_at_line(first: bool) -> ValueError:
+        if first:
+            raise ValueError("boom")
+        raise ValueError("boom")
+
+    exceptions = []
+    for branch in (True, False):
+        try:
+            raise_at_line(branch)
+        except ValueError as exc:
+            exceptions.append(exc)
+
+    for exc in exceptions:
+        await notify_operational_error(session_factory=None, event=event, exc=exc)
+
+    assert bot.send_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_alert_redacts_feedback_command_and_secret_from_message_and_traceback() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    configure_error_alerts(True, -100123)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    event = SimpleNamespace(
+        bot=bot,
+        chat=SimpleNamespace(id=-1001),
+        from_user=None,
+        text="/feedback проблема: мой пароль SECRET_VALUE",
+    )
+    secret = "Authorization: Bearer SUPER_SECRET token=abc123 password=secret123 api_key=key456"
+    try:
+        raise ValueError(secret)
+    except ValueError as exc:
+        await notify_operational_error(session_factory=None, event=event, exc=exc)
+
+    alert_text = bot.send_message.await_args.kwargs["text"]
+    violations = []
+    if "Команда: /feedback" not in alert_text:
+        violations.append("command arguments were included in the command field")
+    for sensitive_value in ("SECRET_VALUE", "SUPER_SECRET", "abc123", "secret123", "key456"):
+        if sensitive_value in alert_text:
+            violations.append(f"secret value leaked: {sensitive_value}")
+    assert not violations, "; ".join(violations)
+
+
+@pytest.mark.asyncio
+async def test_alert_delivery_retries_at_new_chat_after_migration() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    old_chat_id, new_chat_id = -123, -100123
+    configure_error_alerts(True, old_chat_id)
+    migration = TelegramMigrateToChat(
+        method=SendMessage(chat_id=old_chat_id, text="alert"),
+        message="group migrated",
+        migrate_to_chat_id=new_chat_id,
+    )
+    runtime_settings = SimpleNamespace(error_alert_chat_id=old_chat_id)
+
+    class _RuntimeSettingsSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _model, _key):
+            return runtime_settings
+
+        async def commit(self):
+            return None
+
+    class _RuntimeSettingsFactory:
+        def __call__(self):
+            return _RuntimeSettingsSession()
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=[migration, None]))
+    event = SimpleNamespace(bot=bot, chat=SimpleNamespace(id=-1001), from_user=None, text="/status")
+
+    await notify_operational_error(
+        session_factory=_RuntimeSettingsFactory(), event=event, exc=ValueError("service down")
+    )
+
+    sent_chat_ids = [call.kwargs["chat_id"] for call in bot.send_message.await_args_list]
+    assert (
+        sent_chat_ids == [old_chat_id, new_chat_id]
+        and get_error_alert_config().chat_id == new_chat_id
+        and runtime_settings.error_alert_chat_id == new_chat_id
+    )

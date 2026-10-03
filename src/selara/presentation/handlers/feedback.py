@@ -73,4 +73,5 @@ async def feedback_command(message: Message, command: CommandObject, db_session:
     db_session.add(request_row)
     await db_session.flush()
     request_id = int(request_row.id)
+    await db_session.commit()
     await message.answer(f"Обращение #{request_id} отправлено. Спасибо! Его можно будет посмотреть в админке Selara.")

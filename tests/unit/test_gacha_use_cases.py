@@ -397,6 +397,26 @@ async def test_pull_card_does_not_attempt_recovery_on_non_timeout_error(
     fake_client.get_history.assert_not_awaited()
 
 
+@pytest.mark.parametrize("is_operational", [False, True])
+@pytest.mark.asyncio
+async def test_get_profile_preserves_operational_failure_classification(
+    is_operational: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = SimpleNamespace(
+        get_profile=AsyncMock(
+            side_effect=gacha_use_cases.GachaClientError(
+                "gacha request failed", is_operational=is_operational
+            )
+        )
+    )
+    monkeypatch.setattr(gacha_use_cases, "_build_client", lambda settings, *, banner: fake_client)
+
+    with pytest.raises(gacha_use_cases.GachaUseCaseError) as captured:
+        await gacha_use_cases.get_profile(SimpleNamespace(), user_id=1, banner="genshin")
+
+    assert captured.value.is_operational is is_operational
+
+
 @pytest.mark.parametrize("operation", ["pull", "profile", "purchase_pull"])
 @pytest.mark.asyncio
 async def test_gacha_timeout_flag_survives_use_case_wrapping(
