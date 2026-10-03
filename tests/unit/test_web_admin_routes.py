@@ -89,6 +89,7 @@ class FakeSession:
     def __init__(self, *, execute_results=None, records=None) -> None:
         self._execute_results = list(execute_results or [])
         self._records = dict(records or {})
+        self.added = []
         self.execute_calls = []
         self.get_calls = []
         self.commit_calls = 0
@@ -105,6 +106,9 @@ class FakeSession:
 
     async def commit(self) -> None:
         self.commit_calls += 1
+
+    def add(self, row) -> None:
+        self.added.append(row)
 
 
 class QueueSessionFactory:
@@ -733,6 +737,10 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert "Использование действий отношений" in response.text
     assert "Коды входа веб-панели" in response.text
     assert 'action="/app/admin/request-backup"' in response.text
+    assert 'action="/app/admin/error-alerts"' in response.text
+    assert 'name="error_alert_chat_id"' in response.text
+    assert 'name="error_alerts_enabled"' in response.text
+    assert 'value="test">Проверить отправку' in response.text
     assert "Системная рассылка" in response.text
     assert 'action="/app/admin/broadcasts/send"' in response.text
     assert 'enctype="multipart/form-data"' in response.text
@@ -765,6 +773,43 @@ async def test_admin_page_lists_all_mapped_tables(monkeypatch) -> None:
     assert 'data-table-search-card' in response.text
     assert 'data-table-search-text="чаты chats"' in response.text
     assert 'src="/static/admin-table-search.js?v=' in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_error_alert_settings_are_saved(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+    settings_session = FakeSession()
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, settings_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.post(
+            "/app/admin/error-alerts",
+            data={
+                "action": "save",
+                "error_alert_chat_id": "-1001234567890",
+                "error_alerts_enabled": "1",
+            },
+        )
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 303
+    saved = settings_session.added[0]
+    assert saved.error_alert_chat_id == -1001234567890
+    assert saved.error_alerts_enabled is True
+    assert settings_session.commit_calls == 1
 
 
 @pytest.mark.asyncio

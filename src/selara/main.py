@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 def build_bot_commands() -> list[BotCommand]:
     return [
         BotCommand(command="help", description="Справка"),
+        BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),

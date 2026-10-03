@@ -97,6 +97,7 @@ from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.backup import send_daily_backup
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.models import (
+    AdminRuntimeSettingsModel,
     ChatModel,
     EconomyAccountModel,
     MessageArchiveModel,
@@ -8522,6 +8523,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             recent_active_chat_count = await activity_repo.count_recent_active_group_chats(since=active_since)
             recent_active_chats = await activity_repo.list_recent_active_group_chats(since=active_since)
             recent_broadcasts = await activity_repo.list_recent_admin_broadcasts(limit=8)
+            runtime_settings = await session.get(AdminRuntimeSettingsModel, 1)
             await session.commit()
 
         table_sections = _admin_table_sections()
@@ -8568,6 +8570,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
             ),
             recent_broadcast_count=len(recent_broadcasts),
+            error_alert_chat_id=(
+                str(runtime_settings.error_alert_chat_id)
+                if runtime_settings is not None and runtime_settings.error_alert_chat_id is not None
+                else ""
+            ),
+            error_alerts_enabled=bool(runtime_settings and runtime_settings.error_alerts_enabled),
             broadcast_active_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
             recent_active_chat_count=recent_active_chat_count,
             broadcast_audience_status=(
@@ -8763,6 +8771,66 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if prefers_json:
             return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
         return _redirect(redirect_path)
+
+    @app.post("/app/admin/error-alerts")
+    async def admin_save_error_alerts(request: Request):
+        prefers_json = _prefers_json(request)
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            if prefers_json:
+                return _json_result(ok=False, message="Сессия истекла. Войдите снова.", status_code=401, redirect="/app/admin/login")
+            return _redirect("/app/admin/login")
+
+        form = await _parse_form(request)
+        action = str(form.get("action", "save")).strip()
+        raw_chat_id = str(form.get("error_alert_chat_id", "")).strip()
+        enabled = str(form.get("error_alerts_enabled", "")).lower() in {"1", "true", "on", "yes"}
+        try:
+            chat_id = int(raw_chat_id) if raw_chat_id else None
+        except ValueError:
+            chat_id = None
+            error = "ID чата должен быть целым числом."
+        else:
+            error = None
+
+        if error is None and enabled and chat_id is None:
+            error = "Укажите ID чата, прежде чем включать оповещения."
+        if error is None and action == "test" and chat_id is None:
+            error = "Укажите ID чата для тестовой отправки."
+
+        if error is None and action == "test":
+            try:
+                await (await _get_game_bot()).send_message(
+                    chat_id=chat_id,
+                    text="✅ Тестовое сообщение Selara. Оповещения об ошибках смогут приходить в этот чат.",
+                )
+                message = "Тестовое сообщение отправлено."
+            except Exception:
+                logger.exception("Admin error-alert test delivery failed", extra={"target_chat_id": chat_id})
+                error = "Не удалось отправить тест. Проверьте ID чата и убедитесь, что бот может писать туда."
+        elif error is None and action == "save":
+            async with session_factory() as session:
+                runtime_settings = await session.get(AdminRuntimeSettingsModel, 1)
+                if runtime_settings is None:
+                    runtime_settings = AdminRuntimeSettingsModel(id=1)
+                    session.add(runtime_settings)
+                runtime_settings.error_alert_chat_id = chat_id
+                runtime_settings.error_alerts_enabled = enabled
+                await session.commit()
+            message = "Настройки оповещений сохранены."
+        elif error is None:
+            error = "Неизвестное действие."
+
+        if prefers_json:
+            return _json_result(
+                ok=error is None,
+                message=error or message,
+                status_code=400 if error else 200,
+                redirect=_with_message("/app/admin#broadcasts", key="error" if error else "flash", text=error or message),
+            )
+        return _redirect(_with_message("/app/admin#broadcasts", key="error" if error else "flash", text=error or message))
 
     @app.post("/app/admin/broadcasts/send")
     async def admin_send_broadcast(request: Request):

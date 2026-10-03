@@ -12,6 +12,7 @@ from selara.presentation.handlers.clans import router as clans_router
 from selara.presentation.handlers.daily_summary import router as daily_summary_router
 from selara.presentation.handlers.economy import router as economy_router
 from selara.presentation.handlers.engagement import router as engagement_router
+from selara.presentation.handlers.feedback import router as feedback_router
 from selara.presentation.handlers.game import router as game_router
 from selara.presentation.handlers.help import router as help_router
 from selara.presentation.handlers.llm_admin import router as llm_admin_router
@@ -95,6 +96,7 @@ def build_router(
     root.include_router(settings_router)
     root.include_router(aliases_router)
     root.include_router(engagement_router)
+    root.include_router(feedback_router)
     root.include_router(private_panel_router)
     if llm_client is not None:
         root.include_router(llm_admin_router)

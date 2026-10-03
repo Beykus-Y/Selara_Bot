@@ -93,8 +93,8 @@ async def test_gacha_buy_callback_refreshes_info_message(monkeypatch: pytest.Mon
     purchase_mock.assert_awaited_once()
     deliver_mock.assert_awaited_once()
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True, "session_factory": None, "event": query}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False, "session_factory": None, "event": query}),
     ]
     assert query.message.edit_text_calls[0][0] == "<b>Гача инфо</b>"
     assert query.answers[-1] == (None, False)
@@ -268,8 +268,8 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         currency_amount=160,
     )
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True, "session_factory": None, "event": query}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False, "session_factory": None, "event": query}),
     ]
     assert query.answers[-1] == ("Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.", False)
 

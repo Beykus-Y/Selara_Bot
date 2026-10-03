@@ -34,7 +34,7 @@
 | Пользовательская документация | `user_docs.html` | `GET /app/docs/user` | `GET /api/app/docs/user` | Public; optional user/chat context | public, contextual chat, search/anchor future, mobile TOC | Средний |
 | Документация администраторов групп | `admin_docs.html` | `GET /app/docs/admin` | `GET /api/app/docs/admin` | Public с optional user/chat context; это справка по управлению группой, а не системная админка | public, contextual chat, search, deep link, mobile TOC | Средний: не допустить попадания внутренних system-admin процедур |
 | Вход администратора | `admin_login.html` | `GET/POST /app/admin/login` | `POST /api/admin/login` | Public; active admin redirect | invalid password, unsafe configured password, rate limit, expired session | Высокий: auth |
-| Главная администратора | `admin.html` | `GET /app/admin` | `GET /api/admin` | Admin | empty/large chats, broadcasts, feedback, backup success/error, expired session | Очень высокий |
+| Главная администратора | `admin.html` | `GET /app/admin` | `GET /api/admin` | Admin | empty/large chats, broadcasts, feedback, backup success/error, alert settings, expired session | Очень высокий |
 | Детали рассылки | `admin_broadcast_detail.html` | `GET /app/admin/broadcasts/{id}` | `GET /api/admin/broadcasts/{id}` | Admin | missing broadcast, mixed delivery states, replies, all reaction types, bot reaction failure | Очень высокий |
 | Архив сообщений | `admin_messages_compact.html` | `GET /app/admin/table/messages_compact` | generic admin table API пока не возвращает диалоговый view | Admin | empty, filters, replies, edits, media, unavailable file, long archive, mobile navigation | Очень высокий |
 | Generic DB explorer | `admin_table.html` | `GET /app/admin/table/{table}` | `GET /api/admin/table/{table}` | Admin | invalid table/filter, empty/large data, composite PK, raw JSON, mobile overflow | Высокий: destructive tooling |
@@ -56,6 +56,7 @@
 
 - `POST /app/admin/login`, `POST /app/admin/logout`.
 - `POST /app/admin/request-backup`.
+- `POST /app/admin/error-alerts`.
 - `POST /app/admin/broadcasts/send`.
 - `POST /app/admin/broadcasts/{broadcast_id}/replies/{reply_id}/reaction`.
 - `POST /app/admin/feedback/{request_id}/status`.
@@ -76,6 +77,7 @@
 | Economy actions | User + chat | JSON | feature disabled, write lock, balance/ownership | Да, экономика |
 | Admin login/logout | Public / Admin session | redirect или JSON; отдельная admin cookie | rate limit, unsafe password, expiry | Нет |
 | Backup request | Admin | redirect/flash или JSON | auth, backup failure | Нет, но чувствительно |
+| Error alert settings/test | Admin | redirect/flash или JSON | auth, chat ID validation, Telegram send failure | Нет |
 | Broadcast send/reaction | Admin | redirect/flash или JSON | auth, Telegram/API/media validation | Да, внешняя отправка/реакция |
 | Feedback status | Admin | redirect/flash или JSON | auth, missing request | Да, рабочий статус |
 | Generic DB update/delete | Admin | redirect/flash или JSON | auth, table/PK/type validation | **Да, прямое изменение БД** |
