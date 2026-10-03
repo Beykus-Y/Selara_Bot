@@ -172,7 +172,7 @@ async def pull_card(
         logger.warning(
             "Gacha pull failed: user=%s banner=%s error=%s", user_id, banner, exc.message
         )
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def get_banner_cards(
@@ -182,7 +182,7 @@ async def get_banner_cards(
     try:
         return await client.get_banner_cards(banner=banner, if_none_match=if_none_match)
     except GachaClientError as exc:
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def get_profile(settings: Settings, *, user_id: int, banner: str) -> GachaProfileResponse:
@@ -190,7 +190,7 @@ async def get_profile(settings: Settings, *, user_id: int, banner: str) -> Gacha
     try:
         return await client.get_profile(user_id=user_id, banner=banner)
     except GachaClientError as exc:
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def purchase_pull(
@@ -211,7 +211,7 @@ async def purchase_pull(
             )
             if recovered is not None:
                 return recovered
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def sell_pull(settings: Settings, *, user_id: int, pull_id: int, banner: str) -> GachaSellPullResponse:
@@ -219,7 +219,7 @@ async def sell_pull(settings: Settings, *, user_id: int, pull_id: int, banner: s
     try:
         return await client.sell_pull(user_id=user_id, pull_id=pull_id)
     except GachaClientError as exc:
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def reset_cooldown(settings: Settings, *, user_id: int, banner: str) -> GachaCooldownResetResponse:
@@ -235,7 +235,7 @@ async def reset_cooldown(settings: Settings, *, user_id: int, banner: str) -> Ga
             admin_token=admin_token,
         )
     except GachaClientError as exc:
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def give_card(settings: Settings, *, user_id: int, banner: str | None, code: str) -> GachaPullResponse:
@@ -247,7 +247,7 @@ async def give_card(settings: Settings, *, user_id: int, banner: str | None, cod
     try:
         return await client.give_card(user_id=user_id, banner=banner, code=code, admin_token=admin_token)
     except GachaClientError as exc:
-        raise GachaUseCaseError(exc.message) from exc
+        raise GachaUseCaseError(exc.message, is_timeout=exc.is_timeout) from exc
 
 
 async def grant_currency(

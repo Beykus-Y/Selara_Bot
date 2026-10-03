@@ -105,6 +105,7 @@ from selara.infrastructure.db.models import (
     UserFeatureRequestModel,
     UserModel,
 )
+from selara.presentation.middlewares.error_alert_config import configure_error_alerts
 from selara.infrastructure.db.repositories import (
     SqlAlchemyActivityRepository,
     SqlAlchemyEconomyRepository,
@@ -8573,9 +8574,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             error_alert_chat_id=(
                 str(runtime_settings.error_alert_chat_id)
                 if runtime_settings is not None and runtime_settings.error_alert_chat_id is not None
-                else ""
+                else str(settings.error_alert_chat_id or "")
             ),
-            error_alerts_enabled=bool(runtime_settings and runtime_settings.error_alerts_enabled),
+            error_alerts_enabled=(
+                bool(runtime_settings.error_alerts_enabled)
+                if runtime_settings is not None
+                else settings.error_alert_chat_id is not None
+            ),
             broadcast_active_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
             recent_active_chat_count=recent_active_chat_count,
             broadcast_audience_status=(
@@ -8819,6 +8824,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 runtime_settings.error_alert_chat_id = chat_id
                 runtime_settings.error_alerts_enabled = enabled
                 await session.commit()
+            configure_error_alerts(enabled, chat_id)
             message = "Настройки оповещений сохранены."
         elif error is None:
             error = "Неизвестное действие."

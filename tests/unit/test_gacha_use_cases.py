@@ -397,6 +397,34 @@ async def test_pull_card_does_not_attempt_recovery_on_non_timeout_error(
     fake_client.get_history.assert_not_awaited()
 
 
+@pytest.mark.parametrize("operation", ["pull", "profile", "purchase_pull"])
+@pytest.mark.asyncio
+async def test_gacha_timeout_flag_survives_use_case_wrapping(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timeout = gacha_use_cases.GachaClientError("service timeout", is_timeout=True)
+    fake_client = SimpleNamespace(
+        pull=AsyncMock(side_effect=timeout),
+        get_profile=AsyncMock(side_effect=timeout),
+        purchase_pull=AsyncMock(side_effect=timeout),
+        get_history=AsyncMock(side_effect=gacha_use_cases.GachaClientError("history unavailable")),
+    )
+    monkeypatch.setattr(gacha_use_cases, "_build_client", lambda settings, *, banner: fake_client)
+    settings = SimpleNamespace()
+
+    with pytest.raises(gacha_use_cases.GachaUseCaseError, match="service timeout") as captured:
+        if operation == "pull":
+            await gacha_use_cases.pull_card(settings, user_id=1, username="u", banner="genshin")
+        elif operation == "profile":
+            await gacha_use_cases.get_profile(settings, user_id=1, banner="genshin")
+        else:
+            await gacha_use_cases.purchase_pull(settings, user_id=1, username="u", banner="genshin")
+
+    assert captured.value.is_timeout is True
+    if operation in {"pull", "purchase_pull"}:
+        fake_client.get_history.assert_awaited_once_with(user_id=1, banner="genshin", limit=1)
+
+
 @pytest.mark.asyncio
 async def test_buy_currency_with_coins_requires_enough_coins() -> None:
     repo = _FakeEconomyRepo(balance=1_599)

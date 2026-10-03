@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     bot_timezone: str = Field(default="UTC", validation_alias="BOT_TIMEZONE")
 
     database_url: str = Field(..., validation_alias="DATABASE_URL")
+    error_alert_chat_id: int | None = Field(default=None, validation_alias="ERROR_ALERT_CHAT_ID")
     db_pool_size: int = Field(default=10, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")

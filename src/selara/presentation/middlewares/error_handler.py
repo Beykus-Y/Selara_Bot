@@ -11,8 +11,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat, Telegr
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.infrastructure.db.models import AdminRuntimeSettingsModel
 from selara.presentation.chat_migration import apply_chat_migration, extract_migration_ids_from_exception
+from selara.presentation.middlewares.error_alert_config import get_error_alert_config
 
 logger = logging.getLogger(__name__)
 _ALERT_DEDUPE_WINDOW = timedelta(minutes=15)
@@ -22,14 +22,11 @@ _recent_alerts: dict[str, datetime] = {}
 async def notify_operational_error(
     *, session_factory: async_sessionmaker[AsyncSession] | None, event: Any, exc: Exception, bot: Any = None
 ) -> None:
-    if session_factory is None:
+    _ = session_factory  # Kept for call-site compatibility; alert routing is cached outside the DB path.
+    settings = get_error_alert_config()
+    if not settings.enabled or settings.chat_id is None:
         return
     try:
-        async with session_factory() as session:
-            settings = await session.get(AdminRuntimeSettingsModel, 1)
-        if settings is None or not settings.error_alerts_enabled or settings.error_alert_chat_id is None:
-            return
-
         now = datetime.now(timezone.utc)
         frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
         signature_source = "|".join(
@@ -41,10 +38,6 @@ async def notify_operational_error(
         previous = _recent_alerts.get(fingerprint)
         if previous is not None and now - previous < _ALERT_DEDUPE_WINDOW:
             return
-        _recent_alerts[fingerprint] = now
-        for key, sent_at in tuple(_recent_alerts.items()):
-            if now - sent_at >= _ALERT_DEDUPE_WINDOW:
-                _recent_alerts.pop(key, None)
 
         chat = getattr(event, "chat", None) or getattr(getattr(event, "message", None), "chat", None)
         user = getattr(event, "from_user", None)
@@ -72,7 +65,11 @@ async def notify_operational_error(
             lines.extend(["", "Traceback:", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-2200:]])
         target_bot = bot or getattr(event, "bot", None)
         if target_bot is not None:
-            await target_bot.send_message(chat_id=settings.error_alert_chat_id, text="\n".join(lines)[:3900])
+            await target_bot.send_message(chat_id=settings.chat_id, text="\n".join(lines)[:3900])
+            _recent_alerts[fingerprint] = now
+            for key, sent_at in tuple(_recent_alerts.items()):
+                if now - sent_at >= _ALERT_DEDUPE_WINDOW:
+                    _recent_alerts.pop(key, None)
     except Exception:
         logger.exception("Failed to send operational error alert")
 
