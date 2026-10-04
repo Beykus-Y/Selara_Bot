@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -112,6 +113,40 @@ class AiAccountingService:
             )
             await session.commit()
 
+    async def finish_invocation_outcome(
+        self, *, invocation_id: int, status: str, error_category: str | None = None
+    ) -> None:
+        """Finalize even during cancellation, preserving partial provider spend."""
+        task = asyncio.create_task(self._finish_invocation_outcome(
+            invocation_id=invocation_id, status=status, error_category=error_category,
+        ))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception:
+                logger.exception("Could not finalize AI invocation after cancellation id=%s", invocation_id)
+            raise
+
+    async def _finish_invocation_outcome(
+        self, *, invocation_id: int, status: str, error_category: str | None
+    ) -> None:
+        if status == "failed":
+            try:
+                aggregate = await self.aggregate_invocation(invocation_id=invocation_id)
+                if aggregate.provider_calls:
+                    status = "partial"
+            except Exception:
+                # If accounting is temporarily unavailable, don't claim there
+                # was no provider spend merely because the read failed.
+                logger.exception("Could not inspect AI invocation before finalization id=%s", invocation_id)
+                status = "partial"
+                error_category = error_category or "accounting_aggregate_unavailable"
+        await self.finish_invocation(
+            invocation_id=invocation_id, status=status, error_category=error_category,
+        )
+
     async def aggregate_invocation(self, *, invocation_id: int) -> InvocationAggregate:
         async with self._session_factory() as session:
             result = await session.execute(
@@ -151,9 +186,14 @@ class AiAccountingService:
                         LlmUsageLogModel.id,
                     ))),
                     func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0),
-                ).where(
-                    LlmUsageLogModel.created_at >= window_from,
-                    LlmUsageLogModel.created_at < window_to,
+                ).select_from(LlmUsageLogModel)
+                .join(
+                    AiFeatureInvocationModel,
+                    LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id,
+                )
+                .where(
+                    AiFeatureInvocationModel.started_at >= window_from,
+                    AiFeatureInvocationModel.started_at < window_to,
                 )
             )
             calls, unknown_calls, known_cost = usage_result.one()

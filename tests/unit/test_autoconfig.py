@@ -86,6 +86,7 @@ async def test_llm_error_rolls_back_this_turn_not_previous_turns():
     result = await run(c, prior)
     assert result.draft == prior and not result.finished
     assert 'недоступен' in result.answer
+    assert result.outcome == 'failed' and result.error_category == 'assistant_error'
 
 
 async def test_read_tracks_inspected_fields_and_loop_is_bounded():

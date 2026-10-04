@@ -109,11 +109,17 @@ def upgrade() -> None:
     )
     op.execute(
         "UPDATE llm_usage_log SET pricing_status = 'known' "
-        "WHERE stage = 'stt' OR model IN ('gpt-4o-mini', 'gpt-4o')"
+        "WHERE (stage = 'stt' AND audio_seconds IS NOT NULL) "
+        "OR (stage <> 'stt' AND model IN ('gpt-4o-mini', 'gpt-4o') "
+        "AND prompt_tokens IS NOT NULL AND completion_tokens IS NOT NULL "
+        "AND estimated_cost_usd IS NOT NULL)"
     )
     op.execute(
         "UPDATE llm_usage_log SET pricing_status = 'unknown', estimated_cost_usd = NULL "
-        "WHERE stage <> 'stt' AND model NOT IN ('gpt-4o-mini', 'gpt-4o')"
+        "WHERE NOT ((stage = 'stt' AND audio_seconds IS NOT NULL) "
+        "OR (stage <> 'stt' AND model IN ('gpt-4o-mini', 'gpt-4o') "
+        "AND prompt_tokens IS NOT NULL AND completion_tokens IS NOT NULL "
+        "AND estimated_cost_usd IS NOT NULL))"
     )
     op.execute(
         "INSERT INTO ai_feature_invocations "

@@ -190,10 +190,33 @@ async def test_timeout_returns_unknown_failed_attempt_without_inventing_zero_cos
     with pytest.raises(LlmClientError) as caught:
         await client.chat_simple([], accounting_context=LlmAccountingContext(7, "llm_admin", "round", -100))
 
-    assert caught.value.usages[0].error_category == "timeout"
-    assert caught.value.usages[0].status == "failed"
-    assert caught.value.usages[0].estimated_cost_usd is None
-    assert len(recorded) == 1
+    assert len(caught.value.usages) == len(recorded) == 3
+    assert [usage.attempt_number for usage in caught.value.usages] == [1, 2, 3]
+    assert len({usage.call_id for usage in caught.value.usages}) == 3
+    assert len({usage.request_id for usage in caught.value.usages}) == 1
+    assert all(usage.error_category == "timeout" for usage in caught.value.usages)
+    assert all(usage.status == "failed" and usage.estimated_cost_usd is None for usage in caught.value.usages)
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_errors_are_retried_as_separate_accounted_attempts():
+    import httpx
+    from openai import APITimeoutError
+
+    failure = APITimeoutError(request=httpx.Request("POST", "https://provider.invalid"))
+    client = LlmClient(LlmConfig(api_key="test-key", model="gpt-4o-mini"))
+    client._client.chat.completions.create = AsyncMock(side_effect=[failure, failure, _response(
+        "recovered", model="gpt-4o-mini", prompt=31, completion=7,
+    )])
+
+    result = await client.chat_simple([])
+
+    assert result.value == "recovered"
+    assert [usage.attempt_number for usage in result.usages] == [1, 2, 3]
+    assert [usage.status for usage in result.usages] == ["failed", "failed", "succeeded"]
+    assert len({usage.call_id for usage in result.usages}) == 3
+    assert len({usage.request_id for usage in result.usages}) == 1
+    assert client._client.chat.completions.create.await_count == 3
 
 
 @pytest.mark.asyncio

@@ -193,6 +193,8 @@ class AssistantResult:
     answer: str = ''
     finished: bool = False
     usages: list[tuple] = field(default_factory=list)
+    outcome: str = 'succeeded'
+    error_category: str | None = None
 
 
 async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defaults: dict,
@@ -274,4 +276,6 @@ async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defau
         result.draft = dict(draft)
         result.touched = list(touched)
         result.answer = 'Ассистент сейчас недоступен. Предыдущие подготовленные изменения остаются; можно повторить запрос, проверить изменения или отменить их.'
+        result.outcome = 'failed'
+        result.error_category = 'assistant_error'
     return result

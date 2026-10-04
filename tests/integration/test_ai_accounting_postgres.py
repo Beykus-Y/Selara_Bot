@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -81,5 +82,49 @@ async def test_postgres_parallel_invocations_keep_call_aggregates_isolated_and_s
             remaining = (await session.execute(select(LlmUsageLogModel))).scalars().all()
             assert len(remaining) == 4
             assert all(row.chat_id is None for row in remaining)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_window_aggregate_uses_invocation_start_for_calls_crossing_midnight():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_876_544
+        async with factory() as session:
+            session.add(ChatModel(telegram_chat_id=chat_id, type="supergroup", title="window aggregate"))
+            await session.commit()
+        service = AiAccountingService(factory)
+        first = await service.create_invocation(feature="daily_summary", trigger="manual", chat_id=chat_id)
+        second = await service.create_invocation(feature="llm_admin", trigger="telegram_message", chat_id=chat_id)
+        day_start = datetime(2026, 10, 4, 23, 0, tzinfo=timezone.utc)
+        midnight = day_start + timedelta(hours=1)
+        day_end = midnight + timedelta(hours=1)
+        async with factory() as session:
+            first_row = await session.get(AiFeatureInvocationModel, first)
+            second_row = await session.get(AiFeatureInvocationModel, second)
+            first_row.started_at = day_start + timedelta(minutes=30)
+            second_row.started_at = midnight + timedelta(minutes=30)
+            await session.commit()
+        await service.record_provider_call(
+            LlmAccountingContext(first, "daily_summary", "writer", chat_id),
+            LlmCallUsage(str(uuid4()), "gpt-4o-mini", 100, 10, 110, Decimal("0.01"), "known", 1,
+                         "succeeded", recorded_at=midnight + timedelta(minutes=5)),
+        )
+        await service.record_provider_call(
+            LlmAccountingContext(second, "llm_admin", "assistant_round", chat_id),
+            LlmCallUsage(str(uuid4()), "gpt-4o-mini", 200, 20, 220, Decimal("0.02"), "known", 1,
+                         "succeeded", recorded_at=midnight + timedelta(minutes=35)),
+        )
+
+        first_window = await service.aggregate_window(window_from=day_start, window_to=midnight)
+        second_window = await service.aggregate_window(window_from=midnight, window_to=day_end)
+        assert (first_window.invocations, first_window.provider_calls, first_window.known_cost_usd) == (
+            1, 1, Decimal("0.01")
+        )
+        assert (second_window.invocations, second_window.provider_calls, second_window.known_cost_usd) == (
+            1, 1, Decimal("0.02")
+        )
     finally:
         await engine.dispose()

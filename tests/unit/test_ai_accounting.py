@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.models import AiFeatureInvocationModel
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallUsage
 
 
@@ -65,5 +66,34 @@ async def test_structured_validation_update_reuses_one_provider_call_record():
 
         assert aggregate.provider_calls == 1
         assert aggregate.known_cost_usd == Decimal("0.000027000")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_invocation_with_persisted_provider_call_finishes_partial():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="llm_admin", trigger="telegram_message", chat_id=-100,
+        )
+        await service.record_provider_call(
+            LlmAccountingContext(invocation_id, "llm_admin", "assistant_round", -100),
+            LlmCallUsage(str(uuid4()), "gpt-4o-mini", 20, 3, 23, Decimal("0.00001"), "known", 1, "succeeded"),
+        )
+
+        await service.finish_invocation_outcome(
+            invocation_id=invocation_id, status="failed", error_category="handler_error",
+        )
+
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, invocation_id)
+            assert invocation.status == "partial"
+            assert invocation.error_category == "handler_error"
+            assert invocation.completed_at is not None
     finally:
         await engine.dispose()

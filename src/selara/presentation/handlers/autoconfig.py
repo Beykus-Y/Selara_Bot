@@ -311,13 +311,22 @@ async def talk(message: Message, bot: Bot, db_session, activity_repo, settings: 
                 timezone_name=settings.bot_timezone, accounting_context=call_context)
     except TimeoutError:
         from selara.application.autoconfig import AssistantResult
-        result = AssistantResult(draft, touched, 'Запрос занял слишком много времени. Черновик не изменён; можно повторить или открыть сводку.')
+        result = AssistantResult(
+            draft, touched,
+            answer='Запрос занял слишком много времени. Черновик не изменён; можно повторить или открыть сводку.',
+            outcome='failed', error_category='timeout',
+        )
+    except BaseException:
+        if accounting is not None and invocation_id is not None:
+            await accounting.finish_invocation_outcome(
+                invocation_id=invocation_id, status='failed', error_category='handler_error',
+            )
+        raise
     if accounting is not None and invocation_id is not None:
-        aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id)
-        await accounting.finish_invocation(
+        await accounting.finish_invocation_outcome(
             invocation_id=invocation_id,
-            status='succeeded' if result.answer else ('partial' if aggregate.provider_calls else 'failed'),
-            error_category=None if result.answer else 'assistant_turn_failed',
+            status=result.outcome,
+            error_category=result.error_category,
         )
     row = await repository.finish_turn(user_id=message.from_user.id, token=token, result=result, text=text)
     if row is None:

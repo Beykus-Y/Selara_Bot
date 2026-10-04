@@ -182,6 +182,7 @@ async def test_structured_retry_returns_both_billable_attempts() -> None:
     assert sum(u.completion_tokens for u in result.usages) == 50
     assert result.usages[0].status == "validation_failed"
     assert result.usages[1].status == "succeeded"
+    assert [usage.attempt_number for usage in result.usages] == [1, 2]
     assert result.usages[0].request_id == result.usages[1].request_id
     assert result.usages[0].call_id != result.usages[1].call_id
     assert sum(u.estimated_cost_usd for u in result.usages) > 0

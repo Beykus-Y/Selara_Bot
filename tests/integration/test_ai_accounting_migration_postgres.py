@@ -60,10 +60,13 @@ async def test_0072_migration_preserves_legacy_rows_and_does_not_call_unknown_mo
             run_id = result.scalar_one()
             await connection.execute(
                 text("INSERT INTO llm_usage_log "
-                     "(summary_run_id, chat_id, feature, stage, model, prompt_tokens, completion_tokens, estimated_cost_usd) "
-                     "VALUES (:run, -100, 'daily_summary', 'writer', 'gpt-4o-mini', 100, 20, 0.000027), "
-                     "(:run, -100, 'daily_summary', 'analyst', 'provider/future', 80, 10, 0), "
-                     "(NULL, -100, 'daily_summary', 'stt', 'whisper-compatible', NULL, NULL, 0.001)"),
+                     "(summary_run_id, chat_id, feature, stage, model, prompt_tokens, completion_tokens, "
+                     "audio_seconds, estimated_cost_usd) "
+                     "VALUES (:run, -100, 'daily_summary', 'writer', 'gpt-4o-mini', 100, 20, NULL, 0.000027), "
+                     "(:run, -100, 'daily_summary', 'analyst', 'provider/future', 80, 10, NULL, 0), "
+                     "(:run, -100, 'daily_summary', 'writer', 'gpt-4o-mini', NULL, NULL, NULL, 0), "
+                     "(NULL, -100, 'daily_summary', 'stt', 'whisper-compatible', NULL, NULL, 60, 0.001), "
+                     "(NULL, -100, 'daily_summary', 'stt', 'whisper-compatible', NULL, NULL, NULL, 0.001)"),
                 {"run": run_id},
             )
 
@@ -76,11 +79,13 @@ async def test_0072_migration_preserves_legacy_rows_and_does_not_call_unknown_mo
             rows = (await connection.execute(text(
                 "SELECT id, invocation_id, pricing_status, estimated_cost_usd, stage FROM llm_usage_log ORDER BY id"
             ))).all()
-            assert len(rows) == 3
+            assert len(rows) == 5
             assert rows[0].invocation_id is not None
             assert rows[0].pricing_status == "known" and rows[0].estimated_cost_usd == Decimal("0.000027")
             assert rows[1].pricing_status == "unknown" and rows[1].estimated_cost_usd is None
-            assert rows[2].pricing_status == "known" and rows[2].estimated_cost_usd == Decimal("0.001")
+            assert rows[2].pricing_status == "unknown" and rows[2].estimated_cost_usd is None
+            assert rows[3].pricing_status == "known" and rows[3].estimated_cost_usd == Decimal("0.001")
+            assert rows[4].pricing_status == "unknown" and rows[4].estimated_cost_usd is None
             run = (await connection.execute(text(
                 "SELECT pipeline_has_unknown_cost FROM daily_summary_runs WHERE id = :id"
             ), {"id": run_id})).scalar_one()

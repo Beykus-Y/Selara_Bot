@@ -21,6 +21,7 @@ _StructuredModel = TypeVar("_StructuredModel", bound=BaseModel)
 _Response = TypeVar("_Response")
 
 _DEFAULT_TIMEOUT = 60.0
+_MAX_PROVIDER_ATTEMPTS = 3
 # #37: chat_with_tools has the highest fan-out (up to 8 rounds per admin
 # query) of the three chat methods, but was the only one with no max_tokens
 # cap -- a single round could otherwise produce an unbounded-length
@@ -113,77 +114,28 @@ class LlmClient:
         max_tokens: int | None = _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS,
         accounting_context: LlmAccountingContext | None = None,
     ):
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._config.model,
-                messages=messages,
-                tools=tools or None,
-                tool_choice="auto" if tools else None,
-                max_tokens=max_tokens,
-            )
-            usage = self._usage("chat_with_tools", response, model=self._reported_model(response, self._config.model), attempt=1)
-            await self._record(accounting_context, usage)
-            return LlmCallResult(response, (usage,))
-        except APITimeoutError as exc:
-            usage = self._failed_usage(self._config.model, 1, "timeout")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("LLM-сервис не ответил вовремя.", usages=(usage,)) from exc
-        except APIConnectionError as exc:
-            usage = self._failed_usage(self._config.model, 1, "connection")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("Не удалось подключиться к LLM-сервису.", usages=(usage,)) from exc
-        except APIStatusError as exc:
-            usage = self._failed_usage(self._config.model, 1, "api_status")
-            await self._record(accounting_context, usage)
-            raise LlmClientError(_extract_api_error(exc), usages=(usage,)) from exc
+        response, usages = await self._request_with_retries(
+            "chat_with_tools", self._config.model, accounting_context,
+            model=self._config.model, messages=messages, tools=tools or None,
+            tool_choice="auto" if tools else None, max_tokens=max_tokens,
+        )
+        return LlmCallResult(response, usages)
 
     async def chat_simple(self, messages: list[dict], *, max_tokens: int | None = None,
                           accounting_context: LlmAccountingContext | None = None) -> LlmCallResult[str]:
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._config.model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            usage = self._usage("chat_simple", response, model=self._reported_model(response, self._config.model), attempt=1)
-            await self._record(accounting_context, usage)
-            return LlmCallResult(response.choices[0].message.content or "", (usage,))
-        except APITimeoutError as exc:
-            usage = self._failed_usage(self._config.model, 1, "timeout")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("LLM-сервис не ответил вовремя.", usages=(usage,)) from exc
-        except APIConnectionError as exc:
-            usage = self._failed_usage(self._config.model, 1, "connection")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("Не удалось подключиться к LLM-сервису.", usages=(usage,)) from exc
-        except APIStatusError as exc:
-            usage = self._failed_usage(self._config.model, 1, "api_status")
-            await self._record(accounting_context, usage)
-            raise LlmClientError(_extract_api_error(exc), usages=(usage,)) from exc
+        response, usages = await self._request_with_retries(
+            "chat_simple", self._config.model, accounting_context,
+            model=self._config.model, messages=messages, max_tokens=max_tokens,
+        )
+        return LlmCallResult(response.choices[0].message.content or "", usages)
 
     async def summarize(self, messages: list[dict], *, max_tokens: int | None = None,
                         accounting_context: LlmAccountingContext | None = None) -> LlmCallResult[str]:
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._config.summary_model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            usage = self._usage("summarize", response, model=self._reported_model(response, self._config.summary_model), attempt=1)
-            await self._record(accounting_context, usage)
-            return LlmCallResult(response.choices[0].message.content or "", (usage,))
-        except APITimeoutError as exc:
-            usage = self._failed_usage(self._config.summary_model, 1, "timeout")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("LLM-сервис не ответил вовремя.", usages=(usage,)) from exc
-        except APIConnectionError as exc:
-            usage = self._failed_usage(self._config.summary_model, 1, "connection")
-            await self._record(accounting_context, usage)
-            raise LlmClientError("Не удалось подключиться к LLM-сервису.", usages=(usage,)) from exc
-        except APIStatusError as exc:
-            usage = self._failed_usage(self._config.summary_model, 1, "api_status")
-            await self._record(accounting_context, usage)
-            raise LlmClientError(_extract_api_error(exc), usages=(usage,)) from exc
+        response, usages = await self._request_with_retries(
+            "summarize", self._config.summary_model, accounting_context,
+            model=self._config.summary_model, messages=messages, max_tokens=max_tokens,
+        )
+        return LlmCallResult(response.choices[0].message.content or "", usages)
 
     async def chat_structured(
         self,
@@ -210,51 +162,29 @@ class LlmClient:
 
         usages: list[LlmCallUsage] = []
         request_id = str(uuid4())
-        for attempt in range(2):
+        for correction_round in range(2):
+            request_kwargs = dict(
+                model=self._config.summary_model, messages=request_messages, max_tokens=max_tokens,
+            )
+            if self._config.supports_structured_output:
+                request_kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": response_model.__name__,
+                        "schema": schema,
+                        "strict": True,
+                    },
+                }
             try:
-                if self._config.supports_structured_output:
-                    response = await self._client.chat.completions.create(
-                        model=self._config.summary_model,
-                        messages=request_messages,
-                        max_tokens=max_tokens,
-                        response_format={
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": response_model.__name__,
-                                "schema": schema,
-                                "strict": True,
-                            },
-                        },
-                    )
-                else:
-                    response = await self._client.chat.completions.create(
-                        model=self._config.summary_model,
-                        messages=request_messages,
-                        max_tokens=max_tokens,
-                    )
-                usage = self._usage(
-                    "chat_structured", response,
-                    model=self._reported_model(response, self._config.summary_model), attempt=attempt + 1,
-                    request_id=request_id,
+                response, request_usages = await self._request_with_retries(
+                    "chat_structured", self._config.summary_model, accounting_context,
+                    request_id=request_id, attempt_number_start=len(usages) + 1, **request_kwargs,
                 )
-            except APITimeoutError as exc:
-                usage = self._failed_usage(self._config.summary_model, attempt + 1, "timeout", request_id=request_id)
-                usages.append(usage)
-                await self._record(accounting_context, usage)
-                raise LlmClientError("LLM-сервис не ответил вовремя.", usages=tuple(usages)) from exc
-            except APIConnectionError as exc:
-                usage = self._failed_usage(self._config.summary_model, attempt + 1, "connection", request_id=request_id)
-                usages.append(usage)
-                await self._record(accounting_context, usage)
-                raise LlmClientError("Не удалось подключиться к LLM-сервису.", usages=tuple(usages)) from exc
-            except APIStatusError as exc:
-                usage = self._failed_usage(self._config.summary_model, attempt + 1, "api_status", request_id=request_id)
-                usages.append(usage)
-                await self._record(accounting_context, usage)
-                raise LlmClientError(_extract_api_error(exc), usages=tuple(usages)) from exc
+            except LlmClientError as exc:
+                raise LlmClientError(exc.message, usages=tuple([*usages, *exc.usages])) from exc
 
-            usages.append(usage)
-            await self._record(accounting_context, usage)
+            usages.extend(request_usages)
+            usage = usages[-1]
             content = response.choices[0].message.content or ""
             try:
                 parsed = response_model.model_validate(json.loads(content))
@@ -263,7 +193,7 @@ class LlmClient:
                 usage = replace(usage, status="validation_failed")
                 usages[-1] = usage
                 await self._record(accounting_context, usage)
-                if attempt == 0:
+                if correction_round == 0:
                     # Include the actual schema, not just a description of the
                     # failure -- a system prompt that never explicitly says "wrap
                     # the array in an object under this key" reliably produces a
@@ -289,6 +219,59 @@ class LlmClient:
                 raise LlmClientError(f"LLM вернула невалидный структурированный ответ: {exc}", usages=tuple(usages)) from exc
 
         raise AssertionError("unreachable")  # loop always returns or raises
+
+    async def _request_with_retries(
+        self,
+        method: str,
+        configured_model: str,
+        accounting_context: LlmAccountingContext | None,
+        *,
+        request_id: str | None = None,
+        attempt_number_start: int = 1,
+        **request_kwargs,
+    ) -> tuple[object, tuple[LlmCallUsage, ...]]:
+        """Make up to three visible provider attempts, persisting every one.
+
+        Retryable transport and HTTP errors are retried explicitly because the
+        OpenAI SDK's hidden retries are disabled. Each retry shares one logical
+        request_id while retaining its own call_id and attempt number.
+        """
+        request_id = request_id or str(uuid4())
+        usages: list[LlmCallUsage] = []
+        for offset in range(_MAX_PROVIDER_ATTEMPTS):
+            attempt_number = attempt_number_start + offset
+            try:
+                response = await self._client.chat.completions.create(**request_kwargs)
+            except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
+                category = (
+                    "timeout" if isinstance(exc, APITimeoutError)
+                    else "connection" if isinstance(exc, APIConnectionError)
+                    else "api_status"
+                )
+                usage = self._failed_usage(
+                    configured_model, attempt_number, category, request_id=request_id,
+                )
+                usages.append(usage)
+                await self._record(accounting_context, usage)
+                retryable = not isinstance(exc, APIStatusError) or exc.status_code in {408, 409, 429} or exc.status_code >= 500
+                if retryable and offset + 1 < _MAX_PROVIDER_ATTEMPTS:
+                    await asyncio.sleep(0.5 * (2 ** offset))
+                    continue
+                message = _extract_api_error(exc) if isinstance(exc, APIStatusError) else (
+                    "LLM-сервис не ответил вовремя." if isinstance(exc, APITimeoutError)
+                    else "Не удалось подключиться к LLM-сервису."
+                )
+                raise LlmClientError(message, usages=tuple(usages)) from exc
+
+            usage = self._usage(
+                method, response, model=self._reported_model(response, configured_model),
+                attempt=attempt_number, request_id=request_id,
+            )
+            usages.append(usage)
+            await self._record(accounting_context, usage)
+            return response, tuple(usages)
+
+        raise AssertionError("provider retry loop always returns or raises")
 
     @staticmethod
     def _reported_model(response: object, configured_model: str) -> str:

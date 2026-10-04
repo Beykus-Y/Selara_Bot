@@ -120,3 +120,51 @@ async def test_private_summary_keeps_errors_and_confirmed_delivery_with_rollback
     text = html_to_plain_text(bot.send_message.call_args.kwargs['text'])
     assert 'Подтверждённо отправлено артефактов: 1' in text and 'Ошибка <svg>' in text
     assert bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data == 'llm_rollback:42'
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_json_finalizes_invocation_after_provider_usage():
+    from selara.infrastructure.llm.client import LlmClient, LlmConfig
+
+    accounting = SimpleNamespace(
+        create_invocation=AsyncMock(return_value=41),
+        report_provider_attempt=AsyncMock(),
+        finish_invocation_outcome=AsyncMock(),
+    )
+    llm_client = LlmClient(LlmConfig(api_key='test-key', model='gpt-4o-mini'), accounting_service=accounting)
+    malformed_tool_message = SimpleNamespace(
+        content=None,
+        tool_calls=[SimpleNamespace(
+            id='broken-call', function=SimpleNamespace(name='get_top', arguments='{not-json'),
+        )],
+        model_dump=lambda **_: {'role': 'assistant', 'tool_calls': []},
+    )
+    provider_response = SimpleNamespace(
+        model='gpt-4o-mini', usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20, total_tokens=120),
+        choices=[SimpleNamespace(message=malformed_tool_message, finish_reason='tool_calls')],
+    )
+    llm_client._client.chat.completions.create = AsyncMock(return_value=provider_response)
+    settings = Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:')
+    message = SimpleNamespace(
+        text='? Покажи топ', message_id=8, message_thread_id=None,
+        chat=SimpleNamespace(id=-100123, type='supergroup', title='Чат'),
+        from_user=SimpleNamespace(id=1, username='one', first_name='Один', last_name=None, is_bot=False),
+        reply=AsyncMock(return_value=AsyncMock()),
+    )
+    repo = MagicMock()
+    repo.get_last_user_message_at = AsyncMock(return_value=None)
+    repo.search_glossary = AsyncMock(return_value=[])
+
+    with patch.object(handler, 'has_permission', AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, 'LlmRepository', return_value=repo), \
+         patch.object(handler, 'save_interaction', AsyncMock()):
+        with pytest.raises(json.JSONDecodeError):
+            await handler._handle(
+                message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
+                llm_client, AsyncMock(), with_context=False, settings=settings,
+            )
+
+    accounting.report_provider_attempt.assert_awaited_once()
+    accounting.finish_invocation_outcome.assert_awaited_once_with(
+        invocation_id=41, status='failed', error_category='handler_error',
+    )
