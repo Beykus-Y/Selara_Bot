@@ -108,7 +108,7 @@ export function AdminBroadcastPage() {
             <button type="button" className={mediaMode === 'text' ? 'is-selected' : ''} onClick={() => setMediaMode('text')}>Текст</button>
             <button type="button" className={mediaMode === 'photo' ? 'is-selected' : ''} onClick={() => setMediaMode('photo')}>Фото</button>
           </div>
-          {mediaMode === 'photo' ? <label className="admin-photo-input">Изображение<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => setPhoto(event.target.files?.[0])} /></label> : null}
+          {mediaMode === 'photo' ? <label className="admin-photo-input">Изображение<input type="file" accept="image/jpeg,image/png" onChange={(event) => setPhoto(event.target.files?.[0])} /></label> : null}
           <p className="admin-footnote">Поддерживается Telegram HTML, блок реакций и фотография из существующей рассылки.</p>
           <div className="admin-broadcast-actions"><button className="admin-primary-action" type="button" disabled={!body.trim()} onClick={() => setStage(2)}>Далее: аудитория</button></div>
         </div>

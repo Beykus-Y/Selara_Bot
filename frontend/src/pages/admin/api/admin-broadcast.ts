@@ -58,10 +58,11 @@ async function postData<T>(path: string, payload: Record<string, unknown>, fallb
     const { data } = await http.post<T>(path, body, body instanceof FormData ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined)
     return data
   } catch (error) {
-    const detail = typeof error === 'object' && error !== null && 'response' in error
-      ? (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+    const responseMessage = typeof error === 'object' && error !== null && 'response' in error
+      ? (error as { response?: { data?: { message?: string; detail?: string } } }).response?.data
       : undefined
-    throw new Error(typeof detail === 'string' ? detail : fallback)
+    const message = responseMessage?.message ?? responseMessage?.detail
+    throw new Error(typeof message === 'string' ? message : fallback)
   }
 }
 
