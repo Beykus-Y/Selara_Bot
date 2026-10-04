@@ -62,6 +62,7 @@ async def _run_browser_regression() -> None:
             await page.route("https://telegram.org/**", stub_telegram_sdk)
 
             async def handle_api(route):
+                nonlocal progress_requests
                 request = route.request
                 api_calls.append(f"{request.method} {request.url}")
                 path = request.url.split("?", 1)[0]
