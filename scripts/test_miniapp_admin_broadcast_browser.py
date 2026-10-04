@@ -50,20 +50,7 @@ async def _run_browser_regression() -> None:
                   initData: 'browser-test-init-data', colorScheme: 'dark', themeParams: {},
                   ready() {}, expand() {}, onEvent() {}, offEvent() {},
                   BackButton: {show() {}, hide() {}, onClick() {}, offClick() {}}
-                }};
-                const NativeFormData = window.FormData;
-                window.__selaraFormData = [];
-                window.FormData = class extends NativeFormData {
-                  constructor(...args) {
-                    super(...args);
-                    this.__keys = [];
-                    window.__selaraFormData.push(this);
-                  }
-                  append(name, value, ...args) {
-                    this.__keys.push(name);
-                    return super.append(name, value, ...args);
-                  }
-                };"""
+                }};"""
             )
             page = await context.new_page()
             browser_errors: list[str] = []
@@ -177,8 +164,8 @@ async def _run_browser_regression() -> None:
             await page.get_by_role("button", name="Показать preview").click()
             await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
             assert len(preview_requests) == 2
-            form_data_keys = await page.evaluate("window.__selaraFormData.at(-1).__keys")
-            assert "media_mode" in form_data_keys and "photo" not in form_data_keys
+            final_preview = json.loads(preview_requests[-1])
+            assert final_preview["media_mode"] == "text" and "photo" not in final_preview
             await page.get_by_role("button", name="Перейти к подтверждению").click()
             await page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.").check()
             await page.get_by_role("button", name="Подтвердить отправку").click()
