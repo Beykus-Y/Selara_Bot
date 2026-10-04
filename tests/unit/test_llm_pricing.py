@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from selara.infrastructure.llm.pricing import estimate_llm_cost_usd, estimate_stt_cost_usd
 
 
