@@ -16,6 +16,9 @@ from selara.infrastructure.db.autoconfig_repository import AutoConfigRepository,
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import AutoConfigSessionModel, ChatModel, UserModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+from selara.infrastructure.llm.client import LlmCallResult, LlmCallUsage
+from datetime import datetime, timezone
+from uuid import uuid4
 from selara.presentation.handlers.autoconfig import _data, action, can_configure, keyboard, talk
 
 
@@ -31,7 +34,8 @@ def response(*calls, content='Ответ'):
 
 
 def client(*responses):
-    return SimpleNamespace(last_model='test', last_usage=(100, 20), chat_with_tools=AsyncMock(side_effect=list(responses)))
+    usage = LlmCallUsage(str(uuid4()), 'test', 100, 20, 120, None, 'unknown', 1, 'succeeded')
+    return SimpleNamespace(chat_with_tools=AsyncMock(side_effect=[LlmCallResult(r, (usage,)) for r in responses]))
 
 
 async def run(c, draft=None):
@@ -82,6 +86,7 @@ async def test_llm_error_rolls_back_this_turn_not_previous_turns():
     result = await run(c, prior)
     assert result.draft == prior and not result.finished
     assert 'недоступен' in result.answer
+    assert result.outcome == 'failed' and result.error_category == 'assistant_error'
 
 
 async def test_read_tracks_inspected_fields_and_loop_is_bounded():

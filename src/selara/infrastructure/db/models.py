@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -2218,7 +2219,8 @@ class DailySummaryRunModel(Base):
     # application/daily_summary/pipeline.py's DailySummaryDiagnostics and
     # docs/DAILY_SUMMARY_TODO.md's beta observability wishlist.
     diagnostics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
-    pipeline_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 9), nullable=False, default=0, server_default="0")
+    pipeline_has_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     context_stt_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -2234,39 +2236,89 @@ class DailySummaryRunModel(Base):
     )
 
 
-class LlmUsageLogModel(Base):
-    """Per-call cost accounting for the daily summary feature (docs/DAILY_SUMMARY_TODO.md).
+class AiFeatureInvocationModel(Base):
+    """One logical Selara AI feature run; provider calls are recorded separately."""
 
-    Exactly one of `summary_run_id` / `message_archive_id` is set, never both: an LLM
-    pipeline stage (segment_topics/merge/analyst/writer) belongs to one run, while an
-    STT transcription happens asynchronously against one archived message, long before
-    any run for that day exists. A run's cost is attributed by joining back on
-    whichever of these two is populated -- see `pipeline_cost_usd`/`context_stt_cost_usd`
-    on `DailySummaryRunModel`.
-    """
+    __tablename__ = "ai_feature_invocations"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(24), nullable=False, default="chat", server_default="chat")
+    scope_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="running", server_default="running")
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    summary_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    error_category: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed', 'partial')",
+            name="ck_ai_feature_invocations_status",
+        ),
+        Index("idx_ai_feature_invocations_feature_started", "feature", "started_at"),
+        Index("idx_ai_feature_invocations_chat_started", "chat_id", "started_at"),
+        Index("idx_ai_feature_invocations_summary_run", "summary_run_id"),
+    )
+
+
+class LlmUsageLogModel(Base):
+    """One provider inference or STT attempt, optionally linked to legacy rows."""
 
     __tablename__ = "llm_usage_log"
 
     id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    call_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    invocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
+    )
     summary_run_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="CASCADE"), nullable=True
+        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
     )
     message_archive_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=True
+        BigInteger, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
     )
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
     feature: Mapped[str] = mapped_column(String(32), nullable=False)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audio_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    estimated_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 9), nullable=True)
+    pricing_status: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="succeeded", server_default="succeeded")
+    attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
         Index("idx_llm_usage_log_summary_run", "summary_run_id"),
         Index("idx_llm_usage_log_message_archive", "message_archive_id"),
+        Index("idx_llm_usage_log_call_id", "call_id", unique=True),
+        Index("idx_llm_usage_log_request_id", "request_id"),
+        Index("idx_llm_usage_log_invocation", "invocation_id"),
+        Index("idx_llm_usage_log_feature_created", "feature", "created_at"),
+        CheckConstraint("pricing_status IN ('known', 'unknown', 'legacy')", name="ck_llm_usage_log_pricing_status"),
+        CheckConstraint(
+            "status IN ('succeeded', 'failed', 'validation_failed')",
+            name="ck_llm_usage_log_status",
+        ),
     )
 
 

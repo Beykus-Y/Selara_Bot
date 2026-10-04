@@ -10,6 +10,7 @@ from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
@@ -78,7 +79,7 @@ def _build_stt_client(settings) -> SttClient | None:
         return None
 
 
-def _build_llm_client(settings) -> LlmClient | None:
+def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
     if not settings.llm_enabled:
         return None
     if not settings.llm_api_key.strip():
@@ -93,7 +94,8 @@ def _build_llm_client(settings) -> LlmClient | None:
             summary_model=settings.llm_summary_model,
             supports_structured_output=settings.llm_supports_structured_output,
         )
-        return LlmClient(config)
+        accounting = AiAccountingService(session_factory) if session_factory is not None else None
+        return LlmClient(config, accounting_service=accounting)
     except ValueError as exc:
         logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", exc)
         return None
@@ -145,7 +147,7 @@ async def _run_bot(settings, session_factory) -> None:
         live_event_publisher=GAME_STORE.publish_event,
     )
     stt_client = _build_stt_client(settings)
-    llm_client = _build_llm_client(settings)
+    llm_client = _build_llm_client(settings, session_factory)
     logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))

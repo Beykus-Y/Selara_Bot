@@ -12,6 +12,7 @@ from selara.domain.glossary import normalize_glossary_text
 
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
+    AiFeatureInvocationModel,
     AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
@@ -28,6 +29,9 @@ from selara.infrastructure.db.models import (
     LlmChatGlossaryHistoryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
+    LlmUsageLogModel,
+    DailySummaryRunModel,
+    MessageArchiveModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -738,6 +742,79 @@ async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: i
     # A Telegram group upgrade preserves the logical chat and its artifacts.
     await session.execute(
         update(LlmArtifactModel).where(LlmArtifactModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+
+    await _move_ai_accounting_records(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+
+async def _move_ai_accounting_records(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    """Move archive, summary and accounting history, merging possible target duplicates."""
+    archive_rows = (await session.execute(
+        select(MessageArchiveModel).where(MessageArchiveModel.chat_id == old_chat_id)
+    )).scalars().all()
+    for source in archive_rows:
+        target = (await session.execute(
+            select(MessageArchiveModel).where(
+                MessageArchiveModel.chat_id == new_chat_id,
+                MessageArchiveModel.telegram_message_id == source.telegram_message_id,
+                MessageArchiveModel.snapshot_hash == source.snapshot_hash,
+            )
+        )).scalar_one_or_none()
+        if target is None:
+            source.chat_id = new_chat_id
+            continue
+        await session.execute(
+            update(LlmUsageLogModel)
+            .where(LlmUsageLogModel.message_archive_id == source.id)
+            .values(message_archive_id=target.id)
+        )
+        if target.transcript is None and source.transcript is not None:
+            target.transcript = source.transcript
+            target.transcribed_at = source.transcribed_at
+        await session.delete(source)
+
+    summary_rows = (await session.execute(
+        select(DailySummaryRunModel).where(DailySummaryRunModel.chat_id == old_chat_id)
+    )).scalars().all()
+    status_rank = {"claimed": 0, "generating": 1, "failed": 2, "send_failed": 3, "generated": 4, "sent": 5}
+    for source in summary_rows:
+        target = (await session.execute(
+            select(DailySummaryRunModel).where(
+                DailySummaryRunModel.chat_id == new_chat_id,
+                DailySummaryRunModel.summary_date == source.summary_date,
+                DailySummaryRunModel.trigger == source.trigger,
+            )
+        )).scalar_one_or_none()
+        if target is None:
+            source.chat_id = new_chat_id
+            continue
+        await session.execute(
+            update(LlmUsageLogModel)
+            .where(LlmUsageLogModel.summary_run_id == source.id)
+            .values(summary_run_id=target.id)
+        )
+        await session.execute(
+            update(AiFeatureInvocationModel)
+            .where(AiFeatureInvocationModel.summary_run_id == source.id)
+            .values(summary_run_id=target.id)
+        )
+        target.pipeline_cost_usd += source.pipeline_cost_usd
+        target.context_stt_cost_usd += source.context_stt_cost_usd
+        target.pipeline_has_unknown_cost = target.pipeline_has_unknown_cost or source.pipeline_has_unknown_cost
+        if target.generated_text is None:
+            target.generated_text = source.generated_text
+            target.topics_json = source.topics_json
+            target.diagnostics_json = source.diagnostics_json
+        if status_rank.get(source.status, 0) > status_rank.get(target.status, 0):
+            target.status = source.status
+            target.sent_at = target.sent_at or source.sent_at
+        await session.delete(source)
+
+    await session.execute(
+        update(AiFeatureInvocationModel).where(AiFeatureInvocationModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(LlmUsageLogModel).where(LlmUsageLogModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
     )
 
 

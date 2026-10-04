@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 
@@ -64,7 +65,8 @@ class DailySummaryRun:
     generated_text: str | None
     topics_json: Any | None
     diagnostics_json: Any | None
-    pipeline_cost_usd: float
+    pipeline_cost_usd: Decimal
+    pipeline_has_unknown_cost: bool
     context_stt_cost_usd: float
     created_at: datetime
     sent_at: datetime | None

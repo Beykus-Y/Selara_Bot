@@ -193,10 +193,13 @@ class AssistantResult:
     answer: str = ''
     finished: bool = False
     usages: list[tuple] = field(default_factory=list)
+    outcome: str = 'succeeded'
+    error_category: str | None = None
 
 
 async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defaults: dict,
-                        touched: list[str], history: list[dict], timezone_name: str = 'UTC') -> AssistantResult:
+                        touched: list[str], history: list[dict], timezone_name: str = 'UTC',
+                        accounting_context=None) -> AssistantResult:
     result = AssistantResult(dict(draft), list(touched))
     messages = [{'role': 'system', 'content': PROMPT},
         {'role': 'user', 'content': '[Данные каталога и черновика]\n' + json.dumps({
@@ -204,8 +207,14 @@ async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defau
         *history[-24:], {'role': 'user', 'content': text}]
     try:
         for _ in range(MAX_ROUNDS):
-            response = await client.chat_with_tools(messages=messages, tools=TOOLS, max_tokens=2000)
-            result.usages.append((client.last_model, client.last_usage))
+            call_result = await client.chat_with_tools(
+                messages=messages, tools=TOOLS, max_tokens=2000, accounting_context=accounting_context
+            )
+            result.usages.extend(
+                (usage.model, (usage.prompt_tokens, usage.completion_tokens))
+                for usage in call_result.usages
+            )
+            response = call_result.value
             msg = response.choices[0].message
             calls = getattr(msg, 'tool_calls', None) or []
             if not calls:
@@ -257,10 +266,16 @@ async def run_assistant(*, client, text: str, baseline: dict, draft: dict, defau
                 messages.append({'role': 'tool', 'tool_call_id': call.id, 'content': output})
         result.answer = ('Подготовил изменения. Можем продолжить или проверить их кнопкой «Проверить изменения».'
             if result.draft != draft else 'Изменений пока нет. Уточни, что нужно настроить, или нажми «Проверить изменения».')
-    except Exception:
+    except Exception as exc:
+        result.usages.extend(
+            (usage.model, (usage.prompt_tokens, usage.completion_tokens))
+            for usage in getattr(exc, "usages", ())
+        )
         logger.exception('AI configuration turn failed; retaining the previous draft')
         # Roll back every draft operation in an interrupted turn, retaining prior turns.
         result.draft = dict(draft)
         result.touched = list(touched)
         result.answer = 'Ассистент сейчас недоступен. Предыдущие подготовленные изменения остаются; можно повторить запрос, проверить изменения или отменить их.'
+        result.outcome = 'failed'
+        result.error_category = 'assistant_error'
     return result

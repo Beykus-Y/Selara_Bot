@@ -22,6 +22,7 @@ from selara.presentation.llm_formatting import split_telegram_html
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
+from selara.infrastructure.llm.features import AiFeature
 
 logger = logging.getLogger(__name__)
 
@@ -60,61 +61,79 @@ async def _generate_and_finalize(
     style: str,
     persona_enabled: bool,
     run_id: int,
+    trigger: str,
+    actor_user_id: int | None,
     window_from: datetime,
     window_to: datetime,
 ) -> bool:
-    async with session_factory() as session:
-        repo = SqlAlchemyActivityRepository(session)
-        glossary_terms = await _fetch_glossary_terms(session, chat_id=chat.telegram_chat_id)
+    accounting = getattr(llm_client, "accounting_service", None)
+    invocation_id = await accounting.create_invocation(
+        feature=AiFeature.DAILY_SUMMARY, trigger=trigger, chat_id=chat.telegram_chat_id,
+        actor_user_id=actor_user_id, summary_run_id=run_id,
+    ) if accounting is not None else None
+    outcome = {"status": "failed", "error_category": "pipeline_failed"}
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            glossary_terms = await _fetch_glossary_terms(session, chat_id=chat.telegram_chat_id)
 
-        try:
-            output = await run_daily_summary_pipeline(
-                llm_client=llm_client,
-                repo=repo,
-                chat_id=chat.telegram_chat_id,
-                chat_title=chat.title or "Чат",
-                summary_run_id=run_id,
-                window_from=window_from,
-                window_to=window_to,
-                style=style,
-                persona_enabled=persona_enabled,
-                glossary_terms=glossary_terms,
-                artifact_context=ArtifactRequestContext(
-                    repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
-                    chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
-                ),
+            try:
+                output = await run_daily_summary_pipeline(
+                    llm_client=llm_client,
+                    repo=repo,
+                    chat_id=chat.telegram_chat_id,
+                    chat_title=chat.title or "Чат",
+                    summary_run_id=run_id,
+                    invocation_id=invocation_id,
+                    window_from=window_from,
+                    window_to=window_to,
+                    style=style,
+                    persona_enabled=persona_enabled,
+                    glossary_terms=glossary_terms,
+                    artifact_context=ArtifactRequestContext(
+                        repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
+                        chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
+                aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
+                await repo.mark_daily_summary_run_failed(
+                    run_id=run_id, error=str(exc),
+                    pipeline_cost_usd=aggregate.known_cost_usd if aggregate else None,
+                    pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else None,
+                )
+                await session.commit()
+                return False
+
+            aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
+            context_stt_cost = await repo.sum_context_stt_cost_in_window(
+                chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
             )
-        except Exception as exc:
-            logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
-            await repo.mark_daily_summary_run_failed(run_id=run_id, error=str(exc))
+            await repo.finalize_daily_summary_run_generated(
+                run_id=run_id,
+                generated_text=output.generated_text,
+                topics_json=output.topics_json,
+                diagnostics_json=asdict(output.diagnostics),
+                pipeline_cost_usd=aggregate.known_cost_usd if aggregate else output.pipeline_cost_usd,
+                pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else output.has_unknown_cost,
+                context_stt_cost_usd=context_stt_cost,
+            )
             await session.commit()
-            return False
+        outcome["status"] = "succeeded"
+        outcome["error_category"] = None
+        return True
 
-        for usage in output.stage_usages:
-            await repo.record_llm_usage(
-                summary_run_id=run_id,
-                chat_id=chat.telegram_chat_id,
-                feature="daily_summary",
-                stage=usage.stage,
-                model=usage.model,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
-                estimated_cost_usd=usage.estimated_cost_usd,
+    except asyncio.CancelledError:
+        outcome["error_category"] = "cancelled"
+        raise
+    finally:
+        if accounting is not None and invocation_id is not None:
+            await accounting.finish_invocation_outcome(
+                invocation_id=invocation_id,
+                status=outcome["status"],
+                error_category=outcome["error_category"],
             )
-
-        context_stt_cost = await repo.sum_context_stt_cost_in_window(
-            chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
-        )
-        await repo.finalize_daily_summary_run_generated(
-            run_id=run_id,
-            generated_text=output.generated_text,
-            topics_json=output.topics_json,
-            diagnostics_json=asdict(output.diagnostics),
-            pipeline_cost_usd=output.pipeline_cost_usd,
-            context_stt_cost_usd=context_stt_cost,
-        )
-        await session.commit()
-    return True
 
 
 async def _send_and_mark(
@@ -169,6 +188,7 @@ async def attempt_daily_summary_run(
     window_to: datetime,
     summary_date,
     now_utc: datetime,
+    actor_user_id: int | None = None,
 ) -> DailySummaryOutcome:
     """One claim -> generate -> send cycle for one chat, for either trigger.
 
@@ -188,7 +208,7 @@ async def attempt_daily_summary_run(
         existing = await repo.get_daily_summary_run(chat_id=chat.telegram_chat_id, summary_date=summary_date, trigger=trigger)
         if existing is not None and existing.status in ("sent", "failed"):
             return DailySummaryOutcome(False, "already_run_today")
-        if existing is not None and existing.status == "generated":
+        if existing is not None and existing.status in ("generated", "send_failed"):
             sent = await _send_and_mark(bot=bot, session_factory=session_factory, chat_id=chat.telegram_chat_id, run_id=existing.id)
             return DailySummaryOutcome(sent, "sent" if sent else "send_failed")
 
@@ -230,6 +250,8 @@ async def attempt_daily_summary_run(
         style=chat_settings.daily_summary_style,
         persona_enabled=chat_settings.persona_enabled,
         run_id=run.id,
+        trigger=trigger,
+        actor_user_id=actor_user_id,
         window_from=window_from,
         window_to=window_to,
     )

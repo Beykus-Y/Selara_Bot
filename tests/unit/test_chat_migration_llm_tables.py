@@ -20,6 +20,7 @@ from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_migration import ChatMigrationResult, migrate_chat_id
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
+    AiFeatureInvocationModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
     EconomyPrivateContextModel,
@@ -27,6 +28,9 @@ from selara.infrastructure.db.models import (
     LlmChatGlossaryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
+    DailySummaryRunModel,
+    LlmUsageLogModel,
+    MessageArchiveModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -97,6 +101,58 @@ async def test_migrate_chat_id_moves_llm_context_messages_and_summaries_and_acti
                 select(LlmContextMessageModel).where(LlmContextMessageModel.chat_id == old_chat_id)
             )).scalars().all()
             assert old_messages == [], "old chat_id rows must not remain as orphaned duplicates"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migrate_chat_id_moves_daily_summary_and_ai_accounting_records():
+    engine, session_factory = await _session_factory()
+    try:
+        old_chat_id, new_chat_id, user_id = 509, 1509, 609
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            session.add(ChatModel(telegram_chat_id=old_chat_id, type="group", title="Old chat"))
+            session.add(UserModel(telegram_user_id=user_id, username="u", is_bot=False))
+            await session.flush()
+            archive = MessageArchiveModel(
+                chat_id=old_chat_id, user_id=user_id, telegram_message_id=1, snapshot_kind="created",
+                snapshot_at=now, sent_at=now, message_type="text", text="hello", raw_message_json={}, snapshot_hash="h",
+            )
+            session.add(archive)
+            run = DailySummaryRunModel(
+                chat_id=old_chat_id, summary_date=now.date(), window_from=now - timedelta(hours=24),
+                window_to=now, trigger="manual", status="generated", claimed_at=now, lease_until=now,
+            )
+            session.add(run)
+            await session.flush()
+            invocation = AiFeatureInvocationModel(
+                feature="daily_summary", trigger="manual", chat_id=old_chat_id, summary_run_id=run.id,
+                status="succeeded",
+            )
+            session.add(invocation)
+            await session.flush()
+            session.add(LlmUsageLogModel(
+                invocation_id=invocation.id, summary_run_id=run.id, message_archive_id=archive.id,
+                chat_id=old_chat_id, feature="daily_summary", stage="segment_topics", model="gpt-4o-mini",
+                prompt_tokens=10, completion_tokens=5, total_tokens=15, estimated_cost_usd=0.0000045,
+                pricing_status="known", status="succeeded", attempt_number=1,
+            ))
+            await session.commit()
+
+            await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+            await session.commit()
+
+        async with session_factory() as session:
+            from sqlalchemy import select
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
+            usage = (await session.execute(select(LlmUsageLogModel))).scalar_one()
+            archive = (await session.execute(select(MessageArchiveModel))).scalar_one()
+            assert {run.chat_id, invocation.chat_id, usage.chat_id, archive.chat_id} == {new_chat_id}
+            assert usage.invocation_id == invocation.id
+            assert usage.summary_run_id == run.id
+            assert usage.message_archive_id == archive.id
     finally:
         await engine.dispose()
 

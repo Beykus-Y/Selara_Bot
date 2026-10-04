@@ -17,6 +17,8 @@ from selara.domain.entities import ChatSnapshot
 from selara.infrastructure.db.autoconfig_repository import AutoConfigRepository
 from selara.infrastructure.db.models import ChatModel, ChatSettingsModel, UserModel, UserChatActivityModel
 from selara.infrastructure.llm.pricing import estimate_llm_cost_usd
+from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient
+from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.auth import has_permission
 from selara.presentation.handlers.settings_common import settings_to_dict, validate_settings_payload
 from selara.presentation.llm_formatting import render_llm_html, split_telegram_html
@@ -291,13 +293,41 @@ async def talk(message: Message, bot: Bot, db_session, activity_repo, settings: 
     baseline, draft, touched, history = dict(row.baseline), dict(row.draft), list(row.touched), list(row.history)
     await db_session.commit()
     thinking = await message.answer('Думаю над черновиком…', reply_markup=keyboard(row))
+    accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
+    invocation_id = await accounting.create_invocation(
+        feature=AiFeature.AUTOCONFIG, trigger='telegram_message', chat_id=chat.telegram_chat_id,
+        actor_user_id=message.from_user.id, scope_type='user', scope_id=str(message.from_user.id),
+        source_message_id=message.message_id,
+    ) if accounting is not None else None
+    call_context = LlmAccountingContext(
+        invocation_id=invocation_id, feature=AiFeature.AUTOCONFIG, stage='configuration_turn',
+        chat_id=chat.telegram_chat_id, actor_user_id=message.from_user.id,
+        telegram_message_id=message.message_id,
+    ) if invocation_id is not None else None
     try:
         async with asyncio.timeout(180):
             result = await run_assistant(client=llm_client, text=text, baseline=baseline, draft=draft,
-                defaults=settings_to_dict(default_chat_settings(settings)), touched=touched, history=history, timezone_name=settings.bot_timezone)
+                defaults=settings_to_dict(default_chat_settings(settings)), touched=touched, history=history,
+                timezone_name=settings.bot_timezone, accounting_context=call_context)
     except TimeoutError:
         from selara.application.autoconfig import AssistantResult
-        result = AssistantResult(draft, touched, 'Запрос занял слишком много времени. Черновик не изменён; можно повторить или открыть сводку.')
+        result = AssistantResult(
+            draft, touched,
+            answer='Запрос занял слишком много времени. Черновик не изменён; можно повторить или открыть сводку.',
+            outcome='failed', error_category='timeout',
+        )
+    except BaseException:
+        if accounting is not None and invocation_id is not None:
+            await accounting.finish_invocation_outcome(
+                invocation_id=invocation_id, status='failed', error_category='handler_error',
+            )
+        raise
+    if accounting is not None and invocation_id is not None:
+        await accounting.finish_invocation_outcome(
+            invocation_id=invocation_id,
+            status=result.outcome,
+            error_category=result.error_category,
+        )
     row = await repository.finish_turn(user_id=message.from_user.id, token=token, result=result, text=text)
     if row is None:
         await thinking.edit_text('Этот запрос больше не актуален. Черновик отменён или заменён.')
@@ -307,8 +337,11 @@ async def talk(message: Message, bot: Bot, db_session, activity_repo, settings: 
         for model, usage in result.usages:
             prompt_tokens, completion_tokens = usage or (None, None)
             usages.append({'model': model or 'unknown', 'prompt_tokens': prompt_tokens,
-                'completion_tokens': completion_tokens, 'estimated_cost_usd': estimate_llm_cost_usd(
-                    model=model or 'unknown', prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)})
+                'completion_tokens': completion_tokens, 'estimated_cost_usd': (
+                    float(cost) if (cost := estimate_llm_cost_usd(
+                        model=model or 'unknown', prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+                    )) is not None else None
+                )})
         await activity_repo.add_audit_log(
             chat=ChatSnapshot(telegram_chat_id=chat.telegram_chat_id, chat_type=chat.type, title=chat.title),
             actor_user_id=message.from_user.id, action_code='autocfg_usage',

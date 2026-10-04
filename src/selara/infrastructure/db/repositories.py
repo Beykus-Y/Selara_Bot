@@ -2,6 +2,7 @@ import hashlib
 from collections import defaultdict
 from collections.abc import Collection, Sequence
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -2536,7 +2537,8 @@ class SqlAlchemyActivityRepository:
             generated_text=row.generated_text,
             topics_json=row.topics_json,
             diagnostics_json=row.diagnostics_json,
-            pipeline_cost_usd=float(row.pipeline_cost_usd),
+            pipeline_cost_usd=Decimal(row.pipeline_cost_usd),
+            pipeline_has_unknown_cost=bool(row.pipeline_has_unknown_cost),
             context_stt_cost_usd=float(row.context_stt_cost_usd),
             created_at=_coerce_utc_datetime(row.created_at),
             sent_at=_normalize_optional_datetime(row.sent_at),
@@ -3017,9 +3019,10 @@ class SqlAlchemyActivityRepository:
         run_id: int,
         generated_text: str,
         topics_json: object,
-        pipeline_cost_usd: float,
+        pipeline_cost_usd: Decimal | float,
         context_stt_cost_usd: float,
         diagnostics_json: object | None = None,
+        pipeline_has_unknown_cost: bool = False,
     ) -> None:
         await self._session.execute(
             update(DailySummaryRunModel)
@@ -3030,6 +3033,7 @@ class SqlAlchemyActivityRepository:
                 topics_json=topics_json,
                 diagnostics_json=diagnostics_json,
                 pipeline_cost_usd=pipeline_cost_usd,
+                pipeline_has_unknown_cost=pipeline_has_unknown_cost,
                 context_stt_cost_usd=context_stt_cost_usd,
             )
         )
@@ -3046,30 +3050,44 @@ class SqlAlchemyActivityRepository:
             update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="send_failed", error=error)
         )
 
-    async def mark_daily_summary_run_failed(self, *, run_id: int, error: str) -> None:
+    async def mark_daily_summary_run_failed(
+        self, *, run_id: int, error: str, pipeline_cost_usd: Decimal | float | None = None,
+        pipeline_has_unknown_cost: bool | None = None,
+    ) -> None:
+        values = {"status": "failed", "error": error}
+        if pipeline_cost_usd is not None:
+            values["pipeline_cost_usd"] = pipeline_cost_usd
+        if pipeline_has_unknown_cost is not None:
+            values["pipeline_has_unknown_cost"] = pipeline_has_unknown_cost
         await self._session.execute(
-            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="failed", error=error)
+            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(**values)
         )
 
     async def record_llm_usage(
         self,
         *,
-        chat_id: int,
+        chat_id: int | None,
         feature: str,
         stage: str,
         model: str,
-        estimated_cost_usd: float,
+        estimated_cost_usd: float | None,
+        invocation_id: int | None = None,
+        call_id: str | None = None,
         summary_run_id: int | None = None,
         message_archive_id: int | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        total_tokens: int | None = None,
         audio_seconds: float | None = None,
+        pricing_status: str = "legacy",
+        status: str = "succeeded",
+        attempt_number: int | None = None,
+        error_category: str | None = None,
     ) -> None:
-        if (summary_run_id is None) == (message_archive_id is None):
-            raise ValueError("exactly one of summary_run_id/message_archive_id must be set")
-
         self._session.add(
             LlmUsageLogModel(
+                call_id=call_id,
+                invocation_id=invocation_id,
                 summary_run_id=summary_run_id,
                 message_archive_id=message_archive_id,
                 chat_id=chat_id,
@@ -3078,8 +3096,13 @@ class SqlAlchemyActivityRepository:
                 model=model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 audio_seconds=audio_seconds,
                 estimated_cost_usd=estimated_cost_usd,
+                pricing_status=pricing_status,
+                status=status,
+                attempt_number=attempt_number,
+                error_category=error_category,
             )
         )
         await self._session.flush()

@@ -6,6 +6,7 @@ state) and a fake LlmClient (no network) to keep this fast and deterministic.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -13,14 +14,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import MessageArchiveModel
+from selara.infrastructure.db.ai_accounting import AiAccountingService
+from selara.infrastructure.db.models import AiFeatureInvocationModel, DailySummaryRunModel, LlmUsageLogModel, MessageArchiveModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+from selara.infrastructure.llm.client import LlmCallResult, LlmCallUsage
+from decimal import Decimal
+from uuid import uuid4
 from selara.presentation.daily_summary import attempt_daily_summary_run
+from selara.presentation import daily_summary as daily_summary_module
 
 _CHAT_ID = -100555
 _USER_ID = 1001
@@ -78,26 +85,35 @@ async def _seed_chat(session_factory, *, message_count: int, min_messages: int) 
 
 @dataclass
 class _FakeLlmClient:
-    last_usage: tuple = (10, 5)
-    last_model: str = "gpt-4o-mini"
+    accounting_service: object | None = None
     _structured_calls: int = field(default=0, init=False)
 
-    async def chat_structured(self, messages, *, response_model, max_tokens=None):
+    @staticmethod
+    def _usage():
+        return LlmCallUsage(str(uuid4()), "gpt-4o-mini", 10, 5, 15, Decimal("0.0000045"), "known", 1, "succeeded")
+
+    async def _result(self, value, accounting_context):
+        usage = self._usage()
+        if accounting_context is not None and self.accounting_service is not None:
+            await self.accounting_service.report_provider_attempt(accounting_context, usage)
+        return LlmCallResult(value, (usage,))
+
+    async def chat_structured(self, messages, *, response_model, max_tokens=None, accounting_context=None):
         self._structured_calls += 1
         if response_model is SegmentTopicCardList:
-            return SegmentTopicCardList(
+            return await self._result(SegmentTopicCardList(
                 topics=[SegmentTopicCard(title="Разговор", start_message_id=1, end_message_id=2, blurb="Поболтали.")]
-            )
-        return MergedThemeList(
+            ), accounting_context)
+        return await self._result(MergedThemeList(
             themes=[MergedTheme(title="Разговор", source_card_indexes=[0], blurb="Итог.", importance=3)]
-        )
+        ), accounting_context)
 
-    async def chat_with_tools(self, messages, tools, *, max_tokens=None):
+    async def chat_with_tools(self, messages, tools, *, max_tokens=None, accounting_context=None):
         message = SimpleNamespace(content="[]", tool_calls=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return await self._result(SimpleNamespace(choices=[SimpleNamespace(message=message)]), accounting_context)
 
-    async def chat_simple(self, messages, *, max_tokens=None):
-        return "Итоги дня: сегодня поболтали в чате."
+    async def chat_simple(self, messages, *, max_tokens=None, accounting_context=None):
+        return await self._result("Итоги дня: сегодня поболтали в чате.", accounting_context)
 
 
 def _fake_bot() -> SimpleNamespace:
@@ -111,7 +127,7 @@ async def test_attempt_daily_summary_run_full_cycle_sends_and_marks_sent() -> No
     try:
         await _seed_chat(session_factory, message_count=60, min_messages=50)
         bot = _fake_bot()
-        llm_client = _FakeLlmClient()
+        llm_client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
         chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
 
         outcome = await attempt_daily_summary_run(
@@ -139,6 +155,86 @@ async def test_attempt_daily_summary_run_full_cycle_sends_and_marks_sent() -> No
         assert run.diagnostics_json is not None
         assert run.diagnostics_json["message_count"] == 60
         assert run.diagnostics_json["cards_before_merge_count"] >= 1
+        async with session_factory() as session:
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert len(invocations) == 1 and invocations[0].status == "succeeded"
+        assert invocations[0].trigger == "manual" and invocations[0].summary_run_id == run.id
+        assert len(usage_rows) == 5
+        assert {row.stage for row in usage_rows} == {
+            "segment_topics",
+            "merge",
+            "analyst",
+            "writer",
+            "infographic",
+        }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_summary_late_pipeline_failure_keeps_completed_provider_calls():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class _WriterFailureClient(_FakeLlmClient):
+            async def chat_simple(self, messages, *, max_tokens=None, accounting_context=None):
+                raise RuntimeError("writer stage failed after earlier provider calls")
+
+        client = _WriterFailureClient(accounting_service=AiAccountingService(session_factory))
+        outcome = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+        )
+
+        assert outcome.reason == "pipeline_failed"
+        async with session_factory() as session:
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            assert len(usage_rows) == 3
+            assert all(row.invocation_id == invocations[0].id for row in usage_rows)
+            assert invocations[0].feature == "daily_summary"
+            assert invocations[0].trigger == "scheduled"
+            assert invocations[0].status == "partial"
+            assert run.status == "failed"
+            assert run.pipeline_cost_usd > 0
+            assert run.pipeline_has_unknown_cost is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_summary_cancellation_finalizes_invocation_without_failing_run(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        async def cancel_pipeline(**kwargs):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_pipeline)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        with pytest.raises(asyncio.CancelledError):
+            await attempt_daily_summary_run(
+                bot=_fake_bot(), session_factory=session_factory, llm_client=client,
+                chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+                trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+            )
+
+        async with session_factory() as session:
+            invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+        assert invocation.status == "failed"
+        assert invocation.error_category == "cancelled"
+        assert invocation.completed_at is not None
+        # Cancellation leaves the lease/run recoverable; only the accounting
+        # invocation is finalized as failed.
+        assert run.status not in {"failed", "sent"}
     finally:
         await engine.dispose()
 
