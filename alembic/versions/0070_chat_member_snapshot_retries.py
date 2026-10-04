@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0070_chat_member_snapshot_retries"
+revision = "0070_member_snapshot_retry"
 down_revision = "0069_broadcast_idempotency_key"
 branch_labels = None
 depends_on = None
