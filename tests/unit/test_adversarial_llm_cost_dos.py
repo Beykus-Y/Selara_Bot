@@ -7,10 +7,9 @@ least junior_admin). But within that population there is still no cooldown at al
 - No per-admin/per-chat throttle on invoking `?`/`??`.
 - Each single invocation can trigger up to _MAX_TOOL_ROUNDS=8 round-trips to the paid
   chat completion API before giving up (tool-calling loop in _handle).
-- Every invocation additionally fires a "DM summary" chat_simple call
-  (_send_dm_summary) and, when in ??-context mode, a context-compression summarize()
-  call once the threshold is hit - so a single user message can fan out into up to
-  ~10 billed LLM calls, repeatable with no cooldown.
+- A ?? invocation can additionally perform one context-compression summarize()
+  call when the threshold is hit. The DM receipt is deterministic and makes no
+  additional provider call.
 
 This test proves the amplification factor mechanically (a maximally adversarial LLM
 response that always requests another tool round drives chat_with_tools to the full
@@ -158,10 +157,11 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
         )
 
     # _MAX_TOOL_ROUNDS = 8 in llm_admin.py - one Telegram message => up to 8 billed
-    # chat completion calls, plus one more for the DM summary. No budget/cost check
+    # chat completion calls. The deterministic DM receipt adds no provider call. No budget/cost check
     # short-circuits this early within a single invocation (cross-invocation
     # repeats are now throttled by the #3 cooldown fix -- see next test).
     assert call_count == llm_admin_module._MAX_TOOL_ROUNDS
+    llm_client.chat_simple.assert_not_awaited()
 
 
 @pytest.mark.asyncio

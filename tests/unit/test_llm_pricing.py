@@ -5,17 +5,17 @@ from selara.infrastructure.llm.pricing import estimate_llm_cost_usd, estimate_st
 
 def test_estimate_llm_cost_known_model() -> None:
     cost = estimate_llm_cost_usd(model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=1000)
-    assert cost == round(0.00015 + 0.0006, 6)
+    assert str(cost) == "0.000750000"
 
 
-def test_estimate_llm_cost_unknown_model_is_zero_not_an_error() -> None:
+def test_estimate_llm_cost_unknown_model_is_unknown_not_an_error() -> None:
     cost = estimate_llm_cost_usd(model="some-future-model", prompt_tokens=1000, completion_tokens=1000)
-    assert cost == 0.0
+    assert cost is None
 
 
 def test_estimate_llm_cost_handles_missing_token_counts() -> None:
     cost = estimate_llm_cost_usd(model="gpt-4o-mini", prompt_tokens=None, completion_tokens=None)
-    assert cost == 0.0
+    assert cost is None
 
 
 def test_estimate_stt_cost_scales_with_minutes() -> None:

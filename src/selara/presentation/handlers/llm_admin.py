@@ -21,13 +21,15 @@ from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
-from selara.infrastructure.llm.client import LlmClient, LlmClientError
+from selara.infrastructure.llm.client import LlmCallResult, LlmClient, LlmClientError
+from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.context import (
     build_glossary_context,
     load_context,
     maybe_compress,
     save_interaction,
 )
+from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.prompts import (
     ADMIN_SYSTEM_PROMPT,
 )
@@ -188,10 +190,7 @@ async def _handle(
 
     llm_repo = LlmRepository(db_session)
 
-    # #3: the assistant is gated on moderate_users, but nothing stopped the
-    # same admin repeating it immediately -- a single invocation can already
-    # fan out to ~10 billed calls (up to 8 tool rounds + DM summary +
-    # compression).
+    # #3: cooldown prevents an admin from repeating an invocation immediately.
     if settings is None:
         from selara.core.config import get_settings
         settings = get_settings()
@@ -208,6 +207,17 @@ async def _handle(
             return
 
     thinking_msg = await message.reply("⏳ Думаю...")
+    accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
+    invocation_id = await accounting.create_invocation(
+        feature=AiFeature.LLM_ADMIN, trigger="telegram_message", chat_id=message.chat.id,
+        actor_user_id=message.from_user.id, mode="context" if with_context else "no_context",
+        source_message_id=message.message_id,
+    ) if accounting is not None else None
+    call_context = LlmAccountingContext(
+        invocation_id=invocation_id, feature=AiFeature.LLM_ADMIN, stage="assistant_round",
+        chat_id=message.chat.id, actor_user_id=message.from_user.id,
+        telegram_message_id=message.message_id,
+    ) if invocation_id is not None else None
 
     actor = UserSnapshot(
         telegram_user_id=message.from_user.id,
@@ -298,8 +308,17 @@ async def _handle(
         except Exception:
             pass
         try:
-            response = await llm_client.chat_with_tools(messages=messages, tools=get_tool_definitions())
+            request_kwargs = {"messages": messages, "tools": get_tool_definitions()}
+            if call_context is not None:
+                request_kwargs["accounting_context"] = call_context
+            response = await llm_client.chat_with_tools(**request_kwargs)
         except LlmClientError as exc:
+            if accounting is not None and invocation_id is not None:
+                calls = await accounting.aggregate_invocation(invocation_id=invocation_id)
+                await accounting.finish_invocation(
+                    invocation_id=invocation_id, status="partial" if calls.provider_calls else "failed",
+                    error_category=exc.usages[-1].error_category if exc.usages else "provider_error",
+                )
             error_text = f"⚠️ Ошибка AI-ассистента: {exc.message}"
             try:
                 await thinking_msg.edit_text(error_text)
@@ -307,6 +326,7 @@ async def _handle(
                 await message.reply(error_text)
             return
 
+        response = response.value if isinstance(response, LlmCallResult) else response
         if not response or not response.choices:
             log.warning("llm_admin: empty choices after %d tools", len(tool_results))
             if empty_completions < 2:
@@ -401,6 +421,11 @@ async def _handle(
             threshold=chat_settings.llm_context_threshold,
             llm_repo=llm_repo,
             llm_client=llm_client,
+            accounting_context=(LlmAccountingContext(
+                invocation_id=invocation_id, feature=AiFeature.LLM_CONTEXT_COMPRESSION, stage="context_compression",
+                chat_id=message.chat.id, actor_user_id=message.from_user.id,
+                telegram_message_id=message.message_id,
+            ) if invocation_id is not None else None),
         )
 
     await _send_dm_summary(
@@ -410,9 +435,10 @@ async def _handle(
         query=query,
         tool_results=tool_results,
         final_answer=chat_answer,
-        llm_client=llm_client,
         sent_artifacts=artifact_context.sent_artifacts,
     )
+    if accounting is not None and invocation_id is not None:
+        await accounting.finish_invocation(invocation_id=invocation_id, status="succeeded")
 
 
 def _empty_answer_recovery() -> dict:
@@ -482,7 +508,6 @@ async def _send_dm_summary(
     query: str,
     tool_results: list[ToolResult],
     final_answer: str,
-    llm_client: LlmClient,
     sent_artifacts: list[str] | None = None,
 ) -> None:
     # This is an operational receipt, not a generative retelling. Preserve

@@ -197,15 +197,13 @@ Status: **в разработке**, слайсами с тестами перв
   (`tests/unit/test_daily_summary_prompts.py`), включая hot-reload по mtime.
 - [x] `infrastructure/llm/daily_summary_tools.py` — 4 тула поверх репозитория +
   `tool_limits.py` (см. раздел выше, уже был готов).
-- [x] `infrastructure/llm/pricing.py` — статическая мапа цен по модели
-  (`MODEL_PRICING_USD_PER_1K_TOKENS`, неизвестная модель → 0 стоимость, не ошибка) +
-  `estimate_llm_cost_usd`/`estimate_stt_cost_usd`. 5 юнит-тестов
-  (`tests/unit/test_llm_pricing.py`).
-- [x] `LlmClient.last_usage`/`last_model` — новый атрибут, выставляется после каждого
-  `chat_with_tools`/`chat_simple`/`summarize`/`chat_structured` вызова (через
-  внутренний `_record_usage`), не меняя сигнатуру возвращаемого значения ни одного
-  метода — так пайплайн узнаёт токены/модель последнего вызова для учёта стоимости.
-  Покрыто тестом `test_chat_structured_records_last_usage_for_cost_accounting`.
+- [x] Первоначальная beta pricing-схема была заменена в PR 1 AI Accounting Foundation:
+  известные модели возвращают точную `Decimal`-оценку, неизвестная модель или
+  отсутствующие provider tokens дают неизвестную стоимость (`None`), а не `$0`.
+- [x] Прежние mutable `LlmClient.last_usage`/`last_model`/`last_retry_count` удалены
+  в PR 1. Каждый вызов теперь возвращает собственный `LlmCallResult` с usage всех
+  фактических provider calls; записи хранятся в `llm_usage_log` и связываются через
+  `ai_feature_invocations`. Structured retry сохраняет обе попытки.
 - [x] `application/daily_summary/schemas.py` — Pydantic-схемы `SegmentTopicCardList`
   (LLM #1, без статистики) и `MergedThemeList` (LLM #2, с `importance` 1-5).
 - [x] `application/daily_summary/pipeline.py` — оркестрация LLM #1→#2→#3→#4:
@@ -224,10 +222,10 @@ Status: **в разработке**, слайсами с тестами перв
   (`tests/unit/test_daily_summary_pipeline.py`): пустое окно → "было тихо", полный
   happy path со всеми 4 стадиями и ненулевой себестоимостью, все сегменты упали →
   "не получилось", merge упал → фолбэк на карточки как отдельные темы.
-  **Не сделано в этом слайсе**: реальный вызов `record_llm_usage`/
-  `finalize_daily_summary_run_generated` в БД по итогам прогона (пайплайн отдаёт
-  `stage_usages`/`pipeline_cost_usd`, но кто-то выше (шедулер/`/summary`-хендлер)
-  должен сам вызвать репозиторные методы) — это часть раздела 6.
+  Учёт provider calls теперь выполняет accounting service сразу после каждого
+  ответа LLM; `_generate_and_finalize` сохраняет generated/failed run и известную
+  сумму из отдельных usage rows. Итоговая стоимость не зависит от возврата
+  `stage_usages` после завершения всего pipeline.
 
 ## 6. Шедулер и команды
 
@@ -237,8 +235,8 @@ Status: **в разработке**, слайсами с тестами перв
 - [x] `presentation/daily_summary.py`:
   - `attempt_daily_summary_run(...)` — единая функция цикла claim→generate→finalize→send
     для ОБОИХ триггеров (`scheduled`/`manual`), идемпотентна при повторном вызове
-    (уже `sent`/`failed` → no-op, уже `generated` → просто пересылает сохранённый
-    текст без повторного пайплайна, живой чужой claim → `claim_lost`). Важный нюанс:
+    (уже `sent`/`failed` → no-op, уже `generated`/`send_failed` → пересылает
+    сохранённый текст без повторного пайплайна, живой чужой claim → `claim_lost`). Важный нюанс:
     `daily_summary_enabled` гейтит **только** `scheduled` — для `trigger="manual"`
     eligibility вызывается с `replace(chat_settings, daily_summary_enabled=True)`,
     поэтому `/summary` работает независимо от того, включена ли автоматика (как и
@@ -359,11 +357,9 @@ Status: **в разработке**, слайсами с тестами перв
   (`DailySummaryRun.diagnostics_json`) обновлены; `finalize_daily_summary_run_generated`
   принимает `diagnostics_json` как обычный параметр (не ломает существующих вызовов —
   дефолт `None`).
-- [x] `LlmClient.last_retry_count` — новый атрибут (по образцу `last_usage`/`last_model`),
-  выставляется в `chat_structured` (0 — с первой попытки, 1 — потребовался
-  корректирующий повтор). Тест: `test_chat_structured_records_zero_retries_on_first_try_success`
-  + обновлён тест на ретрай (`tests/unit/test_llm_client_structured.py`).
-  Не выставляется в `chat_with_tools`/`chat_simple`/`summarize` — retry-логики там нет.
+- [x] Ранее structured retry отражался через `last_retry_count`; PR 1 заменил это
+  последовательностью provider-call usage. Число corrective retries для вызова
+  вычисляется по количеству его attempt-записей, не через состояние общего клиента.
 - [x] `application/daily_summary/pipeline.py`: новый `DailySummaryDiagnostics`
   (frozen dataclass) на выходе пайплайна (`DailySummaryPipelineOutput.diagnostics`),
   считает: `message_count`, `segments_total_before_truncation`/`segments_processed`,
@@ -377,8 +373,8 @@ Status: **в разработке**, слайсами с тестами перв
   нет тем) — везде, где это осмысленно.
 - [x] `presentation/daily_summary.py` сериализует `output.diagnostics` через
   `dataclasses.asdict` и передаёт в `finalize_daily_summary_run_generated`.
-- [x] Тесты: 2 новых юнит-теста на `LlmClient.last_retry_count`
-  (`tests/unit/test_llm_client_structured.py`), 2 новых юнит-теста на диагностику
+- [x] Тесты: проверки structured retry теперь подтверждают сохранение usage обеих
+  provider attempts (`tests/unit/test_llm_client_structured.py`), 2 новых юнит-теста на диагностику
   пайплайна (полный happy path со всеми ожидаемыми числами; сегмент падает — считается
   в `segment_failures`, остальные сегменты продолжают обрабатываться) в
   `tests/unit/test_daily_summary_pipeline.py`, плюс обновлён тест на merge-fallback

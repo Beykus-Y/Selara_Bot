@@ -100,11 +100,10 @@ async def test_empty_recovery_stays_inside_total_round_budget():
 
 
 async def test_private_summary_does_not_invent_delivery_or_call_a_model():
-    bot, client = AsyncMock(), SimpleNamespace(chat_simple=AsyncMock(return_value='Задача выполнена, картинка отправлена'))
+    bot = AsyncMock()
     await handler._send_dm_summary(bot, admin_user_id=1, chat_title='<script>чат</script>',
         query='Покажи топ', tool_results=[ToolResult('skill', 'read_skill', '{}', 'Навык прочитан'), top_result()], final_answer='Не удалось подготовить картинку.',
-        llm_client=client, sent_artifacts=[])
-    client.chat_simple.assert_not_awaited()
+        sent_artifacts=[])
     text = html_to_plain_text(bot.send_message.call_args.kwargs['text'])
     assert 'Подтверждённо отправлено артефактов: 0' in text
     assert 'Отправка изображения не подтверждена' in text and 'Не удалось подготовить картинку.' in text
@@ -117,7 +116,7 @@ async def test_private_summary_keeps_errors_and_confirmed_delivery_with_rollback
         db_action_id=42, undo_payload={'x': 1}),
         ToolResult('b', 'create_artifact', '{"error":"Ошибка <svg>"}', '', success=False)]
     await handler._send_dm_summary(bot, admin_user_id=1, chat_title='Чат', query='Запрос',
-        tool_results=results, final_answer='Пояснение', llm_client=SimpleNamespace(), sent_artifacts=['id'])
+        tool_results=results, final_answer='Пояснение', sent_artifacts=['id'])
     text = html_to_plain_text(bot.send_message.call_args.kwargs['text'])
     assert 'Подтверждённо отправлено артефактов: 1' in text and 'Ошибка <svg>' in text
     assert bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data == 'llm_rollback:42'

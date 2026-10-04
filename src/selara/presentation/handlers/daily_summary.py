@@ -87,6 +87,7 @@ async def summary_command(
         window_to=now_utc,
         summary_date=now_utc.date(),
         now_utc=now_utc,
+        actor_user_id=message.from_user.id,
     )
 
     if outcome.sent:

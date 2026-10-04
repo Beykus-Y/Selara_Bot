@@ -12,7 +12,15 @@ from selara.application.daily_summary.pipeline import _format_final_post, run_da
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
 from selara.domain.entities import ActivityWindowStats, ArchivedMessageView
 from selara.domain.glossary import GlossaryEntry
-from selara.infrastructure.llm.client import LlmClientError
+from selara.infrastructure.llm.client import LlmCallResult, LlmCallUsage, LlmClientError
+from decimal import Decimal
+from datetime import timezone
+from uuid import uuid4
+
+
+def _usage(*, prompt=100, completion=20):
+    return LlmCallUsage(str(uuid4()), "gpt-4o-mini", prompt, completion, prompt + completion,
+                        Decimal("0.000030000"), "known", 1, "succeeded")
 
 
 @pytest.mark.asyncio
@@ -20,7 +28,7 @@ async def test_writer_selects_relevant_glossary_past_first_twenty_and_uses_alias
     from unittest.mock import AsyncMock
     from selara.application.daily_summary.pipeline import _run_writer_stage
 
-    client = SimpleNamespace(chat_simple=AsyncMock(return_value="title: Test"), last_usage=(0, 0), last_model="test")
+    client = SimpleNamespace(chat_simple=AsyncMock(return_value=LlmCallResult("title: Test", (_usage(),))))
     entries = [GlossaryEntry(f"aaa{i}", "не относящееся к теме значение") for i in range(25)]
     entries.append(GlossaryEntry("сеть", "локальное название VPN", ("VPN",)))
     await _run_writer_stage(client, style="neutral", themes=[{"title": "VPN", "blurb": "Подключение VPN", "importance": 4}],
@@ -74,26 +82,24 @@ class _FakeLlmClient:
     structured_responses: list
     chat_simple_response: str = "Итоги дня: обсудили сериал и VPN."
     tool_response_content: str | None = None
-    last_usage: tuple = (100, 20)
-    last_model: str = "gpt-4o-mini"
     _structured_index: int = field(default=0, init=False)
     chat_with_tools_calls: int = field(default=0, init=False)
 
-    async def chat_structured(self, messages, *, response_model, max_tokens=None):
+    async def chat_structured(self, messages, *, response_model, max_tokens=None, accounting_context=None):
         item = self.structured_responses[self._structured_index]
         self._structured_index += 1
         if isinstance(item, Exception):
             raise item
-        return item
+        return LlmCallResult(item, (_usage(),))
 
-    async def chat_with_tools(self, messages, tools, *, max_tokens=None):
+    async def chat_with_tools(self, messages, tools, *, max_tokens=None, accounting_context=None):
         self.chat_with_tools_calls += 1
         content = self.tool_response_content if self.tool_response_content is not None else "[]"
         message = SimpleNamespace(content=content, tool_calls=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return LlmCallResult(SimpleNamespace(choices=[SimpleNamespace(message=message)]), (_usage(),))
 
-    async def chat_simple(self, messages, *, max_tokens=None):
-        return self.chat_simple_response
+    async def chat_simple(self, messages, *, max_tokens=None, accounting_context=None):
+        return LlmCallResult(self.chat_simple_response, (_usage(),))
 
 
 def _members() -> list[ChatMemberInfo]:
@@ -371,7 +377,7 @@ async def test_pipeline_optional_infographic_records_id_cost_and_diagnostics(mon
     async def create(**kwargs):
         assert kwargs['facts']['archived_message_count'] == 1
         assert '<b>' in kwargs['text']
-        kwargs['record_usage']()
+        kwargs['record_usages']((_usage(),))
         return 'created-id'
     monkeypatch.setattr(artifacts, 'create_daily_infographic', AsyncMock(side_effect=create))
     result = await run_daily_summary_pipeline(llm_client=client, repo=repo, chat_id=-100,
