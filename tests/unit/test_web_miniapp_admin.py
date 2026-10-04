@@ -424,8 +424,10 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
             "idempotency_key": "0123456789abcdef01234567",
             "preview_token": preview.json()["preview_token"],
         }
-        started = await client.post("/api/miniapp/admin/broadcast", json=payload)
-        duplicate = await client.post("/api/miniapp/admin/broadcast", json=payload)
+        started, duplicate = await asyncio.gather(
+            client.post("/api/miniapp/admin/broadcast", json=payload),
+            client.post("/api/miniapp/admin/broadcast", json=payload),
+        )
         for _ in range(20):
             status = await client.get(f"/api/miniapp/admin/broadcast/{started.json()['broadcast_id']}")
             if status.json().get("status") == "completed":
@@ -434,8 +436,9 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
         history = await client.get("/api/miniapp/admin/broadcasts?limit=10")
 
     assert preview.status_code == 200 and preview.json()["target_count"] == 1
-    assert started.status_code == 200 and started.json()["status"] == "sending"
-    assert duplicate.json()["duplicate"] is True
+    assert started.status_code == duplicate.status_code == 200
+    assert started.json()["broadcast_id"] == duplicate.json()["broadcast_id"]
+    assert sorted([started.json().get("duplicate", False), duplicate.json().get("duplicate", False)]) == [False, True]
     assert status.json()["status"] == "completed"
     assert status.json()["sent_count"] == 1 and status.json()["failed_count"] == 0
     assert history.json()["items"][0]["sent_count"] == 1

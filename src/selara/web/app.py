@@ -44,6 +44,7 @@ from sqlalchemy import (
     or_,
     select,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -10888,25 +10889,34 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if existing_id is not None:
                 return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
-            repo = SqlAlchemyActivityRepository(session)
-            targets = await repo.list_recent_active_group_chats(
-                since=_now_utc() - timedelta(days=int(preview["active_since_days"]))
-            )
-            raw_ids = payload.get("chat_ids")
-            selected_ids = {int(value) for value in raw_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_ids, list) else set()
-            if isinstance(raw_ids, list):
-                targets = [item for item in targets if item.chat_id in selected_ids]
-            broadcast = await repo.create_admin_broadcast(
-                body=body,
-                idempotency_key=idempotency_key,
-                rendered_body=str(preview["rendered_text"]),
-                reaction_options=preview["reaction_options"],
-                media_type="photo" if preview.get("media") else None,
-                active_since_days=int(preview["active_since_days"]),
-                created_by_user_id=admin_user_id,
-            )
-            deliveries = await repo.create_admin_broadcast_deliveries(broadcast_id=broadcast.id, targets=targets)
-            await session.commit()
+            try:
+                repo = SqlAlchemyActivityRepository(session)
+                targets = await repo.list_recent_active_group_chats(
+                    since=_now_utc() - timedelta(days=int(preview["active_since_days"]))
+                )
+                raw_ids = payload.get("chat_ids")
+                selected_ids = {int(value) for value in raw_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_ids, list) else set()
+                if isinstance(raw_ids, list):
+                    targets = [item for item in targets if item.chat_id in selected_ids]
+                broadcast = await repo.create_admin_broadcast(
+                    body=body,
+                    idempotency_key=idempotency_key,
+                    rendered_body=str(preview["rendered_text"]),
+                    reaction_options=preview["reaction_options"],
+                    media_type="photo" if preview.get("media") else None,
+                    active_since_days=int(preview["active_since_days"]),
+                    created_by_user_id=admin_user_id,
+                )
+                deliveries = await repo.create_admin_broadcast_deliveries(broadcast_id=broadcast.id, targets=targets)
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing_id = await session.scalar(
+                    select(AdminBroadcastModel.id).where(AdminBroadcastModel.idempotency_key == idempotency_key)
+                )
+                if existing_id is None:
+                    raise
+                return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
         parsed = parse_broadcast_source(body)
         task = asyncio.create_task(
             _run_miniapp_broadcast(
