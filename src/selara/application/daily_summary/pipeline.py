@@ -302,11 +302,11 @@ async def run_daily_summary_pipeline(
                 accounting_context=_accounting_context(invocation_id, chat_id, "segment_topics"),
             )
             stage_usages.extend(_usage_rows("segment_topics", result.usages))
-            diagnostics["structured_output_retries"] += sum(u.status == "validation_failed" for u in result.usages)
+            diagnostics["structured_output_retries"] += result.corrective_retries
             all_cards.extend(result.value.topics)
         except LlmClientError as exc:
             stage_usages.extend(_usage_rows("segment_topics", exc.usages))
-            diagnostics["structured_output_retries"] += sum(u.status == "validation_failed" for u in exc.usages)
+            diagnostics["structured_output_retries"] += exc.corrective_retries
             logger.exception("daily summary chat_id=%s: segment topic extraction failed, skipping segment", chat_id)
             diagnostics["segment_failures"] += 1
 
@@ -351,11 +351,11 @@ async def run_daily_summary_pipeline(
             accounting_context=_accounting_context(invocation_id, chat_id, "merge"),
         )
         stage_usages.extend(_usage_rows("merge", merged_themes.usages))
-        diagnostics["structured_output_retries"] += sum(u.status == "validation_failed" for u in merged_themes.usages)
+        diagnostics["structured_output_retries"] += merged_themes.corrective_retries
         merged_themes = merged_themes.value
     except LlmClientError as exc:
         stage_usages.extend(_usage_rows("merge", exc.usages))
-        diagnostics["structured_output_retries"] += sum(u.status == "validation_failed" for u in exc.usages)
+        diagnostics["structured_output_retries"] += exc.corrective_retries
         logger.exception("daily summary chat_id=%s: merge stage failed, treating each card as its own theme", chat_id)
         diagnostics["merge_fallback_used"] = True
         from selara.application.daily_summary.schemas import MergedTheme

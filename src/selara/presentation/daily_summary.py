@@ -71,62 +71,69 @@ async def _generate_and_finalize(
         feature=AiFeature.DAILY_SUMMARY, trigger=trigger, chat_id=chat.telegram_chat_id,
         actor_user_id=actor_user_id, summary_run_id=run_id,
     ) if accounting is not None else None
-    async with session_factory() as session:
-        repo = SqlAlchemyActivityRepository(session)
-        glossary_terms = await _fetch_glossary_terms(session, chat_id=chat.telegram_chat_id)
+    outcome = {"status": "failed", "error_category": "pipeline_failed"}
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            glossary_terms = await _fetch_glossary_terms(session, chat_id=chat.telegram_chat_id)
 
-        try:
-            output = await run_daily_summary_pipeline(
-                llm_client=llm_client,
-                repo=repo,
-                chat_id=chat.telegram_chat_id,
-                chat_title=chat.title or "Чат",
-                summary_run_id=run_id,
-                invocation_id=invocation_id,
-                window_from=window_from,
-                window_to=window_to,
-                style=style,
-                persona_enabled=persona_enabled,
-                glossary_terms=glossary_terms,
-                artifact_context=ArtifactRequestContext(
-                    repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
-                    chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
-                ),
-            )
-        except Exception as exc:
-            logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
+            try:
+                output = await run_daily_summary_pipeline(
+                    llm_client=llm_client,
+                    repo=repo,
+                    chat_id=chat.telegram_chat_id,
+                    chat_title=chat.title or "Чат",
+                    summary_run_id=run_id,
+                    invocation_id=invocation_id,
+                    window_from=window_from,
+                    window_to=window_to,
+                    style=style,
+                    persona_enabled=persona_enabled,
+                    glossary_terms=glossary_terms,
+                    artifact_context=ArtifactRequestContext(
+                        repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
+                        chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
+                aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
+                await repo.mark_daily_summary_run_failed(
+                    run_id=run_id, error=str(exc),
+                    pipeline_cost_usd=aggregate.known_cost_usd if aggregate else None,
+                    pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else None,
+                )
+                await session.commit()
+                return False
+
             aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
-            await repo.mark_daily_summary_run_failed(
-                run_id=run_id, error=str(exc),
-                pipeline_cost_usd=aggregate.known_cost_usd if aggregate else None,
-                pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else None,
+            context_stt_cost = await repo.sum_context_stt_cost_in_window(
+                chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
+            )
+            await repo.finalize_daily_summary_run_generated(
+                run_id=run_id,
+                generated_text=output.generated_text,
+                topics_json=output.topics_json,
+                diagnostics_json=asdict(output.diagnostics),
+                pipeline_cost_usd=aggregate.known_cost_usd if aggregate else output.pipeline_cost_usd,
+                pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else output.has_unknown_cost,
+                context_stt_cost_usd=context_stt_cost,
             )
             await session.commit()
-            if accounting is not None and invocation_id is not None:
-                await accounting.finish_invocation(
-                    invocation_id=invocation_id,
-                    status="partial" if aggregate and aggregate.provider_calls else "failed",
-                    error_category="pipeline_failed",
-                )
-            return False
+        outcome["status"] = "succeeded"
+        outcome["error_category"] = None
+        return True
 
-        aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
-        context_stt_cost = await repo.sum_context_stt_cost_in_window(
-            chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
-        )
-        await repo.finalize_daily_summary_run_generated(
-            run_id=run_id,
-            generated_text=output.generated_text,
-            topics_json=output.topics_json,
-            diagnostics_json=asdict(output.diagnostics),
-            pipeline_cost_usd=aggregate.known_cost_usd if aggregate else output.pipeline_cost_usd,
-            pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else output.has_unknown_cost,
-            context_stt_cost_usd=context_stt_cost,
-        )
-        await session.commit()
-    if accounting is not None and invocation_id is not None:
-        await accounting.finish_invocation(invocation_id=invocation_id, status="succeeded")
-    return True
+    except asyncio.CancelledError:
+        outcome["error_category"] = "cancelled"
+        raise
+    finally:
+        if accounting is not None and invocation_id is not None:
+            await accounting.finish_invocation_outcome(
+                invocation_id=invocation_id,
+                status=outcome["status"],
+                error_category=outcome["error_category"],
+            )
 
 
 async def _send_and_mark(

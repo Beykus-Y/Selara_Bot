@@ -6,6 +6,7 @@ state) and a fake LlmClient (no network) to keep this fast and deterministic.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from selara.infrastructure.llm.client import LlmCallResult, LlmCallUsage
 from decimal import Decimal
 from uuid import uuid4
 from selara.presentation.daily_summary import attempt_daily_summary_run
+from selara.presentation import daily_summary as daily_summary_module
 
 _CHAT_ID = -100555
 _USER_ID = 1001
@@ -201,6 +203,38 @@ async def test_daily_summary_late_pipeline_failure_keeps_completed_provider_call
             assert run.status == "failed"
             assert run.pipeline_cost_usd > 0
             assert run.pipeline_has_unknown_cost is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_summary_cancellation_finalizes_invocation_without_failing_run(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        async def cancel_pipeline(**kwargs):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_pipeline)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        with pytest.raises(asyncio.CancelledError):
+            await attempt_daily_summary_run(
+                bot=_fake_bot(), session_factory=session_factory, llm_client=client,
+                chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+                trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+            )
+
+        async with session_factory() as session:
+            invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+        assert invocation.status == "failed"
+        assert invocation.error_category == "cancelled"
+        assert invocation.completed_at is not None
+        # Cancellation leaves the lease/run recoverable; only the accounting
+        # invocation is finalized as failed.
+        assert run.status not in {"failed", "sent"}
     finally:
         await engine.dispose()
 

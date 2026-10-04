@@ -8,6 +8,13 @@ def test_estimate_llm_cost_known_model() -> None:
     assert str(cost) == "0.000750000"
 
 
+def test_estimate_llm_cost_resolves_explicit_provider_snapshot() -> None:
+    cost = estimate_llm_cost_usd(
+        model="gpt-4o-mini-2024-07-18", prompt_tokens=1000, completion_tokens=1000
+    )
+    assert str(cost) == "0.000750000"
+
+
 def test_estimate_llm_cost_unknown_model_is_unknown_not_an_error() -> None:
     cost = estimate_llm_cost_usd(model="some-future-model", prompt_tokens=1000, completion_tokens=1000)
     assert cost is None

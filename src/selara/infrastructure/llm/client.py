@@ -48,10 +48,13 @@ class LlmConfig:
 
 
 class LlmClientError(RuntimeError):
-    def __init__(self, message: str, *, usages: tuple[LlmCallUsage, ...] = ()) -> None:
+    def __init__(
+        self, message: str, *, usages: tuple[LlmCallUsage, ...] = (), corrective_retries: int = 0
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.usages = usages
+        self.corrective_retries = corrective_retries
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +87,7 @@ class LlmCallUsage:
 class LlmCallResult(Generic[_Response]):
     value: _Response
     usages: tuple[LlmCallUsage, ...]
+    corrective_retries: int = 0
 
 
 UsageRecorder = Callable[[LlmAccountingContext, LlmCallUsage], Awaitable[None]]
@@ -181,14 +185,16 @@ class LlmClient:
                     request_id=request_id, attempt_number_start=len(usages) + 1, **request_kwargs,
                 )
             except LlmClientError as exc:
-                raise LlmClientError(exc.message, usages=tuple([*usages, *exc.usages])) from exc
+                raise LlmClientError(
+                    exc.message, usages=tuple([*usages, *exc.usages]), corrective_retries=correction_round,
+                ) from exc
 
             usages.extend(request_usages)
             usage = usages[-1]
             content = response.choices[0].message.content or ""
             try:
                 parsed = response_model.model_validate(json.loads(content))
-                return LlmCallResult(parsed, tuple(usages))
+                return LlmCallResult(parsed, tuple(usages), corrective_retries=correction_round)
             except (json.JSONDecodeError, ValidationError) as exc:
                 usage = replace(usage, status="validation_failed")
                 usages[-1] = usage
@@ -216,7 +222,10 @@ class LlmClient:
                         },
                     ]
                     continue
-                raise LlmClientError(f"LLM вернула невалидный структурированный ответ: {exc}", usages=tuple(usages)) from exc
+                raise LlmClientError(
+                    f"LLM вернула невалидный структурированный ответ: {exc}",
+                    usages=tuple(usages), corrective_retries=correction_round,
+                ) from exc
 
         raise AssertionError("unreachable")  # loop always returns or raises
 
@@ -242,6 +251,20 @@ class LlmClient:
             attempt_number = attempt_number_start + offset
             try:
                 response = await self._client.chat.completions.create(**request_kwargs)
+            except asyncio.CancelledError:
+                usage = self._failed_usage(
+                    configured_model, attempt_number, "cancelled", request_id=request_id,
+                )
+                usages.append(usage)
+                log.warning(
+                    "LLM provider attempt cancelled invocation_id=%s feature=%s stage=%s call_id=%s attempt=%s",
+                    accounting_context.invocation_id if accounting_context else None,
+                    accounting_context.feature if accounting_context else None,
+                    accounting_context.stage if accounting_context else method,
+                    usage.call_id, attempt_number,
+                )
+                await self._record(accounting_context, usage)
+                raise
             except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
                 category = (
                     "timeout" if isinstance(exc, APITimeoutError)

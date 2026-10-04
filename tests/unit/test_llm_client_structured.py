@@ -97,6 +97,7 @@ async def test_chat_structured_retries_once_on_invalid_json_then_succeeds() -> N
     assert result.value.title == "x"
     assert client._client.chat.completions.create.await_count == 2
     assert [usage.attempt_number for usage in result.usages] == [1, 2]
+    assert result.corrective_retries == 1
 
 
 @pytest.mark.asyncio
@@ -132,6 +133,22 @@ async def test_chat_structured_records_zero_retries_on_first_try_success() -> No
 
     result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
     assert len(result.usages) == 1
+    assert result.corrective_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_structured_invalid_first_and_second_response_reports_one_retry() -> None:
+    client = LlmClient(LlmConfig(api_key="test-key", model="test-model"))
+    client._client.chat.completions.create = AsyncMock(
+        side_effect=[_response_with_content("invalid one"), _response_with_content("invalid two")]
+    )
+
+    with pytest.raises(LlmClientError) as caught:
+        await client.chat_structured(messages=[], response_model=_Topic)
+
+    assert len(caught.value.usages) == 2
+    assert sum(usage.status == "validation_failed" for usage in caught.value.usages) == 2
+    assert caught.value.corrective_retries == 1
 
 
 @pytest.mark.asyncio

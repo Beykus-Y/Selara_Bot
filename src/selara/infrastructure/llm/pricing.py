@@ -10,6 +10,12 @@ MODEL_PRICING_USD_PER_1K_TOKENS: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o": (Decimal("0.0025"), Decimal("0.01")),
 }
 
+# Exact provider snapshot identifiers whose token rates follow a registered
+# pricing family. Keep this explicit so unknown future variants remain unknown.
+MODEL_PRICING_SNAPSHOT_FAMILIES: dict[str, str] = {
+    "gpt-4o-mini-2024-07-18": "gpt-4o-mini",
+}
+
 # USD per minute of transcribed audio (Whisper-style STT pricing).
 STT_PRICE_USD_PER_MINUTE = 0.006
 
@@ -18,7 +24,8 @@ def estimate_llm_cost_usd(
     *, model: str, prompt_tokens: int | None, completion_tokens: int | None
 ) -> Decimal | None:
     """Return a precise known estimate, or ``None`` when this model is unpriced."""
-    pricing = MODEL_PRICING_USD_PER_1K_TOKENS.get(model)
+    pricing_model = MODEL_PRICING_SNAPSHOT_FAMILIES.get(model, model)
+    pricing = MODEL_PRICING_USD_PER_1K_TOKENS.get(pricing_model)
     if pricing is None or prompt_tokens is None or completion_tokens is None:
         return None
     prompt_price, completion_price = pricing

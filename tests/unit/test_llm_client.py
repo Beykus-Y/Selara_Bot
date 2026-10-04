@@ -172,6 +172,21 @@ async def test_provider_returned_unknown_model_stays_unknown_even_when_configure
 
 
 @pytest.mark.asyncio
+async def test_provider_snapshot_is_preserved_and_priced_by_registered_family():
+    client = LlmClient(LlmConfig(api_key="test-key", model="gpt-4o-mini"))
+    client._client.chat.completions.create = AsyncMock(return_value=_response(
+        "ok", model="gpt-4o-mini-2024-07-18", prompt=1000, completion=1000,
+    ))
+
+    result = await client.chat_simple([])
+
+    usage = result.usages[0]
+    assert usage.model == "gpt-4o-mini-2024-07-18"
+    assert usage.pricing_status == "known"
+    assert str(usage.estimated_cost_usd) == "0.000750000"
+
+
+@pytest.mark.asyncio
 async def test_timeout_returns_unknown_failed_attempt_without_inventing_zero_cost():
     import httpx
     from openai import APITimeoutError
@@ -247,3 +262,37 @@ async def test_cancellation_waits_for_already_received_usage_to_persist():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(persisted) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_inflight_provider_attempt_persists_unknown_failed_call():
+    from selara.infrastructure.llm.client import LlmAccountingContext
+
+    started = asyncio.Event()
+    persisted = []
+
+    async def record(context, usage):
+        persisted.append((context, usage))
+
+    async def provider(**kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    client = LlmClient(LlmConfig(api_key="test-key", model="gpt-4o-mini"), usage_recorder=record)
+    client._client.chat.completions.create = AsyncMock(side_effect=provider)
+    context = LlmAccountingContext(12, "llm_admin", "round", -100)
+    task = asyncio.create_task(client.chat_simple([], accounting_context=context))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(persisted) == 1
+    saved_context, usage = persisted[0]
+    assert saved_context == context
+    assert usage.status == "failed"
+    assert usage.error_category == "cancelled"
+    assert usage.prompt_tokens is None and usage.completion_tokens is None
+    assert usage.pricing_status == "unknown" and usage.estimated_cost_usd is None
+    assert usage.attempt_number == 1
