@@ -50,7 +50,20 @@ async def _run_browser_regression() -> None:
                   initData: 'browser-test-init-data', colorScheme: 'dark', themeParams: {},
                   ready() {}, expand() {}, onEvent() {}, offEvent() {},
                   BackButton: {show() {}, hide() {}, onClick() {}, offClick() {}}
-                }};"""
+                }};
+                const NativeFormData = window.FormData;
+                window.__selaraFormData = [];
+                window.FormData = class extends NativeFormData {
+                  constructor(...args) {
+                    super(...args);
+                    this.__keys = [];
+                    window.__selaraFormData.push(this);
+                  }
+                  append(name, value, ...args) {
+                    this.__keys.push(name);
+                    return super.append(name, value, ...args);
+                  }
+                };"""
             )
             page = await context.new_page()
             browser_errors: list[str] = []
@@ -146,6 +159,7 @@ async def _run_browser_regression() -> None:
                 "mimeType": "image/png",
                 "buffer": bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"),
             })
+            assert await page.locator('input[type="file"]').evaluate("element => element.files.length") == 1
             await page.get_by_role("button", name="Текст", exact=True).click()
             await page.get_by_role("button", name="Далее: аудитория").click()
             await page.get_by_role("button", name="Выбрать группы").click()
@@ -163,8 +177,8 @@ async def _run_browser_regression() -> None:
             await page.get_by_role("button", name="Показать preview").click()
             await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
             assert len(preview_requests) == 2
-            assert 'name="media_mode"' in preview_requests[-1] and "text" in preview_requests[-1]
-            assert 'name="photo"' not in preview_requests[-1]
+            form_data_keys = await page.evaluate("window.__selaraFormData.at(-1).__keys")
+            assert "media_mode" in form_data_keys and "photo" not in form_data_keys
             await page.get_by_role("button", name="Перейти к подтверждению").click()
             await page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.").check()
             await page.get_by_role("button", name="Подтвердить отправку").click()
