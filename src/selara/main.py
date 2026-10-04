@@ -22,6 +22,7 @@ from selara.presentation.gacha_reel_orchestration import (
 )
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
+from selara.presentation.middlewares.error_alert_config import load_error_alert_config
 from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 def build_bot_commands() -> list[BotCommand]:
     return [
         BotCommand(command="help", description="Справка"),
+        BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
@@ -252,6 +254,7 @@ async def run() -> None:
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
+    await load_error_alert_config(settings, session_factory)
     GAME_STORE.configure_runtime(redis_url=settings.redis_url, ttl_hours=settings.game_state_ttl_hours)
 
     from selara.presentation.renderer_service import PlaywrightRendererService

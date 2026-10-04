@@ -71,6 +71,7 @@ from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.commands.resolver import TextCommandResolutionError, resolve_text_command
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
+from selara.presentation.middlewares.error_handler import notify_operational_error
 from selara.presentation.handlers.economy import (
     auction_command as economy_auction_command,
     bid_command as economy_bid_command,
@@ -2416,6 +2417,8 @@ async def _build_gacha_info_view(
     economy_mode: str,
     chat_id: int | None,
     use_custom_emojis: bool = True,
+    session_factory=None,
+    event=None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     banners = ("genshin", "hsr")
     results = await asyncio.gather(
@@ -2441,7 +2444,21 @@ async def _build_gacha_info_view(
     errors: list[str] = []
     for banner, result in zip(banners, results, strict=True):
         if isinstance(result, Exception):
-            error_text = result.message if isinstance(result, GachaUseCaseError) else str(result)
+            if isinstance(result, GachaUseCaseError):
+                if result.is_operational:
+                    await notify_operational_error(
+                        session_factory=session_factory,
+                        event=event,
+                        exc=result,
+                    )
+                error_text = result.message
+            else:
+                await notify_operational_error(
+                    session_factory=session_factory,
+                    event=event,
+                    exc=result,
+                )
+                error_text = "Не удалось загрузить данные гачи."
             errors.append(f"❌ {escape(_gacha_banner_label(banner))}: {escape(error_text)}")
             continue
         available_banners.append(banner)
@@ -2620,7 +2637,9 @@ async def _try_send_gacha_pull_animation(
         )
 
 
-async def _send_gacha_pull(message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str) -> None:
+async def _send_gacha_pull(
+    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, session_factory=None
+) -> None:
     if message.from_user is None:
         return
 
@@ -2630,12 +2649,16 @@ async def _send_gacha_pull(message: Message, settings: Settings, bot: Bot, activ
         return
     _GACHA_TEXT_PULL_IN_FLIGHT.add(user_id)
     try:
-        await _send_gacha_pull_impl(message, settings, bot, activity_repo, banner=banner)
+        await _send_gacha_pull_impl(
+            message, settings, bot, activity_repo, banner=banner, session_factory=session_factory
+        )
     finally:
         _GACHA_TEXT_PULL_IN_FLIGHT.discard(user_id)
 
 
-async def _send_gacha_pull_impl(message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str) -> None:
+async def _send_gacha_pull_impl(
+    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, session_factory=None
+) -> None:
     try:
         response = await pull_gacha_card(
             settings,
@@ -2644,6 +2667,8 @@ async def _send_gacha_pull_impl(message: Message, settings: Settings, bot: Bot, 
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(session_factory=session_factory, event=message, exc=exc, bot=bot)
         await _answer_quiet(message, exc.message)
         return
 
@@ -2680,7 +2705,7 @@ async def _send_gacha_pull_impl(message: Message, settings: Settings, bot: Bot, 
     )
 
 
-async def _send_gacha_profile(message: Message, settings: Settings, *, banner: str) -> None:
+async def _send_gacha_profile(message: Message, settings: Settings, *, banner: str, session_factory=None) -> None:
     if message.from_user is None:
         return
 
@@ -2691,6 +2716,8 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(session_factory=session_factory, event=message, exc=exc)
         await _answer_quiet(message, exc.message)
         return
 
@@ -2703,7 +2730,7 @@ async def _send_gacha_profile(message: Message, settings: Settings, *, banner: s
 
 
 async def _send_gacha_info(
-    message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings, activity_repo
+    message: Message, settings: Settings, economy_repo, chat_settings: ChatSettings, activity_repo, session_factory=None
 ) -> None:
     if message.from_user is None:
         return
@@ -2716,6 +2743,8 @@ async def _send_gacha_info(
         economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
         chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
         use_custom_emojis=True,
+        session_factory=session_factory,
+        event=message,
     )
     fallback_text, fallback_reply_markup = await _build_gacha_info_view(
         settings,
@@ -2725,6 +2754,8 @@ async def _send_gacha_info(
         economy_mode=_gacha_economy_mode(chat_type=message.chat.type, chat_settings=chat_settings),
         chat_id=_gacha_economy_chat_id(chat_type=message.chat.type, chat_id=message.chat.id),
         use_custom_emojis=False,
+        session_factory=session_factory,
+        event=message,
     )
     await _answer_gacha_html(
         message,
@@ -3072,6 +3103,7 @@ async def _send_gacha_skip(
     *,
     banner: str,
     target_username: str | None,
+    session_factory=None,
 ) -> None:
     if message.from_user is None:
         return
@@ -3102,6 +3134,8 @@ async def _send_gacha_skip(
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(session_factory=session_factory, event=message, exc=exc)
         await _answer_quiet(message, exc.message)
         return
 
@@ -3115,6 +3149,7 @@ async def gachagive_command(
     bot: Bot,
     activity_repo,
     settings: Settings,
+    session_factory=None,
 ) -> None:
     if message.from_user is None:
         return
@@ -3165,6 +3200,13 @@ async def gachagive_command(
     try:
         response = await give_gacha_card(settings, user_id=target_user_id, banner=None, code=code)
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(
+                session_factory=session_factory,
+                event=message,
+                exc=exc,
+                bot=bot,
+            )
         await _answer_quiet(message, exc.message)
         return
 
@@ -5259,7 +5301,15 @@ async def inline_private_read_callback(query: CallbackQuery, activity_repo) -> N
 
 
 @router.callback_query(F.data.startswith(_GACHA_CALLBACK_PREFIX))
-async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, economy_repo, activity_repo, chat_settings: ChatSettings) -> None:
+async def gacha_callback(
+    query: CallbackQuery,
+    bot: Bot,
+    settings: Settings,
+    economy_repo,
+    activity_repo,
+    chat_settings: ChatSettings,
+    session_factory=None,
+) -> None:
     if query.message is None:
         await _gacha_callback_impl(
             query,
@@ -5268,6 +5318,7 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             economy_repo=economy_repo,
             activity_repo=activity_repo,
             chat_settings=chat_settings,
+            session_factory=session_factory,
         )
         return
 
@@ -5285,6 +5336,7 @@ async def gacha_callback(query: CallbackQuery, bot: Bot, settings: Settings, eco
             economy_repo=economy_repo,
             activity_repo=activity_repo,
             chat_settings=chat_settings,
+            session_factory=session_factory,
         )
     finally:
         _GACHA_CALLBACK_IN_FLIGHT.discard(lock_key)
@@ -5298,6 +5350,7 @@ async def _gacha_callback_impl(
     economy_repo,
     activity_repo,
     chat_settings: ChatSettings,
+    session_factory=None,
 ) -> None:
     action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
     if action is None or banner is None or owner_user_id is None:
@@ -5329,6 +5382,10 @@ async def _gacha_callback_impl(
                 banner=banner,
             )
         except GachaUseCaseError as exc:
+            if exc.is_operational:
+                await notify_operational_error(
+                    session_factory=session_factory, event=query, exc=exc, bot=bot
+                )
             await _safe_callback_answer(query, exc.message, show_alert=True)
             return
 
@@ -5367,6 +5424,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=True,
+            session_factory=session_factory,
+            event=query,
         )
         fallback_text, fallback_reply_markup = await _build_gacha_info_view(
             settings,
@@ -5376,6 +5435,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=False,
+            session_factory=session_factory,
+            event=query,
         )
         await _run_gacha_message_edit(
             query.message,
@@ -5408,6 +5469,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=True,
+            session_factory=session_factory,
+            event=query,
         )
         fallback_text, fallback_reply_markup = await _build_gacha_info_view(
             settings,
@@ -5417,6 +5480,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=False,
+            session_factory=session_factory,
+            event=query,
         )
         await _run_gacha_message_edit(
             query.message,
@@ -5454,6 +5519,10 @@ async def _gacha_callback_impl(
                 currency_amount=currency_amount,
             )
         except GachaUseCaseError as exc:
+            if exc.is_operational:
+                await notify_operational_error(
+                    session_factory=session_factory, event=query, exc=exc, bot=bot
+                )
             await _safe_callback_answer(query, exc.message, show_alert=True)
             return
 
@@ -5465,6 +5534,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=True,
+            session_factory=session_factory,
+            event=query,
         )
         fallback_text, fallback_reply_markup = await _build_gacha_info_view(
             settings,
@@ -5474,6 +5545,8 @@ async def _gacha_callback_impl(
             economy_mode=economy_mode,
             chat_id=economy_chat_id,
             use_custom_emojis=False,
+            session_factory=session_factory,
+            event=query,
         )
         await _run_gacha_message_edit(
             query.message,
@@ -5505,6 +5578,13 @@ async def _gacha_callback_impl(
             banner=banner,
         )
     except GachaUseCaseError as exc:
+        if exc.is_operational:
+            await notify_operational_error(
+                session_factory=session_factory,
+                event=query,
+                exc=exc,
+                bot=bot,
+            )
         await _safe_callback_answer(query, exc.message, show_alert=True)
         return
 
@@ -6018,15 +6098,27 @@ async def text_commands_handler(
             return
 
     if intent.name == "gacha_pull":
-        await _send_gacha_pull(message, settings, bot, activity_repo, banner=str(intent.args.get("banner", "")))
+        await _send_gacha_pull(
+            message,
+            settings,
+            bot,
+            activity_repo,
+            banner=str(intent.args.get("banner", "")),
+            session_factory=session_factory,
+        )
         return
 
     if intent.name == "gacha_profile":
-        await _send_gacha_profile(message, settings, banner=str(intent.args.get("banner", "")))
+        await _send_gacha_profile(
+            message,
+            settings,
+            banner=str(intent.args.get("banner", "")),
+            session_factory=session_factory,
+        )
         return
 
     if intent.name == "gacha_info":
-        await _send_gacha_info(message, settings, economy_repo, chat_settings, activity_repo)
+        await _send_gacha_info(message, settings, economy_repo, chat_settings, activity_repo, session_factory)
         return
 
     if intent.name == "gacha_skip":
@@ -6038,6 +6130,7 @@ async def text_commands_handler(
             settings,
             banner=str(intent.args.get("banner", "")),
             target_username=intent.args.get("target_username"),
+            session_factory=session_factory,
         )
         return
 

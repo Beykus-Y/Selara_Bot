@@ -121,10 +121,17 @@ class GachaBackupFile:
 
 
 class GachaClientError(RuntimeError):
-    def __init__(self, message: str, *, is_timeout: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        is_timeout: bool = False,
+        is_operational: bool = False,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.is_timeout = is_timeout
+        self.is_operational = bool(is_operational or is_timeout)
 
 
 class HttpGachaClient:
@@ -169,9 +176,11 @@ class HttpGachaClient:
             async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds) as client:
                 response = await client.get(f"/v1/gacha/banners/{banner}/cards", headers=headers)
         except httpx.TimeoutException as exc:
-            raise GachaClientError("Гача-сервер не ответил вовремя.", is_timeout=True) from exc
+            raise GachaClientError(
+                "Гача-сервер не ответил вовремя.", is_timeout=True, is_operational=True
+            ) from exc
         except httpx.HTTPError as exc:
-            raise GachaClientError("Не удалось связаться с гача-сервером.") from exc
+            raise GachaClientError("Не удалось связаться с гача-сервером.", is_operational=True) from exc
 
         if response.status_code == 304:
             return None, response.headers.get("etag")
@@ -179,12 +188,15 @@ class HttpGachaClient:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise GachaClientError(_extract_error_message(exc.response)) from exc
+            raise GachaClientError(
+                _extract_error_message(exc.response),
+                is_operational=_is_operational_http_status(exc.response.status_code),
+            ) from exc
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise GachaClientError("Гача-сервер вернул некорректный ответ.") from exc
+            raise GachaClientError("Гача-сервер вернул некорректный ответ.", is_operational=True) from exc
         return GachaBannerCardsResponse.model_validate(payload), response.headers.get("etag")
 
     async def get_history(self, *, user_id: int, banner: str, limit: int = 10) -> GachaHistoryResponse:
@@ -298,19 +310,28 @@ class HttpGachaClient:
                 response = await client.request(method, path, **kwargs)
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise GachaClientError("Гача-сервер не ответил вовремя.", is_timeout=True) from exc
+            raise GachaClientError(
+                "Гача-сервер не ответил вовремя.", is_timeout=True, is_operational=True
+            ) from exc
         except httpx.HTTPStatusError as exc:
-            raise GachaClientError(_extract_error_message(exc.response)) from exc
+            raise GachaClientError(
+                _extract_error_message(exc.response),
+                is_operational=_is_operational_http_status(exc.response.status_code),
+            ) from exc
         except httpx.HTTPError as exc:
-            raise GachaClientError("Не удалось связаться с гача-сервером.") from exc
+            raise GachaClientError("Не удалось связаться с гача-сервером.", is_operational=True) from exc
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise GachaClientError("Гача-сервер вернул некорректный ответ.") from exc
+            raise GachaClientError("Гача-сервер вернул некорректный ответ.", is_operational=True) from exc
         if not isinstance(payload, dict):
-            raise GachaClientError("Гача-сервер вернул неожиданный формат ответа.")
+            raise GachaClientError("Гача-сервер вернул неожиданный формат ответа.", is_operational=True)
         return payload
+
+
+def _is_operational_http_status(status_code: int) -> bool:
+    return status_code >= 500 or status_code in {401, 403, 408, 429}
 
 
 def _extract_error_message(response: httpx.Response) -> str:

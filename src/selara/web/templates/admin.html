@@ -452,6 +452,30 @@
       {% endif %}
     </section>
 
+    <section class="panel" id="error-alerts">
+      <div class="panel-head">
+        <div>
+          <h3>Оповещения об ошибках</h3>
+          <p class="panel-subtitle">Traceback и сведения об ошибке будут отправляться в выбранный личный чат или группу.</p>
+        </div>
+      </div>
+      <form class="stack-form" method="post" action="/app/admin/error-alerts">
+        <label class="field" for="error-alert-chat-id">
+          <span>ID Telegram-чата</span>
+          <input id="error-alert-chat-id" class="admin-field-input" type="text" name="error_alert_chat_id" inputmode="numeric" value="{{ error_alert_chat_id }}" placeholder="Например, -1001234567890">
+        </label>
+        <label class="field field-checkbox" for="error-alerts-enabled">
+          <input id="error-alerts-enabled" type="checkbox" name="error_alerts_enabled" value="1"{% if error_alerts_enabled %} checked{% endif %}>
+          <span>Отправлять оповещения об ошибках</span>
+        </label>
+        <div class="button-row">
+          <button class="button primary" type="submit" name="action" value="save">Сохранить</button>
+          <button class="button ghost" type="submit" name="action" value="test">Проверить отправку</button>
+        </div>
+        <p class="helper-text">Чтобы узнать ID группы, добавь туда бота и проверь, что у него есть право отправлять сообщения. Одинаковая ошибка повторно не отправляется в течение 15 минут.</p>
+      </form>
+    </section>
+
     <section class="admin-secondary-section admin-feedback-section" id="feedback" data-admin-feedback>
       <header class="admin-feedback-header">
         <div>

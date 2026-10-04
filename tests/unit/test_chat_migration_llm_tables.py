@@ -9,20 +9,31 @@ the new chat_id.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from selara.infrastructure.db import chat_migration
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.chat_migration import migrate_chat_id
+from selara.infrastructure.db.chat_migration import ChatMigrationResult, migrate_chat_id
 from selara.infrastructure.db.models import (
+    AdminRuntimeSettingsModel,
     ChatModel,
+    EconomyPrivateContextModel,
     LlmAdminActionModel,
     LlmChatGlossaryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
+    MarriageModel,
+    PairModel,
+    RelationshipProposalModel,
     UserModel,
+    UserKarmaVoteModel,
 )
+from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
+from selara.presentation import chat_migration as presentation_chat_migration
 
 
 async def _session_factory():
@@ -139,3 +150,95 @@ async def test_group_upgrade_preserves_artifacts_under_new_chat_boundary():
             assert await repo.get(artifact_id=artifact_id, chat_id=1503, thread_id=None) is not None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migrate_chat_id_moves_error_alert_destination(monkeypatch):
+    class _MigrationSession:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        def __init__(self):
+            self.chats = {-123: ChatModel(telegram_chat_id=-123, type="group", title="Old chat")}
+            self.runtime_settings = AdminRuntimeSettingsModel(
+                id=1,
+                error_alert_chat_id=-123,
+                error_alerts_enabled=True,
+            )
+            self.statements = []
+
+        async def get(self, model, key):
+            if model is ChatModel:
+                return self.chats.get(key)
+            if model is AdminRuntimeSettingsModel:
+                return self.runtime_settings if key == 1 else None
+            raise AssertionError(f"Unexpected model: {model}")
+
+        def add(self, row):
+            if isinstance(row, ChatModel):
+                self.chats[row.telegram_chat_id] = row
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if getattr(getattr(statement, "table", None), "name", None) == AdminRuntimeSettingsModel.__tablename__:
+                params = statement.compile().params
+                destination = next(
+                    value for name, value in params.items() if name.startswith("error_alert_chat_id")
+                )
+                self.runtime_settings.error_alert_chat_id = destination
+
+        async def flush(self):
+            return None
+
+    session = _MigrationSession()
+    for helper_name in (
+        "_merge_activity_generic",
+        "_merge_activity_daily_generic",
+        "_merge_activity_minute_generic",
+        "_merge_activity_events_generic",
+        "_merge_announce_subscriptions_generic",
+        "_merge_text_aliases_generic",
+        "_merge_bot_roles_generic",
+        "_merge_moderation_state_generic",
+        "_merge_rest_state_generic",
+        "_merge_activity_event_sync_state",
+        "_move_chat_settings",
+        "_move_chat_alias_settings",
+        "_move_llm_context_and_actions",
+        "_merge_llm_glossary_generic",
+        "_migrate_economy_scopes",
+    ):
+        monkeypatch.setattr(chat_migration, helper_name, AsyncMock(return_value=0))
+    old_chat_id, new_chat_id = -123, -100123
+    configure_error_alerts(True, old_chat_id)
+    configure_error_alerts(True, old_chat_id)
+    await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+    moved_runtime_settings = any(
+        getattr(getattr(statement, "table", None), "name", None) == AdminRuntimeSettingsModel.__tablename__
+        for statement in session.statements
+    )
+    assert moved_runtime_settings is True
+    assert session.runtime_settings.error_alert_chat_id == new_chat_id
+
+
+@pytest.mark.asyncio
+async def test_apply_chat_migration_refreshes_cached_alert_destination(monkeypatch):
+    old_chat_id, new_chat_id = -123, -100123
+    configure_error_alerts(True, old_chat_id)
+    monkeypatch.setattr(
+        presentation_chat_migration,
+        "migrate_chat_id",
+        AsyncMock(return_value=ChatMigrationResult(old_chat_id, new_chat_id, migrated=True)),
+    )
+    monkeypatch.setattr(presentation_chat_migration.GAME_STORE, "migrate_chat_id", AsyncMock())
+
+    migrated = await presentation_chat_migration.apply_chat_migration(
+        event=SimpleNamespace(chat=SimpleNamespace(id=old_chat_id, type="group", title="Old")),
+        data={"db_session": object()},
+        old_chat_id=old_chat_id,
+        new_chat_id=new_chat_id,
+        reason="test",
+    )
+
+    assert migrated is True
+    assert get_error_alert_config().chat_id == new_chat_id

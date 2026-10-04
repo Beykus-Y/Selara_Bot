@@ -1786,6 +1786,19 @@ Index("idx_user_feature_requests_user_created", UserFeatureRequestModel.user_id,
 Index("idx_user_feature_requests_status_created", UserFeatureRequestModel.status, UserFeatureRequestModel.created_at)
 
 
+class AdminRuntimeSettingsModel(Base):
+    """Small set of system-wide settings that admins can change at runtime."""
+
+    __tablename__ = "admin_runtime_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    error_alert_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_alerts_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class UserChatAchievementModel(Base):
     __tablename__ = "user_chat_achievement"
 

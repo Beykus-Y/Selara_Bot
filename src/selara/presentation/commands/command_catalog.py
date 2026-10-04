@@ -37,6 +37,19 @@ class CommandSpec:
 
 COMMAND_CATALOG: tuple[CommandSpec, ...] = (
     CommandSpec(
+        key="user_feedback",
+        category="general",
+        dispatch_kind="slash",
+        syntax=("/feedback <текст>",),
+        title_ru="Обратная связь",
+        description_ru="Отправляет предложение или сообщение о проблеме в админку Selara.",
+        examples=(
+            "/feedback предложение: добавить быстрый ответ на частый вопрос",
+            "/feedback проблема: команда /top не отвечает",
+        ),
+        notes=("Доступно в личке с ботом; можно указать тип: предложение, проблема или поддержка.",),
+    ),
+    CommandSpec(
         key="economy_panel",
         category="economy",
         dispatch_kind="both",

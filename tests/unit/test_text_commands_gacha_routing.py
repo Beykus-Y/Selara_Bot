@@ -229,3 +229,40 @@ async def test_gachagive_requires_explicit_target_and_does_not_default_to_sender
     give_mock.assert_not_awaited()
     assert message.answers
     assert "reply" in message.answers[-1][0].lower() or "ответ" in message.answers[-1][0].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["skip", "give"])
+async def test_gacha_admin_timeout_paths_send_operational_alert(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = _DummyMessage(text="/gachagive card @target")
+    message.from_user = SimpleNamespace(id=999, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    monkeypatch.setattr(text_commands, "_ensure_gacha_admin_user", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_resolve_gacha_skip_target", AsyncMock(return_value=(77, None)))
+    monkeypatch.setattr(text_commands, "_require_channel_subscription", AsyncMock(return_value=True))
+    timeout = text_commands.GachaUseCaseError("service timed out", is_timeout=True)
+    if operation == "skip":
+        monkeypatch.setattr(text_commands, "reset_gacha_cooldown", AsyncMock(side_effect=timeout))
+        call = text_commands._send_gacha_skip(
+            message,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            banner="genshin",
+            target_username=None,
+        )
+    else:
+        monkeypatch.setattr(text_commands, "give_gacha_card", AsyncMock(side_effect=timeout))
+        call = text_commands.gachagive_command(
+            message,
+            SimpleNamespace(args="card @target"),
+            bot=object(),
+            activity_repo=SimpleNamespace(),
+            settings=SimpleNamespace(gacha_admin_user_id=999),
+        )
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+
+    await call
+
+    alert.assert_awaited_once()

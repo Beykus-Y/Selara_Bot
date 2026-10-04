@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.presentation.game_state import GAME_STORE
+from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ async def apply_chat_migration(
         new_chat_type=chat_type,
         new_chat_title=chat_title,
     )
+    alert_config = get_error_alert_config()
+    if result.migrated and alert_config.chat_id == old_chat_id:
+        configure_error_alerts(alert_config.enabled, new_chat_id)
     await GAME_STORE.migrate_chat_id(old_chat_id=old_chat_id, new_chat_id=new_chat_id, new_chat_title=chat_title)
 
     logger.info(

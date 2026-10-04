@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import EditMessageText
 
+from selara.application.use_cases.gacha import GachaUseCaseError
+from selara.infrastructure.http.gacha_client import GachaClientError
 from selara.presentation.handlers import text_commands
 
 _CHAT_SETTINGS = SimpleNamespace(economy_mode="global", gacha_enabled=True)
@@ -93,8 +97,8 @@ async def test_gacha_buy_callback_refreshes_info_message(monkeypatch: pytest.Mon
     purchase_mock.assert_awaited_once()
     deliver_mock.assert_awaited_once()
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True, "session_factory": None, "event": query}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False, "session_factory": None, "event": query}),
     ]
     assert query.message.edit_text_calls[0][0] == "<b>Гача инфо</b>"
     assert query.answers[-1] == (None, False)
@@ -239,6 +243,99 @@ async def test_gacha_sell_callback_removes_markup_and_answers(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+async def test_gacha_sell_timeout_sends_operational_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    query = _DummyQuery(data="gacha:sell:genshin:42:u1", user_id=1)
+    timeout = text_commands.GachaUseCaseError("service timed out", is_timeout=True)
+    monkeypatch.setattr(text_commands, "sell_gacha_pull", AsyncMock(side_effect=timeout))
+    monkeypatch.setattr(text_commands, "_require_channel_subscription_callback", AsyncMock(return_value=True))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+
+    await text_commands.gacha_callback(
+        query,
+        bot=object(),
+        settings=SimpleNamespace(),
+        economy_repo=object(),
+        activity_repo=SimpleNamespace(),
+        chat_settings=_CHAT_SETTINGS,
+    )
+
+    alert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gacha_info_hides_unexpected_exception_and_reports_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_commands, "_load_gacha_coin_balance", AsyncMock(return_value=None))
+    monkeypatch.setattr(text_commands, "_render_gacha_info_section", lambda **_kwargs: "profile ok")
+    monkeypatch.setattr(text_commands, "get_gacha_profile", AsyncMock(side_effect=[SimpleNamespace(), RuntimeError("INTERNAL_SECRET")]))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=False))
+
+    text, _markup = await text_commands._build_gacha_info_view(
+        SimpleNamespace(),
+        object(),
+        activity_repo,
+        user_id=1,
+        economy_mode="global",
+        chat_id=None,
+        session_factory=object(),
+        event=SimpleNamespace(),
+    )
+
+    failures = []
+    if "INTERNAL_SECRET" in text:
+        failures.append("internal exception text reached the user")
+    if "Не удалось загрузить данные гачи." not in text:
+        failures.append("neutral gacha error was not shown")
+    if alert.await_count != 1:
+        failures.append("unexpected exception did not produce exactly one operational alert")
+    assert not failures, "; ".join(failures)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["connect", "server", "malformed_json", "business"])
+async def test_gacha_profile_reports_operational_http_failures_but_not_business_4xx(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = httpx.Request("GET", "https://gacha.example/profile")
+    if failure == "connect":
+        root_cause = httpx.ConnectError("connection refused", request=request)
+    elif failure == "malformed_json":
+        root_cause = json.JSONDecodeError("invalid JSON", "{", 0)
+    else:
+        status = 500 if failure == "server" else 400
+        response = httpx.Response(status, request=request)
+        root_cause = httpx.HTTPStatusError("HTTP error", request=request, response=response)
+    client_error = GachaClientError("gacha request failed", is_operational=failure != "business")
+    client_error.__cause__ = root_cause
+    use_case_error = GachaUseCaseError(
+        "gacha request failed", is_operational=client_error.is_operational
+    )
+    use_case_error.__cause__ = client_error
+    monkeypatch.setattr(text_commands, "get_gacha_profile", AsyncMock(side_effect=use_case_error))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private", id=1),
+        from_user=SimpleNamespace(id=1),
+        answer=AsyncMock(),
+    )
+
+    await text_commands._send_gacha_profile(
+        message,
+        SimpleNamespace(),
+        banner="genshin",
+        session_factory=object(),
+    )
+
+    if failure == "business":
+        alert.assert_not_awaited()
+    else:
+        alert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypatch: pytest.MonkeyPatch) -> None:
     query = _DummyQuery(data="gacha:currency:hsr:160:u1", user_id=1)
     settings = SimpleNamespace()
@@ -268,8 +365,8 @@ async def test_gacha_currency_callback_buys_currency_and_refreshes_info(monkeypa
         currency_amount=160,
     )
     assert build_info_mock.await_args_list == [
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True}),
-        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": True, "session_factory": None, "event": query}),
+        ((settings, economy_repo, activity_repo), {"user_id": 1, "economy_mode": "global", "chat_id": -100123, "use_custom_emojis": False, "session_factory": None, "event": query}),
     ]
     assert query.answers[-1] == ("Обмен: -1600 монет, +160 звездного нефрита. Баланс монет: 1200.", False)
 
