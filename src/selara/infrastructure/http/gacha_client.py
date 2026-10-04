@@ -190,7 +190,7 @@ class HttpGachaClient:
         except httpx.HTTPStatusError as exc:
             raise GachaClientError(
                 _extract_error_message(exc.response),
-                is_operational=exc.response.status_code >= 500,
+                is_operational=_is_operational_http_status(exc.response.status_code),
             ) from exc
 
         try:
@@ -316,7 +316,7 @@ class HttpGachaClient:
         except httpx.HTTPStatusError as exc:
             raise GachaClientError(
                 _extract_error_message(exc.response),
-                is_operational=exc.response.status_code >= 500,
+                is_operational=_is_operational_http_status(exc.response.status_code),
             ) from exc
         except httpx.HTTPError as exc:
             raise GachaClientError("Не удалось связаться с гача-сервером.", is_operational=True) from exc
@@ -328,6 +328,10 @@ class HttpGachaClient:
         if not isinstance(payload, dict):
             raise GachaClientError("Гача-сервер вернул неожиданный формат ответа.", is_operational=True)
         return payload
+
+
+def _is_operational_http_status(status_code: int) -> bool:
+    return status_code >= 500 or status_code in {401, 403, 408, 429}
 
 
 def _extract_error_message(response: httpx.Response) -> str:

@@ -155,6 +155,79 @@ async def test_concurrent_matching_errors_send_only_one_alert() -> None:
 
 
 @pytest.mark.asyncio
+async def test_blocked_alert_does_not_delay_user_fallback() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    configure_error_alerts(True, -100123)
+    alert_started = asyncio.Event()
+    release_alert = asyncio.Event()
+    fallback_sent = asyncio.Event()
+
+    async def blocked_alert(**_kwargs):
+        alert_started.set()
+        await release_alert.wait()
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=blocked_alert))
+    event = AsyncMock(spec=Message)
+    event.chat = SimpleNamespace(id=-1001, title="chat")
+    event.from_user = SimpleNamespace(id=777, full_name="Илья")
+    event.text = "/broken"
+
+    async def answer_fallback(*_args, **_kwargs):
+        fallback_sent.set()
+
+    event.answer = AsyncMock(side_effect=answer_fallback)
+
+    async def failing_handler(_event, _data):
+        raise RuntimeError("unexpected failure")
+
+    task = asyncio.create_task(ErrorHandlerMiddleware()(failing_handler, event, {"bot": bot}))
+    try:
+        await alert_started.wait()
+        await asyncio.wait_for(fallback_sent.wait(), timeout=0.2)
+    finally:
+        release_alert.set()
+        await task
+
+    event.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_blocked_alert_for_one_error_does_not_block_another_error() -> None:
+    from selara.presentation.middlewares import error_handler as middleware_module
+
+    middleware_module._recent_alerts.clear()
+    configure_error_alerts(True, -100123)
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def send(**kwargs):
+        if "first error" in kwargs["text"]:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+    event = SimpleNamespace(bot=bot, chat=None, from_user=None, text="/status")
+    first = asyncio.create_task(
+        notify_operational_error(session_factory=None, event=event, exc=ValueError("first error"))
+    )
+    try:
+        await first_started.wait()
+        second = asyncio.create_task(
+            notify_operational_error(session_factory=None, event=event, exc=ValueError("second error"))
+        )
+        await asyncio.wait_for(second_started.wait(), timeout=0.2)
+        await second
+    finally:
+        release_first.set()
+        await first
+
+
+@pytest.mark.asyncio
 async def test_same_exception_text_at_distinct_raise_lines_is_not_deduplicated() -> None:
     from selara.presentation.middlewares import error_handler as middleware_module
 

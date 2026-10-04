@@ -19,7 +19,9 @@ from selara.presentation.middlewares.error_alert_config import configure_error_a
 logger = logging.getLogger(__name__)
 _ALERT_DEDUPE_WINDOW = timedelta(minutes=15)
 _recent_alerts: dict[str, datetime] = {}
+_inflight_alerts: set[str] = set()
 _alert_delivery_lock = asyncio.Lock()
+_pending_alert_tasks: set[asyncio.Task[None]] = set()
 _SECRET_BEARER_PATTERN = re.compile(r"(?i)(authorization\s*:\s*bearer\s+|bearer\s+)([^\s,;]+)")
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
     r"(?i)\b([\w.-]*(?:token|password|api[_-]?key|secret))(\s*[:=]\s*)([^\s,;]+)"
@@ -78,6 +80,14 @@ async def notify_operational_error(
             previous = _recent_alerts.get(fingerprint)
             if previous is not None and now - previous < _ALERT_DEDUPE_WINDOW:
                 return
+            if fingerprint in _inflight_alerts:
+                return
+            _inflight_alerts.add(fingerprint)
+            for key, sent_at in tuple(_recent_alerts.items()):
+                if now - sent_at >= _ALERT_DEDUPE_WINDOW:
+                    _recent_alerts.pop(key, None)
+        delivered = False
+        try:
             try:
                 await target_bot.send_message(chat_id=settings.chat_id, text=alert_text)
             except TelegramMigrateToChat as migration_exc:
@@ -107,10 +117,12 @@ async def notify_operational_error(
                             extra={"old_chat_id": settings.chat_id, "new_chat_id": int(new_chat_id)},
                         )
                 await target_bot.send_message(chat_id=int(new_chat_id), text=alert_text)
-            _recent_alerts[fingerprint] = datetime.now(timezone.utc)
-            for key, sent_at in tuple(_recent_alerts.items()):
-                if now - sent_at >= _ALERT_DEDUPE_WINDOW:
-                    _recent_alerts.pop(key, None)
+            delivered = True
+        finally:
+            async with _alert_delivery_lock:
+                _inflight_alerts.discard(fingerprint)
+                if delivered:
+                    _recent_alerts[fingerprint] = datetime.now(timezone.utc)
     except Exception:
         logger.exception("Failed to send operational error alert")
 
@@ -162,12 +174,17 @@ class ErrorHandlerMiddleware(BaseMiddleware):
             return None
 
     async def _notify_admin(self, *, event: Any, data: dict[str, Any], exc: Exception) -> None:
-        await notify_operational_error(
-            session_factory=self._session_factory,
-            event=event,
-            exc=exc,
-            bot=data.get("bot"),
+        task = asyncio.create_task(
+            notify_operational_error(
+                session_factory=self._session_factory,
+                event=event,
+                exc=exc,
+                bot=data.get("bot"),
+            )
         )
+        _pending_alert_tasks.add(task)
+        task.add_done_callback(_pending_alert_tasks.discard)
+        await asyncio.sleep(0)
 
     async def _send_fallback_error(self, *, event: Any, data: dict[str, Any]) -> None:
         try:

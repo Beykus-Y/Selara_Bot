@@ -3,6 +3,8 @@ from __future__ import annotations
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.infrastructure.db.models import UserFeatureRequestModel, UserModel
@@ -49,21 +51,26 @@ async def feedback_command(message: Message, command: CommandObject, db_session:
     title = f"{category}: {first_line}"[:160]
 
     user = message.from_user
-    user_row = await db_session.get(UserModel, user.id)
-    if user_row is None:
-        db_session.add(
-            UserModel(
-                telegram_user_id=user.id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name,
-                is_bot=bool(user.is_bot),
-            )
+    await db_session.execute(
+        pg_insert(UserModel)
+        .values(
+            telegram_user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_bot=bool(user.is_bot),
         )
-    else:
-        user_row.username = user.username
-        user_row.first_name = user.first_name
-        user_row.last_name = user.last_name
+        .on_conflict_do_update(
+            index_elements=[UserModel.telegram_user_id],
+            set_={
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "is_bot": bool(user.is_bot),
+                "updated_at": func.now(),
+            },
+        )
+    )
     request_row = UserFeatureRequestModel(
         user_id=user.id,
         title=title,

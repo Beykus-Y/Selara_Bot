@@ -84,7 +84,16 @@ async def test_get_banner_cards_sends_if_none_match_and_handles_304(monkeypatch:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "status", "expected_operational"),
-    [("connect", None, True), ("http", 500, True), ("json", 200, True), ("http", 400, False)],
+    [
+        ("connect", None, True),
+        ("http", 500, True),
+        ("json", 200, True),
+        ("http", 401, True),
+        ("http", 403, True),
+        ("http", 408, True),
+        ("http", 429, True),
+        ("http", 400, False),
+    ],
 )
 async def test_gacha_client_classifies_service_failures_separately_from_business_4xx(
     failure: str, status: int | None, expected_operational: bool, monkeypatch: pytest.MonkeyPatch
@@ -104,5 +113,27 @@ async def test_gacha_client_classifies_service_failures_separately_from_business
 
     with pytest.raises(GachaClientError) as captured:
         await client.get_profile(user_id=1, banner="genshin")
+
+    assert captured.value.is_operational is expected_operational
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_operational"),
+    [(401, True), (403, True), (408, True), (429, True), (500, True), (400, False)],
+)
+async def test_banner_cards_classifies_auth_and_transient_http_failures(
+    status: int, expected_operational: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = httpx.Request("GET", "http://gacha.local/v1/gacha/banners/genshin/cards")
+    response = httpx.Response(status, json={"detail": "request failed"}, request=request)
+    monkeypatch.setattr(
+        "selara.infrastructure.http.gacha_client.httpx.AsyncClient",
+        _FakeAsyncClient(response=response),
+    )
+    client = HttpGachaClient(base_url="http://gacha.local", timeout_seconds=10.0)
+
+    with pytest.raises(GachaClientError) as captured:
+        await client.get_banner_cards(banner="genshin")
 
     assert captured.value.is_operational is expected_operational
