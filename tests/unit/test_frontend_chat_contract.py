@@ -9,3 +9,20 @@ def test_find_me_pagination_uses_server_page_and_new_click_repeats_request() -> 
     assert "setFindMeRequest((current) => current + 1)" in page
     assert "setPage(Math.max(1, leaderboardQuery.data.page - 1))" in page
     assert "setPage(leaderboardQuery.data.page + 1)" in page
+
+
+def test_miniapp_broadcast_api_displays_backend_error_message_and_only_offers_supported_photo_types() -> None:
+    root = Path(__file__).parents[2] / "frontend" / "src" / "pages" / "admin"
+    api = (root / "api" / "admin-broadcast.ts").read_text(encoding="utf-8")
+    page = (root / "ui" / "AdminBroadcastPage.tsx").read_text(encoding="utf-8")
+
+    assert "responseMessage?.message ?? responseMessage?.detail" in api
+    assert 'accept="image/jpeg,image/png"' in page
+    assert "image/webp" not in page
+
+
+def test_miniapp_admin_audience_shows_removed_groups_separately() -> None:
+    root = Path(__file__).parents[2] / "frontend" / "src" / "pages" / "admin" / "ui"
+    dashboard = (root / "AdminDashboardPage.tsx").read_text(encoding="utf-8")
+
+    assert "Бот уже не состоит:" in dashboard

@@ -1,6 +1,7 @@
 import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 
 import { RouteErrorBoundary } from '@/app/router/RouteErrorBoundary'
+import { miniAppAdminRoute } from '@/app/router/miniapp-admin-routes'
 import { AuditPage } from '@/pages/audit/page'
 import { ChatPage } from '@/pages/chat/page'
 import { EconomyPage } from '@/pages/economy/page'
@@ -30,6 +31,7 @@ const router = createBrowserRouter(
         { path: 'games', element: <GamesPage /> },
         { path: 'gacha', element: <GachaCollectionPage /> },
         { path: 'more', element: <MorePage /> },
+        miniAppAdminRoute,
       ],
     },
     {

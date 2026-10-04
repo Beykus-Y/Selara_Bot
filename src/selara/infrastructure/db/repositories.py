@@ -1291,6 +1291,13 @@ class SqlAlchemyActivityRepository:
                 reason="member_left_chat",
             )
 
+    async def set_bot_chat_membership(self, *, chat: ChatSnapshot, is_member: bool) -> None:
+        await self._upsert_chat(chat)
+        row = await self._session.get(ChatModel, chat.telegram_chat_id)
+        if row is not None:
+            row.is_bot_member = bool(is_member)
+            await self._session.flush()
+
     async def cleanup_phantom_relationships(self, *, event_at: datetime) -> RelationshipCleanupSummary:
         inactive_members: set[tuple[int, int]] = set()
 
@@ -2423,6 +2430,7 @@ class SqlAlchemyActivityRepository:
             .where(
                 ChatSettingsModel.interesting_facts_enabled.is_(True),
                 ChatModel.type.in_(("group", "supergroup")),
+                ChatModel.is_bot_member.is_(True),
             )
             .order_by(ChatModel.telegram_chat_id.asc())
         )
@@ -6236,16 +6244,20 @@ class SqlAlchemyActivityRepository:
         self,
         *,
         body: str,
+        idempotency_key: str | None = None,
         rendered_body: str | None = None,
         reaction_options: Sequence[dict[str, str]] = (),
         media_type: str | None = None,
         media_file_id: str | None = None,
         media_file_unique_id: str | None = None,
+        request_fingerprint: str | None = None,
         active_since_days: int,
         created_by_user_id: int | None,
     ) -> AdminBroadcast:
         row = AdminBroadcastModel(
             body=body,
+            idempotency_key=(idempotency_key or "").strip() or None,
+            request_fingerprint=request_fingerprint,
             rendered_body=rendered_body or body,
             reaction_options_json=[dict(option) for option in reaction_options] or None,
             media_type=media_type,

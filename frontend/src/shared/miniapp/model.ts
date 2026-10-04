@@ -84,11 +84,17 @@ export type MiniAppGamesPageData = {
 
 export type MiniAppSessionData = {
   viewer: AppViewer
+  permissions: MiniAppPermissions
   miniapp_url: string
+}
+
+export type MiniAppPermissions = {
+  admin: boolean
 }
 
 export type MiniAppContextValue = {
   viewer: AppViewer
+  permissions: MiniAppPermissions
   miniappUrl: string
   logout: () => Promise<void>
   reopen: () => void

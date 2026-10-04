@@ -1,11 +1,12 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 
 export function MorePage() {
-  const { viewer, miniappUrl, logout } = useMiniApp()
+  const { viewer, miniappUrl, logout, permissions } = useMiniApp()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
@@ -61,6 +62,13 @@ export function MorePage() {
       {/* Navigation section */}
       <h2 className="sec">Навигация</h2>
       <div className="card link-list" style={{ padding: '4px 14px' }}>
+        {permissions.admin && (
+          <Link className="link" to={routes.admin}>
+            <div className="ico">⌘</div>
+            <b>Admin</b>
+            <span>›</span>
+          </Link>
+        )}
         <a className="link" href={routes.desktop} target="_blank" rel="noreferrer">
           <div className="ico">🖥️</div>
           <b>Полная панель (ПК)</b>

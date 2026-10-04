@@ -5,11 +5,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from selara.application.achievements import get_achievement_catalog_from_settings
+from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_stopped, refresh_bot_polling_heartbeat
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
+from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.infrastructure.llm import LlmClient, LlmConfig
@@ -126,6 +128,12 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
         logger.exception("Gacha animation warmup task crashed")
 
 
+async def _refresh_bot_polling_heartbeat() -> None:
+    while True:
+        refresh_bot_polling_heartbeat()
+        await asyncio.sleep(10)
+
+
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
     achievement_catalog = get_achievement_catalog_from_settings(settings)
@@ -169,6 +177,10 @@ async def _run_bot(settings, session_factory) -> None:
     gacha_warmup_task = asyncio.create_task(
         _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
     )
+    chat_member_snapshot_task = asyncio.create_task(
+        run_chat_member_count_snapshot_scheduler(bot=bot, session_factory=session_factory),
+        name="chat-member-count-snapshots",
+    )
     daily_summary_task = None
     if llm_client is not None:
         daily_summary_task = asyncio.create_task(
@@ -193,9 +205,14 @@ async def _run_bot(settings, session_factory) -> None:
     if daily_summary_stt_queue is not None:
         polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 
+    heartbeat_task = asyncio.create_task(_refresh_bot_polling_heartbeat(), name="bot-polling-heartbeat")
+    mark_bot_polling_started()
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)
     finally:
+        mark_bot_polling_stopped()
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
         interesting_facts_task.cancel()
         await asyncio.gather(interesting_facts_task, return_exceptions=True)
         if backup_task is not None:
@@ -203,6 +220,8 @@ async def _run_bot(settings, session_factory) -> None:
             await asyncio.gather(backup_task, return_exceptions=True)
         gacha_warmup_task.cancel()
         await asyncio.gather(gacha_warmup_task, return_exceptions=True)
+        chat_member_snapshot_task.cancel()
+        await asyncio.gather(chat_member_snapshot_task, return_exceptions=True)
         if daily_summary_task is not None:
             daily_summary_task.cancel()
             await asyncio.gather(daily_summary_task, return_exceptions=True)

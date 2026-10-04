@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import time
+from urllib.error import URLError
+from urllib.request import urlopen
+from pathlib import Path
+
+from playwright.async_api import async_playwright
+
+
+ROOT = Path(__file__).resolve().parents[1]
+FRONTEND = ROOT / "frontend"
+PREVIEW_URL = "http://127.0.0.1:4173"
+
+
+def _start_preview() -> subprocess.Popen:
+    process = subprocess.Popen(
+        ["npm", "run", "preview", "--", "--host", "127.0.0.1", "--port", "4173", "--strictPort"],
+        cwd=FRONTEND,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(100):
+        if process.poll() is not None:
+            raise RuntimeError("Vite preview exited before it became ready.")
+        try:
+            with urlopen(PREVIEW_URL, timeout=1):
+                return process
+        except URLError:
+            time.sleep(0.1)
+    process.terminate()
+    raise TimeoutError("Vite preview did not start within 10 seconds.")
+
+
+async def _run_browser_regression() -> None:
+    preview_process = _start_preview()
+    preview_requests: list[str] = []
+    send_requests: list[str] = []
+    api_calls: list[str] = []
+    progress_requests = 0
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context(viewport={"width": 390, "height": 844})
+            await context.add_init_script(
+                """window.Telegram = {WebApp: {
+                  initData: 'browser-test-init-data', colorScheme: 'dark', themeParams: {},
+                  ready() {}, expand() {}, onEvent() {}, offEvent() {},
+                  BackButton: {show() {}, hide() {}, onClick() {}, offClick() {}}
+                }};"""
+            )
+            page = await context.new_page()
+            browser_errors: list[str] = []
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+
+            async def stub_telegram_sdk(route):
+                await route.fulfill(status=200, content_type="application/javascript", body="")
+
+            await page.route("https://telegram.org/**", stub_telegram_sdk)
+
+            async def handle_api(route):
+                nonlocal progress_requests
+                request = route.request
+                api_calls.append(f"{request.method} {request.url}")
+                path = request.url.split("?", 1)[0]
+                if path.endswith("/landing/context"):
+                    payload = {"ok": True, "page": {"hero_ctas": []}}
+                elif path.endswith("/miniapp/session"):
+                    payload = {
+                        "ok": True,
+                        "viewer": {
+                            "telegram_user_id": 77,
+                            "display_name": "Admin",
+                            "username": "owner",
+                            "first_name": "Admin",
+                            "last_name": "",
+                            "initials": "A",
+                            "avatar_url": "",
+                        },
+                        "permissions": {"admin": True},
+                        "miniapp_url": "/",
+                    }
+                elif path.endswith("/miniapp/admin/broadcasts"):
+                    payload = {"ok": True, "items": [], "next_cursor": None}
+                elif path.endswith("/miniapp/admin/broadcast/preview"):
+                    preview_requests.append(request.post_data or "")
+                    payload = {
+                        "ok": True,
+                        "body": "Test announcement",
+                        "rendered_text": "Test announcement",
+                        "reaction_options": [],
+                        "active_since_days": 3,
+                        "target_count": 1,
+                        "targets": [{"chat_id": -1001, "title": "Test group", "last_activity_at": None}],
+                        "targets_truncated": False,
+                        "media": None,
+                        "preview_token": "browser-preview-token",
+                    }
+                elif path.endswith("/miniapp/admin/broadcast"):
+                    send_requests.append(request.post_data or "")
+                    if len(send_requests) == 1:
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"ok": False, "message": "Response lost after acceptance."}),
+                        )
+                        return
+                    payload = {"ok": True, "broadcast_id": 2, "status": "sending", "target_count": 1}
+                elif path.endswith("/miniapp/admin/broadcast/2"):
+                    progress_requests += 1
+                    if progress_requests <= 2:
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"ok": False, "message": "Temporary failure."}),
+                        )
+                        return
+                    payload = {
+                        "ok": True,
+                        "broadcast_id": 2,
+                        "status": "completed",
+                        "target_count": 1,
+                        "sent_count": 1,
+                        "failed_count": 0,
+                        "skipped_count": 0,
+                        "pending_count": 0,
+                        "duration_seconds": 1,
+                    }
+                else:
+                    await route.fulfill(
+                        status=404,
+                        content_type="application/json",
+                        body=json.dumps({"ok": False, "message": "Unexpected API call."}),
+                    )
+                    return
+                await route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+            await page.route("**/api/**", handle_api)
+            await page.goto(f"{PREVIEW_URL}/admin/broadcast", wait_until="domcontentloaded")
+            try:
+                await page.get_by_label("Текст Telegram-сообщения").fill("Test announcement", timeout=8000)
+            except Exception:
+                print(f"Browser URL: {page.url}")
+                print(f"Browser body: {await page.locator('body').inner_text()}")
+                print(f"Mini App API calls: {api_calls}")
+                print(f"Browser errors: {browser_errors}")
+                raise
+            await page.get_by_role("button", name="Фото").click()
+            await page.locator('input[type="file"]').set_input_files({
+                "name": "test.png",
+                "mimeType": "image/png",
+                "buffer": bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"),
+            })
+            assert await page.locator('input[type="file"]').evaluate("element => element.files.length") == 1
+            await page.get_by_role("button", name="Текст", exact=True).click()
+            await page.get_by_role("button", name="Далее: аудитория").click()
+            await page.get_by_role("button", name="Выбрать группы").click()
+            await page.get_by_role("button", name="Загрузить список групп").click()
+            checkbox = page.locator(".admin-broadcast-targets input[type=checkbox]")
+            await checkbox.wait_for(state="visible")
+            await checkbox.check()
+            await checkbox.uncheck()
+
+            continue_button = page.get_by_role("button", name="Выберите хотя бы одну группу")
+            assert await continue_button.is_disabled()
+            assert len(preview_requests) == 1
+            assert send_requests == []
+            await checkbox.check()
+            await page.get_by_role("button", name="Показать preview").click()
+            await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
+            assert len(preview_requests) == 2
+            final_preview = json.loads(preview_requests[-1])
+            assert final_preview["media_mode"] == "text" and "photo" not in final_preview
+            await page.get_by_role("button", name="Перейти к подтверждению").click()
+            await page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.").check()
+            await page.get_by_role("button", name="Подтвердить отправку").click()
+            await page.get_by_text("Response lost after acceptance.").wait_for()
+            assert await page.get_by_role("button", name="Использовать новый ключ для изменённой рассылки").count() == 0
+            await page.get_by_role("button", name="Назад к preview").click()
+            await page.get_by_role("button", name="Изменить содержимое").click()
+            await page.get_by_label("Текст Telegram-сообщения").fill("Updated test announcement")
+            await page.get_by_role("button", name="Далее: аудитория").click()
+            await page.get_by_role("button", name="Показать preview").click()
+            await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
+            await page.get_by_role("button", name="Перейти к подтверждению").click()
+            new_key_recovery = page.get_by_role("button", name="Использовать новый ключ для изменённой рассылки")
+            await new_key_recovery.wait_for()
+            await new_key_recovery.click()
+            confirmation = page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.")
+            assert not await confirmation.is_checked()
+            await confirmation.check()
+            await page.get_by_role("button", name="Подтвердить отправку").click()
+            await page.get_by_role("button", name="Повторить").wait_for()
+            assert len(send_requests) == 2
+            first_send, second_send = (json.loads(request) for request in send_requests)
+            assert first_send["idempotency_key"] != second_send["idempotency_key"]
+            assert second_send["body"] == "Updated test announcement"
+            await page.get_by_role("button", name="Повторить").click()
+            await page.get_by_text("Готово", exact=True).wait_for()
+            assert progress_requests >= 3
+            assert await page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+
+            await context.close()
+            await browser.close()
+    finally:
+        preview_process.terminate()
+        preview_process.wait(timeout=10)
+
+
+if __name__ == "__main__":
+    asyncio.run(_run_browser_regression())

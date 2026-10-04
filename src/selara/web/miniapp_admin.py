@@ -1,0 +1,649 @@
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from starlette.datastructures import UploadFile
+from redis.asyncio import Redis
+from sqlalchemy import case, distinct, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from selara.core.config import Settings
+from selara.core.logging import get_admin_log_buffer
+from selara.domain.entities import UserSnapshot
+from selara.infrastructure.db.models import (
+    AdminBroadcastDeliveryModel,
+    AdminBroadcastModel,
+    ChatMemberCountSnapshotModel,
+    ChatMetricsModel,
+    ChatModel,
+    OperationalAlertModel,
+    UserChatMessageEventModel,
+    UserFeatureRequestModel,
+    UserModel,
+)
+from selara.infrastructure.security.redaction import redact_sensitive_text
+
+UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
+BroadcastPreview = Callable[[AsyncSession, dict[str, Any]], Awaitable[dict[str, Any]]]
+BroadcastStart = Callable[[int, dict[str, Any]], Awaitable[dict[str, Any]]]
+BroadcastStatus = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
+TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
+_PERIODS = {1, 7, 30, 90}
+_GROUP_TYPES = ("group", "supergroup")
+_health_last_success: dict[str, str] = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+_PROCESS_STARTED_AT = _utc_now()
+
+
+def _percent_change(current: int, previous: int) -> float | None:
+    if previous <= 0:
+        return None
+    return round(((current - previous) / previous) * 100, 1)
+
+
+def build_miniapp_admin_router(
+    *,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    load_user: UserLoader,
+    broadcast_preview_handler: BroadcastPreview,
+    broadcast_start_handler: BroadcastStart,
+    broadcast_status_handler: BroadcastStatus,
+    telegram_bot_probe: TelegramBotProbe,
+) -> APIRouter:
+    router = APIRouter(prefix="/api/miniapp/admin", tags=["miniapp-admin"])
+
+    async def require_admin(request: Request):
+        async with session_factory() as session:
+            user = await load_user(session, request)
+            if user is None:
+                raise HTTPException(status_code=401, detail="Mini App сессия истекла.")
+            if settings.admin_user_id is None or user.telegram_user_id != settings.admin_user_id:
+                raise HTTPException(status_code=403, detail="Недостаточно прав.")
+            yield session
+            await session.commit()
+
+    AdminSession = Depends(require_admin)
+
+    async def _read_broadcast_payload(request: Request) -> dict[str, Any]:
+        if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            form = await request.form(max_files=1, max_fields=12, max_part_size=10 * 1024 * 1024)
+            payload: dict[str, Any] = {}
+            for key, value in form.multi_items():
+                if isinstance(value, UploadFile):
+                    if key == "photo" and value.filename:
+                        payload["photo_content"] = await value.read()
+                        payload["photo_filename"] = value.filename
+                        payload["photo_content_type"] = value.content_type or ""
+                else:
+                    payload[str(key)] = str(value)
+            raw_ids = payload.get("chat_ids")
+            if isinstance(raw_ids, str):
+                payload["chat_ids"] = [item.strip() for item in raw_ids.split(",") if item.strip()]
+            if isinstance(payload.get("confirm"), str):
+                payload["confirm"] = payload["confirm"].strip().lower() == "true"
+            return payload
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Ожидался JSON или multipart запрос.") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Некорректные данные рассылки.")
+        return payload
+
+    def _page_limit(limit: int) -> int:
+        return max(1, min(limit, 50))
+
+    @router.get("/feedback")
+    async def feedback(
+        status: str = Query(default="open"),
+        search: str = Query(default="", max_length=120),
+        start_at: datetime | None = Query(default=None),
+        end_at: datetime | None = Query(default=None),
+        before_id: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=20, ge=1, le=50),
+        session: AsyncSession = AdminSession,
+    ):
+        if status not in {"all", "open", "resolved"}:
+            raise HTTPException(status_code=422, detail="Допустимые статусы: all, open, resolved.")
+        stmt = (
+            select(UserFeatureRequestModel, UserModel)
+            .join(UserModel, UserModel.telegram_user_id == UserFeatureRequestModel.user_id)
+            .order_by(UserFeatureRequestModel.id.desc())
+            .limit(_page_limit(limit) + 1)
+        )
+        if status != "all":
+            stmt = stmt.where(UserFeatureRequestModel.status == ("done" if status == "resolved" else "open"))
+        if before_id is not None:
+            stmt = stmt.where(UserFeatureRequestModel.id < before_id)
+        query = search.strip()
+        if query:
+            if query.isdigit():
+                stmt = stmt.where(
+                    (UserFeatureRequestModel.title.ilike(f"%{query}%"))
+                    | (UserFeatureRequestModel.details.ilike(f"%{query}%"))
+                    | (UserModel.username.ilike(f"%{query}%"))
+                    | (UserFeatureRequestModel.user_id == int(query))
+                )
+            else:
+                stmt = stmt.where(
+                    (UserFeatureRequestModel.title.ilike(f"%{query}%"))
+                    | (UserFeatureRequestModel.details.ilike(f"%{query}%"))
+                    | (UserModel.username.ilike(f"%{query}%"))
+                )
+        if start_at is not None:
+            stmt = stmt.where(UserFeatureRequestModel.created_at >= (start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)))
+        if end_at is not None:
+            stmt = stmt.where(UserFeatureRequestModel.created_at <= (end_at if end_at.tzinfo else end_at.replace(tzinfo=timezone.utc)))
+        rows = (await session.execute(stmt)).all()
+        has_more = len(rows) > _page_limit(limit)
+        rows = rows[:_page_limit(limit)]
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": row.id,
+                    "title": row.title,
+                    "preview": row.details[:240],
+                    "status": "resolved" if row.status == "done" else "open",
+                    "category": "suggestion",
+                    "user": {
+                        "id": row.user_id,
+                        "username": user.username,
+                        "first_name": user.first_name,
+                    },
+                    "created_at": row.created_at.isoformat(),
+                    "updated_at": row.updated_at.isoformat(),
+                }
+                for row, user in rows
+            ],
+            "next_cursor": rows[-1][0].id if has_more and rows else None,
+        }
+
+    @router.get("/feedback/{request_id}")
+    async def feedback_detail(request_id: int, session: AsyncSession = AdminSession):
+        row = await session.get(UserFeatureRequestModel, request_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Обращение не найдено.")
+        user = await session.get(UserModel, row.user_id)
+        return {
+            "ok": True,
+            "id": row.id,
+            "title": row.title,
+            "details": row.details,
+            "status": "resolved" if row.status == "done" else "open",
+            "user": {
+                "id": row.user_id,
+                "username": user.username if user else None,
+                "first_name": user.first_name if user else None,
+            },
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+        }
+
+    async def _set_feedback_status(request_id: int, status: str, session: AsyncSession):
+        row = await session.get(UserFeatureRequestModel, request_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Обращение не найдено.")
+        row.status = "done" if status == "resolved" else "open"
+        row.done_at = _utc_now() if status == "resolved" else None
+        row.updated_at = _utc_now()
+        await session.commit()
+        return {"ok": True, "id": row.id, "status": status}
+
+    @router.post("/feedback/{request_id}/resolve")
+    async def resolve_feedback(request_id: int, session: AsyncSession = AdminSession):
+        return await _set_feedback_status(request_id, "resolved", session)
+
+    @router.post("/feedback/{request_id}/reopen")
+    async def reopen_feedback(request_id: int, session: AsyncSession = AdminSession):
+        return await _set_feedback_status(request_id, "open", session)
+
+    @router.get("/alerts")
+    async def alerts(
+        severity: str = Query(default="all"),
+        source: str = Query(default="", max_length=160),
+        search: str = Query(default="", max_length=120),
+        start_at: datetime | None = Query(default=None),
+        end_at: datetime | None = Query(default=None),
+        before_id: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=20, ge=1, le=50),
+        session: AsyncSession = AdminSession,
+    ):
+        stmt = select(OperationalAlertModel).order_by(OperationalAlertModel.id.desc()).limit(_page_limit(limit) + 1)
+        if severity != "all":
+            if severity not in {"error", "warning", "info"}:
+                raise HTTPException(status_code=422, detail="Неизвестный severity.")
+            stmt = stmt.where(OperationalAlertModel.severity == severity)
+        if source.strip():
+            stmt = stmt.where(OperationalAlertModel.source.ilike(f"%{source.strip()}%"))
+        if search.strip():
+            needle = f"%{search.strip()}%"
+            stmt = stmt.where(
+                (OperationalAlertModel.message.ilike(needle))
+                | (OperationalAlertModel.fingerprint.ilike(needle))
+                | (OperationalAlertModel.source.ilike(needle))
+            )
+        if before_id is not None:
+            stmt = stmt.where(OperationalAlertModel.id < before_id)
+        if start_at is not None:
+            stmt = stmt.where(OperationalAlertModel.created_at >= (start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)))
+        if end_at is not None:
+            stmt = stmt.where(OperationalAlertModel.created_at <= (end_at if end_at.tzinfo else end_at.replace(tzinfo=timezone.utc)))
+        records = list((await session.execute(stmt)).scalars())
+        has_more = len(records) > _page_limit(limit)
+        records = records[:_page_limit(limit)]
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": row.id,
+                    "severity": row.severity,
+                    "source": row.source,
+                    "fingerprint": row.fingerprint,
+                    "message": redact_sensitive_text(row.message)[:500],
+                    "context": row.context_json,
+                    "created_at": row.created_at.isoformat(),
+                }
+                for row in records
+            ],
+            "next_cursor": records[-1].id if has_more and records else None,
+        }
+
+    @router.get("/alerts/{alert_id}")
+    async def alert_detail(alert_id: int, session: AsyncSession = AdminSession):
+        row = await session.get(OperationalAlertModel, alert_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Событие не найдено.")
+        return {
+            "ok": True,
+            "id": row.id,
+            "severity": row.severity,
+            "source": row.source,
+            "fingerprint": row.fingerprint,
+            "message": redact_sensitive_text(row.message)[:1000],
+            "context": row.context_json,
+            "traceback": redact_sensitive_text(row.sanitized_traceback or ""),
+            "created_at": row.created_at.isoformat(),
+        }
+
+    @router.get("/logs")
+    async def logs(
+        level: str = Query(default="all"),
+        source: str = Query(default="", max_length=160),
+        search: str = Query(default="", max_length=120),
+        start_at: datetime | None = Query(default=None),
+        end_at: datetime | None = Query(default=None),
+        before_id: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=30, ge=1, le=50),
+        session: AsyncSession = AdminSession,
+    ):
+        # Read only a small in-process ring buffer, never the entire service stdout
+        # or journald on demand. IDs are monotonic within this process and provide
+        # a stable cursor for the bounded retained window.
+        if level not in {"all", "debug", "info", "warning", "error", "critical"}:
+            raise HTTPException(status_code=422, detail="Неизвестный уровень журнала.")
+        records = get_admin_log_buffer().list_records()
+        if level != "all":
+            records = [row for row in records if row["level"] == level]
+        if source.strip():
+            needle_source = source.strip().casefold()
+            records = [row for row in records if needle_source in row["source"].casefold()]
+        if search.strip():
+            needle = search.strip().casefold()
+            records = [row for row in records if needle in row["message"].casefold()]
+        if before_id is not None:
+            records = [row for row in records if row["id"] < before_id]
+        if start_at is not None:
+            start = start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)
+            records = [row for row in records if datetime.fromisoformat(row["created_at"]) >= start]
+        if end_at is not None:
+            end = end_at if end_at.tzinfo else end_at.replace(tzinfo=timezone.utc)
+            records = [row for row in records if datetime.fromisoformat(row["created_at"]) <= end]
+        records.sort(key=lambda row: row["id"], reverse=True)
+        records = records[: _page_limit(limit) + 1]
+        has_more = len(records) > _page_limit(limit)
+        records = records[:_page_limit(limit)]
+        return {
+            "ok": True,
+            "items": records,
+            "next_cursor": records[-1]["id"] if has_more and records else None,
+        }
+
+    @router.post("/broadcast/preview")
+    async def broadcast_preview_route(request: Request, session: AsyncSession = AdminSession):
+        payload = await _read_broadcast_payload(request)
+        return {"ok": True, **(await broadcast_preview_handler(session, payload))}
+
+    @router.post("/broadcast")
+    async def broadcast_start_route(request: Request, session: AsyncSession = AdminSession):
+        payload = await _read_broadcast_payload(request)
+        if payload.get("confirm") is not True:
+            raise HTTPException(status_code=422, detail="Требуется явное подтверждение отправки.")
+        user = await load_user(session, request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Mini App сессия истекла.")
+        return {"ok": True, **(await broadcast_start_handler(user.telegram_user_id, payload))}
+
+    @router.get("/broadcast/{broadcast_id}")
+    async def broadcast_status_route(broadcast_id: int, session: AsyncSession = AdminSession):
+        return {"ok": True, **(await broadcast_status_handler(session, broadcast_id))}
+
+    @router.get("/broadcasts")
+    async def broadcast_history(
+        before_id: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=20, ge=1, le=50),
+        session: AsyncSession = AdminSession,
+    ):
+        stats = (
+            select(
+                AdminBroadcastDeliveryModel.broadcast_id.label("broadcast_id"),
+                func.count(AdminBroadcastDeliveryModel.id).label("target_count"),
+                func.sum(case((AdminBroadcastDeliveryModel.status == "sent", 1), else_=0)).label("sent_count"),
+                func.sum(case((AdminBroadcastDeliveryModel.status == "failed", 1), else_=0)).label("failed_count"),
+                func.sum(case((AdminBroadcastDeliveryModel.status == "pending", 1), else_=0)).label("pending_count"),
+            )
+            .group_by(AdminBroadcastDeliveryModel.broadcast_id)
+            .subquery()
+        )
+        stmt = (
+            select(AdminBroadcastModel, stats.c.target_count, stats.c.sent_count, stats.c.failed_count, stats.c.pending_count)
+            .outerjoin(stats, stats.c.broadcast_id == AdminBroadcastModel.id)
+            .order_by(AdminBroadcastModel.id.desc())
+            .limit(_page_limit(limit) + 1)
+        )
+        if before_id is not None:
+            stmt = stmt.where(AdminBroadcastModel.id < before_id)
+        rows = (await session.execute(stmt)).all()
+        has_more = len(rows) > _page_limit(limit)
+        rows = rows[:_page_limit(limit)]
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": row.id,
+                    "body": row.rendered_body or row.body,
+                    "created_at": row.created_at.isoformat(),
+                    "target_count": int(target_count or 0),
+                    "sent_count": int(sent_count or 0),
+                    "failed_count": int(failed_count or 0),
+                    "pending_count": int(pending_count or 0),
+                    "media_type": row.media_type,
+                }
+                for row, target_count, sent_count, failed_count, pending_count in rows
+            ],
+            "next_cursor": rows[-1][0].id if has_more and rows else None,
+        }
+
+    @router.get("/audience")
+    async def audience(period_days: int = Query(default=30), session: AsyncSession = AdminSession):
+        if period_days not in _PERIODS:
+            raise HTTPException(status_code=422, detail="Допустимые периоды: 1, 7, 30 или 90 дней.")
+
+        now = _utc_now()
+        period_start = now - timedelta(days=period_days)
+        previous_start = period_start - timedelta(days=period_days)
+        user_id = UserChatMessageEventModel.user_id
+        is_group = ChatModel.type.in_(_GROUP_TYPES)
+        is_human = UserModel.is_bot.is_(False)
+        is_private = ChatModel.type == "private"
+        inside_current = UserChatMessageEventModel.sent_at >= period_start
+        inside_previous = (UserChatMessageEventModel.sent_at >= previous_start) & (
+            UserChatMessageEventModel.sent_at < period_start
+        )
+
+        activity_stmt = (
+            select(
+                func.count(distinct(case((inside_current & is_private, user_id)))).label("bot_current"),
+                func.count(distinct(case((inside_previous & is_private, user_id)))).label("bot_previous"),
+                func.count(distinct(case((inside_current & is_group, user_id)))).label("group_current"),
+                func.count(distinct(case((inside_previous & is_group, user_id)))).label("group_previous"),
+            )
+            .select_from(UserChatMessageEventModel)
+            .join(ChatModel, ChatModel.telegram_chat_id == UserChatMessageEventModel.chat_id)
+            .join(UserModel, UserModel.telegram_user_id == user_id)
+            .where(UserChatMessageEventModel.sent_at >= previous_start, is_human)
+        )
+        activity = (await session.execute(activity_stmt)).one()
+
+        known_bot_users_stmt = (
+            select(func.count(distinct(UserModel.telegram_user_id)))
+            .select_from(UserModel)
+            .join(ChatModel, ChatModel.telegram_chat_id == UserModel.telegram_user_id)
+            .where(ChatModel.type == "private", is_human)
+        )
+        known_bot_users = int((await session.execute(known_bot_users_stmt)).scalar_one() or 0)
+
+        known_group_members_stmt = (
+            select(func.coalesce(func.sum(ChatMetricsModel.active_members_count), 0))
+            .select_from(ChatMetricsModel)
+            .join(ChatModel, ChatModel.telegram_chat_id == ChatMetricsModel.chat_id)
+            .where(ChatModel.type.in_(_GROUP_TYPES), ChatModel.is_bot_member.is_(True))
+        )
+        known_group_members = int((await session.execute(known_group_members_stmt)).scalar_one() or 0)
+
+        group_rows_stmt = (
+            select(
+                ChatMemberCountSnapshotModel.member_count,
+                ChatMemberCountSnapshotModel.last_success_at,
+            )
+            .select_from(ChatModel)
+            .outerjoin(
+                ChatMemberCountSnapshotModel,
+                ChatMemberCountSnapshotModel.chat_id == ChatModel.telegram_chat_id,
+            )
+            .where(ChatModel.type.in_(_GROUP_TYPES), ChatModel.is_bot_member.is_(True))
+        )
+        group_rows = (await session.execute(group_rows_stmt)).all()
+        snapshot_cutoff = now - timedelta(hours=24)
+        fresh_counts = [
+            int(row.member_count)
+            for row in group_rows
+            if row.member_count is not None
+            and row.last_success_at is not None
+            and row.last_success_at.replace(tzinfo=timezone.utc) >= snapshot_cutoff
+        ]
+        group_count = len(group_rows)
+        inaccessible_groups = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ChatModel)
+                    .where(ChatModel.type.in_(_GROUP_TYPES), ChatModel.is_bot_member.is_(False))
+                )
+            ).scalar_one()
+            or 0
+        )
+        checked_groups = len(fresh_counts)
+        if group_count == 0 or checked_groups == group_count:
+            member_total_status = "available"
+            member_total = sum(fresh_counts)
+        elif checked_groups:
+            member_total_status = "partial"
+            member_total = None
+        else:
+            member_total_status = "unavailable"
+            member_total = None
+
+        bot_current = int(activity.bot_current or 0)
+        bot_previous = int(activity.bot_previous or 0)
+        group_current = int(activity.group_current or 0)
+        group_previous = int(activity.group_previous or 0)
+        return {
+            "ok": True,
+            "period_days": period_days,
+            "generated_at": now.isoformat(),
+            "metrics": {
+                "active_bot_users": {
+                    "value": bot_current,
+                    "change_percent": _percent_change(bot_current, bot_previous),
+                },
+                "total_bot_users": {"value": known_bot_users},
+                "active_group_users": {
+                    "value": group_current,
+                    "change_percent": _percent_change(group_current, group_previous),
+                },
+                "total_group_members": {
+                    "value": member_total,
+                    "status": member_total_status,
+                    "checked_groups": checked_groups,
+                    "total_groups": group_count,
+                    "inaccessible_groups": inaccessible_groups,
+                    "known_active_members": known_group_members,
+                    "note": (
+                        "Показана сумма последних успешных Telegram member_count."
+                        if member_total_status == "available"
+                        else "Точный итог недоступен: часть текущих групп ещё не проверена или snapshot устарел. Число известных Selara участников не равно полной аудитории групп."
+                    ),
+                },
+            },
+        }
+
+    @router.get("/summary")
+    async def operational_summary(session: AsyncSession = AdminSession):
+        since = _utc_now() - timedelta(hours=24)
+        errors_count = int(
+            (await session.execute(
+                select(func.count()).select_from(OperationalAlertModel).where(OperationalAlertModel.created_at >= since)
+            )).scalar_one()
+            or 0
+        )
+        new_feedback_count = int(
+            (await session.execute(
+                select(func.count()).select_from(UserFeatureRequestModel).where(UserFeatureRequestModel.created_at >= since)
+            )).scalar_one()
+            or 0
+        )
+        open_feedback_count = int(
+            (await session.execute(
+                select(func.count()).select_from(UserFeatureRequestModel).where(UserFeatureRequestModel.status == "open")
+            )).scalar_one()
+            or 0
+        )
+        recent_alerts = list(
+            (
+                await session.execute(
+                    select(OperationalAlertModel)
+                    .order_by(OperationalAlertModel.id.desc())
+                    .limit(3)
+                )
+            ).scalars()
+        )
+        recent_feedback = list(
+            (
+                await session.execute(
+                    select(UserFeatureRequestModel)
+                    .order_by(UserFeatureRequestModel.id.desc())
+                    .limit(3)
+                )
+            ).scalars()
+        )
+        recent_events = [
+            {
+                "id": row.id,
+                "severity": row.severity,
+                "source": row.source,
+                "message": redact_sensitive_text(row.message)[:180],
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in recent_alerts
+        ]
+        recent_events.extend(
+            {
+                "id": row.id,
+                "severity": "info",
+                "source": "Feedback",
+                "message": f"Новое обращение #{row.id}: {row.title[:140]}",
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in recent_feedback
+        )
+        recent_events.sort(key=lambda item: item["created_at"], reverse=True)
+        return {
+            "ok": True,
+            "errors_24h": errors_count,
+            "new_feedback_24h": new_feedback_count,
+            "open_feedback": open_feedback_count,
+            "recent_events": recent_events[:5],
+        }
+
+    async def _probe_database(session: AsyncSession) -> dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            await session.execute(select(1))
+            return {"status": "healthy", "latency_ms": round((time.perf_counter() - started) * 1000)}
+        except Exception:
+            return {"status": "down", "latency_ms": None}
+
+    async def _probe_redis() -> dict[str, Any]:
+        started = time.perf_counter()
+        client = Redis.from_url(settings.redis_url, socket_connect_timeout=1, socket_timeout=1)
+        try:
+            await asyncio.wait_for(client.ping(), timeout=1.5)
+            return {"status": "healthy", "latency_ms": round((time.perf_counter() - started) * 1000)}
+        except Exception:
+            return {"status": "down", "latency_ms": None}
+        finally:
+            await client.aclose()
+
+    async def _probe_gacha(url: str | None) -> dict[str, Any]:
+        if not url:
+            return {"status": "unknown", "latency_ms": None, "detail": "Не настроен"}
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0)) as client:
+                response = await client.get(f"{url.rstrip('/')}/v1/gacha/health")
+            status = "healthy" if response.is_success else "down"
+            return {"status": status, "latency_ms": round((time.perf_counter() - started) * 1000)}
+        except Exception:
+            return {"status": "down", "latency_ms": None}
+
+    @router.get("/health")
+    async def health(session: AsyncSession = AdminSession):
+        now = _utc_now()
+        web_started = time.perf_counter()
+        checks = await asyncio.gather(
+            _probe_database(session),
+            _probe_redis(),
+            _probe_gacha(settings.resolve_gacha_base_url("genshin")),
+            _probe_gacha(settings.resolve_gacha_base_url("hsr")),
+            telegram_bot_probe(),
+        )
+        components = {
+            "web": {"status": "healthy", "latency_ms": round((time.perf_counter() - web_started) * 1000), "checked_at": now.isoformat()},
+            "telegram_bot": {**checks[4], "checked_at": now.isoformat()},
+            "postgresql": {**checks[0], "checked_at": now.isoformat()},
+            "redis": {**checks[1], "checked_at": now.isoformat()},
+            "gacha_genshin": {**checks[2], "checked_at": now.isoformat()},
+            "gacha_hsr": {**checks[3], "checked_at": now.isoformat()},
+        }
+        statuses = {item["status"] for item in components.values()}
+        for name, component in components.items():
+            if component["status"] == "healthy":
+                _health_last_success[name] = now.isoformat()
+            component["last_success_at"] = _health_last_success.get(name)
+        overall = "down" if "down" in statuses else "degraded" if statuses.intersection({"unknown", "degraded"}) else "healthy"
+        return {
+            "ok": True,
+            "status": overall,
+            "environment": settings.app_env,
+            "version": os.getenv("GIT_COMMIT") or os.getenv("SOURCE_VERSION"),
+            "checked_at": now.isoformat(),
+            "process_started_at": _PROCESS_STARTED_AT.isoformat(),
+            "process_uptime_seconds": max(0, int((now - _PROCESS_STARTED_AT).total_seconds())),
+            "components": components,
+        }
+
+    return router
