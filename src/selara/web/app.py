@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -77,6 +78,7 @@ from selara.application.use_cases.economy.use_item import execute as use_item
 from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import ChatSettings, default_chat_settings
+from selara.core.bot_runtime import get_bot_polling_runtime_state
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
@@ -89,6 +91,7 @@ from selara.core.web_auth import (
     validate_telegram_webapp_init_data,
 )
 from selara.domain.entities import (
+    AdminBroadcastTarget,
     ChatSnapshot,
     LeaderboardItem,
     UserChatOverview,
@@ -641,6 +644,26 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if game_bot is None:
             game_bot = Bot(token=settings.bot_token)
         return game_bot
+
+    async def _probe_miniapp_telegram_bot() -> dict[str, object]:
+        runtime_state = get_bot_polling_runtime_state()
+        if runtime_state["running"] is not True:
+            return {"status": "down", "latency_ms": None, "detail": "Telegram polling-процесс не запущен."}
+        heartbeat_at = runtime_state["heartbeat_at"]
+        now = _now_utc()
+        if not isinstance(heartbeat_at, datetime):
+            return {"status": "unknown", "latency_ms": None, "detail": "Нет heartbeat от polling-процесса."}
+        if heartbeat_at.tzinfo is None:
+            heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+        if (now - heartbeat_at).total_seconds() > 45:
+            return {"status": "degraded", "latency_ms": None, "detail": "Polling heartbeat устарел."}
+
+        started = asyncio.get_running_loop().time()
+        try:
+            await asyncio.wait_for((await _get_game_bot()).get_me(), timeout=3)
+            return {"status": "healthy", "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000)}
+        except Exception:
+            return {"status": "down", "latency_ms": None, "detail": "Telegram Bot API не ответил на проверку."}
 
     async def _close_game_bot() -> None:
         nonlocal game_bot
@@ -10801,6 +10824,54 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         return _json_result(ok=True, message="Запись удалена.", status_code=200)
 
+    _MINIAPP_BROADCAST_PREVIEW_TTL_SECONDS = 15 * 60
+
+    def _miniapp_broadcast_selection(payload: dict[str, object]) -> list[int] | None:
+        raw_ids = payload.get("chat_ids")
+        if raw_ids is None:
+            return None
+        if not isinstance(raw_ids, list):
+            raise StarletteHTTPException(status_code=422, detail="Некорректный список групп.")
+        selected_ids: set[int] = set()
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool) or not str(raw_id).lstrip("-").isdigit():
+                raise StarletteHTTPException(status_code=422, detail="Некорректный список групп.")
+            chat_id = int(raw_id)
+            if chat_id == 0:
+                raise StarletteHTTPException(status_code=422, detail="Некорректный список групп.")
+            selected_ids.add(chat_id)
+        return sorted(selected_ids)
+
+    def _miniapp_broadcast_preview_token(claims: dict[str, object]) -> str:
+        raw_claims = json.dumps(claims, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded_claims = base64.urlsafe_b64encode(raw_claims).rstrip(b"=").decode("ascii")
+        signature = hmac.new(settings.resolved_web_auth_secret.encode("utf-8"), raw_claims, hashlib.sha256).digest()
+        encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+        return f"{encoded_claims}.{encoded_signature}"
+
+    def _read_miniapp_broadcast_preview_token(token: str) -> dict[str, object]:
+        try:
+            encoded_claims, encoded_signature = token.split(".", 1)
+            raw_claims = base64.urlsafe_b64decode(encoded_claims + "=" * (-len(encoded_claims) % 4))
+            signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+            expected = hmac.new(settings.resolved_web_auth_secret.encode("utf-8"), raw_claims, hashlib.sha256).digest()
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("invalid signature")
+            claims = json.loads(raw_claims)
+        except (ValueError, TypeError, binascii.Error, json.JSONDecodeError):
+            raise StarletteHTTPException(status_code=409, detail="Preview недействителен. Соберите его заново.") from None
+        if not isinstance(claims, dict) or claims.get("version") != 1:
+            raise StarletteHTTPException(status_code=409, detail="Preview недействителен. Соберите его заново.")
+        issued_at = claims.get("issued_at")
+        now_timestamp = int(_now_utc().timestamp())
+        if (
+            not isinstance(issued_at, int)
+            or issued_at > now_timestamp + 30
+            or now_timestamp - issued_at > _MINIAPP_BROADCAST_PREVIEW_TTL_SECONDS
+        ):
+            raise StarletteHTTPException(status_code=409, detail="Preview истёк. Соберите его заново.")
+        return claims
+
     async def _miniapp_broadcast_preview(session: AsyncSession, payload: dict[str, object]) -> dict[str, object]:
         body = _normalize_admin_broadcast_body(str(payload.get("body") or ""))
         if len(body) > 5000:
@@ -10840,26 +10911,26 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             days = max(1, min(int(days), 90))
         except (TypeError, ValueError):
             raise StarletteHTTPException(status_code=422, detail="Некорректный период активности.") from None
-        raw_chat_ids = payload.get("chat_ids")
-        selected_ids = {int(value) for value in raw_chat_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_chat_ids, list) else set()
+        selected_ids = _miniapp_broadcast_selection(payload)
         repo = SqlAlchemyActivityRepository(session)
         targets = await repo.list_recent_active_group_chats(since=_now_utc() - timedelta(days=days))
-        if isinstance(raw_chat_ids, list):
-            targets = [item for item in targets if item.chat_id in selected_ids]
+        if selected_ids is not None:
+            selected_id_set = set(selected_ids)
+            targets = [item for item in targets if item.chat_id in selected_id_set]
         photo_digest = hashlib.sha256(photo_content).hexdigest() if photo_content else ""
-        signature_source = "\n".join(
-            [
-                body,
-                str(days),
-                ",".join(str(value) for value in sorted(selected_ids)),
-                ",".join(str(item.chat_id) for item in sorted(targets, key=lambda item: item.chat_id)),
-                media_mode,
-                photo_digest,
-            ]
-        )
-        preview_token = hmac.new(
-            settings.resolved_web_auth_secret.encode("utf-8"), signature_source.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
+        issued_at = int(_now_utc().timestamp())
+        target_chat_ids = sorted(item.chat_id for item in targets)
+        preview_claims: dict[str, object] = {
+            "version": 1,
+            "issued_at": issued_at,
+            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "active_since_days": days,
+            "selection_ids": selected_ids,
+            "media_mode": media_mode,
+            "photo_sha256": photo_digest,
+            "target_chat_ids": target_chat_ids,
+        }
+        preview_token = _miniapp_broadcast_preview_token(preview_claims)
         return {
             "body": body,
             "rendered_text": parsed.rendered_text,
@@ -10870,6 +10941,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "targets": [{"chat_id": item.chat_id, "title": item.chat_title, "last_activity_at": item.last_activity_at.isoformat() if item.last_activity_at else None} for item in targets[:100]],
             "targets_truncated": len(targets) > 100,
             "preview_token": preview_token,
+            "preview_expires_at": (_now_utc() + timedelta(seconds=_MINIAPP_BROADCAST_PREVIEW_TTL_SECONDS)).isoformat(),
         }
 
     async def _miniapp_broadcast_start(admin_user_id: int, payload: dict[str, object]) -> dict[str, object]:
@@ -10877,11 +10949,33 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", idempotency_key):
             raise StarletteHTTPException(status_code=422, detail="Некорректный ключ отправки.")
-        preview = await _miniapp_broadcast_preview_for_payload(payload)
         submitted_preview_token = str(payload.get("preview_token") or "")
-        if not hmac.compare_digest(submitted_preview_token, str(preview["preview_token"])):
-            raise StarletteHTTPException(status_code=409, detail="Сначала обновите preview с текущим содержимым и аудиторией.")
-        if preview["target_count"] < 1:
+        claims = _read_miniapp_broadcast_preview_token(submitted_preview_token)
+        photo_content = payload.get("photo_content") if isinstance(payload.get("photo_content"), bytes) else None
+        media_mode = str(payload.get("media_mode") or ("photo" if photo_content else "text"))
+        photo_digest = hashlib.sha256(photo_content).hexdigest() if photo_content else ""
+        days_raw = payload.get("active_since_days", _ADMIN_BROADCAST_ACTIVE_DAYS)
+        try:
+            days = max(1, min(int(days_raw), 90))
+        except (TypeError, ValueError):
+            raise StarletteHTTPException(status_code=422, detail="Некорректный период активности.") from None
+        selected_ids = _miniapp_broadcast_selection(payload)
+        if (
+            claims.get("body_sha256") != hashlib.sha256(body.encode("utf-8")).hexdigest()
+            or claims.get("active_since_days") != days
+            or claims.get("selection_ids") != selected_ids
+            or claims.get("media_mode") != media_mode
+            or claims.get("photo_sha256") != photo_digest
+        ):
+            raise StarletteHTTPException(status_code=409, detail="Содержимое изменилось. Соберите preview заново.")
+        target_chat_ids = claims.get("target_chat_ids")
+        if (
+            not isinstance(target_chat_ids, list)
+            or any(isinstance(chat_id, bool) or not isinstance(chat_id, int) or chat_id == 0 for chat_id in target_chat_ids)
+            or len(set(target_chat_ids)) != len(target_chat_ids)
+        ):
+            raise StarletteHTTPException(status_code=409, detail="Preview содержит некорректную аудиторию.")
+        if not target_chat_ids:
             raise StarletteHTTPException(status_code=422, detail="В выбранной аудитории нет активных групп.")
         async with session_factory() as session:
             existing_id = await session.scalar(
@@ -10891,20 +10985,41 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
             try:
                 repo = SqlAlchemyActivityRepository(session)
-                targets = await repo.list_recent_active_group_chats(
-                    since=_now_utc() - timedelta(days=int(preview["active_since_days"]))
+                target_rows = list(
+                    (
+                        await session.execute(
+                            select(ChatModel.telegram_chat_id, ChatModel.type, ChatModel.title).where(
+                                ChatModel.telegram_chat_id.in_(target_chat_ids),
+                                ChatModel.type.in_(("group", "supergroup")),
+                            )
+                        )
+                    ).all()
                 )
-                raw_ids = payload.get("chat_ids")
-                selected_ids = {int(value) for value in raw_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_ids, list) else set()
-                if isinstance(raw_ids, list):
-                    targets = [item for item in targets if item.chat_id in selected_ids]
+                targets_by_id = {int(row.telegram_chat_id): row for row in target_rows}
+                if len(targets_by_id) != len(target_chat_ids):
+                    raise StarletteHTTPException(
+                        status_code=409,
+                        detail="Состав групп изменился. Соберите preview заново.",
+                    )
+                targets = [
+                    AdminBroadcastTarget(
+                        chat_id=chat_id,
+                        chat_type=str(targets_by_id[chat_id].type),
+                        chat_title=targets_by_id[chat_id].title,
+                        last_activity_at=None,
+                    )
+                    for chat_id in target_chat_ids
+                ]
                 broadcast = await repo.create_admin_broadcast(
                     body=body,
                     idempotency_key=idempotency_key,
-                    rendered_body=str(preview["rendered_text"]),
-                    reaction_options=preview["reaction_options"],
-                    media_type="photo" if preview.get("media") else None,
-                    active_since_days=int(preview["active_since_days"]),
+                    rendered_body=parse_broadcast_source(body).rendered_text,
+                    reaction_options=[
+                        {"key": option.key, "emoji": option.emoji, "label": option.label}
+                        for option in parse_broadcast_source(body).options
+                    ],
+                    media_type="photo" if media_mode == "photo" else None,
+                    active_since_days=days,
                     created_by_user_id=admin_user_id,
                 )
                 deliveries = await repo.create_admin_broadcast_deliveries(broadcast_id=broadcast.id, targets=targets)
@@ -10922,7 +11037,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             _run_miniapp_broadcast(
                 broadcast_id=broadcast.id,
                 parsed=parsed,
-                photo_content=payload.get("photo_content") if isinstance(payload.get("photo_content"), bytes) else None,
+                photo_content=photo_content,
                 photo_filename=str(payload.get("photo_filename") or "") or None,
             ),
             name=f"miniapp-broadcast-{broadcast.id}",
@@ -10931,10 +11046,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         task.add_done_callback(lambda completed, bid=broadcast.id: miniapp_broadcast_tasks.pop(bid, None))
         logger.info("Mini App broadcast started", extra={"broadcast_id": broadcast.id, "targets": len(deliveries)})
         return {"ok": True, "broadcast_id": broadcast.id, "status": "sending", "target_count": len(deliveries)}
-
-    async def _miniapp_broadcast_preview_for_payload(payload: dict[str, object]) -> dict[str, object]:
-        async with session_factory() as session:
-            return await _miniapp_broadcast_preview(session, payload)
 
     async def _run_miniapp_broadcast(
         *, broadcast_id: int, parsed: ParsedBroadcast, photo_content: bytes | None, photo_filename: str | None
@@ -11009,6 +11120,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_preview_handler=_miniapp_broadcast_preview,
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
+            telegram_bot_probe=_probe_miniapp_telegram_bot,
         )
     )
     return app

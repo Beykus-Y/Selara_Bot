@@ -34,6 +34,7 @@ UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
 BroadcastPreview = Callable[[AsyncSession, dict[str, Any]], Awaitable[dict[str, Any]]]
 BroadcastStart = Callable[[int, dict[str, Any]], Awaitable[dict[str, Any]]]
 BroadcastStatus = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
+TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
 _PERIODS = {1, 7, 30, 90}
 _GROUP_TYPES = ("group", "supergroup")
 _health_last_success: dict[str, str] = {}
@@ -60,6 +61,7 @@ def build_miniapp_admin_router(
     broadcast_preview_handler: BroadcastPreview,
     broadcast_start_handler: BroadcastStart,
     broadcast_status_handler: BroadcastStatus,
+    telegram_bot_probe: TelegramBotProbe,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/miniapp/admin", tags=["miniapp-admin"])
 
@@ -88,8 +90,8 @@ def build_miniapp_admin_router(
                 else:
                     payload[str(key)] = str(value)
             raw_ids = payload.get("chat_ids")
-            if isinstance(raw_ids, str) and raw_ids.strip():
-                payload["chat_ids"] = [item for item in raw_ids.split(",") if item.strip()]
+            if isinstance(raw_ids, str):
+                payload["chat_ids"] = [item.strip() for item in raw_ids.split(",") if item.strip()]
             if isinstance(payload.get("confirm"), str):
                 payload["confirm"] = payload["confirm"].strip().lower() == "true"
             return payload
@@ -396,6 +398,7 @@ def build_miniapp_admin_router(
         user_id = UserChatMessageEventModel.user_id
         is_group = ChatModel.type.in_(_GROUP_TYPES)
         is_human = UserModel.is_bot.is_(False)
+        is_private = ChatModel.type == "private"
         inside_current = UserChatMessageEventModel.sent_at >= period_start
         inside_previous = (UserChatMessageEventModel.sent_at >= previous_start) & (
             UserChatMessageEventModel.sent_at < period_start
@@ -403,8 +406,8 @@ def build_miniapp_admin_router(
 
         activity_stmt = (
             select(
-                func.count(distinct(case((inside_current, user_id)))).label("bot_current"),
-                func.count(distinct(case((inside_previous, user_id)))).label("bot_previous"),
+                func.count(distinct(case((inside_current & is_private, user_id)))).label("bot_current"),
+                func.count(distinct(case((inside_previous & is_private, user_id)))).label("bot_previous"),
                 func.count(distinct(case((inside_current & is_group, user_id)))).label("group_current"),
                 func.count(distinct(case((inside_previous & is_group, user_id)))).label("group_previous"),
             )
@@ -600,15 +603,11 @@ def build_miniapp_admin_router(
             _probe_redis(),
             _probe_gacha(settings.resolve_gacha_base_url("genshin")),
             _probe_gacha(settings.resolve_gacha_base_url("hsr")),
+            telegram_bot_probe(),
         )
         components = {
             "web": {"status": "healthy", "latency_ms": round((time.perf_counter() - web_started) * 1000), "checked_at": now.isoformat()},
-            "telegram_bot": {
-                "status": "unknown",
-                "latency_ms": None,
-                "checked_at": now.isoformat(),
-                "detail": "Состояние polling-процесса пока не публикуется в web runtime.",
-            },
+            "telegram_bot": {**checks[4], "checked_at": now.isoformat()},
             "postgresql": {**checks[0], "checked_at": now.isoformat()},
             "redis": {**checks[1], "checked_at": now.isoformat()},
             "gacha_genshin": {**checks[2], "checked_at": now.isoformat()},
@@ -619,7 +618,7 @@ def build_miniapp_admin_router(
             if component["status"] == "healthy":
                 _health_last_success[name] = now.isoformat()
             component["last_success_at"] = _health_last_success.get(name)
-        overall = "down" if "down" in statuses else "degraded" if "unknown" in statuses else "healthy"
+        overall = "down" if "down" in statuses else "degraded" if statuses.intersection({"unknown", "degraded"}) else "healthy"
         return {
             "ok": True,
             "status": overall,

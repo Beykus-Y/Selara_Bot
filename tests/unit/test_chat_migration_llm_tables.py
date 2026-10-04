@@ -8,7 +8,7 @@ the new chat_id.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -20,6 +20,7 @@ from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_migration import ChatMigrationResult, migrate_chat_id
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
+    ChatMemberCountSnapshotModel,
     ChatModel,
     EconomyPrivateContextModel,
     LlmAdminActionModel,
@@ -201,6 +202,7 @@ async def test_migrate_chat_id_moves_error_alert_destination(monkeypatch):
         "_merge_moderation_state_generic",
         "_merge_rest_state_generic",
         "_merge_activity_event_sync_state",
+        "_merge_chat_member_count_snapshot",
         "_move_chat_settings",
         "_move_chat_alias_settings",
         "_move_llm_context_and_actions",
@@ -219,6 +221,39 @@ async def test_migrate_chat_id_moves_error_alert_destination(monkeypatch):
     )
     assert moved_runtime_settings is True
     assert session.runtime_settings.error_alert_chat_id == new_chat_id
+
+
+@pytest.mark.asyncio
+async def test_migrate_chat_id_moves_member_count_snapshot_to_supergroup():
+    engine, session_factory = await _session_factory()
+    try:
+        old_chat_id, new_chat_id = -123, -100123
+        checked_at = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            session.add_all([
+                ChatModel(telegram_chat_id=old_chat_id, type="group", title="Old chat"),
+                ChatModel(telegram_chat_id=new_chat_id, type="supergroup", title="New chat"),
+                ChatMemberCountSnapshotModel(
+                    chat_id=old_chat_id,
+                    member_count=47,
+                    last_checked_at=checked_at,
+                    last_success_at=checked_at,
+                ),
+            ])
+            await session.commit()
+
+            await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+            await session.commit()
+
+        async with session_factory() as session:
+            snapshot = await session.get(ChatMemberCountSnapshotModel, new_chat_id)
+            assert snapshot is not None
+            assert snapshot.member_count == 47
+            assert snapshot.last_success_at is not None
+            assert snapshot.last_success_at.replace(tzinfo=timezone.utc) == checked_at
+            assert await session.get(ChatMemberCountSnapshotModel, old_chat_id) is None
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

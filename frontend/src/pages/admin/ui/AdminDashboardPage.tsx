@@ -128,7 +128,7 @@ export function AdminDashboardPage() {
   }> = metrics ? [
     {
       key: 'active-bot',
-      label: 'Активные пользователи бота',
+      label: 'Активные пользователи бота в личке',
       value: formatCount(metrics.active_bot_users.value),
       note: formatChange(metrics.active_bot_users.change_percent),
       primary: true,

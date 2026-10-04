@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode
 
 from selara.core.config import Settings
+from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_stopped
 from selara.core.logging import configure_logging
 from selara.domain.entities import UserSnapshot
 from selara.infrastructure.db.models import (
@@ -224,7 +225,7 @@ async def test_admin_audience_counts_unique_users_and_keeps_group_total_explicit
 
     assert response.status_code == 200
     metrics = response.json()["metrics"]
-    assert metrics["active_bot_users"]["value"] == 2
+    assert metrics["active_bot_users"]["value"] == 1
     assert metrics["total_bot_users"]["value"] == 3
     assert metrics["active_group_users"]["value"] == 1
     assert metrics["total_group_members"]["value"] is None
@@ -257,6 +258,25 @@ async def test_admin_audience_sums_fresh_telegram_member_snapshots_once_per_grou
     assert member_total["value"] == 155
     assert member_total["status"] == "available"
     assert member_total["checked_groups"] == member_total["total_groups"] == 2
+
+
+@pytest.mark.asyncio
+async def test_admin_broadcast_empty_multipart_group_selection_stays_empty(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=admin) as (client, session_factory):
+        _seed_audience(session_factory)
+        response = await client.post(
+            "/api/miniapp/admin/broadcast/preview",
+            files=[
+                ("body", (None, "Announcement")),
+                ("active_since_days", (None, "30")),
+                ("media_mode", (None, "text")),
+                ("chat_ids", (None, "")),
+            ],
+        )
+
+    assert response.status_code == 200
+    assert response.json()["target_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -390,14 +410,15 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
     class FakeBot:
         def __init__(self):
             self.sent = 0
+            self.chat_ids = []
             self.session = SimpleNamespace(close=self.close)
 
         async def close(self):
             return None
 
         async def send_message(self, **kwargs):
-            _ = kwargs
             self.sent += 1
+            self.chat_ids.append(kwargs["chat_id"])
             return SimpleNamespace(message_id=700 + self.sent, date=datetime.now(timezone.utc))
 
     bot = FakeBot()
@@ -417,6 +438,10 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
             "/api/miniapp/admin/broadcast/preview",
             json={"body": "<b>Проверка</b>", "active_since_days": 3},
         )
+        with Session(session_factory._engine) as session:
+            session.add(ChatModel(telegram_chat_id=-1002, type="supergroup", title="Добавлена после preview"))
+            session.add(UserChatActivityModel(chat_id=-1002, user_id=80, message_count=1, last_seen_at=now))
+            session.commit()
         payload = {
             "body": "<b>Проверка</b>",
             "active_since_days": 3,
@@ -443,6 +468,37 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
     assert status.json()["sent_count"] == 1 and status.json()["failed_count"] == 0
     assert history.json()["items"][0]["sent_count"] == 1
     assert bot.sent == 1
+    assert bot.chat_ids == [-1001]
+
+
+@pytest.mark.asyncio
+async def test_admin_health_uses_telegram_polling_and_api_probe(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+
+    class FakeBot:
+        def __init__(self, token):
+            _ = token
+            self.session = SimpleNamespace(close=self.close)
+
+        async def get_me(self):
+            return SimpleNamespace(id=123456)
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(web_app_module, "Bot", FakeBot)
+    mark_bot_polling_started()
+    try:
+        async with _client(monkeypatch, current_user=admin) as (client, _session_factory):
+            response = await client.get("/api/miniapp/admin/health")
+    finally:
+        mark_bot_polling_stopped()
+
+    assert response.status_code == 200
+    telegram = response.json()["components"]["telegram_bot"]
+    assert telegram["status"] == "healthy"
+    assert isinstance(telegram["latency_ms"], int)
+    assert telegram["last_success_at"] is not None
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from selara.application.achievements import get_achievement_catalog_from_settings
+from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_stopped, refresh_bot_polling_heartbeat
 from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
@@ -127,6 +128,12 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
         logger.exception("Gacha animation warmup task crashed")
 
 
+async def _refresh_bot_polling_heartbeat() -> None:
+    while True:
+        refresh_bot_polling_heartbeat()
+        await asyncio.sleep(10)
+
+
 async def _run_bot(settings, session_factory) -> None:
     bot = Bot(token=settings.bot_token)
     achievement_catalog = get_achievement_catalog_from_settings(settings)
@@ -198,9 +205,14 @@ async def _run_bot(settings, session_factory) -> None:
     if daily_summary_stt_queue is not None:
         polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 
+    heartbeat_task = asyncio.create_task(_refresh_bot_polling_heartbeat(), name="bot-polling-heartbeat")
+    mark_bot_polling_started()
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)
     finally:
+        mark_bot_polling_stopped()
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
         interesting_facts_task.cancel()
         await asyncio.gather(interesting_facts_task, return_exceptions=True)
         if backup_task is not None:

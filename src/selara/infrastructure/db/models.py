@@ -1949,6 +1949,7 @@ class ChatMemberCountSnapshotModel(Base):
     member_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GlobalMetricsModel(Base):

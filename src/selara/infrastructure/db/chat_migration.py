@@ -14,6 +14,7 @@ from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
     AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
+    ChatMemberCountSnapshotModel,
     ChatModel,
     ChatSettingsModel,
     ChatTextAliasModel,
@@ -128,6 +129,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _merge_moderation_state_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_rest_state_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_chat_member_count_snapshot(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -147,6 +149,7 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _merge_moderation_state_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_rest_state_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_activity_event_sync_state(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_chat_member_count_snapshot(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_chat_alias_settings(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -531,6 +534,33 @@ async def _merge_activity_event_sync_state(session: AsyncSession, *, old_chat_id
     new_row.last_checked_at = None
     new_row.last_synced_at = None
     new_row.last_error = "chat_id_migrated"
+
+
+async def _merge_chat_member_count_snapshot(
+    session: AsyncSession, *, old_chat_id: int, new_chat_id: int
+) -> None:
+    old_row = await session.get(ChatMemberCountSnapshotModel, old_chat_id)
+    if old_row is None:
+        return
+    new_row = await session.get(ChatMemberCountSnapshotModel, new_chat_id)
+    if new_row is None:
+        old_row.chat_id = new_chat_id
+        return
+
+    if old_row.last_success_at is not None and (
+        new_row.last_success_at is None or old_row.last_success_at > new_row.last_success_at
+    ):
+        new_row.member_count = old_row.member_count
+        new_row.last_success_at = old_row.last_success_at
+    if old_row.last_checked_at is not None and (
+        new_row.last_checked_at is None or old_row.last_checked_at > new_row.last_checked_at
+    ):
+        new_row.last_checked_at = old_row.last_checked_at
+    if old_row.last_error_at is not None and (
+        new_row.last_error_at is None or old_row.last_error_at > new_row.last_error_at
+    ):
+        new_row.last_error_at = old_row.last_error_at
+    await session.delete(old_row)
 
 
 async def _merge_announce_subscriptions_generic(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:

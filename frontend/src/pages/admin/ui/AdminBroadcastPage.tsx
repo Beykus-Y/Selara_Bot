@@ -23,16 +23,22 @@ export function AdminBroadcastPage() {
   const [activeDays, setActiveDays] = useState(3)
   const [selectionMode, setSelectionMode] = useState<'all' | 'selected'>('all')
   const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [candidatePreview, setCandidatePreview] = useState<Awaited<ReturnType<typeof previewAdminBroadcast>> | null>(null)
   const [previewData, setPreviewData] = useState<Awaited<ReturnType<typeof previewAdminBroadcast>> | null>(null)
   const [confirmed, setConfirmed] = useState(false)
   const [broadcastId, setBroadcastId] = useState<number | null>(null)
   const [requestKey, setRequestKey] = useState(idempotencyKey)
   usePageTitle('Рассылка · Selara Admin')
 
-  const audienceIds = selectionMode === 'selected' && selectedIds.length ? selectedIds : undefined
+  const audienceIds = selectionMode === 'selected' ? selectedIds : undefined
   const preview = useMutation({
-    mutationFn: () => previewAdminBroadcast({ body, active_since_days: activeDays, chat_ids: audienceIds, media_mode: mediaMode, photo }),
-    onSuccess: (result) => {
+    mutationFn: ({ chatIds, loadCandidates }: { chatIds?: number[]; loadCandidates?: boolean }) =>
+      previewAdminBroadcast({ body, active_since_days: activeDays, chat_ids: loadCandidates ? undefined : chatIds, media_mode: mediaMode, photo }),
+    onSuccess: (result, variables) => {
+      if (variables.loadCandidates) {
+        setCandidatePreview(result)
+        return
+      }
       setPreviewData(result)
       setStage(3)
     },
@@ -73,7 +79,6 @@ export function AdminBroadcastPage() {
     staleTime: 30_000,
   })
 
-  const customSelectionUnavailable = Boolean(previewData?.targets_truncated)
   const previewHtml = useMemo(() => ({ __html: previewData?.rendered_text ?? '' }), [previewData?.rendered_text])
   const photoUrl = useMemo(() => photo ? URL.createObjectURL(photo) : null, [photo])
   useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl) }, [photoUrl])
@@ -81,7 +86,7 @@ export function AdminBroadcastPage() {
 
   function runPreview() {
     setPreviewData(null)
-    preview.mutate()
+    preview.mutate({ chatIds: audienceIds })
   }
 
   return (
@@ -122,7 +127,7 @@ export function AdminBroadcastPage() {
       {stage === 2 ? (
         <div className="admin-broadcast-form">
           <label htmlFor="active-days">Активность группы за последние дни</label>
-          <select id="active-days" value={activeDays} onChange={(event) => setActiveDays(Number(event.target.value))}>
+          <select id="active-days" value={activeDays} onChange={(event) => { setActiveDays(Number(event.target.value)); setCandidatePreview(null); setSelectedIds([]) }}>
             {[1, 3, 7, 14, 30, 90].map((days) => <option key={days} value={days}>{days} {days === 1 ? 'день' : 'дней'}</option>)}
           </select>
           <div className="admin-filter-row" role="group" aria-label="Выбор групп">
@@ -130,18 +135,25 @@ export function AdminBroadcastPage() {
             <button type="button" className={selectionMode === 'selected' ? 'is-selected' : ''} onClick={() => setSelectionMode('selected')}>Выбрать группы</button>
           </div>
           {selectionMode === 'selected' ? (
-            previewData?.targets.length && !customSelectionUnavailable ? (
+            candidatePreview?.targets.length && !candidatePreview.targets_truncated ? (
               <div className="admin-broadcast-targets">
-                {previewData.targets.map((target) => (
+                {candidatePreview.targets.map((target) => (
                   <label key={target.chat_id}><input type="checkbox" checked={selectedIds.includes(target.chat_id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, target.chat_id] : current.filter((id) => id !== target.chat_id))} /><span>{target.title || `Группа ${target.chat_id}`}</span></label>
                 ))}
               </div>
-            ) : <p className="admin-footnote">Сначала загрузите список через preview. Если список длиннее 100 групп, выбор отдельных чатов доступен в старой панели.</p>
+            ) : candidatePreview?.targets_truncated ? (
+              <p className="admin-footnote">Список превышает 100 групп. Для выборочной рассылки используйте старую панель.</p>
+            ) : (
+              <div>
+                <p className="admin-footnote">Загрузите список, затем отметьте группы. Если ничего не выбрано, рассылка не продолжится.</p>
+                <button type="button" disabled={preview.isPending} onClick={() => preview.mutate({ loadCandidates: true })}>{preview.isPending ? 'Загружаю…' : 'Загрузить список групп'}</button>
+              </div>
+            )
           ) : null}
           {preview.isError ? <div className="admin-inline-error">{preview.error.message}</div> : null}
           <div className="admin-broadcast-actions">
             <button type="button" onClick={() => setStage(1)}>Назад</button>
-            <button className="admin-primary-action" type="button" disabled={preview.isPending} onClick={runPreview}>{preview.isPending ? 'Готовлю preview…' : selectionMode === 'selected' && selectedIds.length === 0 ? 'Загрузить список групп' : 'Показать preview'}</button>
+            <button className="admin-primary-action" type="button" disabled={preview.isPending || (selectionMode === 'selected' && selectedIds.length === 0)} onClick={runPreview}>{preview.isPending ? 'Готовлю preview…' : selectionMode === 'selected' && selectedIds.length === 0 ? 'Выберите хотя бы одну группу' : 'Показать preview'}</button>
           </div>
         </div>
       ) : null}
