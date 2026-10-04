@@ -52,6 +52,13 @@ async def _run_browser_regression() -> None:
                 }};"""
             )
             page = await context.new_page()
+            browser_errors: list[str] = []
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+
+            async def stub_telegram_sdk(route):
+                await route.fulfill(status=200, content_type="application/javascript", body="")
+
+            await page.route("https://telegram.org/**", stub_telegram_sdk)
 
             async def handle_api(route):
                 request = route.request
@@ -110,6 +117,7 @@ async def _run_browser_regression() -> None:
                 print(f"Browser URL: {page.url}")
                 print(f"Browser body: {await page.locator('body').inner_text()}")
                 print(f"Mini App API calls: {api_calls}")
+                print(f"Browser errors: {browser_errors}")
                 raise
             await page.get_by_role("button", name="Далее: аудитория").click()
             await page.get_by_role("button", name="Выбрать группы").click()
