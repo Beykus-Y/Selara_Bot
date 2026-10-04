@@ -1127,7 +1127,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        if request.url.path.startswith("/api/miniapp/admin/"):
+        if request.url.path.startswith("/" + "api/miniapp/admin/"):
             message = exc.detail if isinstance(exc.detail, str) and exc.detail else "Сервер отклонил запрос."
             return JSONResponse(
                 status_code=exc.status_code,
@@ -1170,7 +1170,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-        if request.url.path.startswith("/api/miniapp/admin/"):
+        if request.url.path.startswith("/" + "api/miniapp/admin/"):
             return JSONResponse(
                 status_code=422,
                 content={"ok": False, "status_code": 422, "message": "Проверьте параметры запроса."},
