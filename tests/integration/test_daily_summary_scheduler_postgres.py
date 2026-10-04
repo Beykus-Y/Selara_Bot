@@ -158,8 +158,14 @@ async def test_attempt_daily_summary_run_full_cycle_sends_and_marks_sent() -> No
             usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
         assert len(invocations) == 1 and invocations[0].status == "succeeded"
         assert invocations[0].trigger == "manual" and invocations[0].summary_run_id == run.id
-        assert len(usage_rows) == 4
-        assert {row.stage for row in usage_rows} == {"segment_topics", "merge", "analyst", "writer"}
+        assert len(usage_rows) == 5
+        assert {row.stage for row in usage_rows} == {
+            "segment_topics",
+            "merge",
+            "analyst",
+            "writer",
+            "infographic",
+        }
     finally:
         await engine.dispose()
 
