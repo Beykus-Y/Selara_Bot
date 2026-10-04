@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -97,6 +98,8 @@ from selara.domain.value_objects import display_name_from_parts
 from selara.infrastructure.backup import send_daily_backup
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.models import (
+    AdminBroadcastDeliveryModel,
+    AdminBroadcastModel,
     AdminRuntimeSettingsModel,
     ChatModel,
     EconomyAccountModel,
@@ -136,6 +139,7 @@ from selara.presentation.handlers.settings_common import (
 )
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.getting_started import build_getting_started_context
+from selara.web.miniapp_admin import build_miniapp_admin_router
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
     AUDIT_CATEGORY_OPTIONS,
@@ -629,6 +633,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     chat_settings_defaults = default_chat_settings(settings)
     bot_username = (settings.bot_username or settings.bot_name or "selara_ru_bot").lstrip("@")
     game_bot: Bot | None = None
+    miniapp_broadcast_tasks: dict[int, asyncio.Task] = {}
 
     async def _get_game_bot() -> Bot:
         nonlocal game_bot
@@ -638,6 +643,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     async def _close_game_bot() -> None:
         nonlocal game_bot
+        for task in tuple(miniapp_broadcast_tasks.values()):
+            task.cancel()
+        if miniapp_broadcast_tasks:
+            await asyncio.gather(*miniapp_broadcast_tasks.values(), return_exceptions=True)
+        miniapp_broadcast_tasks.clear()
         if game_bot is not None:
             await game_bot.session.close()
             game_bot = None
@@ -1116,6 +1126,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        if request.url.path.startswith("/api/miniapp/admin/"):
+            message = exc.detail if isinstance(exc.detail, str) and exc.detail else "Сервер отклонил запрос."
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"ok": False, "status_code": exc.status_code, "message": message},
+            )
         if exc.status_code == 404:
             return await _render_status_page(
                 request,
@@ -1153,6 +1169,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith("/api/miniapp/admin/"):
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "status_code": 422, "message": "Проверьте параметры запроса."},
+            )
         return await _render_status_page(
             request,
             status_code=422,
@@ -1356,6 +1377,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     def _miniapp_launch_url(*, start_param: str | None = None) -> str:
         _ = start_param
         return f"https://t.me/{bot_username}"
+
+    def _miniapp_permissions(user: UserSnapshot) -> dict[str, bool]:
+        return {"admin": settings.admin_user_id is not None and user.telegram_user_id == settings.admin_user_id}
+
+    async def _load_miniapp_admin_user(session: AsyncSession, request: Request) -> UserSnapshot | None:
+        return await _load_user_from_request(session, request, touch=True)
 
     def _miniapp_group_payload(group: UserChatOverview, *, is_admin: bool) -> dict[str, object]:
         payload = build_group_link(group, is_admin=is_admin)
@@ -4667,6 +4694,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             content={
                 "ok": True,
                 "viewer": _viewer_payload(user, avatar_url="/api/miniapp/me/avatar"),
+                "permissions": _miniapp_permissions(user),
                 "miniapp_url": _miniapp_launch_url(),
             },
             status_code=200,
@@ -4746,6 +4774,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             content={
                 "ok": True,
                 "viewer": _viewer_payload(user, avatar_url="/api/miniapp/me/avatar"),
+                "permissions": _miniapp_permissions(user),
             },
             status_code=200,
         )
@@ -10771,6 +10800,207 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         return _json_result(ok=True, message="Запись удалена.", status_code=200)
 
+    async def _miniapp_broadcast_preview(session: AsyncSession, payload: dict[str, object]) -> dict[str, object]:
+        body = _normalize_admin_broadcast_body(str(payload.get("body") or ""))
+        if len(body) > 5000:
+            raise StarletteHTTPException(status_code=422, detail="Текст рассылки слишком длинный.")
+        photo_content = payload.get("photo_content") if isinstance(payload.get("photo_content"), bytes) else None
+        photo_filename = str(payload.get("photo_filename") or "")
+        photo_content_type = str(payload.get("photo_content_type") or "")
+        media_mode = str(payload.get("media_mode") or ("photo" if photo_content else "text"))
+        if media_mode not in {"text", "photo"}:
+            raise StarletteHTTPException(status_code=422, detail="Неизвестный тип рассылки.")
+        if media_mode == "photo" and photo_content is None:
+            raise StarletteHTTPException(status_code=422, detail="Для рассылки с фото выберите изображение.")
+        if media_mode == "text" and photo_content is not None:
+            raise StarletteHTTPException(status_code=422, detail="Уберите фото или выберите режим «Фото».")
+        photo_meta = None
+        if media_mode == "photo":
+            try:
+                photo_meta = validate_broadcast_photo(
+                    filename=photo_filename,
+                    content_type=photo_content_type,
+                    content=photo_content or b"",
+                )
+            except BroadcastFormatError as exc:
+                raise StarletteHTTPException(status_code=422, detail=str(exc)) from None
+        try:
+            parsed = parse_broadcast_source(body)
+        except BroadcastFormatError as exc:
+            raise StarletteHTTPException(status_code=422, detail=str(exc)) from None
+        rendered_limit = _ADMIN_BROADCAST_CAPTION_LIMIT if media_mode == "photo" else _ADMIN_BROADCAST_BODY_LIMIT
+        if len(parsed.rendered_text) > rendered_limit:
+            raise StarletteHTTPException(status_code=422, detail="Сообщение превышает лимит Telegram.")
+        html_error = _validate_admin_broadcast_body(parsed.rendered_text)
+        if html_error:
+            raise StarletteHTTPException(status_code=422, detail=html_error)
+        days = payload.get("active_since_days", _ADMIN_BROADCAST_ACTIVE_DAYS)
+        try:
+            days = max(1, min(int(days), 90))
+        except (TypeError, ValueError):
+            raise StarletteHTTPException(status_code=422, detail="Некорректный период активности.") from None
+        raw_chat_ids = payload.get("chat_ids")
+        selected_ids = {int(value) for value in raw_chat_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_chat_ids, list) else set()
+        repo = SqlAlchemyActivityRepository(session)
+        targets = await repo.list_recent_active_group_chats(since=_now_utc() - timedelta(days=days))
+        if isinstance(raw_chat_ids, list):
+            targets = [item for item in targets if item.chat_id in selected_ids]
+        photo_digest = hashlib.sha256(photo_content).hexdigest() if photo_content else ""
+        signature_source = "\n".join(
+            [
+                body,
+                str(days),
+                ",".join(str(value) for value in sorted(selected_ids)),
+                ",".join(str(item.chat_id) for item in sorted(targets, key=lambda item: item.chat_id)),
+                media_mode,
+                photo_digest,
+            ]
+        )
+        preview_token = hmac.new(
+            settings.resolved_web_auth_secret.encode("utf-8"), signature_source.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return {
+            "body": body,
+            "rendered_text": parsed.rendered_text,
+            "reaction_options": [{"key": option.key, "emoji": option.emoji, "label": option.label} for option in parsed.options],
+            "media": {"type": "photo", "filename": photo_meta.filename, "width": photo_meta.width, "height": photo_meta.height, "size": photo_meta.size} if photo_meta else None,
+            "active_since_days": days,
+            "target_count": len(targets),
+            "targets": [{"chat_id": item.chat_id, "title": item.chat_title, "last_activity_at": item.last_activity_at.isoformat() if item.last_activity_at else None} for item in targets[:100]],
+            "targets_truncated": len(targets) > 100,
+            "preview_token": preview_token,
+        }
+
+    async def _miniapp_broadcast_start(admin_user_id: int, payload: dict[str, object]) -> dict[str, object]:
+        body = _normalize_admin_broadcast_body(str(payload.get("body") or ""))
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", idempotency_key):
+            raise StarletteHTTPException(status_code=422, detail="Некорректный ключ отправки.")
+        preview = await _miniapp_broadcast_preview_for_payload(payload)
+        submitted_preview_token = str(payload.get("preview_token") or "")
+        if not hmac.compare_digest(submitted_preview_token, str(preview["preview_token"])):
+            raise StarletteHTTPException(status_code=409, detail="Сначала обновите preview с текущим содержимым и аудиторией.")
+        if preview["target_count"] < 1:
+            raise StarletteHTTPException(status_code=422, detail="В выбранной аудитории нет активных групп.")
+        async with session_factory() as session:
+            existing_id = await session.scalar(
+                select(AdminBroadcastModel.id).where(AdminBroadcastModel.idempotency_key == idempotency_key)
+            )
+            if existing_id is not None:
+                return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
+            repo = SqlAlchemyActivityRepository(session)
+            targets = await repo.list_recent_active_group_chats(
+                since=_now_utc() - timedelta(days=int(preview["active_since_days"]))
+            )
+            raw_ids = payload.get("chat_ids")
+            selected_ids = {int(value) for value in raw_ids if str(value).lstrip("-").isdigit()} if isinstance(raw_ids, list) else set()
+            if isinstance(raw_ids, list):
+                targets = [item for item in targets if item.chat_id in selected_ids]
+            broadcast = await repo.create_admin_broadcast(
+                body=body,
+                idempotency_key=idempotency_key,
+                rendered_body=str(preview["rendered_text"]),
+                reaction_options=preview["reaction_options"],
+                media_type="photo" if preview.get("media") else None,
+                active_since_days=int(preview["active_since_days"]),
+                created_by_user_id=admin_user_id,
+            )
+            deliveries = await repo.create_admin_broadcast_deliveries(broadcast_id=broadcast.id, targets=targets)
+            await session.commit()
+        parsed = parse_broadcast_source(body)
+        task = asyncio.create_task(
+            _run_miniapp_broadcast(
+                broadcast_id=broadcast.id,
+                parsed=parsed,
+                photo_content=payload.get("photo_content") if isinstance(payload.get("photo_content"), bytes) else None,
+                photo_filename=str(payload.get("photo_filename") or "") or None,
+            ),
+            name=f"miniapp-broadcast-{broadcast.id}",
+        )
+        miniapp_broadcast_tasks[broadcast.id] = task
+        task.add_done_callback(lambda completed, bid=broadcast.id: miniapp_broadcast_tasks.pop(bid, None))
+        logger.info("Mini App broadcast started", extra={"broadcast_id": broadcast.id, "targets": len(deliveries)})
+        return {"ok": True, "broadcast_id": broadcast.id, "status": "sending", "target_count": len(deliveries)}
+
+    async def _miniapp_broadcast_preview_for_payload(payload: dict[str, object]) -> dict[str, object]:
+        async with session_factory() as session:
+            return await _miniapp_broadcast_preview(session, payload)
+
+    async def _run_miniapp_broadcast(
+        *, broadcast_id: int, parsed: ParsedBroadcast, photo_content: bytes | None, photo_filename: str | None
+    ) -> None:
+        try:
+            async with session_factory() as session:
+                repo = SqlAlchemyActivityRepository(session)
+                broadcast = await repo.get_admin_broadcast(broadcast_id=broadcast_id)
+                deliveries = await repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
+            if broadcast is None:
+                return
+            await _deliver_admin_broadcast(
+                bot=await _get_game_bot(),
+                broadcast=broadcast,
+                deliveries=deliveries,
+                parsed=parsed,
+                photo_content=photo_content,
+                photo_filename=photo_filename,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Mini App broadcast worker failed", extra={"broadcast_id": broadcast_id})
+
+    async def _miniapp_broadcast_status(session: AsyncSession, broadcast_id: int) -> dict[str, object]:
+        broadcast = await session.get(AdminBroadcastModel, broadcast_id)
+        if broadcast is None:
+            raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена.")
+        counts = dict(
+            (await session.execute(
+                select(AdminBroadcastDeliveryModel.status, func.count())
+                .where(AdminBroadcastDeliveryModel.broadcast_id == broadcast_id)
+                .group_by(AdminBroadcastDeliveryModel.status)
+            )).all()
+        )
+        target = sum(int(value) for value in counts.values())
+        sent = int(counts.get("sent", 0))
+        failed = int(counts.get("failed", 0))
+        pending = int(counts.get("pending", 0))
+        active = broadcast_id in miniapp_broadcast_tasks
+        status = "sending" if active else "completed" if pending == 0 else "interrupted"
+        last_delivery_at = await session.scalar(
+            select(func.max(AdminBroadcastDeliveryModel.updated_at)).where(
+                AdminBroadcastDeliveryModel.broadcast_id == broadcast_id
+            )
+        )
+        duration_seconds = None
+        if pending == 0 and last_delivery_at is not None:
+            started_at = broadcast.created_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if last_delivery_at.tzinfo is None:
+                last_delivery_at = last_delivery_at.replace(tzinfo=timezone.utc)
+            duration_seconds = max(0, int((last_delivery_at - started_at).total_seconds()))
+        return {
+            "broadcast_id": broadcast_id,
+            "status": status,
+            "target_count": target,
+            "sent_count": sent,
+            "failed_count": failed,
+            "pending_count": pending,
+            "skipped_count": 0,
+            "duration_seconds": duration_seconds,
+            "created_at": broadcast.created_at.isoformat(),
+        }
+
+    app.include_router(
+        build_miniapp_admin_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=_load_miniapp_admin_user,
+            broadcast_preview_handler=_miniapp_broadcast_preview,
+            broadcast_start_handler=_miniapp_broadcast_start,
+            broadcast_status_handler=_miniapp_broadcast_status,
+        )
+    )
     return app
 
 

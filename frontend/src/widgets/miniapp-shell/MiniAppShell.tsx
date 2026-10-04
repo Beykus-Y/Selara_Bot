@@ -37,6 +37,7 @@ export function MiniAppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const meta = resolveShellMeta(location.pathname)
+  const isAdminArea = location.pathname === routes.admin || location.pathname.startsWith(`${routes.admin}/`)
 
   useEffect(() => {
     const tg = (window as TelegramWindow).Telegram?.WebApp
@@ -66,7 +67,7 @@ export function MiniAppShell() {
       </main>
 
       {/* Bottom Navigation Tab Bar */}
-      <nav className="tabbar" aria-label="Mini App navigation">
+      {!isAdminArea && <nav className="tabbar" aria-label="Mini App navigation">
         {miniappNavigation.map((item) => {
           const tabInfo = tabIcons[item.to] || { icon: '⋯', labelRu: item.label }
           return (
@@ -83,7 +84,7 @@ export function MiniAppShell() {
             </NavLink>
           )
         })}
-      </nav>
+      </nav>}
     </div>
   )
 }

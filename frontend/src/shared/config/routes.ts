@@ -21,6 +21,11 @@ export const routes = {
   games: '/games',
   gacha: '/gacha',
   more: '/more',
+  admin: '/admin',
+  adminFeedback: '/admin/feedback',
+  adminMonitoring: '/admin/monitoring',
+  adminMore: '/admin/more',
+  adminBroadcast: '/admin/broadcast',
 
   settings: '/more',
   achievements: '/more',

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { http } from '@/shared/api/http'
 import { resolveAppPath } from '@/shared/config/app-base-path'
 import { MiniAppContextProvider } from '@/shared/miniapp/context'
-import type { MiniAppContextValue, MiniAppSessionData } from '@/shared/miniapp/model'
+import type { MiniAppContextValue, MiniAppPermissions, MiniAppSessionData } from '@/shared/miniapp/model'
 import { postMiniAppData } from '@/shared/miniapp/api'
 import { notifySessionChanged } from '@/shared/lib/session-events'
 
@@ -15,6 +15,7 @@ type LaunchState = {
   miniappUrl: string
   message?: string
   viewer?: MiniAppContextValue['viewer']
+  permissions?: MiniAppPermissions
 }
 
 type LandingContextResponse = {
@@ -207,6 +208,7 @@ export function MiniAppGate({ children }: PropsWithChildren) {
           status: 'ready',
           miniappUrl: payload.miniapp_url || miniappUrl,
           viewer: normalizeViewer(payload.viewer),
+          permissions: payload.permissions,
         })
       } catch (error) {
         if (disposed) {
@@ -236,6 +238,7 @@ export function MiniAppGate({ children }: PropsWithChildren) {
 
     return {
       viewer: state.viewer,
+      permissions: state.permissions || { admin: false },
       miniappUrl: state.miniappUrl,
       logout: async () => {
         await postMiniAppData('/miniapp/logout', {}, 'Не удалось завершить miniapp-сессию.')

@@ -1563,6 +1563,7 @@ class AdminBroadcastModel(Base):
 
     id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     active_since_days: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3, server_default="3")
     body: Mapped[str] = mapped_column(Text, nullable=False)
     rendered_body: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1799,6 +1800,23 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class OperationalAlertModel(Base):
+    __tablename__ = "operational_alerts"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(160), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    sanitized_traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_operational_alerts_created", OperationalAlertModel.created_at)
+Index("idx_operational_alerts_fingerprint", OperationalAlertModel.fingerprint)
+
+
 class UserChatAchievementModel(Base):
     __tablename__ = "user_chat_achievement"
 
@@ -1918,6 +1936,19 @@ class ChatMetricsModel(Base):
     )
     active_members_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChatMemberCountSnapshotModel(Base):
+    __tablename__ = "chat_member_count_snapshots"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    member_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GlobalMetricsModel(Base):

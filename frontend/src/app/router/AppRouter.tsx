@@ -2,6 +2,13 @@ import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 
 import { RouteErrorBoundary } from '@/app/router/RouteErrorBoundary'
 import { AuditPage } from '@/pages/audit/page'
+import { MiniAppAdminRoute } from '@/pages/admin/route'
+import { MiniAppAdminShell } from '@/pages/admin/ui/MiniAppAdminShell'
+import { AdminDashboardPage } from '@/pages/admin/ui/AdminDashboardPage'
+import { AdminFeedbackPage } from '@/pages/admin/ui/AdminFeedbackPage'
+import { AdminMonitoringPage } from '@/pages/admin/ui/AdminMonitoringPage'
+import { AdminMorePage } from '@/pages/admin/ui/AdminMorePage'
+import { AdminBroadcastPage } from '@/pages/admin/ui/AdminBroadcastPage'
 import { ChatPage } from '@/pages/chat/page'
 import { EconomyPage } from '@/pages/economy/page'
 import { FamilyPage } from '@/pages/family/page'
@@ -30,6 +37,22 @@ const router = createBrowserRouter(
         { path: 'games', element: <GamesPage /> },
         { path: 'gacha', element: <GachaCollectionPage /> },
         { path: 'more', element: <MorePage /> },
+        {
+          path: 'admin',
+          element: <MiniAppAdminRoute />,
+          children: [
+            {
+              element: <MiniAppAdminShell />,
+              children: [
+                { index: true, element: <AdminDashboardPage /> },
+                { path: 'feedback', element: <AdminFeedbackPage /> },
+                { path: 'monitoring', element: <AdminMonitoringPage /> },
+                { path: 'more', element: <AdminMorePage /> },
+                { path: 'broadcast', element: <AdminBroadcastPage /> },
+              ],
+            },
+          ],
+        },
       ],
     },
     {

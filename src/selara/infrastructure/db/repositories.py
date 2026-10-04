@@ -6236,6 +6236,7 @@ class SqlAlchemyActivityRepository:
         self,
         *,
         body: str,
+        idempotency_key: str | None = None,
         rendered_body: str | None = None,
         reaction_options: Sequence[dict[str, str]] = (),
         media_type: str | None = None,
@@ -6246,6 +6247,7 @@ class SqlAlchemyActivityRepository:
     ) -> AdminBroadcast:
         row = AdminBroadcastModel(
             body=body,
+            idempotency_key=(idempotency_key or "").strip() or None,
             rendered_body=rendered_body or body,
             reaction_options_json=[dict(option) for option in reaction_options] or None,
             media_type=media_type,

@@ -10,9 +10,12 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat, TelegramNetworkError
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.infrastructure.db.models import AdminRuntimeSettingsModel
+from selara.infrastructure.db.models import OperationalAlertModel
+from selara.infrastructure.security.redaction import redact_sensitive_text
 from selara.presentation.chat_migration import apply_chat_migration, extract_migration_ids_from_exception
 from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
 
@@ -37,8 +40,6 @@ async def notify_operational_error(
     *, session_factory: async_sessionmaker[AsyncSession] | None, event: Any, exc: Exception, bot: Any = None
 ) -> None:
     settings = get_error_alert_config()
-    if not settings.enabled or settings.chat_id is None:
-        return
     try:
         now = datetime.now(timezone.utc)
         frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
@@ -73,7 +74,39 @@ async def notify_operational_error(
         target_bot = bot or getattr(event, "bot", None)
         if target_bot is None:
             return
-        alert_text = _sanitize_operational_alert("\n".join(lines))[:3900]
+        alert_text = redact_sensitive_text(_sanitize_operational_alert("\n".join(lines)))[:3900]
+        sanitized_traceback = None
+        if frames:
+            sanitized_traceback = redact_sensitive_text(
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            )[-12000:]
+        if session_factory is not None:
+            try:
+                async with session_factory() as session:
+                    session.add(
+                        OperationalAlertModel(
+                            severity="error",
+                            source=f"{type(exc).__module__}.{type(exc).__qualname__}"[:160],
+                            fingerprint=fingerprint,
+                            message=redact_sensitive_text(f"{type(exc).__name__}: {str(exc)}")[:1000],
+                            context_json={"event": type(event).__name__, "command": command},
+                            sanitized_traceback=sanitized_traceback,
+                            created_at=now,
+                        )
+                    )
+                    await session.commit()
+                    await session.execute(
+                        text(
+                            "DELETE FROM operational_alerts WHERE id NOT IN "
+                            "(SELECT id FROM operational_alerts ORDER BY id DESC LIMIT 1000)"
+                        )
+                    )
+                    await session.commit()
+            except Exception:
+                logger.exception("Could not persist sanitized operational alert")
+
+        if not settings.enabled or settings.chat_id is None:
+            return
 
         async with _alert_delivery_lock:
             now = datetime.now(timezone.utc)
