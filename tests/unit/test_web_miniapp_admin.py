@@ -166,7 +166,8 @@ def _seed_audience(session_factory) -> None:
                 UserModel(telegram_user_id=999, is_bot=True),
                 ChatModel(telegram_chat_id=-1001, type="supergroup", title="Первый чат"),
                 ChatModel(telegram_chat_id=-1002, type="group", title="Второй чат"),
-                ChatModel(telegram_chat_id=77, type="private", title=None),
+                ChatModel(telegram_chat_id=90, type="private", title=None),
+                ChatModel(telegram_chat_id=91, type="private", title=None),
                 ChatMetricsModel(chat_id=-1001, active_members_count=12),
                 ChatMetricsModel(chat_id=-1002, active_members_count=8),
             ]
@@ -175,8 +176,8 @@ def _seed_audience(session_factory) -> None:
             [
                 UserChatMessageEventModel(chat_id=-1001, user_id=80, sent_at=now - timedelta(days=2)),
                 UserChatMessageEventModel(chat_id=-1002, user_id=80, sent_at=now - timedelta(days=1)),
-                UserChatMessageEventModel(chat_id=77, user_id=90, sent_at=now - timedelta(days=3)),
-                UserChatMessageEventModel(chat_id=77, user_id=91, sent_at=now - timedelta(days=120)),
+                UserChatMessageEventModel(chat_id=90, user_id=90, sent_at=now - timedelta(days=3)),
+                UserChatMessageEventModel(chat_id=91, user_id=91, sent_at=now - timedelta(days=120)),
                 UserChatMessageEventModel(chat_id=-1001, user_id=77, sent_at=now - timedelta(days=40)),
                 UserChatMessageEventModel(chat_id=-1001, user_id=999, sent_at=now - timedelta(days=2)),
             ]

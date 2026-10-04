@@ -419,10 +419,9 @@ def build_miniapp_admin_router(
         activity = (await session.execute(activity_stmt)).one()
 
         known_bot_users_stmt = (
-            select(func.count(distinct(UserChatMessageEventModel.user_id)))
-            .select_from(UserChatMessageEventModel)
-            .join(ChatModel, ChatModel.telegram_chat_id == UserChatMessageEventModel.chat_id)
-            .join(UserModel, UserModel.telegram_user_id == UserChatMessageEventModel.user_id)
+            select(func.count(distinct(UserModel.telegram_user_id)))
+            .select_from(UserModel)
+            .join(ChatModel, ChatModel.telegram_chat_id == UserModel.telegram_user_id)
             .where(ChatModel.type == "private", is_human)
         )
         known_bot_users = int((await session.execute(known_bot_users_stmt)).scalar_one() or 0)
