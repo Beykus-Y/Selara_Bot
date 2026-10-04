@@ -418,8 +418,14 @@ def build_miniapp_admin_router(
         )
         activity = (await session.execute(activity_stmt)).one()
 
-        known_users_stmt = select(func.count(distinct(UserModel.telegram_user_id))).where(is_human)
-        known_users = int((await session.execute(known_users_stmt)).scalar_one() or 0)
+        known_bot_users_stmt = (
+            select(func.count(distinct(UserChatMessageEventModel.user_id)))
+            .select_from(UserChatMessageEventModel)
+            .join(ChatModel, ChatModel.telegram_chat_id == UserChatMessageEventModel.chat_id)
+            .join(UserModel, UserModel.telegram_user_id == UserChatMessageEventModel.user_id)
+            .where(ChatModel.type == "private", is_human)
+        )
+        known_bot_users = int((await session.execute(known_bot_users_stmt)).scalar_one() or 0)
 
         known_group_members_stmt = (
             select(func.coalesce(func.sum(ChatMetricsModel.active_members_count), 0))
@@ -462,10 +468,10 @@ def build_miniapp_admin_router(
             or 0
         )
         checked_groups = len(fresh_counts)
-        if (group_count == 0 or checked_groups == group_count) and inaccessible_groups == 0:
+        if group_count == 0 or checked_groups == group_count:
             member_total_status = "available"
             member_total = sum(fresh_counts)
-        elif checked_groups or inaccessible_groups:
+        elif checked_groups:
             member_total_status = "partial"
             member_total = None
         else:
@@ -485,7 +491,7 @@ def build_miniapp_admin_router(
                     "value": bot_current,
                     "change_percent": _percent_change(bot_current, bot_previous),
                 },
-                "total_bot_users": {"value": known_users},
+                "total_bot_users": {"value": known_bot_users},
                 "active_group_users": {
                     "value": group_current,
                     "change_percent": _percent_change(group_current, group_previous),
@@ -500,7 +506,7 @@ def build_miniapp_admin_router(
                     "note": (
                         "Показана сумма последних успешных Telegram member_count."
                         if member_total_status == "available"
-                        else "Точный итог недоступен: часть групп ещё не проверена, недоступна боту или snapshot устарел. Число известных Selara участников не равно полной аудитории групп."
+                        else "Точный итог недоступен: часть текущих групп ещё не проверена или snapshot устарел. Число известных Selara участников не равно полной аудитории групп."
                     ),
                 },
             },

@@ -9,6 +9,32 @@ type Stage = 1 | 2 | 3 | 4 | 5 | 6
 
 const stages = ['Контент', 'Аудитория', 'Preview', 'Подтверждение', 'Отправка', 'Результат']
 
+type BroadcastPayload = {
+  body: string
+  activeDays: number
+  mediaMode: 'text' | 'photo'
+  photo?: File
+  chatIds?: number[]
+}
+
+type BroadcastAttempt = {
+  payload: BroadcastPayload
+  requestKey: string
+  previewToken: string
+}
+
+function sameBroadcastPayload(first: BroadcastPayload, second: BroadcastPayload) {
+  const sameAudience = first.chatIds === undefined && second.chatIds === undefined
+    || first.chatIds !== undefined && second.chatIds !== undefined
+      && first.chatIds.length === second.chatIds.length
+      && first.chatIds.every((id, index) => id === second.chatIds?.[index])
+  return first.body === second.body
+    && first.activeDays === second.activeDays
+    && first.mediaMode === second.mediaMode
+    && first.photo === second.photo
+    && sameAudience
+}
+
 function idempotencyKey() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID().replaceAll('-', '')
   return `${Date.now()}_${Math.random().toString(36).slice(2)}`
@@ -28,9 +54,18 @@ export function AdminBroadcastPage() {
   const [confirmed, setConfirmed] = useState(false)
   const [broadcastId, setBroadcastId] = useState<number | null>(null)
   const [requestKey, setRequestKey] = useState(idempotencyKey)
+  const [failedPayload, setFailedPayload] = useState<BroadcastPayload | null>(null)
   usePageTitle('Рассылка · Selara Admin')
 
   const audienceIds = selectionMode === 'selected' ? selectedIds : undefined
+  const currentPayload = (): BroadcastPayload => ({
+    body,
+    activeDays,
+    mediaMode,
+    photo,
+    chatIds: audienceIds ? [...audienceIds].sort((first, second) => first - second) : undefined,
+  })
+  const changedSinceFailedAttempt = failedPayload !== null && !sameBroadcastPayload(failedPayload, currentPayload())
   const preview = useMutation({
     mutationFn: ({ chatIds, loadCandidates }: { chatIds?: number[]; loadCandidates?: boolean }) =>
       previewAdminBroadcast({ body, active_since_days: activeDays, chat_ids: loadCandidates ? undefined : chatIds, media_mode: mediaMode, photo }),
@@ -44,17 +79,19 @@ export function AdminBroadcastPage() {
     },
   })
   const send = useMutation({
-    mutationFn: () => startAdminBroadcast({
-      body,
-      active_since_days: activeDays,
-      chat_ids: audienceIds,
-      media_mode: mediaMode,
-      photo,
+    mutationFn: (attempt: BroadcastAttempt) => startAdminBroadcast({
+      body: attempt.payload.body,
+      active_since_days: attempt.payload.activeDays,
+      chat_ids: attempt.payload.chatIds,
+      media_mode: attempt.payload.mediaMode,
+      photo: attempt.payload.photo,
       confirm: true,
-      idempotency_key: requestKey,
-      preview_token: previewData?.preview_token ?? '',
+      idempotency_key: attempt.requestKey,
+      preview_token: attempt.previewToken,
     }),
+    onError: (_error, attempt) => setFailedPayload((current) => current ?? attempt.payload),
     onSuccess: (result) => {
+      setFailedPayload(null)
       setBroadcastId(result.broadcast_id)
       setStage(5)
       void queryClient.invalidateQueries({ queryKey: ['miniapp-admin-broadcast-history'] })
@@ -167,7 +204,7 @@ export function AdminBroadcastPage() {
             <div dangerouslySetInnerHTML={previewHtml} />
             {previewData.reaction_options.length ? <div className="admin-preview-reactions">{previewData.reaction_options.map((option) => <span key={option.key}>{option.emoji} {option.label}</span>)}</div> : null}
           </article>
-          <div className="admin-broadcast-actions"><button type="button" onClick={() => setStage(2)}>Изменить аудиторию</button><button className="admin-primary-action" type="button" onClick={() => { setConfirmed(false); setStage(4) }}>Перейти к подтверждению</button></div>
+          <div className="admin-broadcast-actions"><button type="button" onClick={() => setStage(1)}>Изменить содержимое</button><button type="button" onClick={() => setStage(2)}>Изменить аудиторию</button><button className="admin-primary-action" type="button" onClick={() => { setConfirmed(false); setStage(4) }}>Перейти к подтверждению</button></div>
         </div>
       ) : null}
 
@@ -176,7 +213,13 @@ export function AdminBroadcastPage() {
           <p>Будет отправлено в <strong>{previewData?.target_count ?? 0} активных групп</strong>. После подтверждения сообщение начнёт уходить сразу.</p>
           <label className="admin-confirm-check"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Я проверил текст и аудиторию, подтверждаю отправку.</span></label>
           {send.isError ? <div className="admin-inline-error">{send.error.message}</div> : null}
-          <div className="admin-broadcast-actions"><button type="button" onClick={() => setStage(3)}>Назад к preview</button><button className="admin-primary-action" type="button" disabled={!confirmed || send.isPending} onClick={() => send.mutate()}>{send.isPending ? 'Запускаю…' : 'Подтвердить отправку'}</button></div>
+          {send.isError && changedSinceFailedAttempt ? (
+            <div className="admin-broadcast-recovery">
+              <p>Содержимое или аудитория отличаются от предыдущей попытки. Сервер мог принять её, даже если ответ не дошёл. Для отдельной отправки изменённого варианта создайте новый ключ и подтвердите его ещё раз.</p>
+              <button type="button" onClick={() => { setRequestKey(idempotencyKey()); setFailedPayload(null); send.reset(); setConfirmed(false) }}>Использовать новый ключ для изменённой рассылки</button>
+            </div>
+          ) : null}
+          <div className="admin-broadcast-actions"><button type="button" onClick={() => setStage(3)}>Назад к preview</button><button className="admin-primary-action" type="button" disabled={!confirmed || send.isPending || changedSinceFailedAttempt} onClick={() => send.mutate({ payload: currentPayload(), requestKey, previewToken: previewData?.preview_token ?? '' })}>{send.isPending ? 'Запускаю…' : 'Подтвердить отправку'}</button></div>
         </div>
       ) : null}
 

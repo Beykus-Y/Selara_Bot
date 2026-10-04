@@ -146,7 +146,9 @@ export function AdminDashboardPage() {
       value: metrics.total_group_members.value === null ? '—' : formatCount(metrics.total_group_members.value),
       note: metrics.total_group_members.value === null
         ? `${metrics.total_group_members.checked_groups}/${metrics.total_group_members.total_groups} проверено · недоступно групп: ${metrics.total_group_members.inaccessible_groups} · известных Selara участников: ${formatCount(metrics.total_group_members.known_active_members)}`
-        : undefined,
+        : metrics.total_group_members.inaccessible_groups > 0
+          ? `Бот уже не состоит: ${metrics.total_group_members.inaccessible_groups} групп`
+          : undefined,
       unavailable: metrics.total_group_members.value === null,
     },
   ] : []

@@ -19,3 +19,10 @@ def test_miniapp_broadcast_api_displays_backend_error_message_and_only_offers_su
     assert "responseMessage?.message ?? responseMessage?.detail" in api
     assert 'accept="image/jpeg,image/png"' in page
     assert "image/webp" not in page
+
+
+def test_miniapp_admin_audience_shows_removed_groups_separately() -> None:
+    root = Path(__file__).parents[2] / "frontend" / "src" / "pages" / "admin" / "ui"
+    dashboard = (root / "AdminDashboardPage.tsx").read_text(encoding="utf-8")
+
+    assert "Бот уже не состоит:" in dashboard

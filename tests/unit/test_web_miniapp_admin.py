@@ -162,6 +162,7 @@ def _seed_audience(session_factory) -> None:
                 UserModel(telegram_user_id=77, is_bot=False),
                 UserModel(telegram_user_id=80, is_bot=False),
                 UserModel(telegram_user_id=90, is_bot=False),
+                UserModel(telegram_user_id=91, is_bot=False),
                 UserModel(telegram_user_id=999, is_bot=True),
                 ChatModel(telegram_chat_id=-1001, type="supergroup", title="Первый чат"),
                 ChatModel(telegram_chat_id=-1002, type="group", title="Второй чат"),
@@ -175,6 +176,7 @@ def _seed_audience(session_factory) -> None:
                 UserChatMessageEventModel(chat_id=-1001, user_id=80, sent_at=now - timedelta(days=2)),
                 UserChatMessageEventModel(chat_id=-1002, user_id=80, sent_at=now - timedelta(days=1)),
                 UserChatMessageEventModel(chat_id=77, user_id=90, sent_at=now - timedelta(days=3)),
+                UserChatMessageEventModel(chat_id=77, user_id=91, sent_at=now - timedelta(days=120)),
                 UserChatMessageEventModel(chat_id=-1001, user_id=77, sent_at=now - timedelta(days=40)),
                 UserChatMessageEventModel(chat_id=-1001, user_id=999, sent_at=now - timedelta(days=2)),
             ]
@@ -226,7 +228,7 @@ async def test_admin_audience_counts_unique_users_and_keeps_group_total_explicit
     assert response.status_code == 200
     metrics = response.json()["metrics"]
     assert metrics["active_bot_users"]["value"] == 1
-    assert metrics["total_bot_users"]["value"] == 3
+    assert metrics["total_bot_users"]["value"] == 2
     assert metrics["active_group_users"]["value"] == 1
     assert metrics["total_group_members"]["value"] is None
     assert metrics["total_group_members"]["known_active_members"] == 20
@@ -289,8 +291,8 @@ async def test_admin_audience_exposes_inaccessible_groups_without_retrying_them_
 
     assert response.status_code == 200
     members = response.json()["metrics"]["total_group_members"]
-    assert members["status"] == "partial"
-    assert members["value"] is None
+    assert members["status"] == "available"
+    assert members["value"] == 155
     assert members["checked_groups"] == members["total_groups"] == 2
     assert members["inaccessible_groups"] == 1
 

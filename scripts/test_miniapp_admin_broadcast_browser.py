@@ -101,8 +101,15 @@ async def _run_browser_regression() -> None:
                     }
                 elif path.endswith("/miniapp/admin/broadcast"):
                     send_requests.append(request.post_data or "")
-                    payload = {"ok": True, "broadcast_id": 1, "status": "sending", "target_count": 1}
-                elif path.endswith("/miniapp/admin/broadcast/1"):
+                    if len(send_requests) == 1:
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"ok": False, "message": "Response lost after acceptance."}),
+                        )
+                        return
+                    payload = {"ok": True, "broadcast_id": 2, "status": "sending", "target_count": 1}
+                elif path.endswith("/miniapp/admin/broadcast/2"):
                     progress_requests += 1
                     if progress_requests <= 2:
                         await route.fulfill(
@@ -113,7 +120,7 @@ async def _run_browser_regression() -> None:
                         return
                     payload = {
                         "ok": True,
-                        "broadcast_id": 1,
+                        "broadcast_id": 2,
                         "status": "completed",
                         "target_count": 1,
                         "sent_count": 1,
@@ -170,8 +177,27 @@ async def _run_browser_regression() -> None:
             await page.get_by_role("button", name="Перейти к подтверждению").click()
             await page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.").check()
             await page.get_by_role("button", name="Подтвердить отправку").click()
+            await page.get_by_text("Response lost after acceptance.").wait_for()
+            assert await page.get_by_role("button", name="Использовать новый ключ для изменённой рассылки").count() == 0
+            await page.get_by_role("button", name="Назад к preview").click()
+            await page.get_by_role("button", name="Изменить содержимое").click()
+            await page.get_by_label("Текст Telegram-сообщения").fill("Updated test announcement")
+            await page.get_by_role("button", name="Далее: аудитория").click()
+            await page.get_by_role("button", name="Показать preview").click()
+            await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
+            await page.get_by_role("button", name="Перейти к подтверждению").click()
+            new_key_recovery = page.get_by_role("button", name="Использовать новый ключ для изменённой рассылки")
+            await new_key_recovery.wait_for()
+            await new_key_recovery.click()
+            confirmation = page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.")
+            assert not await confirmation.is_checked()
+            await confirmation.check()
+            await page.get_by_role("button", name="Подтвердить отправку").click()
             await page.get_by_role("button", name="Повторить").wait_for()
-            assert len(send_requests) == 1
+            assert len(send_requests) == 2
+            first_send, second_send = (json.loads(request) for request in send_requests)
+            assert first_send["idempotency_key"] != second_send["idempotency_key"]
+            assert second_send["body"] == "Updated test announcement"
             await page.get_by_role("button", name="Повторить").click()
             await page.get_by_text("Готово", exact=True).wait_for()
             assert progress_requests >= 3
