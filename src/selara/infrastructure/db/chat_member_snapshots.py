@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,7 +37,11 @@ async def refresh_chat_member_count_snapshots(
     async with session_factory() as session:
         if batch_size is None:
             group_count = int(
-                await session.scalar(select(func.count()).select_from(ChatModel).where(ChatModel.type.in_(_GROUP_TYPES)))
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ChatModel)
+                    .where(ChatModel.type.in_(_GROUP_TYPES), ChatModel.is_bot_member.is_(True))
+                )
                 or 0
             )
             batch_size = _snapshot_batch_size(group_count, interval_seconds)
@@ -47,6 +52,7 @@ async def refresh_chat_member_count_snapshots(
                 ChatMemberCountSnapshotModel.chat_id == ChatModel.telegram_chat_id,
             )
             .where(ChatModel.type.in_(_GROUP_TYPES))
+            .where(ChatModel.is_bot_member.is_(True))
             .where(
                 or_(
                     ChatMemberCountSnapshotModel.chat_id.is_(None),
@@ -86,6 +92,10 @@ async def refresh_chat_member_count_snapshots(
                 "Telegram member count check failed for chat %s (%s)", chat_id, type(exc).__name__
             )
             async with session_factory() as session:
+                if isinstance(exc, TelegramForbiddenError):
+                    chat = await session.get(ChatModel, chat_id)
+                    if chat is not None:
+                        chat.is_bot_member = False
                 snapshot = await session.get(ChatMemberCountSnapshotModel, chat_id)
                 if snapshot is None:
                     snapshot = ChatMemberCountSnapshotModel(

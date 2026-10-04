@@ -40,6 +40,7 @@ async def _run_browser_regression() -> None:
     preview_requests: list[str] = []
     send_requests: list[str] = []
     api_calls: list[str] = []
+    progress_requests = 0
     try:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
@@ -100,6 +101,26 @@ async def _run_browser_regression() -> None:
                 elif path.endswith("/miniapp/admin/broadcast"):
                     send_requests.append(request.post_data or "")
                     payload = {"ok": True, "broadcast_id": 1, "status": "sending", "target_count": 1}
+                elif path.endswith("/miniapp/admin/broadcast/1"):
+                    progress_requests += 1
+                    if progress_requests <= 2:
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"ok": False, "message": "Temporary failure."}),
+                        )
+                        return
+                    payload = {
+                        "ok": True,
+                        "broadcast_id": 1,
+                        "status": "completed",
+                        "target_count": 1,
+                        "sent_count": 1,
+                        "failed_count": 0,
+                        "skipped_count": 0,
+                        "pending_count": 0,
+                        "duration_seconds": 1,
+                    }
                 else:
                     await route.fulfill(
                         status=404,
@@ -119,6 +140,13 @@ async def _run_browser_regression() -> None:
                 print(f"Mini App API calls: {api_calls}")
                 print(f"Browser errors: {browser_errors}")
                 raise
+            await page.get_by_role("button", name="Фото").click()
+            await page.locator('input[type="file"]').set_input_files({
+                "name": "test.png",
+                "mimeType": "image/png",
+                "buffer": bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"),
+            })
+            await page.get_by_role("button", name="Текст", exact=True).click()
             await page.get_by_role("button", name="Далее: аудитория").click()
             await page.get_by_role("button", name="Выбрать группы").click()
             await page.get_by_role("button", name="Загрузить список групп").click()
@@ -131,6 +159,20 @@ async def _run_browser_regression() -> None:
             assert await continue_button.is_disabled()
             assert len(preview_requests) == 1
             assert send_requests == []
+            await checkbox.check()
+            await page.get_by_role("button", name="Показать preview").click()
+            await page.get_by_role("button", name="Перейти к подтверждению").wait_for()
+            assert len(preview_requests) == 2
+            assert 'name="media_mode"' in preview_requests[-1] and "text" in preview_requests[-1]
+            assert 'name="photo"' not in preview_requests[-1]
+            await page.get_by_role("button", name="Перейти к подтверждению").click()
+            await page.get_by_label("Я проверил текст и аудиторию, подтверждаю отправку.").check()
+            await page.get_by_role("button", name="Подтвердить отправку").click()
+            await page.get_by_role("button", name="Повторить").wait_for()
+            assert len(send_requests) == 1
+            await page.get_by_role("button", name="Повторить").click()
+            await page.get_by_text("Готово", exact=True).wait_for()
+            assert progress_requests >= 3
             assert await page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
 
             await context.close()

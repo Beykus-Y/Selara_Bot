@@ -37,6 +37,7 @@ export type AdminAudienceData = {
       status: 'available' | 'partial' | 'unavailable'
       checked_groups: number
       total_groups: number
+      inaccessible_groups: number
       known_active_members: number
       note: string
     }

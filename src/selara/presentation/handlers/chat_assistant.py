@@ -2003,6 +2003,25 @@ async def chat_member_updated_handler(event: ChatMemberUpdated, activity_repo, a
         )
 
 
+@router.my_chat_member()
+async def bot_chat_membership_updated_handler(event: ChatMemberUpdated, activity_repo) -> None:
+    if event.chat.type not in _GROUP_CHAT_TYPES:
+        return
+    member = event.new_chat_member
+    status = getattr(member, "status", None)
+    is_member = status in {"member", "administrator", "creator"} or (
+        status == "restricted" and bool(getattr(member, "is_member", False))
+    )
+    await activity_repo.set_bot_chat_membership(
+        chat=ChatSnapshot(
+            telegram_chat_id=event.chat.id,
+            chat_type=event.chat.type,
+            title=event.chat.title,
+        ),
+        is_member=is_member,
+    )
+
+
 @router.callback_query(F.data.startswith("cap:"))
 async def captcha_callback(query: CallbackQuery, bot: Bot, activity_repo) -> None:
     if query.data is None or query.from_user is None:

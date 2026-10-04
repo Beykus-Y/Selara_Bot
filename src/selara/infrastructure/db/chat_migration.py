@@ -109,7 +109,14 @@ async def _ensure_target_chat(
         chat_title = None
 
     if new_chat is None:
-        session.add(ChatModel(telegram_chat_id=new_chat_id, type=chat_type, title=chat_title))
+        session.add(
+            ChatModel(
+                telegram_chat_id=new_chat_id,
+                type=chat_type,
+                title=chat_title,
+                is_bot_member=old_chat.is_bot_member if old_chat is not None else True,
+            )
+        )
         return
 
     if chat_type and new_chat.type != chat_type:

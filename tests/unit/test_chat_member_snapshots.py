@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.methods import GetChatMemberCount
 
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_member_snapshots import (
@@ -63,5 +65,32 @@ async def test_failed_member_count_check_retries_after_scheduler_interval():
             assert succeeded.member_count == 55
             assert succeeded.last_success_at is not None
             assert succeeded.last_error_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_forbidden_group_is_retired_until_bot_membership_returns():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    denied = TelegramForbiddenError(
+        method=GetChatMemberCount(chat_id=-1002),
+        message="Forbidden: bot is not a member of the chat",
+    )
+    bot = SimpleNamespace(get_chat_member_count=AsyncMock(side_effect=denied))
+    try:
+        async with session_factory() as session:
+            session.add(ChatModel(telegram_chat_id=-1002, type="supergroup", title="Removed group"))
+            await session.commit()
+
+        assert await refresh_chat_member_count_snapshots(bot=bot, session_factory=session_factory) == 0
+        async with session_factory() as session:
+            removed_group = await session.get(ChatModel, -1002)
+            assert removed_group is not None
+            assert removed_group.is_bot_member is False
+        assert await refresh_chat_member_count_snapshots(bot=bot, session_factory=session_factory) == 0
+        assert bot.get_chat_member_count.await_count == 1
     finally:
         await engine.dispose()

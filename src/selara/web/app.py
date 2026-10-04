@@ -10860,7 +10860,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             claims = json.loads(raw_claims)
         except (ValueError, TypeError, binascii.Error, json.JSONDecodeError):
             raise StarletteHTTPException(status_code=409, detail="Preview недействителен. Соберите его заново.") from None
-        if not isinstance(claims, dict) or claims.get("version") != 1:
+        if not isinstance(claims, dict) or claims.get("version") != 2:
             raise StarletteHTTPException(status_code=409, detail="Preview недействителен. Соберите его заново.")
         issued_at = claims.get("issued_at")
         now_timestamp = int(_now_utc().timestamp())
@@ -10920,15 +10920,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         photo_digest = hashlib.sha256(photo_content).hexdigest() if photo_content else ""
         issued_at = int(_now_utc().timestamp())
         target_chat_ids = sorted(item.chat_id for item in targets)
-        preview_claims: dict[str, object] = {
-            "version": 1,
-            "issued_at": issued_at,
+        fingerprint_claims = {
             "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "active_since_days": days,
             "selection_ids": selected_ids,
             "media_mode": media_mode,
             "photo_sha256": photo_digest,
             "target_chat_ids": target_chat_ids,
+        }
+        request_fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_claims, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        preview_claims: dict[str, object] = {
+            "version": 2,
+            "issued_at": issued_at,
+            **fingerprint_claims,
+            "request_fingerprint": request_fingerprint,
         }
         preview_token = _miniapp_broadcast_preview_token(preview_claims)
         return {
@@ -10961,7 +10968,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             raise StarletteHTTPException(status_code=422, detail="Некорректный период активности.") from None
         selected_ids = _miniapp_broadcast_selection(payload)
         if (
-            claims.get("body_sha256") != hashlib.sha256(body.encode("utf-8")).hexdigest()
+            claims.get("version") != 2
+            or claims.get("body_sha256") != hashlib.sha256(body.encode("utf-8")).hexdigest()
             or claims.get("active_since_days") != days
             or claims.get("selection_ids") != selected_ids
             or claims.get("media_mode") != media_mode
@@ -10969,20 +10977,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         ):
             raise StarletteHTTPException(status_code=409, detail="Содержимое изменилось. Соберите preview заново.")
         target_chat_ids = claims.get("target_chat_ids")
+        request_fingerprint = claims.get("request_fingerprint")
         if (
             not isinstance(target_chat_ids, list)
             or any(isinstance(chat_id, bool) or not isinstance(chat_id, int) or chat_id == 0 for chat_id in target_chat_ids)
             or len(set(target_chat_ids)) != len(target_chat_ids)
+            or not isinstance(request_fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", request_fingerprint)
         ):
             raise StarletteHTTPException(status_code=409, detail="Preview содержит некорректную аудиторию.")
         if not target_chat_ids:
             raise StarletteHTTPException(status_code=422, detail="В выбранной аудитории нет активных групп.")
         async with session_factory() as session:
-            existing_id = await session.scalar(
-                select(AdminBroadcastModel.id).where(AdminBroadcastModel.idempotency_key == idempotency_key)
+            existing = await session.scalar(
+                select(AdminBroadcastModel).where(AdminBroadcastModel.idempotency_key == idempotency_key)
             )
-            if existing_id is not None:
-                return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
+            if existing is not None:
+                if existing.request_fingerprint != request_fingerprint:
+                    raise StarletteHTTPException(status_code=409, detail="Ключ уже использован для другой рассылки.")
+                return {"ok": True, "broadcast_id": int(existing.id), "status": "sending", "duplicate": True}
             try:
                 repo = SqlAlchemyActivityRepository(session)
                 target_rows = list(
@@ -11019,6 +11032,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         for option in parse_broadcast_source(body).options
                     ],
                     media_type="photo" if media_mode == "photo" else None,
+                    request_fingerprint=request_fingerprint,
                     active_since_days=days,
                     created_by_user_id=admin_user_id,
                 )
@@ -11026,12 +11040,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                existing_id = await session.scalar(
-                    select(AdminBroadcastModel.id).where(AdminBroadcastModel.idempotency_key == idempotency_key)
+                existing = await session.scalar(
+                    select(AdminBroadcastModel).where(AdminBroadcastModel.idempotency_key == idempotency_key)
                 )
-                if existing_id is None:
+                if existing is None:
                     raise
-                return {"ok": True, "broadcast_id": int(existing_id), "status": "sending", "duplicate": True}
+                if existing.request_fingerprint != request_fingerprint:
+                    raise StarletteHTTPException(status_code=409, detail="Ключ уже использован для другой рассылки.")
+                return {"ok": True, "broadcast_id": int(existing.id), "status": "sending", "duplicate": True}
         parsed = parse_broadcast_source(body)
         task = asyncio.create_task(
             _run_miniapp_broadcast(

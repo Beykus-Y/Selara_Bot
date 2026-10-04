@@ -49,6 +49,7 @@ class ChatModel(Base):
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_bot_member: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1564,6 +1565,7 @@ class AdminBroadcastModel(Base):
     id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     active_since_days: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3, server_default="3")
     body: Mapped[str] = mapped_column(Text, nullable=False)
     rendered_body: Mapped[str | None] = mapped_column(Text, nullable=True)

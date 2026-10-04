@@ -261,6 +261,41 @@ async def test_admin_audience_sums_fresh_telegram_member_snapshots_once_per_grou
 
 
 @pytest.mark.asyncio
+async def test_admin_audience_exposes_inaccessible_groups_without_retrying_them_as_missing(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=admin) as (client, session_factory):
+        _seed_audience(session_factory)
+        with Session(session_factory._engine) as session:
+            inaccessible = ChatModel(
+                telegram_chat_id=-1003,
+                type="supergroup",
+                title="Removed group",
+                is_bot_member=False,
+            )
+            session.add(inaccessible)
+            snapshot_time = datetime.now(timezone.utc) - timedelta(hours=1)
+            session.add_all(
+                [
+                    ChatMemberCountSnapshotModel(
+                        chat_id=-1001, member_count=120, last_checked_at=snapshot_time, last_success_at=snapshot_time
+                    ),
+                    ChatMemberCountSnapshotModel(
+                        chat_id=-1002, member_count=35, last_checked_at=snapshot_time, last_success_at=snapshot_time
+                    ),
+                ]
+            )
+            session.commit()
+        response = await client.get("/api/miniapp/admin/audience?period_days=30")
+
+    assert response.status_code == 200
+    members = response.json()["metrics"]["total_group_members"]
+    assert members["status"] == "partial"
+    assert members["value"] is None
+    assert members["checked_groups"] == members["total_groups"] == 2
+    assert members["inaccessible_groups"] == 1
+
+
+@pytest.mark.asyncio
 async def test_admin_broadcast_empty_multipart_group_selection_stays_empty(monkeypatch) -> None:
     admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
     async with _client(monkeypatch, current_user=admin) as (client, session_factory):
@@ -453,6 +488,14 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
             client.post("/api/miniapp/admin/broadcast", json=payload),
             client.post("/api/miniapp/admin/broadcast", json=payload),
         )
+        changed_preview = await client.post(
+            "/api/miniapp/admin/broadcast/preview",
+            json={"body": "<b>Другой текст</b>", "active_since_days": 3},
+        )
+        reused_key_with_changes = await client.post(
+            "/api/miniapp/admin/broadcast",
+            json={**payload, "body": "<b>Другой текст</b>", "preview_token": changed_preview.json()["preview_token"]},
+        )
         for _ in range(20):
             status = await client.get(f"/api/miniapp/admin/broadcast/{started.json()['broadcast_id']}")
             if status.json().get("status") == "completed":
@@ -462,6 +505,8 @@ async def test_admin_broadcast_is_idempotent_and_reports_async_progress(monkeypa
 
     assert preview.status_code == 200 and preview.json()["target_count"] == 1
     assert started.status_code == duplicate.status_code == 200
+    assert changed_preview.status_code == 200
+    assert reused_key_with_changes.status_code == 409
     assert started.json()["broadcast_id"] == duplicate.json()["broadcast_id"]
     assert sorted([started.json().get("duplicate", False), duplicate.json().get("duplicate", False)]) == [False, True]
     assert status.json()["status"] == "completed"

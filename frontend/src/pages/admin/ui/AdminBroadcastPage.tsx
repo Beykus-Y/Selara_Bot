@@ -105,7 +105,7 @@ export function AdminBroadcastPage() {
           <label htmlFor="broadcast-content">Текст Telegram-сообщения</label>
           <textarea id="broadcast-content" rows={9} maxLength={5000} value={body} onChange={(event) => setBody(event.target.value)} placeholder={'Привет!\n\nНовости Selara…\n\n[reactions]\n👍=Полезно\n👀=Посмотрю позже\n[/reactions]'} />
           <div className="admin-filter-row" role="group" aria-label="Формат рассылки">
-            <button type="button" className={mediaMode === 'text' ? 'is-selected' : ''} onClick={() => setMediaMode('text')}>Текст</button>
+            <button type="button" className={mediaMode === 'text' ? 'is-selected' : ''} onClick={() => { setMediaMode('text'); setPhoto(undefined) }}>Текст</button>
             <button type="button" className={mediaMode === 'photo' ? 'is-selected' : ''} onClick={() => setMediaMode('photo')}>Фото</button>
           </div>
           {mediaMode === 'photo' ? <label className="admin-photo-input">Изображение<input type="file" accept="image/jpeg,image/png" onChange={(event) => setPhoto(event.target.files?.[0])} /></label> : null}
@@ -191,7 +191,8 @@ export function AdminBroadcastPage() {
         </div>
       ) : null}
 
-      {stage === 5 && !progress.data ? <div className="admin-skeleton-list"><i /><i /></div> : null}
+      {stage === 5 && !progress.data && progress.isError ? <div className="admin-inline-error">Не удалось загрузить состояние рассылки. <button type="button" onClick={() => void progress.refetch()}>Повторить</button></div> : null}
+      {stage === 5 && !progress.data && progress.isPending ? <div className="admin-skeleton-list"><i /><i /></div> : null}
 
       {shownStage === 6 && progress.data ? (
         <div className="admin-broadcast-progress">
