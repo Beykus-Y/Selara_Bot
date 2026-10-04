@@ -39,6 +39,7 @@ async def _run_browser_regression() -> None:
     preview_process = _start_preview()
     preview_requests: list[str] = []
     send_requests: list[str] = []
+    api_calls: list[str] = []
     try:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
@@ -54,6 +55,7 @@ async def _run_browser_regression() -> None:
 
             async def handle_api(route):
                 request = route.request
+                api_calls.append(f"{request.method} {request.url}")
                 path = request.url.split("?", 1)[0]
                 if path.endswith("/landing/context"):
                     payload = {"ok": True, "page": {"hero_ctas": []}}
@@ -102,7 +104,13 @@ async def _run_browser_regression() -> None:
 
             await page.route("**/api/**", handle_api)
             await page.goto(f"{PREVIEW_URL}/admin/broadcast", wait_until="domcontentloaded")
-            await page.get_by_label("Текст Telegram-сообщения").fill("Test announcement")
+            try:
+                await page.get_by_label("Текст Telegram-сообщения").fill("Test announcement", timeout=8000)
+            except Exception:
+                print(f"Browser URL: {page.url}")
+                print(f"Browser body: {await page.locator('body').inner_text()}")
+                print(f"Mini App API calls: {api_calls}")
+                raise
             await page.get_by_role("button", name="Далее: аудитория").click()
             await page.get_by_role("button", name="Выбрать группы").click()
             await page.get_by_role("button", name="Загрузить список групп").click()
