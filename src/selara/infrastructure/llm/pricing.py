@@ -14,6 +14,8 @@ MODEL_PRICING_USD_PER_1K_TOKENS: dict[str, tuple[Decimal, Decimal]] = {
 # pricing family. Keep this explicit so unknown future variants remain unknown.
 MODEL_PRICING_SNAPSHOT_FAMILIES: dict[str, str] = {
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini",
+    "gpt-4o-2024-08-06": "gpt-4o",
+    "gpt-4o-2024-11-20": "gpt-4o",
 }
 
 # USD per minute of transcribed audio (Whisper-style STT pricing).

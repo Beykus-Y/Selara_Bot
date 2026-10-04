@@ -31,7 +31,7 @@ class AccountingWindowAggregate:
     failed_invocations: int
     unknown_cost_calls: int
     known_cost_usd: Decimal
-    average_known_cost_per_invocation_usd: Decimal | None
+    average_known_cost_component_per_started_invocation_usd: Decimal | None
 
 
 class AiAccountingService:
@@ -166,12 +166,22 @@ class AiAccountingService:
             return InvocationAggregate(int(calls), int(prompt), int(completion), Decimal(cost), bool(has_unknown))
 
     async def aggregate_window(self, *, window_from: datetime, window_to: datetime) -> AccountingWindowAggregate:
-        """Summarize all feature invocations started in a half-open time window."""
+        """Summarize in-window invocations and their known spend component.
+
+        The average divides known cost by every invocation started in the window,
+        including invocations with unknown-priced calls. It is not a complete
+        average cost when ``unknown_cost_calls`` is nonzero. ``failed_invocations``
+        counts both terminal ``failed`` and ``partial`` outcomes because partial
+        invocations represent unsuccessful feature outcomes after provider spend.
+        """
         async with self._session_factory() as session:
             invocation_result = await session.execute(
                 select(
                     func.count(AiFeatureInvocationModel.id),
-                    func.count(case((AiFeatureInvocationModel.status == "failed", AiFeatureInvocationModel.id))),
+                    func.count(case((
+                        AiFeatureInvocationModel.status.in_(("failed", "partial")),
+                        AiFeatureInvocationModel.id,
+                    ))),
                 ).where(
                     AiFeatureInvocationModel.started_at >= window_from,
                     AiFeatureInvocationModel.started_at < window_to,

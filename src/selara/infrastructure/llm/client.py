@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,6 +24,7 @@ _Response = TypeVar("_Response")
 
 _DEFAULT_TIMEOUT = 60.0
 _MAX_PROVIDER_ATTEMPTS = 3
+_MAX_RETRY_AFTER_SECONDS = 120.0
 # #37: chat_with_tools has the highest fan-out (up to 8 rounds per admin
 # query) of the three chat methods, but was the only one with no max_tokens
 # cap -- a single round could otherwise produce an unbounded-length
@@ -276,9 +279,18 @@ class LlmClient:
                 )
                 usages.append(usage)
                 await self._record(accounting_context, usage)
-                retryable = not isinstance(exc, APIStatusError) or exc.status_code in {408, 409, 429} or exc.status_code >= 500
+                retryable = (
+                    _status_error_should_retry(exc)
+                    if isinstance(exc, APIStatusError)
+                    else True
+                )
                 if retryable and offset + 1 < _MAX_PROVIDER_ATTEMPTS:
-                    await asyncio.sleep(0.5 * (2 ** offset))
+                    delay = (
+                        _status_error_retry_delay(exc, offset)
+                        if isinstance(exc, APIStatusError)
+                        else 0.5 * (2 ** offset)
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 message = _extract_api_error(exc) if isinstance(exc, APIStatusError) else (
                     "LLM-сервис не ответил вовремя." if isinstance(exc, APITimeoutError)
@@ -397,3 +409,50 @@ def _extract_api_error(exc: APIStatusError) -> str:
     if code >= 500:
         return "LLM API: внутренняя ошибка сервиса."
     return f"LLM API вернул ошибку: HTTP {code}."
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """Parse Retry-After in milliseconds, seconds, or HTTP-date form."""
+    retry_after_ms = headers.get("retry-after-ms")
+    if retry_after_ms is not None:
+        try:
+            delay = float(retry_after_ms) / 1000
+            if math.isfinite(delay):
+                return delay
+        except (TypeError, ValueError):
+            pass
+
+    retry_after = headers.get("retry-after")
+    if retry_after is None:
+        return None
+    try:
+        delay = float(retry_after)
+    except (TypeError, ValueError):
+        try:
+            retry_date = email.utils.parsedate_to_datetime(retry_after)
+            if retry_date.tzinfo is None:
+                retry_date = retry_date.replace(tzinfo=timezone.utc)
+            delay = (retry_date - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    return delay if math.isfinite(delay) else None
+
+
+def _status_error_should_retry(exc: APIStatusError) -> bool:
+    headers = exc.response.headers
+    retry_after = _retry_after_seconds(headers)
+    if retry_after is not None and retry_after > _MAX_RETRY_AFTER_SECONDS:
+        return False
+    directive = headers.get("x-should-retry", "").lower()
+    if directive == "true":
+        return True
+    if directive == "false":
+        return False
+    return exc.status_code in {408, 409, 429} or exc.status_code >= 500
+
+
+def _status_error_retry_delay(exc: APIStatusError, offset: int) -> float:
+    retry_after = _retry_after_seconds(exc.response.headers)
+    if retry_after is not None and 0 < retry_after <= _MAX_RETRY_AFTER_SECONDS:
+        return retry_after
+    return 0.5 * (2 ** offset)

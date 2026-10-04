@@ -98,14 +98,17 @@ async def test_window_aggregate_uses_invocation_start_for_calls_crossing_midnigh
         service = AiAccountingService(factory)
         first = await service.create_invocation(feature="daily_summary", trigger="manual", chat_id=chat_id)
         second = await service.create_invocation(feature="llm_admin", trigger="telegram_message", chat_id=chat_id)
+        third = await service.create_invocation(feature="llm_admin", trigger="telegram_message", chat_id=chat_id)
         day_start = datetime(2026, 10, 4, 23, 0, tzinfo=timezone.utc)
         midnight = day_start + timedelta(hours=1)
         day_end = midnight + timedelta(hours=1)
         async with factory() as session:
             first_row = await session.get(AiFeatureInvocationModel, first)
             second_row = await session.get(AiFeatureInvocationModel, second)
+            third_row = await session.get(AiFeatureInvocationModel, third)
             first_row.started_at = day_start + timedelta(minutes=30)
             second_row.started_at = midnight + timedelta(minutes=30)
+            third_row.started_at = midnight + timedelta(minutes=40)
             await session.commit()
         await service.record_provider_call(
             LlmAccountingContext(first, "daily_summary", "writer", chat_id),
@@ -117,6 +120,11 @@ async def test_window_aggregate_uses_invocation_start_for_calls_crossing_midnigh
             LlmCallUsage(str(uuid4()), "gpt-4o-mini", 200, 20, 220, Decimal("0.02"), "known", 1,
                          "succeeded", recorded_at=midnight + timedelta(minutes=35)),
         )
+        await service.record_provider_call(
+            LlmAccountingContext(third, "llm_admin", "assistant_round", chat_id),
+            LlmCallUsage(str(uuid4()), "future-model", 200, 20, 220, None, "unknown", 1,
+                         "succeeded", recorded_at=midnight + timedelta(minutes=45)),
+        )
 
         first_window = await service.aggregate_window(window_from=day_start, window_to=midnight)
         second_window = await service.aggregate_window(window_from=midnight, window_to=day_end)
@@ -124,7 +132,50 @@ async def test_window_aggregate_uses_invocation_start_for_calls_crossing_midnigh
             1, 1, Decimal("0.01")
         )
         assert (second_window.invocations, second_window.provider_calls, second_window.known_cost_usd) == (
-            1, 1, Decimal("0.02")
+            2, 2, Decimal("0.02")
         )
+        assert first_window.average_known_cost_component_per_started_invocation_usd == Decimal("0.01")
+        assert second_window.unknown_cost_calls == 1
+        assert second_window.average_known_cost_component_per_started_invocation_usd == Decimal("0.01")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_window_aggregate_counts_partial_invocations_as_failed_outcomes():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_876_545
+        async with factory() as session:
+            session.add(ChatModel(telegram_chat_id=chat_id, type="supergroup", title="failed invocation"))
+            await session.commit()
+        service = AiAccountingService(factory)
+        invocation_id = await service.create_invocation(
+            feature="llm_admin", trigger="telegram_message", chat_id=chat_id,
+        )
+        context = LlmAccountingContext(invocation_id, "llm_admin", "chat_round", chat_id)
+        for attempt in range(1, 4):
+            await service.record_provider_call(
+                context,
+                LlmCallUsage(
+                    str(uuid4()), "gpt-4o-mini", None, None, None, None,
+                    "unknown", attempt, "failed", "timeout",
+                ),
+            )
+        await service.finish_invocation_outcome(invocation_id=invocation_id, status="failed", error_category="timeout")
+
+        now = datetime.now(timezone.utc)
+        aggregate = await service.aggregate_window(
+            window_from=now - timedelta(days=1), window_to=now + timedelta(days=1),
+        )
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, invocation_id)
+
+        assert invocation.status == "partial"
+        assert aggregate.invocations == 1
+        assert aggregate.failed_invocations == 1
+        assert aggregate.provider_calls == 3
+        assert aggregate.unknown_cost_calls == 3
     finally:
         await engine.dispose()

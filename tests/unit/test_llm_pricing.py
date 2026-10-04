@@ -15,6 +15,12 @@ def test_estimate_llm_cost_resolves_explicit_provider_snapshot() -> None:
     assert str(cost) == "0.000750000"
 
 
+@pytest.mark.parametrize("snapshot", ["gpt-4o-2024-08-06", "gpt-4o-2024-11-20"])
+def test_estimate_llm_cost_resolves_known_gpt_4o_snapshots(snapshot: str) -> None:
+    cost = estimate_llm_cost_usd(model=snapshot, prompt_tokens=1000, completion_tokens=1000)
+    assert str(cost) == "0.012500000"
+
+
 def test_estimate_llm_cost_unknown_model_is_unknown_not_an_error() -> None:
     cost = estimate_llm_cost_usd(model="some-future-model", prompt_tokens=1000, completion_tokens=1000)
     assert cost is None
