@@ -180,6 +180,7 @@ async def test_generated_run_is_never_reclaimed_for_regeneration() -> None:
             assert first is not None
             await repo.finalize_daily_summary_run_generated(
                 run_id=first.id,
+                claimed_at=first.claimed_at,
                 generated_text="Итоги дня: тестовая сводка",
                 topics_json={"themes": []},
                 pipeline_cost_usd=0.01,

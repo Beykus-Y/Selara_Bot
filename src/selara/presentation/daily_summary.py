@@ -124,6 +124,7 @@ async def _generate_and_finalize(
     style: str,
     persona_enabled: bool,
     run_id: int,
+    claimed_at: datetime,
     trigger: str,
     actor_user_id: int | None,
     window_from: datetime,
@@ -131,7 +132,7 @@ async def _generate_and_finalize(
     invocation_id: int | None = None,
     quota_invocation_id: int | None = None,
     quota_access_service: FeatureAccessService | None = None,
-) -> bool:
+) -> bool | None:
     accounting = getattr(llm_client, "accounting_service", None)
     if invocation_id is None and accounting is not None:
         invocation_id = await accounting.create_invocation(
@@ -170,20 +171,24 @@ async def _generate_and_finalize(
                     extra={"chat_id": chat.telegram_chat_id, "run_id": run_id, "trigger": trigger},
                 )
                 aggregate = await accounting.aggregate_summary_run(summary_run_id=run_id) if accounting else None
-                await repo.mark_daily_summary_run_failed(
-                    run_id=run_id, error=str(exc),
+                updated = await repo.mark_daily_summary_run_failed(
+                    run_id=run_id, claimed_at=claimed_at, error=str(exc),
                     pipeline_cost_usd=aggregate.known_cost_usd if aggregate else None,
                     pipeline_has_unknown_cost=aggregate.has_unknown_cost if aggregate else None,
                 )
                 await session.commit()
+                if not updated:
+                    outcome["error_category"] = "claim_lost"
+                    return None
                 return False
 
             aggregate = await accounting.aggregate_summary_run(summary_run_id=run_id) if accounting else None
             context_stt_cost = await repo.sum_context_stt_cost_in_window(
                 chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
             )
-            await repo.finalize_daily_summary_run_generated(
+            finalized = await repo.finalize_daily_summary_run_generated(
                 run_id=run_id,
+                claimed_at=claimed_at,
                 generated_text=output.generated_text,
                 topics_json=output.topics_json,
                 diagnostics_json=asdict(output.diagnostics),
@@ -192,6 +197,9 @@ async def _generate_and_finalize(
                 context_stt_cost_usd=context_stt_cost,
             )
             await session.commit()
+            if not finalized:
+                outcome["error_category"] = "claim_lost"
+                return None
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
         return True
@@ -222,12 +230,15 @@ async def _send_and_mark(
     session_factory: async_sessionmaker[AsyncSession],
     chat_id: int,
     run_id: int,
-) -> bool:
+    claimed_at: datetime,
+) -> bool | None:
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
         run = await repo.get_daily_summary_run_by_id(run_id=run_id)
         if run is None or run.chat_id != chat_id or not run.generated_text:
             return False
+        if run.claimed_at != claimed_at:
+            return None
 
         try:
             artifact_id = (run.topics_json or {}).get("artifact_id")
@@ -252,12 +263,20 @@ async def _send_and_mark(
                 "Daily Summary send failed",
                 extra={"chat_id": chat_id, "run_id": run_id},
             )
-            await repo.mark_daily_summary_run_send_failed(run_id=run_id, error=str(exc))
+            updated = await repo.mark_daily_summary_run_send_failed(
+                run_id=run_id, claimed_at=claimed_at, error=str(exc)
+            )
             await session.commit()
+            if not updated:
+                return None
             return False
 
-        await repo.mark_daily_summary_run_sent(run_id=run_id, sent_at=datetime.now(timezone.utc))
+        updated = await repo.mark_daily_summary_run_sent(
+            run_id=run_id, claimed_at=claimed_at, sent_at=datetime.now(timezone.utc)
+        )
         await session.commit()
+        if not updated:
+            return None
     return True
 
 
@@ -363,7 +382,10 @@ async def attempt_daily_summary_run(
                 session_factory=session_factory,
                 chat_id=chat.telegram_chat_id,
                 run_id=existing.id,
+                claimed_at=existing.claimed_at,
             )
+            if sent is None:
+                return DailySummaryOutcome(False, "claim_lost")
             return DailySummaryOutcome(sent, "sent" if sent else "send_failed")
 
         # The toggle is only the scheduled execution setting. Check it before
@@ -387,7 +409,10 @@ async def attempt_daily_summary_run(
                     session_factory=session_factory,
                     chat_id=chat.telegram_chat_id,
                     run_id=existing.id,
+                    claimed_at=existing.claimed_at,
                 )
+                if sent is None:
+                    return DailySummaryOutcome(False, "claim_lost", access_decision)
                 return DailySummaryOutcome(sent, "sent" if sent else "send_failed", access_decision)
 
         # Run the inexpensive settings gates before entitlement lookup. Archived
@@ -439,6 +464,7 @@ async def attempt_daily_summary_run(
 
     if run is None:
         return DailySummaryOutcome(False, "claim_lost", access_decision)
+    claim_token = run.claimed_at
 
     if (
         existing is not None
@@ -459,7 +485,7 @@ async def attempt_daily_summary_run(
         try:
             async with session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
-                await repo.release_unstarted_daily_summary_claim(run_id=run.id, claimed_at=run.claimed_at)
+                await repo.release_unstarted_daily_summary_claim(run_id=run.id, claimed_at=claim_token)
                 await session.commit()
         except Exception:
             logger.exception(
@@ -482,6 +508,12 @@ async def attempt_daily_summary_run(
                 logger.info(
                     "Daily Summary claim superseded by chat migration",
                     extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
+                )
+                return False, False
+            if current_run.claimed_at != claim_token:
+                logger.info(
+                    "Daily Summary claim superseded by a newer worker",
+                    extra={"chat_id": current_run.chat_id, "run_id": current_run.id, "trigger": trigger},
                 )
                 return False, False
             changed = current_run.chat_id != chat.telegram_chat_id
@@ -642,6 +674,37 @@ async def attempt_daily_summary_run(
             )
             return DailySummaryOutcome(False, "access_unavailable", access_decision)
 
+    # Recheck ownership after access/quota resolution and immediately before
+    # the expensive pipeline. This avoids starting provider work when a newer
+    # worker already reclaimed the lease during those checks.
+    async with session_factory() as session:
+        current_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
+    if current_run is None or current_run.claimed_at != claim_token:
+        if quota_access_service is not None and quota_invocation_id is not None:
+            try:
+                await quota_access_service.release_if_no_provider_attempts(
+                    invocation_id=quota_invocation_id, reason="claim_lost"
+                )
+            except Exception:
+                logger.exception(
+                    "Could not release unused quota after Daily Summary claim was lost",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": run.id},
+                )
+        if pipeline_invocation_id is not None:
+            accounting = getattr(llm_client, "accounting_service", None) or AiAccountingService(session_factory)
+            try:
+                await accounting.finish_invocation_outcome(
+                    invocation_id=pipeline_invocation_id,
+                    status="failed",
+                    error_category="claim_lost",
+                )
+            except Exception:
+                logger.exception(
+                    "Could not finish Daily Summary invocation after claim loss",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": run.id},
+                )
+        return DailySummaryOutcome(False, "claim_lost", access_decision)
+
     generated = await _generate_and_finalize(
         session_factory=session_factory,
         llm_client=llm_client,
@@ -649,6 +712,7 @@ async def attempt_daily_summary_run(
         style=chat_settings.daily_summary_style,
         persona_enabled=chat_settings.persona_enabled,
         run_id=run.id,
+        claimed_at=claim_token,
         trigger=trigger,
         actor_user_id=actor_user_id,
         window_from=window_from,
@@ -657,6 +721,8 @@ async def attempt_daily_summary_run(
         quota_invocation_id=quota_invocation_id,
         quota_access_service=quota_access_service,
     )
+    if generated is None:
+        return DailySummaryOutcome(False, "claim_lost", access_decision)
     if not generated:
         return DailySummaryOutcome(False, "pipeline_failed", access_decision)
 
@@ -670,7 +736,15 @@ async def attempt_daily_summary_run(
         },
     )
 
-    sent = await _send_and_mark(bot=bot, session_factory=session_factory, chat_id=chat.telegram_chat_id, run_id=run.id)
+    sent = await _send_and_mark(
+        bot=bot,
+        session_factory=session_factory,
+        chat_id=chat.telegram_chat_id,
+        run_id=run.id,
+        claimed_at=claim_token,
+    )
+    if sent is None:
+        return DailySummaryOutcome(False, "claim_lost", access_decision)
     return DailySummaryOutcome(sent, "sent" if sent else "send_failed", access_decision)
 
 

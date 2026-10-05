@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
@@ -686,6 +686,7 @@ async def test_scheduled_generated_send_failed_resends_require_entitlement_and_r
             assert run is not None
             await repo.finalize_daily_summary_run_generated(
                 run_id=run.id,
+                claimed_at=run.claimed_at,
                 generated_text="Ранее созданные итоги.",
                 topics_json=[],
                 pipeline_cost_usd=Decimal("0.0000045"),
@@ -855,6 +856,112 @@ async def test_parallel_scheduled_claims_start_only_one_provider_pipeline(monkey
         assert len(runs) == 1 and runs[0].status == "sent"
         assert len(invocations) == 1 and invocations[0].trigger == "scheduled"
         assert len(usages) == 5
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_claim_fences_stale_worker_finalize_and_delivery():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        window_from = _NOW - timedelta(hours=24)
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            worker_a = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=window_from,
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=60,
+                now=_NOW,
+            )
+            await session.commit()
+        assert worker_a is not None
+
+        # Simulate worker A's lease expiring while its process is still alive.
+        async with session_factory() as session:
+            await session.execute(
+                update(DailySummaryRunModel)
+                .where(DailySummaryRunModel.id == worker_a.id)
+                .values(lease_until=_NOW + timedelta(seconds=30))
+            )
+            await session.commit()
+
+        reclaim_time = _NOW + timedelta(minutes=2)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            worker_b = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=window_from,
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=60,
+                now=reclaim_time,
+            )
+            await session.commit()
+        assert worker_b is not None and worker_b.id == worker_a.id
+        assert worker_b.claimed_at != worker_a.claimed_at
+
+        # A stale worker cannot fail or finalize the run after B reclaimed it.
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            stale_failure = await repo.mark_daily_summary_run_failed(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, error="stale worker"
+            )
+            stale_finalize = await repo.finalize_daily_summary_run_generated(
+                run_id=worker_a.id,
+                claimed_at=worker_a.claimed_at,
+                generated_text="Сводка от A",
+                topics_json=[],
+                pipeline_cost_usd=0.01,
+                context_stt_cost_usd=0,
+            )
+            worker_b_finalize = await repo.finalize_daily_summary_run_generated(
+                run_id=worker_b.id,
+                claimed_at=worker_b.claimed_at,
+                generated_text="Сводка от B",
+                topics_json=[],
+                pipeline_cost_usd=0.02,
+                context_stt_cost_usd=0,
+            )
+            stale_sent = await repo.mark_daily_summary_run_sent(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, sent_at=reclaim_time
+            )
+            stale_send_failed = await repo.mark_daily_summary_run_send_failed(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, error="stale sender"
+            )
+            await session.commit()
+
+        assert not stale_failure
+        assert not stale_finalize
+        assert worker_b_finalize
+        assert not stale_sent
+        assert not stale_send_failed
+
+        stale_bot = _fake_bot()
+        stale_send = await daily_summary_module._send_and_mark(
+            bot=stale_bot,
+            session_factory=session_factory,
+            chat_id=_CHAT_ID,
+            run_id=worker_a.id,
+            claimed_at=worker_a.claimed_at,
+        )
+        assert stale_send is None  # mapped to claim_lost by the orchestrator
+        stale_bot.send_message.assert_not_awaited()
+
+        async with session_factory() as session:
+            stored = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=worker_b.id)
+        assert stored is not None
+        assert stored.status == "generated"
+        assert stored.generated_text == "Сводка от B"
+        assert stored.pipeline_cost_usd == Decimal("0.02")
+        assert stored.sent_at is None
     finally:
         await engine.dispose()
 

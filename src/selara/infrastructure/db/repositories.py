@@ -2930,6 +2930,8 @@ class SqlAlchemyActivityRepository:
         left untouched and this returns None -- callers should then use
         `get_daily_summary_run` to see what state it's actually in (e.g. to
         just resend an already-`generated` run instead of regenerating it).
+        Every successful claim refreshes `claimed_at`; state writes must include
+        that value as a fencing token so a reclaimed worker cannot overwrite it.
 
         This must stay a single atomic statement on Postgres (INSERT ... ON
         CONFLICT ... DO UPDATE ... WHERE ...) -- a read-then-write here would
@@ -3030,16 +3032,21 @@ class SqlAlchemyActivityRepository:
         self,
         *,
         run_id: int,
+        claimed_at: datetime,
         generated_text: str,
         topics_json: object,
         pipeline_cost_usd: Decimal | float,
         context_stt_cost_usd: float,
         diagnostics_json: object | None = None,
         pipeline_has_unknown_cost: bool = False,
-    ) -> None:
-        await self._session.execute(
+    ) -> bool:
+        result = await self._session.execute(
             update(DailySummaryRunModel)
-            .where(DailySummaryRunModel.id == run_id)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("claimed", "generating")),
+            )
             .values(
                 status="generated",
                 generated_text=generated_text,
@@ -3050,31 +3057,53 @@ class SqlAlchemyActivityRepository:
                 context_stt_cost_usd=context_stt_cost_usd,
             )
         )
+        return result.rowcount == 1
 
-    async def mark_daily_summary_run_sent(self, *, run_id: int, sent_at: datetime) -> None:
-        await self._session.execute(
+    async def mark_daily_summary_run_sent(self, *, run_id: int, claimed_at: datetime, sent_at: datetime) -> bool:
+        result = await self._session.execute(
             update(DailySummaryRunModel)
-            .where(DailySummaryRunModel.id == run_id)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+            )
             .values(status="sent", sent_at=_coerce_utc_datetime(sent_at))
         )
+        return result.rowcount == 1
 
-    async def mark_daily_summary_run_send_failed(self, *, run_id: int, error: str) -> None:
-        await self._session.execute(
-            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="send_failed", error=error)
+    async def mark_daily_summary_run_send_failed(
+        self, *, run_id: int, claimed_at: datetime, error: str
+    ) -> bool:
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+            )
+            .values(status="send_failed", error=error)
         )
+        return result.rowcount == 1
 
     async def mark_daily_summary_run_failed(
-        self, *, run_id: int, error: str, pipeline_cost_usd: Decimal | float | None = None,
+        self, *, run_id: int, claimed_at: datetime, error: str, pipeline_cost_usd: Decimal | float | None = None,
         pipeline_has_unknown_cost: bool | None = None,
-    ) -> None:
+    ) -> bool:
         values = {"status": "failed", "error": error}
         if pipeline_cost_usd is not None:
             values["pipeline_cost_usd"] = pipeline_cost_usd
         if pipeline_has_unknown_cost is not None:
             values["pipeline_has_unknown_cost"] = pipeline_has_unknown_cost
-        await self._session.execute(
-            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(**values)
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("claimed", "generating")),
+            )
+            .values(**values)
         )
+        return result.rowcount == 1
 
     async def record_llm_usage(
         self,

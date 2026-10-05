@@ -299,23 +299,59 @@ async def test_daily_summary_refuses_wrong_chat(context, monkeypatch):
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=2, generated_text='Итоги')))
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
-    assert not await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    assert not await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1,
+        run_id=42, claimed_at=datetime.now(timezone.utc))
+    bot.send_message.assert_not_called()
+    bot.send_photo.assert_not_called()
+
+
+async def test_daily_summary_does_not_send_from_reclaimed_claim(monkeypatch):
+    from selara.presentation.daily_summary import _send_and_mark
+    stale_claim = datetime.now(timezone.utc)
+    current_claim = stale_claim + timedelta(seconds=1)
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    repo = SimpleNamespace(
+        get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(
+            chat_id=1, claimed_at=current_claim, generated_text="Итоги", topics_json=None
+        ))
+    )
+    monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+
+    result = await _send_and_mark(
+        bot=bot,
+        session_factory=_Session,
+        chat_id=1,
+        run_id=42,
+        claimed_at=stale_claim,
+    )
+
+    assert result is None
     bot.send_message.assert_not_called()
     bot.send_photo.assert_not_called()
 
 
 async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch):
     from selara.presentation.daily_summary import _send_and_mark
+    claimed_at = datetime.now(timezone.utc)
     context.thread_id = None
     row = await context.repository.create(chat_id=1, thread_id=None, creator_id=0, title='Summary',
         pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
     await context.repository.session.commit()
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
-        generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
+        claimed_at=claimed_at, generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
         mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(return_value=SimpleNamespace(message_id=10)))
-    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1,
+        run_id=42, claimed_at=claimed_at)
     bot.send_message.assert_not_called()
     assert bot.send_photo.call_args.kwargs['caption'] == '<b>Итоги</b>'
     assert 'reply_parameters' not in bot.send_photo.call_args.kwargs
@@ -324,12 +360,14 @@ async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch
 
 async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
     from selara.presentation.daily_summary import _send_and_mark
+    claimed_at = datetime.now(timezone.utc)
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
-        generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
+        claimed_at=claimed_at, generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
         mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
-    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1, run_id=42)
+    assert await _send_and_mark(bot=bot, session_factory=lambda: context.repository.session, chat_id=1,
+        run_id=42, claimed_at=claimed_at)
     bot.send_photo.assert_not_called()
     assert bot.send_message.call_args.kwargs['text'] == '<b>Итоги</b>'
 
