@@ -11,7 +11,7 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
-from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
+from selara.application.daily_summary.pipeline import DailySummaryClaimLost, run_daily_summary_pipeline
 from selara.application.daily_summary.schedule import compute_scheduled_window_to
 from selara.application.feature_access import (
     AccessReason,
@@ -147,6 +147,16 @@ async def _generate_and_finalize(
             repo = SqlAlchemyActivityRepository(session)
             glossary_terms = await _fetch_glossary_terms(session, chat_id=chat.telegram_chat_id)
 
+            async def ensure_claim_owned() -> bool:
+                async with session_factory() as ownership_session:
+                    ownership_repo = SqlAlchemyActivityRepository(ownership_session)
+                    current_run = await ownership_repo.get_daily_summary_run_by_id(run_id=run_id)
+                return bool(
+                    current_run is not None
+                    and current_run.claimed_at == claimed_at
+                    and current_run.status in ("claimed", "generating")
+                )
+
             try:
                 output = await run_daily_summary_pipeline(
                     llm_client=llm_client,
@@ -164,7 +174,11 @@ async def _generate_and_finalize(
                         repository=ArtifactRepository(session), renderer_url=get_settings().artifact_renderer_url,
                         chat_id=chat.telegram_chat_id, creator_id=0, message_id=None, summary_run_id=run_id,
                     ),
+                    claim_check=ensure_claim_owned,
                 )
+            except DailySummaryClaimLost:
+                outcome["error_category"] = "claim_lost"
+                return None
             except Exception as exc:
                 logger.exception(
                     "Daily Summary pipeline failed",
@@ -240,6 +254,27 @@ async def _send_and_mark(
         if run.claimed_at != claimed_at:
             return None
 
+        delivery_claimed_at = await repo.claim_daily_summary_delivery(
+            run_id=run_id,
+            claimed_at=claimed_at,
+            lease_seconds=_LEASE_SECONDS,
+        )
+        await session.commit()
+        if delivery_claimed_at is None:
+            return None
+
+        async def delivery_claim_is_current() -> bool:
+            async with session_factory() as ownership_session:
+                current_run = await SqlAlchemyActivityRepository(ownership_session).get_daily_summary_run_by_id(
+                    run_id=run_id
+                )
+            return bool(
+                current_run is not None
+                and current_run.claimed_at == delivery_claimed_at
+                and current_run.status in ("generated", "send_failed")
+                and current_run.lease_until > datetime.now(timezone.utc)
+            )
+
         try:
             artifact_id = (run.topics_json or {}).get("artifact_id")
             artifact_repo = ArtifactRepository(session)
@@ -250,11 +285,14 @@ async def _send_and_mark(
                     ctx=ArtifactRequestContext(repository=artifact_repo, renderer_url="", chat_id=chat_id,
                         creator_id=0, message_id=None, summary_run_id=run_id),
                     bot=bot, caption=run.generated_text, caption_is_html=True, fallback_to_text=True,
+                    claim_check=delivery_claim_is_current,
                 )
                 if not result.success:
                     raise RuntimeError(result.result_text)
             else:
                 for chunk in split_telegram_html(run.generated_text):
+                    if not await delivery_claim_is_current():
+                        return None
                     await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
         except asyncio.CancelledError:
             raise
@@ -264,7 +302,7 @@ async def _send_and_mark(
                 extra={"chat_id": chat_id, "run_id": run_id},
             )
             updated = await repo.mark_daily_summary_run_send_failed(
-                run_id=run_id, claimed_at=claimed_at, error=str(exc)
+                run_id=run_id, claimed_at=delivery_claimed_at, error=str(exc)
             )
             await session.commit()
             if not updated:
@@ -272,13 +310,12 @@ async def _send_and_mark(
             return False
 
         updated = await repo.mark_daily_summary_run_sent(
-            run_id=run_id, claimed_at=claimed_at, sent_at=datetime.now(timezone.utc)
+            run_id=run_id, claimed_at=delivery_claimed_at, sent_at=datetime.now(timezone.utc)
         )
         await session.commit()
         if not updated:
             return None
     return True
-
 
 async def attempt_daily_summary_run(
     *,
