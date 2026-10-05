@@ -233,6 +233,7 @@ async def test_pre_checkout_retry_with_new_query_id_survives_lost_answer(monkeyp
         buyer_user_id=123,
         source_chat_id=-100,
         chat_id=-100,
+        invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
         product_key=SELARA_AI_PRODUCT_KEY,
         amount_stars=137,
         currency="XTR",
