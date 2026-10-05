@@ -19,6 +19,7 @@ from selara.application.selara_ai_product import (
 from selara.core.config import Settings
 from selara.infrastructure.db.telegram_stars import PurchaseIntent, PreCheckoutResult
 from selara.presentation.handlers import premium
+from selara.presentation.handlers import private_panel
 from selara.presentation.payment_safe_dispatcher import _requires_durable_processing
 
 
@@ -214,3 +215,27 @@ async def test_pre_checkout_rejects_unknown_payload_and_answers_once(monkeypatch
 
     query.answer.assert_awaited_once()
     assert query.answer.await_args.kwargs["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_private_panel_pending_inputs_do_not_consume_successful_payment(monkeypatch):
+    monkeypatch.setattr(private_panel, "_get_pending_cfg_input", lambda _user_id: object())
+    monkeypatch.setattr(private_panel, "_get_pending_admin_input", lambda _user_id: object())
+    filters = (
+        private_panel.PendingCfgInputFilter(),
+        private_panel.PendingAdminInputFilter(),
+    )
+    paid_message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        successful_payment=object(),
+    )
+    normal_message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        successful_payment=None,
+    )
+
+    for pending_filter in filters:
+        assert await pending_filter(paid_message) is False
+        assert await pending_filter(normal_message) is True

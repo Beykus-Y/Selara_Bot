@@ -101,8 +101,8 @@ def build_router(
     root.include_router(aliases_router)
     root.include_router(engagement_router)
     root.include_router(feedback_router)
-    root.include_router(private_panel_router)
     root.include_router(premium_router)
+    root.include_router(private_panel_router)
     if llm_client is not None:
         root.include_router(llm_admin_router)
         root.include_router(daily_summary_router)
