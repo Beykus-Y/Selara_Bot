@@ -26,7 +26,7 @@ def _repo(*, is_member: bool) -> SimpleNamespace:
         get_chat_display_name=AsyncMock(return_value=None),
         find_chat_user_by_username=AsyncMock(return_value=None),
         is_active_chat_member=AsyncMock(return_value=is_member),
-        create_marriage_proposal=AsyncMock(return_value=(SimpleNamespace(), None)),
+        create_marriage_proposal=AsyncMock(return_value=(SimpleNamespace(id=1), None)),
     )
 
 
