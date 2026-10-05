@@ -939,7 +939,10 @@ async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_e
         async with session_factory() as session:
             messages = (await session.execute(select(MessageArchiveModel))).scalars().all()
             for index, message in enumerate(messages):
-                message.snapshot_at = _NOW - timedelta(hours=5) + timedelta(minutes=index)
+                # Keep both chats' full seed sets inside the scheduled
+                # window. A global index would push the second chat's
+                # messages past the 03:00 window boundary.
+                message.snapshot_at = _NOW - timedelta(hours=8) + timedelta(minutes=index % 60)
                 message.sent_at = message.snapshot_at
             await session.commit()
 
