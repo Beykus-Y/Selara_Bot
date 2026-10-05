@@ -14,13 +14,15 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.llm.client import LlmCallResult, LlmClient, LlmClientError
 from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.context import (
@@ -42,7 +44,8 @@ from selara.infrastructure.llm.tools import (
     get_tool_definitions,
     get_tool_status,
 )
-from selara.presentation.auth import has_permission
+from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
@@ -103,8 +106,12 @@ async def llm_admin_context_handler(
     llm_client: LlmClient,
     db_session: AsyncSession,
     settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True, settings=settings)
+    await _handle(
+        message, bot, activity_repo, chat_settings, llm_client, db_session,
+        with_context=True, settings=settings, session_factory=session_factory,
+    )
 
 
 @router.message(
@@ -119,8 +126,12 @@ async def llm_admin_nocontext_handler(
     llm_client: LlmClient,
     db_session: AsyncSession,
     settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False, settings=settings)
+    await _handle(
+        message, bot, activity_repo, chat_settings, llm_client, db_session,
+        with_context=False, settings=settings, session_factory=session_factory,
+    )
 
 
 async def _handle(
@@ -133,6 +144,7 @@ async def _handle(
     *,
     with_context: bool,
     settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     if not chat_settings.llm_enabled:
         return
@@ -206,13 +218,55 @@ async def _handle(
             await message.reply(f"⏳ Слишком часто. Подожди {wait_left} сек.")
             return
 
-    thinking_msg = await message.reply("⏳ Думаю...")
     accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
-    invocation_id = await accounting.create_invocation(
-        feature=AiFeature.LLM_ADMIN, trigger="telegram_message", chat_id=message.chat.id,
-        actor_user_id=message.from_user.id, mode="context" if with_context else "no_context",
-        source_message_id=message.message_id,
-    ) if accounting is not None else None
+    thinking_msg = await message.reply("⏳ Думаю...")
+    if session_factory is None:
+        log.error("Feature quota service unavailable: session factory was not injected chat_id=%s", message.chat.id)
+        await thinking_msg.edit_text("⚠️ Проверка доступа временно недоступна. Попробуйте позже.")
+        return
+
+    access_service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
+    owner_exempt = await resolve_owner_admin_exemption(
+        bot=bot,
+        chat_id=message.chat.id,
+        admin_user_id=settings.admin_user_id,
+    )
+    try:
+        decision = await access_service.reserve_feature_usage(
+            feature=AiFeature.LLM_ADMIN,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            actor_user_id=message.from_user.id,
+            actor_is_bot=bool(message.from_user.is_bot),
+            trigger="telegram_message",
+            timezone_name=settings.bot_timezone,
+            idempotency_key=message_idempotency_key(
+                feature=AiFeature.LLM_ADMIN,
+                chat_id=message.chat.id,
+                source_message_id=message.message_id,
+            ),
+            source_message_id=message.message_id,
+            mode="context" if with_context else "no_context",
+            owner_exempt=owner_exempt,
+        )
+    except Exception:
+        log.exception("Feature quota reservation failed chat_id=%s message_id=%s", message.chat.id, message.message_id)
+        await thinking_msg.edit_text("⚠️ Проверка доступа временно недоступна. Попробуйте позже.")
+        return
+
+    if decision.reused:
+        await thinking_msg.edit_text("Этот запрос уже был обработан. Повторный запуск не выполнялся.")
+        return
+    if not decision.allowed:
+        if decision.reason == AccessReason.QUOTA_EXHAUSTED:
+            text = quota_exhausted_message(decision, timezone_name=settings.bot_timezone)
+        else:
+            text = "⚠️ Сейчас не удалось разрешить запрос. Попробуйте позже."
+        await thinking_msg.edit_text(text)
+        return
+
+    invocation_id = decision.invocation_id
     call_context = LlmAccountingContext(
         invocation_id=invocation_id, feature=AiFeature.LLM_ADMIN, stage="assistant_round",
         chat_id=message.chat.id, actor_user_id=message.from_user.id,
@@ -443,6 +497,14 @@ async def _handle(
         await _run_invocation()
     finally:
         if accounting is not None and invocation_id is not None:
+            if outcome["status"] != "succeeded":
+                try:
+                    await access_service.release_if_no_provider_attempts(
+                        invocation_id=invocation_id,
+                        reason=outcome["error_category"] or "pre_provider_failure",
+                    )
+                except Exception:
+                    log.exception("Could not release unused feature quota invocation_id=%s", invocation_id)
             try:
                 await accounting.finish_invocation_outcome(
                     invocation_id=invocation_id,

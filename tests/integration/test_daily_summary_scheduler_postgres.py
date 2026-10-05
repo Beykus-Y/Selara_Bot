@@ -14,20 +14,30 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
+from selara.application.feature_access import FeatureAccessService
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.ai_accounting import AiAccountingService
-from selara.infrastructure.db.models import AiFeatureInvocationModel, DailySummaryRunModel, LlmUsageLogModel, MessageArchiveModel
+from selara.infrastructure.db.models import (
+    AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
+    DailySummaryRunModel,
+    LlmUsageLogModel,
+    MessageArchiveModel,
+)
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.llm.client import LlmCallResult, LlmCallUsage
 from decimal import Decimal
 from uuid import uuid4
 from selara.presentation.daily_summary import attempt_daily_summary_run
 from selara.presentation import daily_summary as daily_summary_module
+from selara.core.config import Settings
+from selara.infrastructure.llm.features import AiFeature
 
 _CHAT_ID = -100555
 _USER_ID = 1001
@@ -263,6 +273,62 @@ async def test_manual_trigger_works_even_when_scheduled_automation_is_disabled()
         )
 
         assert outcome.sent is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_manual_summary_quota_denial_releases_claim_and_never_starts_pipeline():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        access = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
+        for index in range(10):
+            decision = await access.reserve_feature_usage(
+                feature=AiFeature.DAILY_SUMMARY,
+                chat_id=_CHAT_ID,
+                chat_type="supergroup",
+                chat_title="Test Chat",
+                actor_user_id=None,
+                actor_is_bot=False,
+                trigger="manual",
+                timezone_name="UTC",
+                idempotency_key=f"daily_summary:{_CHAT_ID}:seed:{index}",
+                now=_NOW,
+            )
+            assert decision.allowed
+
+        llm_client = _FakeLlmClient()
+        outcome = await attempt_daily_summary_run(
+            bot=_fake_bot(),
+            session_factory=session_factory,
+            llm_client=llm_client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="manual",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            actor_user_id=_USER_ID,
+            source_message_id=999,
+            settings=Settings(bot_token="123:TEST", database_url="postgresql+asyncpg://localhost/test"),
+        )
+
+        assert outcome.sent is False
+        assert outcome.reason == "quota_exhausted"
+        assert outcome.access_decision.quota_used == 10
+        assert llm_client._structured_calls == 0
+        async with session_factory() as session:
+            run_count = await session.scalar(select(func.count(DailySummaryRunModel.id)))
+            provider_call_count = await session.scalar(select(func.count(LlmUsageLogModel.id)))
+            manual_quota_count = await session.scalar(
+                select(func.count(AiFeatureQuotaUsageModel.id)).where(
+                    AiFeatureQuotaUsageModel.feature == AiFeature.DAILY_SUMMARY.value,
+                )
+            )
+        assert run_count == 0
+        assert provider_call_count == 0
+        assert manual_quota_count == 10
     finally:
         await engine.dispose()
 

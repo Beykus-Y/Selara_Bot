@@ -2273,6 +2273,46 @@ class AiFeatureInvocationModel(Base):
     )
 
 
+class AiFeatureQuotaUsageModel(Base):
+    """One logical feature quota reservation, separate from provider-call cost."""
+
+    __tablename__ = "ai_feature_quota_usage"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    invocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    policy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    quota_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    access_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="consumed", server_default="consumed")
+    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
+        CheckConstraint("quota_limit > 0", name="ck_ai_feature_quota_positive_limit"),
+        CheckConstraint("status IN ('consumed', 'released')", name="ck_ai_feature_quota_status"),
+        UniqueConstraint("idempotency_key", name="uq_ai_feature_quota_idempotency"),
+        UniqueConstraint("invocation_id", name="uq_ai_feature_quota_invocation"),
+        Index("idx_ai_feature_quota_period_usage", "feature", "chat_id", "period_start", "status"),
+    )
+
+
 class LlmUsageLogModel(Base):
     """One provider inference or STT attempt, optionally linked to legacy rows."""
 

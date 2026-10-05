@@ -30,6 +30,7 @@ from selara.presentation.auth import (
     get_role_label_ru,
     has_command_access,
     has_permission,
+    is_telegram_chat_admin,
 )
 from selara.presentation.targeting import resolve_chat_target_user, split_explicit_target_and_tail, strip_wrapping_quotes
 
@@ -407,7 +408,7 @@ def _ban_confirm_markup(request_id: str) -> InlineKeyboardMarkup:
 
 
 def _is_chat_member_admin(member) -> bool:
-    return getattr(member, "status", None) in {"administrator", "creator"}
+    return is_telegram_chat_admin(member)
 
 
 async def _target_is_telegram_admin(bot: Bot, *, chat_id: int, user_id: int) -> bool:

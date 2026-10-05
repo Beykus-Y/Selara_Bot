@@ -3013,6 +3013,17 @@ class SqlAlchemyActivityRepository:
 
         return None
 
+    async def release_unstarted_daily_summary_claim(self, *, run_id: int, claimed_at: datetime) -> bool:
+        """Remove only the fresh claim that has not entered the pipeline yet."""
+        result = await self._session.execute(
+            delete(DailySummaryRunModel).where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.status == "claimed",
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+            )
+        )
+        return bool(result.rowcount)
+
     async def finalize_daily_summary_run_generated(
         self,
         *,

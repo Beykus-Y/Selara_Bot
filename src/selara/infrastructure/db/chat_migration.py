@@ -13,6 +13,7 @@ from selara.domain.glossary import normalize_glossary_text
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
     AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
@@ -146,6 +147,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -166,7 +168,19 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+
+async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    # These are append-only quota events, not per-chat counters. Preserve every
+    # event and its original key; the access repository counts matching Telegram
+    # source messages once and reuses migrated requests under the new chat id.
+    await session.execute(
+        update(AiFeatureQuotaUsageModel)
+        .where(AiFeatureQuotaUsageModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
 
 
 async def _merge_activity_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
