@@ -106,17 +106,26 @@ class SqlAlchemyFeatureQuotaRepository:
                             reason=AccessReason.DUPLICATE_REQUEST,
                         )
 
+                    reacquire_invocation = None
                     if (
                         existing.status == "released"
                         and policy.feature == AiFeature.DAILY_SUMMARY
                         and trigger == "manual"
-                        and existing.summary_run_id == summary_run_id
+                        and summary_run_id is not None
                     ):
-                        invocation = await session.scalar(
+                        reacquire_invocation = await session.scalar(
                             select(AiFeatureInvocationModel)
                             .where(AiFeatureInvocationModel.id == existing.invocation_id)
                             .with_for_update()
                         )
+                        if (
+                            reacquire_invocation is None
+                            or reacquire_invocation.summary_run_id != summary_run_id
+                        ):
+                            reacquire_invocation = None
+
+                    if existing.status == "released" and reacquire_invocation is not None:
+                        invocation = reacquire_invocation
                         provider_attempts = await session.scalar(
                             select(func.count(LlmUsageLogModel.id)).where(
                                 LlmUsageLogModel.invocation_id == existing.invocation_id,
