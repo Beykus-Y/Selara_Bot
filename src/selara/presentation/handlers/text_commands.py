@@ -6,7 +6,7 @@ import re
 import hashlib
 import time
 from os.path import basename
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import BytesIO
@@ -5799,9 +5799,8 @@ async def text_commands_handler(
             return
         text = rewritten
 
-    write_locked = bool(getattr(chat_settings, "chat_write_locked", False)) and message.chat.type in {"group", "supergroup"}
-    if write_locked and chat_settings.custom_rp_enabled:
-        chat_settings = replace(chat_settings, custom_rp_enabled=False)
+    # chat_settings не подменяем: объект сохраняется в БД командами гачи.
+    write_locked = bool(chat_settings.chat_write_locked) and message.chat.type in {"group", "supergroup"}
 
     if _is_reply_profile_lookup(message, text):
         if not await _enforce_command_access(message, activity_repo, command_key="me"):
@@ -5868,7 +5867,7 @@ async def text_commands_handler(
 
     if not chat_settings.text_commands_enabled:
         if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
+            if chat_settings.custom_rp_enabled and not write_locked:
                 custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
                 if custom_social_action is not None:
                     await send_custom_social_action(message, activity_repo, custom_social_action)
@@ -5881,7 +5880,7 @@ async def text_commands_handler(
 
     if message.chat.type not in settings.supported_chat_types:
         if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
+            if chat_settings.custom_rp_enabled and not write_locked:
                 custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
                 if custom_social_action is not None:
                     await send_custom_social_action(message, activity_repo, custom_social_action)
@@ -5938,7 +5937,7 @@ async def text_commands_handler(
         )
         return
 
-    if chat_settings.custom_rp_enabled and message.chat.type in {"group", "supergroup"}:
+    if chat_settings.custom_rp_enabled and not write_locked and message.chat.type in {"group", "supergroup"}:
         custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
         if custom_social_action is not None:
             await send_custom_social_action(message, activity_repo, custom_social_action)

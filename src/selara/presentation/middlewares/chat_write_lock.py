@@ -29,6 +29,9 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "bid",
         "growth",
         "growth_action",
+        # Гача текстом (ключи resolver, не каталога)
+        "gacha_pull",
+        "gacha_skip",
         "title",
         # Отношения
         "pair",
@@ -100,6 +103,11 @@ _LOCKED_CALLBACK_PREFIXES: tuple[str, ...] = (
 )
 
 
+# Мутирующие текстовые команды кланов (handlers/clans.py): отдельный роутер с text-фильтрами,
+# ключей каталога у них нет. Просмотр (`клан`, `кланы`) не блокируется.
+_LOCKED_CLAN_TEXT_PREFIXES: tuple[str, ...] = ("создать клан ", "вступить в клан ")
+_LOCKED_CLAN_TEXT_EXACT: frozenset[str] = frozenset({"удалить клан", "выйти из клана"})
+
 CHAT_WRITE_LOCK_ANSWER = "🔒 Чат заблокирован администратором. Команда недоступна."
 
 
@@ -133,6 +141,10 @@ class ChatWriteLockMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         raw_text = (event.text or "").strip()
+        lowered = raw_text.lower()
+        if lowered.startswith(_LOCKED_CLAN_TEXT_PREFIXES) or lowered in _LOCKED_CLAN_TEXT_EXACT:
+            await event.answer(CHAT_WRITE_LOCK_ANSWER)
+            return None
         if raw_text.startswith("/"):
             # Извлекаем имя команды (до пробела и до @).
             command_key = raw_text[1:].split()[0].split("@")[0].lower()
