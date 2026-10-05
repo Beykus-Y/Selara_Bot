@@ -106,7 +106,7 @@ def _allow_feature_access_in_handler_unit_tests(monkeypatch):
         )),
         release_if_no_provider_attempts=AsyncMock(return_value=False),
     )
-    monkeypatch.setattr(llm_admin_module, "FeatureAccessService", lambda _repository: service)
+    monkeypatch.setattr(llm_admin_module, "FeatureAccessService", lambda _repository, **_kwargs: service)
     monkeypatch.setattr(llm_admin_module, "resolve_owner_admin_exemption", AsyncMock(return_value=False))
     return service
 
