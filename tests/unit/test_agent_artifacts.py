@@ -368,6 +368,7 @@ async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
         claimed_at=claimed_at, lease_until=claimed_at + timedelta(minutes=30),
         generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
         claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
+        is_daily_summary_delivery_claim_current=AsyncMock(return_value=True),
         mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
