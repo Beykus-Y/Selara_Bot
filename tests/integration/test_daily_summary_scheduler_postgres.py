@@ -1182,12 +1182,18 @@ async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_e
         await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
         await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id)
         async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            chat_settings = await repo.get_chat_settings(chat_id=_CHAT_ID)
+            assert chat_settings is not None
+            scheduled_window_to = daily_summary_module.compute_scheduled_window_to(
+                hour=chat_settings.daily_summary_hour,
+                now_local=_NOW,
+            )
             messages = (await session.execute(select(MessageArchiveModel))).scalars().all()
             for index, message in enumerate(messages):
                 # Keep both chats' full seed sets inside the scheduled
-                # window. A global index would push the second chat's
-                # messages past the 03:00 window boundary.
-                message.snapshot_at = _NOW - timedelta(hours=8) + timedelta(minutes=index % 60)
+                # window. Use the configured window boundary, not a fixed clock.
+                message.snapshot_at = scheduled_window_to - timedelta(hours=8) + timedelta(minutes=index % 60)
                 message.sent_at = message.snapshot_at
             await session.commit()
 
