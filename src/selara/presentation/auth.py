@@ -79,7 +79,7 @@ async def resolve_owner_admin_exemption(
     """Confirm the configured Selara owner is a Telegram admin in this chat.
 
     Verification failures are logged and treated as unconfirmed, leaving the
-    regular commercial quota in force.
+    regular commercial access policy in force.
     """
     if bot is None or admin_user_id is None:
         return False
@@ -87,9 +87,12 @@ async def resolve_owner_admin_exemption(
         member = await bot.get_chat_member(chat_id=chat_id, user_id=admin_user_id)
     except Exception:
         logger.warning(
-            "Could not verify owner-admin exemption; applying normal feature quota chat_id=%s owner_user_id=%s",
-            chat_id,
-            admin_user_id,
+            "Could not verify owner-admin exemption; applying normal feature access policy",
+            extra={
+                "chat_id": chat_id,
+                "owner_user_id": admin_user_id,
+                "access_reason": "owner_exemption_unverified",
+            },
             exc_info=True,
         )
         return False

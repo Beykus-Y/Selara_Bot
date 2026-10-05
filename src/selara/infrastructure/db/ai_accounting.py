@@ -70,6 +70,91 @@ class AiAccountingService:
             await session.commit()
             return invocation_id
 
+    async def create_recovery_invocation_if_provider_started(self, *, invocation_id: int) -> int:
+        """Keep an unreported attempt visible when a summary run is reclaimed.
+
+        A provider-start marker is sticky for the lifetime of an invocation. If
+        recovery reused that same invocation, later usage rows could hide an
+        earlier marker-only attempt in run-level aggregation. Retain the old
+        invocation for audit and give the recovered pipeline a fresh one.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                quota_usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel).where(
+                        AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                    )
+                )
+                if quota_usage is not None:
+                    if session.bind is None or session.bind.dialect.name != "postgresql":
+                        raise RuntimeError("Quota-backed recovery requires PostgreSQL advisory locks")
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": feature_quota_idempotency_lock_key(
+                            idempotency_key=quota_usage.idempotency_key,
+                        )},
+                    )
+                    quota_usage = await session.scalar(
+                        select(AiFeatureQuotaUsageModel).where(
+                            AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                        )
+                    )
+                    if quota_usage is not None:
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                            {"lock_key": feature_quota_lock_key(
+                                feature=quota_usage.feature,
+                                chat_id=quota_usage.chat_id or 0,
+                                period_start=quota_usage.period_start,
+                            )},
+                        )
+                        quota_usage = await session.scalar(
+                            select(AiFeatureQuotaUsageModel).where(
+                                AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                            ).execution_options(populate_existing=True).with_for_update()
+                        )
+
+                previous = await session.scalar(
+                    select(AiFeatureInvocationModel).where(
+                        AiFeatureInvocationModel.id == invocation_id,
+                    ).with_for_update()
+                )
+                if previous is None:
+                    raise RuntimeError(f"AI invocation {invocation_id} does not exist")
+                if (
+                    previous.provider_attempt_started_at is None
+                    or previous.summary_run_id is None
+                    or (quota_usage is not None and quota_usage.status != "consumed")
+                ):
+                    return invocation_id
+
+                summary_run_id = previous.summary_run_id
+                recovery = AiFeatureInvocationModel(
+                    feature=previous.feature,
+                    scope_type=previous.scope_type,
+                    scope_id=previous.scope_id,
+                    chat_id=previous.chat_id,
+                    actor_user_id=previous.actor_user_id,
+                    trigger=previous.trigger,
+                    mode=previous.mode,
+                    status="running",
+                    source_message_id=previous.source_message_id,
+                    summary_run_id=previous.summary_run_id,
+                )
+                session.add(recovery)
+                await session.flush()
+                recovery_invocation_id = recovery.id
+
+        logger.info(
+            "AI recovery invocation created after provider start",
+            extra={
+                "summary_run_id": summary_run_id,
+                "previous_invocation_id": invocation_id,
+                "recovery_invocation_id": recovery_invocation_id,
+            },
+        )
+        return recovery_invocation_id
+
     async def mark_provider_attempt_started(self, *, invocation_id: int) -> None:
         """Durably mark an attempt before the network call begins.
 
@@ -223,7 +308,62 @@ class AiAccountingService:
                 )
             )
             calls, prompt, completion, cost, has_unknown = result.one()
-            return InvocationAggregate(int(calls), int(prompt), int(completion), Decimal(cost), bool(has_unknown))
+            provider_started_at = await session.scalar(
+                select(AiFeatureInvocationModel.provider_attempt_started_at).where(
+                    AiFeatureInvocationModel.id == invocation_id,
+                )
+            )
+            marker_only_attempt = provider_started_at is not None and int(calls) == 0
+            return InvocationAggregate(
+                int(calls) + int(marker_only_attempt),
+                int(prompt),
+                int(completion),
+                Decimal(cost),
+                bool(has_unknown) or marker_only_attempt,
+            )
+
+    async def aggregate_summary_run(self, *, summary_run_id: int) -> InvocationAggregate:
+        """Aggregate all provider accounting linked to one stable summary run.
+
+        Recovery can create another logical invocation after a worker dies. All
+        calls and marker-only attempts still belong to the same DailySummaryRun.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(
+                    func.count(LlmUsageLogModel.id),
+                    func.coalesce(func.sum(LlmUsageLogModel.prompt_tokens), 0),
+                    func.coalesce(func.sum(LlmUsageLogModel.completion_tokens), 0),
+                    func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0),
+                    func.max(case((
+                        (LlmUsageLogModel.pricing_status == "unknown") | (LlmUsageLogModel.status == "failed"), 1
+                    ), else_=0)),
+                )
+                .join(
+                    AiFeatureInvocationModel,
+                    AiFeatureInvocationModel.id == LlmUsageLogModel.invocation_id,
+                )
+                .where(AiFeatureInvocationModel.summary_run_id == summary_run_id)
+            )
+            calls, prompt, completion, cost, has_unknown = result.one()
+            has_usage = select(LlmUsageLogModel.id).where(
+                LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id,
+            ).exists()
+            marker_only = await session.scalar(
+                select(func.count(AiFeatureInvocationModel.id)).where(
+                    AiFeatureInvocationModel.summary_run_id == summary_run_id,
+                    AiFeatureInvocationModel.provider_attempt_started_at.is_not(None),
+                    ~has_usage,
+                )
+            )
+            marker_only_count = int(marker_only or 0)
+            return InvocationAggregate(
+                int(calls) + marker_only_count,
+                int(prompt),
+                int(completion),
+                Decimal(cost),
+                bool(has_unknown) or marker_only_count > 0,
+            )
 
     async def aggregate_window(self, *, window_from: datetime, window_to: datetime) -> AccountingWindowAggregate:
         """Summarize in-window invocations and their known spend component.
@@ -268,6 +408,19 @@ class AiAccountingService:
             )
             calls, unknown_calls, known_cost = usage_result.one()
             known_cost = Decimal(known_cost)
+            has_usage = select(LlmUsageLogModel.id).where(
+                LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id,
+            ).exists()
+            marker_only_count = await session.scalar(
+                select(func.count(AiFeatureInvocationModel.id)).where(
+                    AiFeatureInvocationModel.started_at >= window_from,
+                    AiFeatureInvocationModel.started_at < window_to,
+                    AiFeatureInvocationModel.provider_attempt_started_at.is_not(None),
+                    ~has_usage,
+                )
+            )
+            calls = int(calls) + int(marker_only_count or 0)
+            unknown_calls = int(unknown_calls) + int(marker_only_count or 0)
             average = known_cost / invocation_count if invocation_count else None
             return AccountingWindowAggregate(
                 int(invocation_count), int(calls), int(failed_count), int(unknown_calls), known_cost, average

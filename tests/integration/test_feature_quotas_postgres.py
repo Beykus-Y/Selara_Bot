@@ -10,7 +10,14 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from selara.application.feature_access import AccessReason, FeatureAccessService
+from selara.application.feature_access import (
+    AccessReason,
+    AccessTier,
+    FeatureAccessService,
+    FeatureEntitlement,
+    FeatureQuotaPolicy,
+    QuotaPeriod,
+)
 from selara.domain.entities import ChatSnapshot
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.base import Base
@@ -225,6 +232,55 @@ async def test_manual_summary_quota_resets_on_bot_timezone_month_and_scheduled_i
                 )
             )
         assert manual_count == 11
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_paid_manual_summary_persists_resolved_access_tier():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_700_014
+        await _seed_chats(factory, chat_id)
+        paid_policy = FeatureQuotaPolicy(
+            feature=AiFeature.DAILY_SUMMARY,
+            policy_key="test_paid_manual_monthly_v1",
+            limit=17,
+            period=QuotaPeriod.MONTH,
+        )
+
+        class PaidManualResolver:
+            async def resolve(self, *, chat_id, feature, trigger):
+                return FeatureEntitlement(
+                    access_tier=AccessTier.PAID,
+                    source="test_only",
+                    quota_policy=paid_policy,
+                )
+
+        service = FeatureAccessService(
+            SqlAlchemyFeatureQuotaRepository(factory),
+            entitlement_resolver=PaidManualResolver(),
+        )
+        decision = await _reserve(
+            service,
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=chat_id,
+            key=f"daily_summary:paid:{chat_id}:run:1",
+            trigger="manual",
+            now=_NOW,
+        )
+
+        assert decision.allowed
+        assert decision.access_tier == AccessTier.PAID
+        assert decision.quota_limit == 17
+        async with factory() as session:
+            usage = (await session.execute(
+                select(AiFeatureQuotaUsageModel).where(AiFeatureQuotaUsageModel.chat_id == chat_id)
+            )).scalar_one()
+        assert usage.access_tier == AccessTier.PAID.value
+        assert usage.quota_limit == 17
+        assert usage.owner_exempt is False
     finally:
         await engine.dispose()
 

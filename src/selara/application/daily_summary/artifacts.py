@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
+
+from selara.application.daily_summary.pipeline import DailySummaryClaimLost, ensure_daily_summary_claim
 
 from selara.infrastructure.llm.artifact_tools import create_artifact, read_skill
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClientError
@@ -15,7 +18,8 @@ _ALLOWED = {"read_skill": read_skill, "create_artifact": create_artifact}
 
 async def create_daily_infographic(*, client, context, text: str, themes: list[dict],
                                   participant_directory, accounting_context: LlmAccountingContext | None,
-                                  record_usages, facts: dict | None = None) -> str | None:
+                                  record_usages, facts: dict | None = None,
+                                  claim_check: Callable[[], Awaitable[bool]] | None = None) -> str | None:
     """Only IDs created by this request are candidates. All failures preserve text."""
     context.accompanying_text = html_to_plain_text(text)
     messages = [
@@ -33,6 +37,7 @@ async def create_daily_infographic(*, client, context, text: str, themes: list[d
     definitions = [t for t in get_tool_definitions() if t["function"]["name"] in _ALLOWED]
     try:
         for _ in range(7):  # skill read + six bounded source checks; at most three renders
+            await ensure_daily_summary_claim(claim_check)
             result = await client.chat_with_tools(messages, tools=definitions, accounting_context=accounting_context)
             record_usages(result.usages)
             response = result.value
@@ -54,6 +59,8 @@ async def create_daily_infographic(*, client, context, text: str, themes: list[d
                 messages.append({"role": "tool", "tool_call_id": c.id, "content": result.result_text})
                 if c.function.name == "create_artifact" and result.success and context.created_artifacts:
                     return context.created_artifacts[-1]
+    except DailySummaryClaimLost:
+        raise
     except LlmClientError as exc:
         record_usages(exc.usages)
         logger.exception("daily summary chat_id=%s: infographic provider call failed", context.chat_id)

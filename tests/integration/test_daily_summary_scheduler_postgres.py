@@ -7,6 +7,7 @@ state) and a fake LlmClient (no network) to keep this fast and deterministic.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,13 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
-from selara.application.feature_access import FeatureAccessService
+from selara.application.feature_access import AccessTier, FeatureEntitlement, FeatureAccessService
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
@@ -41,7 +43,7 @@ from selara.infrastructure.llm.features import AiFeature
 
 _CHAT_ID = -100555
 _USER_ID = 1001
-_NOW = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+_NOW = datetime.now(timezone.utc)
 
 
 async def _database():
@@ -55,10 +57,16 @@ async def _database():
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def _seed_chat(session_factory, *, message_count: int, min_messages: int) -> None:
+async def _seed_chat(
+    session_factory,
+    *,
+    message_count: int,
+    min_messages: int,
+    chat_id: int = _CHAT_ID,
+) -> None:
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
-        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        chat = ChatSnapshot(telegram_chat_id=chat_id, chat_type="supergroup", title="Test Chat")
         await repo._upsert_chat(chat)
         await repo._upsert_user(
             UserSnapshot(telegram_user_id=_USER_ID, username="vasya", first_name="Vasya", last_name=None, is_bot=False)
@@ -77,7 +85,7 @@ async def _seed_chat(session_factory, *, message_count: int, min_messages: int) 
             sent_at = _NOW - timedelta(hours=1) + timedelta(minutes=i)
             rows.append(
                 MessageArchiveModel(
-                    chat_id=_CHAT_ID,
+                    chat_id=chat_id,
                     user_id=_USER_ID,
                     telegram_message_id=i + 1,
                     snapshot_kind="created",
@@ -126,8 +134,33 @@ class _FakeLlmClient:
         return await self._result("Итоги дня: сегодня поболтали в чате.", accounting_context)
 
 
-def _fake_bot() -> SimpleNamespace:
-    return SimpleNamespace(send_message=AsyncMock())
+def _fake_bot(*, owner_status: str | None = None) -> SimpleNamespace:
+    bot = SimpleNamespace(send_message=AsyncMock())
+    if owner_status is not None:
+        bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status=owner_status))
+    return bot
+
+
+def _test_settings(*, admin_user_id: int | None = None) -> Settings:
+    return Settings(
+        bot_token="123:TEST",
+        database_url="postgresql+asyncpg://localhost/test",
+        bot_timezone="UTC",
+        admin_user_id=admin_user_id,
+    )
+
+
+def _paid_access(session_factory, *, resolver=None) -> FeatureAccessService:
+    if resolver is None:
+        class PaidResolver:
+            async def resolve(self, *, chat_id, feature, trigger):
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = PaidResolver()
+    return FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(session_factory),
+        entitlement_resolver=resolver,
+    )
 
 
 @pytest.mark.integration
@@ -198,6 +231,8 @@ async def test_daily_summary_late_pipeline_failure_keeps_completed_provider_call
             bot=_fake_bot(), session_factory=session_factory, llm_client=client,
             chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
             trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+            settings=_test_settings(),
+            feature_access_service=_paid_access(session_factory),
         )
 
         assert outcome.reason == "pipeline_failed"
@@ -223,28 +258,65 @@ async def test_daily_summary_cancellation_finalizes_invocation_without_failing_r
     engine, session_factory = await _database()
     try:
         await _seed_chat(session_factory, message_count=60, min_messages=50)
+        real_pipeline = daily_summary_module.run_daily_summary_pipeline
+        access = _paid_access(session_factory)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
 
-        async def cancel_pipeline(**kwargs):
+        async def cancel_after_provider_start(**kwargs):
+            await client.accounting_service.mark_provider_attempt_started(
+                invocation_id=kwargs["invocation_id"],
+            )
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_pipeline)
-        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_after_provider_start)
         with pytest.raises(asyncio.CancelledError):
             await attempt_daily_summary_run(
                 bot=_fake_bot(), session_factory=session_factory, llm_client=client,
                 chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
                 trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+                settings=_test_settings(),
+                feature_access_service=access,
             )
 
         async with session_factory() as session:
             invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
             run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
-        assert invocation.status == "failed"
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        aggregate = await client.accounting_service.aggregate_summary_run(summary_run_id=run.id)
+        assert invocation.status == "partial"
         assert invocation.error_category == "cancelled"
         assert invocation.completed_at is not None
-        # Cancellation leaves the lease/run recoverable; only the accounting
-        # invocation is finalized as failed.
+        assert invocation.provider_attempt_started_at is not None
+        assert usage_rows == []
+        assert aggregate.provider_calls == 1
+        assert aggregate.known_cost_usd == 0
+        assert aggregate.has_unknown_cost
+        # A provider-start marker without a persisted usage row remains visible
+        # as one unknown-cost attempt, and the run stays recoverable.
         assert run.status not in {"failed", "sent"}
+
+        async with session_factory() as session:
+            run_row = await session.get(DailySummaryRunModel, run.id)
+            run_row.lease_until = _NOW - timedelta(seconds=1)
+            await session.commit()
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", real_pipeline)
+        recovered = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="scheduled", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
+            now_utc=_NOW + timedelta(minutes=40), settings=_test_settings(),
+            feature_access_service=access,
+        )
+
+        assert recovered.sent
+        async with session_factory() as session:
+            stored_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+        assert stored_run.status == "sent"
+        assert stored_run.pipeline_cost_usd > 0
+        assert stored_run.pipeline_has_unknown_cost is True
+        assert len(invocations) == 2
+        assert {item.summary_run_id for item in invocations} == {run.id}
     finally:
         await engine.dispose()
 
@@ -426,6 +498,89 @@ async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monk
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_manual_recovery_after_marker_only_attempt_preserves_unknown_cost(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        settings = _test_settings()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+
+        async def cancel_after_provider_start(**kwargs):
+            await client.accounting_service.mark_provider_attempt_started(
+                invocation_id=kwargs["invocation_id"],
+            )
+            raise asyncio.CancelledError
+
+        real_pipeline = daily_summary_module.run_daily_summary_pipeline
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_after_provider_start)
+        with pytest.raises(asyncio.CancelledError):
+            await attempt_daily_summary_run(
+                bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+                trigger="manual", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+                actor_user_id=_USER_ID, source_message_id=4242, settings=settings,
+            )
+
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            quota = (await session.execute(select(AiFeatureQuotaUsageModel))).scalar_one()
+            original_invocation = await session.get(AiFeatureInvocationModel, quota.invocation_id)
+            original_run_id = run.id
+            original_invocation_id = original_invocation.id
+            assert run.status == "claimed"
+            run.lease_until = _NOW - timedelta(seconds=1)
+            await session.commit()
+            assert await session.scalar(select(func.count(LlmUsageLogModel.id))) == 0
+        assert quota.status == "consumed"
+        assert original_invocation.provider_attempt_started_at is not None
+        assert original_invocation.status == "partial"
+
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", real_pipeline)
+        recovered = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+            trigger="manual", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
+            now_utc=_NOW + timedelta(minutes=40), actor_user_id=_USER_ID,
+            source_message_id=9999, settings=settings,
+        )
+
+        assert recovered.sent
+        aggregate = await client.accounting_service.aggregate_summary_run(summary_run_id=original_run_id)
+        async with session_factory() as session:
+            run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=original_run_id)
+            quota_rows = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+            invocations = (await session.execute(
+                select(AiFeatureInvocationModel).where(
+                    AiFeatureInvocationModel.summary_run_id == original_run_id,
+                ).order_by(AiFeatureInvocationModel.id)
+            )).scalars().all()
+            usage_rows = (await session.execute(
+                select(LlmUsageLogModel).where(LlmUsageLogModel.invocation_id != original_invocation_id)
+            )).scalars().all()
+
+        assert run.status == "sent"
+        assert run.pipeline_has_unknown_cost is True
+        assert aggregate.has_unknown_cost is True
+        assert aggregate.provider_calls == len(usage_rows) + 1
+        assert len(quota_rows) == 1 and quota_rows[0].status == "consumed"
+        assert quota_rows[0].invocation_id == original_invocation_id
+        assert len(invocations) == 2
+        assert invocations[0].status == "partial" and invocations[0].provider_attempt_started_at is not None
+        assert invocations[1].status == "succeeded" and invocations[1].id != original_invocation_id
+        assert usage_rows
+        usage_summary = await FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory)).get_usage_summary(
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=_CHAT_ID,
+            trigger="manual",
+            timezone_name="UTC",
+            now=_NOW + timedelta(minutes=40),
+        )
+        assert usage_summary.quota_used == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_scheduled_trigger_is_blocked_when_automation_is_disabled() -> None:
     engine, session_factory = await _database()
     try:
@@ -443,10 +598,630 @@ async def test_scheduled_trigger_is_blocked_when_automation_is_disabled() -> Non
         outcome = await attempt_daily_summary_run(
             bot=bot, session_factory=session_factory, llm_client=llm_client, chat=chat,
             trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+            settings=_test_settings(),
         )
 
         assert outcome.sent is False
         assert outcome.reason == "not_eligible:disabled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_free_chat_is_denied_before_count_claim_quota_or_provider(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=daily_summary_module.__name__)
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        count_messages = AsyncMock(return_value=60)
+        monkeypatch.setattr(
+            daily_summary_module.SqlAlchemyActivityRepository,
+            "count_archived_messages_in_window",
+            count_messages,
+        )
+        daily_summary_module._ACCESS_LOG_KEYS.clear()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        bot = _fake_bot()
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "now_utc": _NOW,
+            "settings": _test_settings(),
+        }
+
+        first = await attempt_daily_summary_run(**kwargs)
+        second = await attempt_daily_summary_run(**kwargs)
+
+        assert first.reason == "access_required"
+        assert first.access_decision.reason.value == "access_required"
+        assert second.reason == "access_required"
+        assert client._structured_calls == 0
+        count_messages.assert_not_awaited()
+        bot.send_message.assert_not_awaited()
+        assert sum(
+            "Scheduled Daily Summary skipped: access required" in record.getMessage()
+            for record in caplog.records
+        ) == 1
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            chat_settings = await repo.get_chat_settings(chat_id=_CHAT_ID)
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            quota_rows = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+            provider_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert chat_settings.daily_summary_enabled is True
+        assert runs == []
+        assert invocations == []
+        assert quota_rows == []
+        assert provider_rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_generated_send_failed_resends_require_entitlement_and_reuse_run():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=1800,
+                now=_NOW,
+            )
+            assert run is not None
+            await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                claimed_at=run.claimed_at,
+                generated_text="Ранее созданные итоги.",
+                topics_json=[],
+                pipeline_cost_usd=Decimal("0.0000045"),
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+        run_id = run.id
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        call_kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": chat,
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "now_utc": _NOW,
+            "settings": _test_settings(),
+        }
+
+        denied = await attempt_daily_summary_run(**call_kwargs)
+        assert denied.reason == "access_required"
+        bot.send_message.assert_not_awaited()
+
+        bot.send_message.side_effect = [RuntimeError("temporary Telegram failure"), None]
+        access = _paid_access(session_factory)
+        failed_send = await attempt_daily_summary_run(
+            **call_kwargs,
+            feature_access_service=access,
+        )
+        assert not failed_send.sent and failed_send.reason == "send_failed"
+        async with session_factory() as session:
+            failed_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run_id)
+        assert failed_run.status == "send_failed"
+
+        resent = await attempt_daily_summary_run(
+            **call_kwargs,
+            feature_access_service=access,
+        )
+        assert resent.sent and resent.reason == "sent"
+        assert client._structured_calls == 0
+        assert bot.send_message.await_count == 2
+        async with session_factory() as session:
+            final_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run_id)
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            quota_rows = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+        assert len(runs) == 1 and final_run.status == "sent"
+        assert final_run.id == run_id
+        assert invocations == []
+        assert quota_rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_group_migration_after_claim_reloads_canonical_chat_before_generation():
+    engine, session_factory = await _database()
+    try:
+        new_chat_id = _CHAT_ID - 100
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class MigrateDuringAccessRecheckResolver:
+            calls = 0
+
+            async def resolve(self, *, chat_id, feature, trigger):
+                self.calls += 1
+                if self.calls == 2:
+                    async with session_factory() as session:
+                        await migrate_chat_id(
+                            session,
+                            old_chat_id=_CHAT_ID,
+                            new_chat_id=new_chat_id,
+                            new_chat_type="supergroup",
+                            new_chat_title="Test Chat",
+                        )
+                        await session.commit()
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = MigrateDuringAccessRecheckResolver()
+        access = _paid_access(session_factory, resolver=resolver)
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="group", title="Test Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+            feature_access_service=access,
+        )
+
+        assert outcome.sent
+        assert resolver.calls == 3
+        bot.send_message.assert_awaited_once()
+        assert bot.send_message.await_args.kwargs["chat_id"] == new_chat_id
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            usages = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].chat_id == new_chat_id and runs[0].status == "sent"
+        assert len(invocations) == 1 and invocations[0].chat_id == new_chat_id
+        assert invocations[0].summary_run_id == runs[0].id
+        assert usages and all(row.chat_id == new_chat_id for row in usages)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_parallel_scheduled_claims_start_only_one_provider_pipeline(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        original_count = SqlAlchemyActivityRepository.count_archived_messages_in_window
+        both_counted = asyncio.Event()
+        count_calls = 0
+
+        async def wait_until_both_counted(self, **kwargs):
+            nonlocal count_calls
+            result = await original_count(self, **kwargs)
+            count_calls += 1
+            if count_calls == 2:
+                both_counted.set()
+            await both_counted.wait()
+            return result
+
+        monkeypatch.setattr(
+            SqlAlchemyActivityRepository,
+            "count_archived_messages_in_window",
+            wait_until_both_counted,
+        )
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "now_utc": _NOW,
+            "settings": _test_settings(),
+            "feature_access_service": _paid_access(session_factory),
+        }
+
+        left, right = await asyncio.gather(
+            attempt_daily_summary_run(**kwargs),
+            attempt_daily_summary_run(**kwargs),
+        )
+
+        assert sum(outcome.sent for outcome in (left, right)) == 1
+        assert sorted(outcome.reason for outcome in (left, right)) == ["claim_lost", "sent"]
+        assert client._structured_calls == 2
+        bot.send_message.assert_awaited_once()
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            usages = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].status == "sent"
+        assert len(invocations) == 1 and invocations[0].trigger == "scheduled"
+        assert len(usages) == 5
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_claim_fences_stale_worker_finalize_and_delivery():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        window_from = _NOW - timedelta(hours=24)
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            worker_a = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=window_from,
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=60,
+                now=_NOW,
+            )
+            await session.commit()
+        assert worker_a is not None
+
+        # Simulate worker A's lease expiring while its process is still alive.
+        async with session_factory() as session:
+            await session.execute(
+                update(DailySummaryRunModel)
+                .where(DailySummaryRunModel.id == worker_a.id)
+                .values(lease_until=_NOW + timedelta(seconds=30))
+            )
+            await session.commit()
+
+        reclaim_time = _NOW + timedelta(minutes=2)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            worker_b = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=window_from,
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=60,
+                now=reclaim_time,
+            )
+            await session.commit()
+        assert worker_b is not None and worker_b.id == worker_a.id
+        assert worker_b.claimed_at != worker_a.claimed_at
+
+        # A stale worker cannot fail or finalize the run after B reclaimed it.
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            stale_failure = await repo.mark_daily_summary_run_failed(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, error="stale worker"
+            )
+            stale_finalize = await repo.finalize_daily_summary_run_generated(
+                run_id=worker_a.id,
+                claimed_at=worker_a.claimed_at,
+                generated_text="Сводка от A",
+                topics_json=[],
+                pipeline_cost_usd=0.01,
+                context_stt_cost_usd=0,
+            )
+            worker_b_finalize = await repo.finalize_daily_summary_run_generated(
+                run_id=worker_b.id,
+                claimed_at=worker_b.claimed_at,
+                generated_text="Сводка от B",
+                topics_json=[],
+                pipeline_cost_usd=0.02,
+                context_stt_cost_usd=0,
+            )
+            stale_sent = await repo.mark_daily_summary_run_sent(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, sent_at=reclaim_time
+            )
+            stale_send_failed = await repo.mark_daily_summary_run_send_failed(
+                run_id=worker_a.id, claimed_at=worker_a.claimed_at, error="stale sender"
+            )
+            await session.commit()
+
+        assert not stale_failure
+        assert not stale_finalize
+        assert worker_b_finalize
+        assert not stale_sent
+        assert not stale_send_failed
+
+        stale_bot = _fake_bot()
+        stale_send = await daily_summary_module._send_and_mark(
+            bot=stale_bot,
+            session_factory=session_factory,
+            chat_id=_CHAT_ID,
+            run_id=worker_a.id,
+            claimed_at=worker_a.claimed_at,
+        )
+        assert stale_send is None  # mapped to claim_lost by the orchestrator
+        stale_bot.send_message.assert_not_awaited()
+
+        async with session_factory() as session:
+            stored = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=worker_b.id)
+        assert stored is not None
+        assert stored.status == "generated"
+        assert stored.generated_text == "Сводка от B"
+        assert stored.pipeline_cost_usd == Decimal("0.02")
+        assert stored.sent_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_owner_internal_chat_runs_without_paid_entitlement_or_manual_quota():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        bot = _fake_bot(owner_status="administrator")
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(admin_user_id=_USER_ID),
+        )
+
+        assert outcome.sent
+        assert outcome.access_decision.allowed
+        assert outcome.access_decision.access_tier == AccessTier.OWNER_INTERNAL
+        bot.get_chat_member.assert_awaited()  # the whole chat, not a particular command actor, is exempt
+        async with session_factory() as session:
+            invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
+            quota_count = await session.scalar(select(func.count(AiFeatureQuotaUsageModel.id)))
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+        assert invocation.trigger == "scheduled"
+        assert invocation.summary_run_id == run.id
+        assert quota_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_manual_and_scheduled_runs_share_date_but_keep_access_and_quota_independent():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        access = _paid_access(session_factory)
+        settings = _test_settings()
+
+        scheduled, manual = await asyncio.gather(
+            attempt_daily_summary_run(
+                bot=bot,
+                session_factory=session_factory,
+                llm_client=client,
+                chat=chat,
+                trigger="scheduled",
+                window_to=_NOW,
+                summary_date=_NOW.date(),
+                now_utc=_NOW,
+                settings=settings,
+                feature_access_service=access,
+            ),
+            attempt_daily_summary_run(
+                bot=bot,
+                session_factory=session_factory,
+                llm_client=client,
+                chat=chat,
+                trigger="manual",
+                window_to=_NOW,
+                summary_date=_NOW.date(),
+                now_utc=_NOW,
+                actor_user_id=_USER_ID,
+                source_message_id=987,
+                settings=settings,
+                feature_access_service=access,
+            ),
+        )
+
+        assert scheduled.sent and manual.sent
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            quota = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+        assert {run.trigger for run in runs} == {"manual", "scheduled"}
+        assert {invocation.trigger for invocation in invocations} == {"manual", "scheduled"}
+        assert len(quota) == 1 and quota[0].trigger == "manual"
+        assert {invocation.summary_run_id for invocation in invocations} == {run.id for run in runs}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_entitlement_revoked_after_initial_check_releases_claim_and_recovers():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class RevokeBetweenChecksResolver:
+            calls = 0
+
+            async def resolve(self, *, chat_id, feature, trigger):
+                self.calls += 1
+                if self.calls == 2:
+                    return FeatureEntitlement(access_tier=AccessTier.FREE)
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = RevokeBetweenChecksResolver()
+        access = _paid_access(session_factory, resolver=resolver)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        base_kwargs = {
+            "bot": _fake_bot(),
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": chat,
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "settings": _test_settings(),
+            "feature_access_service": access,
+        }
+
+        denied = await attempt_daily_summary_run(now_utc=_NOW, **base_kwargs)
+
+        assert denied.reason == "access_required"
+        assert client._structured_calls == 0
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            assert await session.scalar(select(func.count(LlmUsageLogModel.id))) == 0
+        assert run.status == "claimed"
+        assert run.lease_until < run.claimed_at
+        assert invocations == []
+
+        recovery_kwargs = {
+            **base_kwargs,
+            "now_utc": _NOW + timedelta(minutes=40),
+            "window_to": _NOW + timedelta(minutes=40),
+        }
+        recovered = await attempt_daily_summary_run(**recovery_kwargs)
+
+        assert recovered.sent
+        assert resolver.calls == 4
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
+        assert len(runs) == 1 and runs[0].id == run.id and runs[0].status == "sent"
+        assert invocation.trigger == "scheduled" and invocation.summary_run_id == run.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_toggle_disabled_during_access_recheck_stops_pipeline():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+
+        class DisableToggleDuringRecheckResolver:
+            calls = 0
+
+            async def resolve(self, *, chat_id, feature, trigger):
+                self.calls += 1
+                if self.calls == 2:
+                    async with session_factory() as session:
+                        repo = SqlAlchemyActivityRepository(session)
+                        await repo.upsert_chat_settings(
+                            chat=chat,
+                            values={"daily_summary_enabled": False},
+                        )
+                        await session.commit()
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = DisableToggleDuringRecheckResolver()
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=chat,
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+            feature_access_service=_paid_access(session_factory, resolver=resolver),
+        )
+
+        assert outcome.reason == "not_eligible:disabled"
+        assert resolver.calls == 2
+        assert client._structured_calls == 0
+        bot.send_message.assert_not_awaited()
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            chat_settings = await SqlAlchemyActivityRepository(session).get_chat_settings(chat_id=_CHAT_ID)
+            assert await session.scalar(select(func.count(LlmUsageLogModel.id))) == 0
+        assert chat_settings.daily_summary_enabled is False
+        assert run.status == "claimed" and run.lease_until < run.claimed_at
+        assert invocations == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_error():
+    engine, session_factory = await _database()
+    try:
+        allowed_chat_id = _CHAT_ID + 1
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            chat_settings = await repo.get_chat_settings(chat_id=_CHAT_ID)
+            assert chat_settings is not None
+            scheduled_window_to = daily_summary_module.compute_scheduled_window_to(
+                hour=chat_settings.daily_summary_hour,
+                now_local=_NOW,
+            )
+            messages = (await session.execute(select(MessageArchiveModel))).scalars().all()
+            for index, message in enumerate(messages):
+                # Keep both chats' full seed sets inside the scheduled
+                # window. Use the configured window boundary, not a fixed clock.
+                message.snapshot_at = scheduled_window_to - timedelta(hours=8) + timedelta(minutes=index % 60)
+                message.sent_at = message.snapshot_at
+            await session.commit()
+
+        class OneChatResolver:
+            async def resolve(self, *, chat_id, feature, trigger):
+                if chat_id == _CHAT_ID:
+                    raise RuntimeError("entitlement store unavailable")
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            settings=_test_settings(),
+            feature_access_service=_paid_access(session_factory, resolver=OneChatResolver()),
+        )
+
+        sent_count = await scheduler.run_once(now=_NOW)
+
+        assert sent_count == 1
+        assert bot.send_message.await_count == 1
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].chat_id == allowed_chat_id and runs[0].status == "sent"
+        assert len(invocations) == 1 and invocations[0].chat_id == allowed_chat_id
     finally:
         await engine.dispose()
 
@@ -508,5 +1283,201 @@ async def test_second_manual_run_same_day_is_a_no_op_after_first_sends() -> None
         assert second.sent is False
         assert second.reason == "already_run_today"
         bot.send_message.assert_awaited_once()  # still just the one send from `first`
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_daily_summary_resends_claim_delivery_and_send_once(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="manual",
+                lease_seconds=1800,
+                now=_NOW,
+            )
+            assert run is not None
+            assert await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                claimed_at=run.claimed_at,
+                generated_text="Одна сохранённая сводка.",
+                topics_json=[],
+                pipeline_cost_usd=0,
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+
+        # Force both resenders to read the same old token before either can
+        # perform the atomic delivery claim.
+        read_barrier = asyncio.Barrier(2)
+        initial_reads = 0
+        real_repository = daily_summary_module.SqlAlchemyActivityRepository
+
+        class _ReadBarrierRepository(real_repository):
+            async def get_daily_summary_run_by_id(self, *, run_id):
+                nonlocal initial_reads
+                row = await super().get_daily_summary_run_by_id(run_id=run_id)
+                if initial_reads < 2:
+                    initial_reads += 1
+                    await read_barrier.wait()
+                return row
+
+        monkeypatch.setattr(daily_summary_module, "SqlAlchemyActivityRepository", _ReadBarrierRepository)
+        bot = _fake_bot()
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def _blocked_send(**kwargs):
+            send_started.set()
+            await release_send.wait()
+            return SimpleNamespace(message_id=123)
+
+        bot.send_message.side_effect = _blocked_send
+        attempts = [
+            asyncio.create_task(daily_summary_module._send_and_mark(
+                bot=bot, session_factory=session_factory, chat_id=_CHAT_ID, run_id=run.id,
+                claimed_at=run.claimed_at,
+            ))
+            for _ in range(2)
+        ]
+        await asyncio.wait_for(send_started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert bot.send_message.await_count == 1
+        release_send.set()
+        results = await asyncio.gather(*attempts)
+
+        assert sorted(results, key=lambda value: str(value)) == [None, True]
+        assert bot.send_message.await_count == 1
+        async with session_factory() as session:
+            stored = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
+        assert stored.status == "sent"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_generation_lease_stops_before_next_provider_stage():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class _ExpireLeaseAfterFirstProviderCall(_FakeLlmClient):
+            async def chat_structured(self, messages, *, response_model, max_tokens=None, accounting_context=None):
+                result = await super().chat_structured(
+                    messages, response_model=response_model, max_tokens=max_tokens,
+                    accounting_context=accounting_context,
+                )
+                if self._structured_calls == 1:
+                    async with session_factory() as session:
+                        await session.execute(
+                            update(DailySummaryRunModel)
+                            .where(
+                                DailySummaryRunModel.chat_id == _CHAT_ID,
+                                DailySummaryRunModel.summary_date == _NOW.date(),
+                                DailySummaryRunModel.trigger == "manual",
+                            )
+                            .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=1))
+                        )
+                        await session.commit()
+                return result
+
+        client = _ExpireLeaseAfterFirstProviderCall(
+            accounting_service=AiAccountingService(session_factory)
+        )
+        bot = _fake_bot()
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="manual",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+        )
+
+        assert outcome.reason == "claim_lost"
+        assert client._structured_calls == 1
+        bot.send_message.assert_not_awaited()
+        async with session_factory() as session:
+            run = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
+                chat_id=_CHAT_ID, summary_date=_NOW.date(), trigger="manual"
+            )
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert run is not None
+        assert run.status in {"claimed", "generating"}
+        assert run.lease_until <= datetime.now(timezone.utc)
+        assert len(usage_rows) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_crashed_daily_summary_delivery_lease_can_be_reclaimed():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        now = datetime.now(timezone.utc)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=now.date(),
+                window_from=now - timedelta(hours=24),
+                window_to=now,
+                trigger="manual",
+                lease_seconds=1800,
+                now=now,
+            )
+            assert run is not None
+            assert await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                claimed_at=run.claimed_at,
+                generated_text="Сводка для проверки lease.",
+                topics_json=[],
+                pipeline_cost_usd=0,
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+
+        delivery_start = datetime.now(timezone.utc) + timedelta(seconds=1)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            first_token = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=run.claimed_at, lease_seconds=1800, now=delivery_start,
+            )
+            await session.commit()
+        assert first_token is not None
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            premature = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=first_token, lease_seconds=1800,
+                now=delivery_start + timedelta(minutes=15),
+            )
+            await session.commit()
+        assert premature is None
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            recovered_token = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=first_token, lease_seconds=1800,
+                now=delivery_start + timedelta(minutes=31),
+            )
+            await session.commit()
+        assert recovered_token is not None
+        assert recovered_token != first_token
     finally:
         await engine.dispose()

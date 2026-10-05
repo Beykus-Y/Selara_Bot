@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -95,5 +96,49 @@ async def test_failed_invocation_with_persisted_provider_call_finishes_partial()
             assert invocation.status == "partial"
             assert invocation.error_category == "handler_error"
             assert invocation.completed_at is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_start_marker_without_usage_is_unknown_cost_not_zero_usage():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="daily_summary",
+            trigger="scheduled",
+            chat_id=None,
+            summary_run_id=42,
+        )
+        await service.mark_provider_attempt_started(invocation_id=invocation_id)
+
+        aggregate = await service.aggregate_invocation(invocation_id=invocation_id)
+        run_aggregate = await service.aggregate_summary_run(summary_run_id=42)
+        await service.finish_invocation_outcome(
+            invocation_id=invocation_id,
+            status="failed",
+            error_category="cancelled_after_provider_start",
+        )
+        window = await service.aggregate_window(
+            window_from=datetime.now(timezone.utc) - timedelta(minutes=1),
+            window_to=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+        assert aggregate.provider_calls == 1
+        assert aggregate.known_cost_usd == Decimal("0")
+        assert aggregate.has_unknown_cost
+        assert run_aggregate.provider_calls == 1
+        assert run_aggregate.has_unknown_cost
+        assert window.provider_calls == 1
+        assert window.unknown_cost_calls == 1
+        assert window.known_cost_usd == Decimal("0")
+        assert window.failed_invocations == 1
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, invocation_id)
+            assert invocation.status == "partial"
     finally:
         await engine.dispose()
