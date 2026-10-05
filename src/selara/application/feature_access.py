@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from typing import Protocol
@@ -95,6 +95,7 @@ class FeatureEntitlement:
     access_tier: AccessTier
     valid_until: datetime | None = None
     source: str | None = None
+    quota_policy: FeatureQuotaPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +395,13 @@ class FeatureAccessService:
     ) -> FeatureAccessDecision:
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
         policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        entitlement = None
+        if policy is not None and not owner_exempt and feature == AiFeature.DAILY_SUMMARY and trigger == "manual":
+            policy, tier, entitlement = await self._manual_summary_policy(
+                policy=policy,
+                chat_id=chat_id,
+                now=now,
+            )
         if policy is None:
             return FeatureAccessDecision(
                 allowed=True,
@@ -416,7 +424,7 @@ class FeatureAccessService:
             now=now or datetime.now(timezone.utc),
             timezone_name=timezone_name,
         )
-        return await self._repository.reserve(
+        decision = await self._repository.reserve(
             policy=policy,
             chat_id=chat_id,
             chat_type=chat_type,
@@ -432,6 +440,14 @@ class FeatureAccessService:
             period_start=start,
             period_end=end,
         )
+        if entitlement is not None:
+            return replace(
+                decision,
+                access_tier=tier,
+                entitlement_valid_until=entitlement.valid_until,
+                entitlement_source=entitlement.source,
+            )
+        return decision
 
     async def get_usage_summary(
         self,
@@ -445,6 +461,12 @@ class FeatureAccessService:
     ) -> FeatureUsageSummary:
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
         policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        if policy is not None and not owner_exempt and feature == AiFeature.DAILY_SUMMARY and trigger == "manual":
+            policy, tier, _ = await self._manual_summary_policy(
+                policy=policy,
+                chat_id=chat_id,
+                now=now,
+            )
         if policy is None:
             return FeatureUsageSummary(
                 feature, "chat", str(chat_id), tier, None, None, None, None, None, None,
@@ -455,13 +477,59 @@ class FeatureAccessService:
             now=now or datetime.now(timezone.utc),
             timezone_name=timezone_name,
         )
-        return await self._repository.usage_summary(
+        summary = await self._repository.usage_summary(
             policy=policy,
             chat_id=chat_id,
             owner_exempt=owner_exempt,
             period_start=start,
             period_end=end,
         )
+        return replace(summary, access_tier=tier)
+
+    async def _manual_summary_policy(
+        self,
+        *,
+        policy: FeatureQuotaPolicy,
+        chat_id: int,
+        now: datetime | None,
+    ) -> tuple[FeatureQuotaPolicy, AccessTier, FeatureEntitlement | None]:
+        """Select a future paid manual quota without promising a paid limit today.
+
+        Resolver errors and incomplete paid policies fall back to the current
+        free 10/month policy. Owner-internal quota bypass remains a separate
+        path based on a live Telegram admin check.
+        """
+        try:
+            entitlement = await self._entitlement_resolver.resolve(
+                chat_id=chat_id,
+                feature=AiFeature.DAILY_SUMMARY,
+                trigger="manual",
+            )
+            if not isinstance(entitlement, FeatureEntitlement):
+                raise TypeError("Entitlement resolver returned an unsupported result")
+            if entitlement.access_tier != AccessTier.PAID or entitlement.quota_policy is None:
+                return policy, AccessTier.FREE, None
+            if entitlement.quota_policy.feature != AiFeature.DAILY_SUMMARY:
+                raise ValueError("Manual Daily Summary entitlement supplied a policy for another feature")
+            if entitlement.quota_policy.period != QuotaPeriod.MONTH or entitlement.quota_policy.limit <= policy.limit:
+                raise ValueError("Paid manual Daily Summary policy must raise the monthly free quota")
+            if entitlement.valid_until is not None:
+                expiry = entitlement.valid_until
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                current = now or datetime.now(timezone.utc)
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=timezone.utc)
+                if expiry.astimezone(timezone.utc) <= current.astimezone(timezone.utc):
+                    return policy, AccessTier.FREE, None
+            return entitlement.quota_policy, AccessTier.PAID, entitlement
+        except Exception:
+            logger.debug(
+                "Manual Daily Summary quota policy resolution failed; applying free policy chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+            return policy, AccessTier.FREE, None
 
     async def release_if_no_provider_attempts(self, *, invocation_id: int, reason: str) -> bool:
         return await self._repository.release_if_no_provider_attempts(invocation_id=invocation_id, reason=reason)

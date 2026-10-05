@@ -256,30 +256,65 @@ async def test_daily_summary_cancellation_finalizes_invocation_without_failing_r
     engine, session_factory = await _database()
     try:
         await _seed_chat(session_factory, message_count=60, min_messages=50)
+        real_pipeline = daily_summary_module.run_daily_summary_pipeline
+        access = _paid_access(session_factory)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
 
-        async def cancel_pipeline(**kwargs):
+        async def cancel_after_provider_start(**kwargs):
+            await client.accounting_service.mark_provider_attempt_started(
+                invocation_id=kwargs["invocation_id"],
+            )
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_pipeline)
-        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_after_provider_start)
         with pytest.raises(asyncio.CancelledError):
             await attempt_daily_summary_run(
                 bot=_fake_bot(), session_factory=session_factory, llm_client=client,
                 chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
                 trigger="scheduled", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
                 settings=_test_settings(),
-                feature_access_service=_paid_access(session_factory),
+                feature_access_service=access,
             )
 
         async with session_factory() as session:
             invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
             run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
-        assert invocation.status == "failed"
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        aggregate = await client.accounting_service.aggregate_summary_run(summary_run_id=run.id)
+        assert invocation.status == "partial"
         assert invocation.error_category == "cancelled"
         assert invocation.completed_at is not None
-        # Cancellation leaves the lease/run recoverable; only the accounting
-        # invocation is finalized as failed.
+        assert invocation.provider_attempt_started_at is not None
+        assert usage_rows == []
+        assert aggregate.provider_calls == 1
+        assert aggregate.known_cost_usd == 0
+        assert aggregate.has_unknown_cost
+        # A provider-start marker without a persisted usage row remains visible
+        # as one unknown-cost attempt, and the run stays recoverable.
         assert run.status not in {"failed", "sent"}
+
+        async with session_factory() as session:
+            run_row = await session.get(DailySummaryRunModel, run.id)
+            run_row.lease_until = _NOW - timedelta(seconds=1)
+            await session.commit()
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", real_pipeline)
+        recovered = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="scheduled", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
+            now_utc=_NOW + timedelta(minutes=40), settings=_test_settings(),
+            feature_access_service=access,
+        )
+
+        assert recovered.sent
+        async with session_factory() as session:
+            stored_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+        assert stored_run.status == "sent"
+        assert stored_run.pipeline_cost_usd > 0
+        assert stored_run.pipeline_has_unknown_cost is True
+        assert len(invocations) == 2
+        assert {item.summary_run_id for item in invocations} == {run.id}
     finally:
         await engine.dispose()
 
@@ -523,7 +558,10 @@ async def test_scheduled_free_chat_is_denied_before_count_claim_quota_or_provide
         assert client._structured_calls == 0
         count_messages.assert_not_awaited()
         bot.send_message.assert_not_awaited()
-        assert sum("Scheduled Daily Summary skipped: access required" in record.message for record in caplog.records) == 1
+        assert sum(
+            "Scheduled Daily Summary skipped: access required" in record.getMessage()
+            for record in caplog.records
+        ) == 1
 
         async with session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
@@ -537,6 +575,83 @@ async def test_scheduled_free_chat_is_denied_before_count_claim_quota_or_provide
         assert invocations == []
         assert quota_rows == []
         assert provider_rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_generated_send_failed_resends_require_entitlement_and_reuse_run():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="scheduled",
+                lease_seconds=1800,
+                now=_NOW,
+            )
+            assert run is not None
+            await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                generated_text="Ранее созданные итоги.",
+                topics_json=[],
+                pipeline_cost_usd=Decimal("0.0000045"),
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+        run_id = run.id
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        call_kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": chat,
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "now_utc": _NOW,
+            "settings": _test_settings(),
+        }
+
+        denied = await attempt_daily_summary_run(**call_kwargs)
+        assert denied.reason == "access_required"
+        bot.send_message.assert_not_awaited()
+
+        bot.send_message.side_effect = [RuntimeError("temporary Telegram failure"), None]
+        access = _paid_access(session_factory)
+        failed_send = await attempt_daily_summary_run(
+            **call_kwargs,
+            feature_access_service=access,
+        )
+        assert not failed_send.sent and failed_send.reason == "send_failed"
+        async with session_factory() as session:
+            failed_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run_id)
+        assert failed_run.status == "send_failed"
+
+        resent = await attempt_daily_summary_run(
+            **call_kwargs,
+            feature_access_service=access,
+        )
+        assert resent.sent and resent.reason == "sent"
+        assert client._structured_calls == 0
+        assert bot.send_message.await_count == 2
+        async with session_factory() as session:
+            final_run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run_id)
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            quota_rows = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+        assert len(runs) == 1 and final_run.status == "sent"
+        assert final_run.id == run_id
+        assert invocations == []
+        assert quota_rows == []
     finally:
         await engine.dispose()
 

@@ -223,7 +223,62 @@ class AiAccountingService:
                 )
             )
             calls, prompt, completion, cost, has_unknown = result.one()
-            return InvocationAggregate(int(calls), int(prompt), int(completion), Decimal(cost), bool(has_unknown))
+            provider_started_at = await session.scalar(
+                select(AiFeatureInvocationModel.provider_attempt_started_at).where(
+                    AiFeatureInvocationModel.id == invocation_id,
+                )
+            )
+            marker_only_attempt = provider_started_at is not None and int(calls) == 0
+            return InvocationAggregate(
+                int(calls) + int(marker_only_attempt),
+                int(prompt),
+                int(completion),
+                Decimal(cost),
+                bool(has_unknown) or marker_only_attempt,
+            )
+
+    async def aggregate_summary_run(self, *, summary_run_id: int) -> InvocationAggregate:
+        """Aggregate all provider accounting linked to one stable summary run.
+
+        Recovery can create another logical invocation after a worker dies. All
+        calls and marker-only attempts still belong to the same DailySummaryRun.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(
+                    func.count(LlmUsageLogModel.id),
+                    func.coalesce(func.sum(LlmUsageLogModel.prompt_tokens), 0),
+                    func.coalesce(func.sum(LlmUsageLogModel.completion_tokens), 0),
+                    func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0),
+                    func.max(case((
+                        (LlmUsageLogModel.pricing_status == "unknown") | (LlmUsageLogModel.status == "failed"), 1
+                    ), else_=0)),
+                )
+                .join(
+                    AiFeatureInvocationModel,
+                    AiFeatureInvocationModel.id == LlmUsageLogModel.invocation_id,
+                )
+                .where(AiFeatureInvocationModel.summary_run_id == summary_run_id)
+            )
+            calls, prompt, completion, cost, has_unknown = result.one()
+            has_usage = select(LlmUsageLogModel.id).where(
+                LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id,
+            ).exists()
+            marker_only = await session.scalar(
+                select(func.count(AiFeatureInvocationModel.id)).where(
+                    AiFeatureInvocationModel.summary_run_id == summary_run_id,
+                    AiFeatureInvocationModel.provider_attempt_started_at.is_not(None),
+                    ~has_usage,
+                )
+            )
+            marker_only_count = int(marker_only or 0)
+            return InvocationAggregate(
+                int(calls) + marker_only_count,
+                int(prompt),
+                int(completion),
+                Decimal(cost),
+                bool(has_unknown) or marker_only_count > 0,
+            )
 
     async def aggregate_window(self, *, window_from: datetime, window_to: datetime) -> AccountingWindowAggregate:
         """Summarize in-window invocations and their known spend component.
@@ -268,6 +323,19 @@ class AiAccountingService:
             )
             calls, unknown_calls, known_cost = usage_result.one()
             known_cost = Decimal(known_cost)
+            has_usage = select(LlmUsageLogModel.id).where(
+                LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id,
+            ).exists()
+            marker_only_count = await session.scalar(
+                select(func.count(AiFeatureInvocationModel.id)).where(
+                    AiFeatureInvocationModel.started_at >= window_from,
+                    AiFeatureInvocationModel.started_at < window_to,
+                    AiFeatureInvocationModel.provider_attempt_started_at.is_not(None),
+                    ~has_usage,
+                )
+            )
+            calls = int(calls) + int(marker_only_count or 0)
+            unknown_calls = int(unknown_calls) + int(marker_only_count or 0)
             average = known_cost / invocation_count if invocation_count else None
             return AccountingWindowAggregate(
                 int(invocation_count), int(calls), int(failed_count), int(unknown_calls), known_cost, average

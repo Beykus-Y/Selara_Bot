@@ -9,7 +9,7 @@ from aiogram.types import Message
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot
-from selara.application.feature_access import AccessReason, FeatureAccessDecision
+from selara.application.feature_access import AccessReason, FeatureAccessDecision, FeatureAccessService
 from selara.infrastructure.llm.client import LlmClient
 from selara.presentation.auth import has_permission
 from selara.presentation.daily_summary import attempt_daily_summary_run
@@ -61,6 +61,7 @@ async def summary_command(
     session_factory,
     llm_client: LlmClient | None = None,
     settings: Settings | None = None,
+    feature_access_service: FeatureAccessService | None = None,
 ) -> None:
     if message.chat.type not in {"group", "supergroup"}:
         await message.answer("Команда доступна только в группе.")
@@ -108,6 +109,7 @@ async def summary_command(
         actor_user_id=message.from_user.id,
         source_message_id=message.message_id,
         settings=settings,
+        feature_access_service=feature_access_service,
     )
 
     if outcome.sent:

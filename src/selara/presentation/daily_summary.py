@@ -167,7 +167,7 @@ async def _generate_and_finalize(
                     "Daily Summary pipeline failed",
                     extra={"chat_id": chat.telegram_chat_id, "run_id": run_id, "trigger": trigger},
                 )
-                aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
+                aggregate = await accounting.aggregate_summary_run(summary_run_id=run_id) if accounting else None
                 await repo.mark_daily_summary_run_failed(
                     run_id=run_id, error=str(exc),
                     pipeline_cost_usd=aggregate.known_cost_usd if aggregate else None,
@@ -176,7 +176,7 @@ async def _generate_and_finalize(
                 await session.commit()
                 return False
 
-            aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
+            aggregate = await accounting.aggregate_summary_run(summary_run_id=run_id) if accounting else None
             context_stt_cost = await repo.sum_context_stt_cost_in_window(
                 chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
             )

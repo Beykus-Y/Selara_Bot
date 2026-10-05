@@ -9,8 +9,10 @@ import pytest
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
-    FeatureEntitlement,
+    FeatureAccessDecision,
     FeatureAccessService,
+    FeatureEntitlement,
+    FeatureQuotaPolicy,
     FeatureUsageSummary,
     NoPaidChatEntitlementResolver,
     QuotaPeriod,
@@ -94,6 +96,81 @@ async def test_paid_entitlement_is_typed_and_kept_separate_from_quota():
         feature=AiFeature.DAILY_SUMMARY,
         trigger="scheduled",
     )
+
+
+@pytest.mark.asyncio
+async def test_paid_manual_quota_is_supplied_as_policy_without_a_product_default():
+    paid_policy = FeatureQuotaPolicy(
+        feature=AiFeature.DAILY_SUMMARY,
+        policy_key="test_paid_manual_policy",
+        limit=17,
+        period=QuotaPeriod.MONTH,
+    )
+    entitlement = FeatureEntitlement(
+        access_tier=AccessTier.PAID,
+        valid_until=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        source="test_only",
+        quota_policy=paid_policy,
+    )
+    free_decision = FeatureAccessDecision(
+        allowed=True,
+        feature=AiFeature.DAILY_SUMMARY,
+        scope_type="chat",
+        scope_id="-100500",
+        access_tier=AccessTier.FREE,
+        quota_limit=17,
+        quota_used=1,
+        quota_remaining=16,
+        period_start=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        period_end=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        policy_key=paid_policy.policy_key,
+    )
+    usage = FeatureUsageSummary(
+        feature=AiFeature.DAILY_SUMMARY,
+        scope_type="chat",
+        scope_id="-100500",
+        access_tier=AccessTier.FREE,
+        quota_limit=17,
+        quota_used=1,
+        quota_remaining=16,
+        period_start=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        period_end=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        reset_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        unlimited=False,
+        owner_exempt=False,
+        policy_key=paid_policy.policy_key,
+    )
+    repository = SimpleNamespace(
+        reserve=AsyncMock(return_value=free_decision),
+        usage_summary=AsyncMock(return_value=usage),
+    )
+    resolver = SimpleNamespace(resolve=AsyncMock(return_value=entitlement))
+    service = FeatureAccessService(repository, entitlement_resolver=resolver)
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+
+    decision = await service.reserve_feature_usage(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        actor_user_id=123,
+        trigger="manual",
+        timezone_name="UTC",
+        idempotency_key="daily_summary:run:42",
+        now=now,
+    )
+    summary = await service.get_usage_summary(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="manual",
+        timezone_name="UTC",
+        now=now,
+    )
+
+    assert repository.reserve.await_args.kwargs["policy"] == paid_policy
+    assert repository.usage_summary.await_args.kwargs["policy"] == paid_policy
+    assert decision.access_tier == AccessTier.PAID
+    assert decision.entitlement_source == "test_only"
+    assert summary.access_tier == AccessTier.PAID
+    assert summary.quota_limit == 17
 
 
 @pytest.mark.asyncio
