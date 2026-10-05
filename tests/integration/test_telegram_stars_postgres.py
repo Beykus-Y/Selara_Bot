@@ -238,9 +238,17 @@ async def test_two_concurrent_real_payments_for_one_chat_add_sixty_days():
         )
 
         assert first.state == second.state == "applied"
-        assert first.valid_until == second.valid_until == _NOW + timedelta(days=60)
+        assert {
+            first.valid_until,
+            second.valid_until,
+        } == {_NOW + timedelta(days=30), _NOW + timedelta(days=60)}
         async with factory() as session:
+            final_entitlement = await session.scalar(
+                select(ChatEntitlementModel).where(ChatEntitlementModel.chat_id == chat_id)
+            )
             payment_count = await session.scalar(select(func.count(SelaraAiPaymentModel.id)))
+        assert final_entitlement is not None
+        assert final_entitlement.valid_until == _NOW + timedelta(days=60)
         assert payment_count == 2
         assert (await repository.payment_totals()).stars_revenue == 274
     finally:
@@ -539,6 +547,11 @@ async def test_migration_collision_sums_remaining_paid_time_without_duplicate_en
             )
             await session.commit()
         before = datetime.now(timezone.utc)
+        expected_remaining_seconds = sum(
+            max(0.0, (valid_until - before).total_seconds())
+            for valid_until in (_NOW + timedelta(days=10), _NOW + timedelta(days=20))
+        )
+        expected_valid_until = before + timedelta(seconds=expected_remaining_seconds)
         async with factory() as session:
             await migrate_chat_id(
                 session,
@@ -553,8 +566,8 @@ async def test_migration_collision_sums_remaining_paid_time_without_duplicate_en
             rows = list(await session.scalars(select(ChatEntitlementModel)))
         assert len(rows) == 1
         assert rows[0].chat_id == new_chat_id
-        assert rows[0].valid_until >= before + timedelta(days=29, hours=23)
-        assert rows[0].valid_until <= before + timedelta(days=30, seconds=10)
+        assert expected_valid_until - timedelta(seconds=30) <= rows[0].valid_until
+        assert rows[0].valid_until <= expected_valid_until + timedelta(seconds=30)
     finally:
         await engine.dispose()
 
