@@ -279,7 +279,7 @@ async def test_manual_trigger_works_even_when_scheduled_automation_is_disabled()
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_manual_summary_quota_denial_releases_claim_and_never_starts_pipeline():
+async def test_manual_summary_quota_denial_expires_but_preserves_run_and_never_starts_pipeline():
     engine, session_factory = await _database()
     try:
         await _seed_chat(session_factory, message_count=60, min_messages=50)
@@ -319,16 +319,83 @@ async def test_manual_summary_quota_denial_releases_claim_and_never_starts_pipel
         assert outcome.access_decision.quota_used == 10
         assert llm_client._structured_calls == 0
         async with session_factory() as session:
-            run_count = await session.scalar(select(func.count(DailySummaryRunModel.id)))
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
             provider_call_count = await session.scalar(select(func.count(LlmUsageLogModel.id)))
             manual_quota_count = await session.scalar(
                 select(func.count(AiFeatureQuotaUsageModel.id)).where(
                     AiFeatureQuotaUsageModel.feature == AiFeature.DAILY_SUMMARY.value,
                 )
             )
-        assert run_count == 0
+        assert len(runs) == 1
+        assert runs[0].status == "claimed"
+        assert runs[0].lease_until < runs[0].claimed_at
         assert provider_call_count == 0
         assert manual_quota_count == 10
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        settings = Settings(
+            bot_token="123:TEST",
+            database_url="postgresql+asyncpg://localhost/test",
+            bot_timezone="UTC",
+            admin_user_id=None,
+        )
+
+        async def die_after_reservation(**kwargs):
+            raise asyncio.CancelledError
+
+        real_generate = daily_summary_module._generate_and_finalize
+        monkeypatch.setattr(daily_summary_module, "_generate_and_finalize", die_after_reservation)
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+
+        with pytest.raises(asyncio.CancelledError):
+            await attempt_daily_summary_run(
+                bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+                trigger="manual", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+                actor_user_id=_USER_ID, source_message_id=4242, settings=settings,
+            )
+
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            original_run_id = run.id
+            assert run.status == "claimed"
+            run.lease_until = _NOW - timedelta(seconds=1)
+            await session.commit()
+            quota_before_reclaim = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+        assert len(quota_before_reclaim) == 1
+        original_invocation_id = quota_before_reclaim[0].invocation_id
+
+        monkeypatch.setattr(daily_summary_module, "_generate_and_finalize", real_generate)
+        recovered = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+            trigger="manual", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
+            now_utc=_NOW + timedelta(minutes=40), actor_user_id=_USER_ID,
+            source_message_id=9999, settings=settings,
+        )
+
+        assert recovered.sent is True
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            quota = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+            invocation = await session.get(AiFeatureInvocationModel, original_invocation_id)
+            provider_calls = await session.scalar(
+                select(func.count(LlmUsageLogModel.id)).where(
+                    LlmUsageLogModel.invocation_id == original_invocation_id,
+                )
+            )
+        assert len(runs) == 1 and runs[0].id == original_run_id and runs[0].status == "sent"
+        assert len(quota) == 1 and quota[0].invocation_id == original_invocation_id
+        assert quota[0].source_message_id == 4242  # first message remains audit metadata
+        assert invocation.summary_run_id == original_run_id
+        assert provider_calls > 0
     finally:
         await engine.dispose()
 

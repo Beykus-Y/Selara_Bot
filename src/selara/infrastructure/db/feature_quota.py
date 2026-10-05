@@ -25,6 +25,11 @@ from selara.infrastructure.db.models import (
 logger = logging.getLogger(__name__)
 
 
+def feature_quota_lock_key(*, feature: str, chat_id: int, period_start) -> int:
+    payload = f"{feature}\0{chat_id}\0{period_start.isoformat()}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+
+
 class SqlAlchemyFeatureQuotaRepository:
     """PostgreSQL-backed quota reservation and usage history.
 
@@ -69,21 +74,6 @@ class SqlAlchemyFeatureQuotaRepository:
                         AiFeatureQuotaUsageModel.idempotency_key == idempotency_key,
                     )
                 )
-                if existing is None and source_message_id is not None:
-                    # A group -> supergroup migration changes the chat_id that
-                    # participates in the key. Reuse a migrated event by its
-                    # Telegram message identity so redelivery cannot reserve a
-                    # second unit under the new chat id.
-                    existing = await session.scalar(
-                        select(AiFeatureQuotaUsageModel)
-                        .where(
-                            AiFeatureQuotaUsageModel.feature == policy.feature.value,
-                            AiFeatureQuotaUsageModel.chat_id == chat_id,
-                            AiFeatureQuotaUsageModel.source_message_id == source_message_id,
-                        )
-                        .order_by(AiFeatureQuotaUsageModel.id)
-                        .limit(1)
-                    )
                 if existing is not None:
                     if existing.feature != policy.feature.value:
                         raise RuntimeError("Feature quota idempotency key was reused across features")
@@ -171,6 +161,7 @@ class SqlAlchemyFeatureQuotaRepository:
                     actor_user_id=actor_user_id,
                     invocation_id=invocation.id,
                     trigger=trigger,
+                    source_chat_id=chat_id if source_message_id is not None else None,
                     source_message_id=source_message_id,
                     idempotency_key=idempotency_key,
                     period_start=period_start,
@@ -251,6 +242,7 @@ class SqlAlchemyFeatureQuotaRepository:
         )
 
     async def release_if_no_provider_attempts(self, *, invocation_id: int, reason: str) -> bool:
+        """Release only before any provider start marker or persisted attempt."""
         async with self._session_factory() as session:
             async with session.begin():
                 if session.bind is None or session.bind.dialect.name != "postgresql":
@@ -273,7 +265,14 @@ class SqlAlchemyFeatureQuotaRepository:
                         LlmUsageLogModel.invocation_id == invocation_id,
                     )
                 )
-                if provider_attempts:
+                invocation = await session.scalar(
+                    select(AiFeatureInvocationModel).where(
+                        AiFeatureInvocationModel.id == invocation_id,
+                    )
+                )
+                if provider_attempts or (
+                    invocation is not None and invocation.provider_attempt_started_at is not None
+                ):
                     return False
                 usage.status = "released"
                 usage.release_reason = reason[:64]
@@ -291,7 +290,12 @@ class SqlAlchemyFeatureQuotaRepository:
         logical_request = case(
             (
                 AiFeatureQuotaUsageModel.source_message_id.is_not(None),
-                func.concat("telegram-message:", AiFeatureQuotaUsageModel.source_message_id),
+                func.concat(
+                    "telegram-message:",
+                    func.coalesce(AiFeatureQuotaUsageModel.source_chat_id, AiFeatureQuotaUsageModel.chat_id),
+                    ":",
+                    AiFeatureQuotaUsageModel.source_message_id,
+                ),
             ),
             else_=func.concat("idempotency-key:", AiFeatureQuotaUsageModel.idempotency_key),
         )
@@ -342,5 +346,4 @@ class SqlAlchemyFeatureQuotaRepository:
 
     @staticmethod
     def _lock_key(*, feature: str, chat_id: int, period_start) -> int:
-        payload = f"{feature}\0{chat_id}\0{period_start.isoformat()}".encode("utf-8")
-        return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+        return feature_quota_lock_key(feature=feature, chat_id=chat_id, period_start=period_start)

@@ -214,6 +214,65 @@ async def test_timeout_returns_unknown_failed_attempt_without_inventing_zero_cos
 
 
 @pytest.mark.asyncio
+async def test_provider_start_marker_precedes_best_effort_usage_recording():
+    from selara.infrastructure.llm.client import LlmAccountingContext
+
+    events = []
+
+    async def mark_started(*, invocation_id):
+        events.append(("started", invocation_id))
+
+    async def fail_usage_record(context, usage):
+        events.append(("usage_record_failed", context.invocation_id))
+        raise RuntimeError("temporary accounting outage")
+
+    accounting = SimpleNamespace(
+        mark_provider_attempt_started=mark_started,
+        report_provider_attempt=fail_usage_record,
+    )
+    client = LlmClient(LlmConfig(api_key="test-key", model="gpt-4o-mini"), accounting_service=accounting)
+
+    async def provider(**kwargs):
+        events.append(("provider", None))
+        return _response("answer", model="gpt-4o-mini", prompt=10, completion=2)
+
+    client._client.chat.completions.create = AsyncMock(side_effect=provider)
+    await client.chat_simple(
+        [], accounting_context=LlmAccountingContext(77, "llm_admin", "round", -100),
+    )
+
+    assert events == [
+        ("started", 77),
+        ("provider", None),
+        ("usage_record_failed", 77),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_is_not_called_when_quota_start_marker_cannot_be_persisted():
+    from selara.infrastructure.llm.client import LlmAccountingContext
+
+    async def marker_unavailable(*, invocation_id):
+        raise RuntimeError("quota storage unavailable")
+
+    accounting = SimpleNamespace(
+        mark_provider_attempt_started=marker_unavailable,
+        report_provider_attempt=AsyncMock(),
+    )
+    client = LlmClient(LlmConfig(api_key="test-key", model="gpt-4o-mini"), accounting_service=accounting)
+    client._client.chat.completions.create = AsyncMock(return_value=_response(
+        "must not run", model="gpt-4o-mini", prompt=10, completion=2,
+    ))
+
+    with pytest.raises(RuntimeError, match="quota storage unavailable"):
+        await client.chat_simple(
+            [], accounting_context=LlmAccountingContext(78, "llm_admin", "round", -100),
+        )
+
+    client._client.chat.completions.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_transient_provider_errors_are_retried_as_separate_accounted_attempts():
     import httpx
     from openai import APITimeoutError

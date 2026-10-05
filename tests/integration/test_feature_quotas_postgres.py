@@ -337,6 +337,51 @@ async def test_provider_timeout_keeps_quota_but_pre_provider_failure_can_release
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_best_effort_provider_accounting_failure_does_not_refund_started_attempt(monkeypatch):
+    engine, factory = await _database()
+    try:
+        chat_id = -100_700_009
+        await _seed_chats(factory, chat_id)
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        accounting = AiAccountingService(factory)
+        reservation = await _reserve(
+            service, feature=AiFeature.LLM_ADMIN, chat_id=chat_id, key="accounting-recorder-failure",
+        )
+
+        # This durable pre-request marker is written by LlmClient before it
+        # invokes the provider. The subsequent best-effort usage write can fail.
+        await accounting.mark_provider_attempt_started(invocation_id=reservation.invocation_id)
+
+        async def fail_usage_insert(context, usage):
+            raise RuntimeError("simulated accounting insert failure")
+
+        monkeypatch.setattr(accounting, "record_provider_call", fail_usage_insert)
+        with pytest.raises(RuntimeError, match="simulated accounting insert failure"):
+            await accounting.report_provider_attempt(
+                LlmAccountingContext(reservation.invocation_id, "llm_admin", "assistant_round", chat_id),
+                LlmCallUsage(
+                    str(uuid4()), "gpt-4o-mini", 10, 5, 15, Decimal("0.0000045"), "known", 1, "succeeded",
+                ),
+            )
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, reservation.invocation_id)
+            provider_calls = await session.scalar(
+                select(func.count(LlmUsageLogModel.id)).where(
+                    LlmUsageLogModel.invocation_id == reservation.invocation_id,
+                )
+            )
+        assert invocation.provider_attempt_started_at is not None
+        assert provider_calls == 0
+        assert not await service.release_if_no_provider_attempts(
+            invocation_id=reservation.invocation_id,
+            reason="usage_recorder_failed",
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_duplicate_bucket():
     engine, factory = await _database()
     try:
@@ -347,7 +392,7 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
             service, feature=AiFeature.LLM_ADMIN, chat_id=old_chat_id,
             key=f"llm_admin:{old_chat_id}:10", source_message_id=10,
         )
-        duplicate_new_use = await _reserve(
+        same_message_id_new_origin = await _reserve(
             service, feature=AiFeature.LLM_ADMIN, chat_id=new_chat_id,
             key=f"llm_admin:{new_chat_id}:10", source_message_id=10,
         )
@@ -370,7 +415,7 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
             service,
             feature=AiFeature.LLM_ADMIN,
             chat_id=new_chat_id,
-            key=f"llm_admin:{new_chat_id}:10:replay",
+            key=f"llm_admin:{new_chat_id}:10",
             source_message_id=10,
             now=datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc),
         )
@@ -378,10 +423,14 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
             usage_rows = (await session.execute(
                 select(AiFeatureQuotaUsageModel).where(AiFeatureQuotaUsageModel.chat_id == new_chat_id)
             )).scalars().all()
-        assert old_use.invocation_id != duplicate_new_use.invocation_id
+            invocations = (await session.execute(
+                select(AiFeatureInvocationModel).where(AiFeatureInvocationModel.chat_id == new_chat_id)
+            )).scalars().all()
+        assert old_use.invocation_id != same_message_id_new_origin.invocation_id
         assert old_use.invocation_id != distinct_new_use.invocation_id
         assert len(usage_rows) == 3  # keep the audit history for both source rows
-        assert summary.quota_used == 2  # source_message_id=10 is one logical request
+        assert all(row.scope_type == "chat" and row.scope_id == str(new_chat_id) for row in invocations)
+        assert summary.quota_used == 3  # origin chat + message_id distinguish requests
         assert replay.allowed and replay.reused
         async with factory() as session:
             total_usage_rows = await session.scalar(select(func.count(AiFeatureQuotaUsageModel.id)))

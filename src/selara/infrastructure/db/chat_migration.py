@@ -173,9 +173,8 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
 
 
 async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
-    # These are append-only quota events, not per-chat counters. Preserve every
-    # event and its original key; the access repository counts matching Telegram
-    # source messages once and reuses migrated requests under the new chat id.
+    # `chat_id` is the current quota scope, while source_chat_id and the
+    # idempotency key preserve the immutable origin identity of each request.
     await session.execute(
         update(AiFeatureQuotaUsageModel)
         .where(AiFeatureQuotaUsageModel.chat_id == old_chat_id)
@@ -825,7 +824,20 @@ async def _move_ai_accounting_records(session: AsyncSession, *, old_chat_id: int
         await session.delete(source)
 
     await session.execute(
-        update(AiFeatureInvocationModel).where(AiFeatureInvocationModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type == "chat",
+        )
+        .values(chat_id=new_chat_id, scope_id=str(new_chat_id))
+    )
+    await session.execute(
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type != "chat",
+        )
+        .values(chat_id=new_chat_id)
     )
     await session.execute(
         update(LlmUsageLogModel).where(LlmUsageLogModel.chat_id == old_chat_id).values(chat_id=new_chat_id)

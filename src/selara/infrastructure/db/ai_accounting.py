@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.infrastructure.db.models import AiFeatureInvocationModel, LlmUsageLogModel
+from selara.infrastructure.db.feature_quota import feature_quota_lock_key
+from selara.infrastructure.db.models import AiFeatureInvocationModel, AiFeatureQuotaUsageModel, LlmUsageLogModel
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallUsage
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,44 @@ class AiAccountingService:
             invocation_id = row.id
             await session.commit()
             return invocation_id
+
+    async def mark_provider_attempt_started(self, *, invocation_id: int) -> None:
+        """Durably mark an attempt before the network call begins.
+
+        Provider usage rows are deliberately best-effort after a response. This
+        separate marker lets quota release distinguish a genuine pre-provider
+        failure from a paid attempt whose accounting insert failed.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                quota_usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel)
+                    .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                    .with_for_update()
+                )
+                if quota_usage is not None:
+                    if session.bind is None or session.bind.dialect.name != "postgresql":
+                        raise RuntimeError("Quota-backed provider attempts require PostgreSQL")
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": feature_quota_lock_key(
+                            feature=quota_usage.feature,
+                            chat_id=quota_usage.chat_id or 0,
+                            period_start=quota_usage.period_start,
+                        )},
+                    )
+                    if quota_usage.status != "consumed":
+                        raise RuntimeError("Cannot start a provider attempt for released quota")
+
+                invocation = await session.scalar(
+                    select(AiFeatureInvocationModel)
+                    .where(AiFeatureInvocationModel.id == invocation_id)
+                    .with_for_update()
+                )
+                if invocation is None:
+                    raise RuntimeError(f"AI invocation {invocation_id} does not exist")
+                if invocation.provider_attempt_started_at is None:
+                    invocation.provider_attempt_started_at = datetime.now(timezone.utc)
 
     async def record_provider_call(self, context: LlmAccountingContext, usage: LlmCallUsage) -> None:
         """Insert or finalize one attempt; retry validation updates the same call_id."""

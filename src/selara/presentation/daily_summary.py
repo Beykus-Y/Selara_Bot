@@ -15,7 +15,6 @@ from selara.application.daily_summary.schedule import compute_scheduled_window_t
 from selara.application.feature_access import (
     FeatureAccessDecision,
     FeatureAccessService,
-    message_idempotency_key,
 )
 from selara.core.config import Settings, get_settings
 from selara.domain.entities import ChatSnapshot, DailySummaryRun
@@ -249,7 +248,9 @@ async def attempt_daily_summary_run(
         eligibility = evaluate_daily_summary_eligibility(
             settings=eligibility_settings,
             message_count_in_window=message_count,
-            already_run_today=existing is not None,  # a live 'claimed'/'generating'/'send_failed' row
+            # Completed runs were returned above. In-progress rows must reach
+            # the atomic claim so an expired worker lease can be reclaimed.
+            already_run_today=False,
         )
         if not eligibility.eligible:
             return DailySummaryOutcome(False, f"not_eligible:{eligibility.reason}")
@@ -292,15 +293,9 @@ async def attempt_daily_summary_run(
             admin_user_id=settings.admin_user_id,
         )
         quota_access_service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
-        idempotency_key = (
-            message_idempotency_key(
-                feature=AiFeature.DAILY_SUMMARY,
-                chat_id=chat.telegram_chat_id,
-                source_message_id=source_message_id,
-            )
-            if source_message_id is not None
-            else f"{AiFeature.DAILY_SUMMARY.value}:{chat.telegram_chat_id}:run:{run.id}"
-        )
+        # A manual summary is one stable logical run. Telegram message ID is
+        # retained as audit metadata, while recovery/reclaims reuse run.id.
+        idempotency_key = f"{AiFeature.DAILY_SUMMARY.value}:run:{run.id}"
         try:
             access_decision = await quota_access_service.reserve_feature_usage(
                 feature=AiFeature.DAILY_SUMMARY,
@@ -325,7 +320,7 @@ async def attempt_daily_summary_run(
             await _release_unstarted_claim()
             return DailySummaryOutcome(False, "access_unavailable")
 
-        if not access_decision.allowed or access_decision.reused:
+        if not access_decision.allowed:
             await _release_unstarted_claim()
             reason = (
                 access_decision.reason.value

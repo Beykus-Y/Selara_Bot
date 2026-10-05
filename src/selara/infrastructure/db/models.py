@@ -2255,6 +2255,7 @@ class AiFeatureInvocationModel(Base):
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="running", server_default="running")
     source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    provider_attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summary_run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
     )
@@ -2290,6 +2291,9 @@ class AiFeatureQuotaUsageModel(Base):
         BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
     )
     trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Immutable Telegram identity at reservation time. `chat_id` tracks the
+    # current commercial scope and may change on group -> supergroup migration.
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -252,6 +252,11 @@ class LlmClient:
         usages: list[LlmCallUsage] = []
         for offset in range(_MAX_PROVIDER_ATTEMPTS):
             attempt_number = attempt_number_start + offset
+            marker = getattr(self.accounting_service, "mark_provider_attempt_started", None)
+            if accounting_context is not None and marker is not None:
+                # This must commit before the HTTP request. Usage-row writes
+                # happen after a response and can fail independently.
+                await marker(invocation_id=accounting_context.invocation_id)
             try:
                 response = await self._client.chat.completions.create(**request_kwargs)
             except asyncio.CancelledError:
