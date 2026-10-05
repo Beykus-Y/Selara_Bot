@@ -8,7 +8,10 @@ from aiogram import F
 from aiogram.types import Message
 
 from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
 from selara.domain.entities import ChatRoleDefinition
+from selara.application.feature_access import AccessReason, AccessTier, FeatureAccessDecision
+from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.handlers.llm_admin import (
     _execute_rollback,
     _handle,
@@ -120,21 +123,24 @@ async def test_llm_admin_handlers_dispatch(chat_settings):
     db_session = MagicMock()
     message = MagicMock(spec=Message)
     settings = MagicMock()
+    session_factory = object()
 
     with patch("selara.presentation.handlers.llm_admin._handle", new_callable=AsyncMock) as mock_handle:
         await llm_admin_context_handler(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, settings
+            message, bot, activity_repo, chat_settings, llm_client, db_session, settings, session_factory
         )
         mock_handle.assert_awaited_once_with(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True, settings=settings
+            message, bot, activity_repo, chat_settings, llm_client, db_session,
+            with_context=True, settings=settings, session_factory=session_factory,
         )
 
     with patch("selara.presentation.handlers.llm_admin._handle", new_callable=AsyncMock) as mock_handle:
         await llm_admin_nocontext_handler(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, settings
+            message, bot, activity_repo, chat_settings, llm_client, db_session, settings, session_factory
         )
         mock_handle.assert_awaited_once_with(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False, settings=settings
+            message, bot, activity_repo, chat_settings, llm_client, db_session,
+            with_context=False, settings=settings, session_factory=session_factory,
         )
 
 
@@ -166,6 +172,104 @@ async def test_handle_empty_query(chat_settings):
         
         # Should reply saying to enter request after prefix
         message.reply.assert_awaited_once_with("Введите запрос после ??")
+
+
+@pytest.mark.asyncio
+async def test_quota_denial_never_calls_llm_provider(chat_settings):
+    from selara.presentation.handlers import llm_admin as handler
+
+    message = AsyncMock(spec=Message)
+    message.message_id = 77
+    message.message_thread_id = None
+    message.chat = SimpleNamespace(id=-100123, type="supergroup", title="Test group")
+    message.from_user = SimpleNamespace(id=111, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    message.text = "? скажи привет"
+    status_message = AsyncMock()
+    message.reply = AsyncMock(return_value=status_message)
+    llm_client = AsyncMock()
+    settings = Settings(bot_token="123:TEST", database_url="sqlite+aiosqlite:///:memory:")
+    decision = FeatureAccessDecision(
+        allowed=False,
+        feature=AiFeature.LLM_ADMIN,
+        scope_type="chat",
+        scope_id="-100123",
+        access_tier=AccessTier.FREE,
+        quota_limit=10,
+        quota_used=10,
+        quota_remaining=0,
+        period_start=None,
+        period_end=None,
+        reason=AccessReason.QUOTA_EXHAUSTED,
+    )
+    access_service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=decision),
+        release_if_no_provider_attempts=AsyncMock(),
+    )
+    repo = MagicMock()
+    repo.get_last_user_message_at = AsyncMock(return_value=None)
+
+    with patch.object(handler, "has_permission", AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, "resolve_owner_admin_exemption", AsyncMock(return_value=False)), \
+         patch.object(handler, "FeatureAccessService", return_value=access_service), \
+         patch.object(handler, "LlmRepository", return_value=repo):
+        await handler._handle(
+            message,
+            AsyncMock(),
+            MagicMock(),
+            chat_settings,
+            llm_client,
+            AsyncMock(),
+            with_context=False,
+            settings=settings,
+            session_factory=object(),
+        )
+
+    llm_client.chat_with_tools.assert_not_awaited()
+    llm_client.chat_simple.assert_not_awaited()
+    status_message.edit_text.assert_awaited_once()
+    assert "10/10" in status_message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_quota_database_failure_fails_closed_before_provider_call(chat_settings):
+    from selara.presentation.handlers import llm_admin as handler
+
+    message = AsyncMock(spec=Message)
+    message.message_id = 78
+    message.message_thread_id = None
+    message.chat = SimpleNamespace(id=-100123, type="supergroup", title="Test group")
+    message.from_user = SimpleNamespace(id=111, username="admin", first_name="Admin", last_name=None, is_bot=False)
+    message.text = "?? расскажи привет"
+    status_message = AsyncMock()
+    message.reply = AsyncMock(return_value=status_message)
+    llm_client = AsyncMock()
+    settings = Settings(bot_token="123:TEST", database_url="sqlite+aiosqlite:///:memory:")
+    access_service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        release_if_no_provider_attempts=AsyncMock(),
+    )
+    repo = MagicMock()
+    repo.get_last_user_message_at = AsyncMock(return_value=None)
+
+    with patch.object(handler, "has_permission", AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, "resolve_owner_admin_exemption", AsyncMock(return_value=False)), \
+         patch.object(handler, "FeatureAccessService", return_value=access_service), \
+         patch.object(handler, "LlmRepository", return_value=repo):
+        await handler._handle(
+            message,
+            AsyncMock(),
+            MagicMock(),
+            chat_settings,
+            llm_client,
+            AsyncMock(),
+            with_context=True,
+            settings=settings,
+            session_factory=object(),
+        )
+
+    llm_client.chat_with_tools.assert_not_awaited()
+    status_message.edit_text.assert_awaited_once()
+    assert "временно недоступна" in status_message.edit_text.await_args.args[0]
 
 
 def _target_row_result(user_id: int) -> AsyncMock:

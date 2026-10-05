@@ -12,17 +12,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
 from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
 from selara.application.daily_summary.schedule import compute_scheduled_window_to
+from selara.application.feature_access import (
+    FeatureAccessDecision,
+    FeatureAccessService,
+)
 from selara.core.config import Settings, get_settings
 from selara.domain.entities import ChatSnapshot, DailySummaryRun
 from selara.domain.glossary import GlossaryEntry
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
+from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext, deliver_artifact
 from selara.infrastructure.llm.tools import ToolCall
 from selara.presentation.llm_formatting import split_telegram_html
 from selara.infrastructure.db.llm_repository import LlmRepository
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
 from selara.infrastructure.llm.features import AiFeature
+from selara.presentation.auth import resolve_owner_admin_exemption
+from selara.presentation.feature_access_messages import quota_exhausted_message
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,7 @@ _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" befor
 class DailySummaryOutcome:
     sent: bool
     reason: str  # "sent" | "not_eligible:<gate>" | "already_run_today" | "claim_lost" | "pipeline_failed" | "send_failed"
+    access_decision: FeatureAccessDecision | None = None
 
 
 def _resolve_timezone(timezone_name: str) -> ZoneInfo:
@@ -65,12 +74,17 @@ async def _generate_and_finalize(
     actor_user_id: int | None,
     window_from: datetime,
     window_to: datetime,
+    invocation_id: int | None = None,
+    quota_access_service: FeatureAccessService | None = None,
 ) -> bool:
     accounting = getattr(llm_client, "accounting_service", None)
-    invocation_id = await accounting.create_invocation(
-        feature=AiFeature.DAILY_SUMMARY, trigger=trigger, chat_id=chat.telegram_chat_id,
-        actor_user_id=actor_user_id, summary_run_id=run_id,
-    ) if accounting is not None else None
+    if invocation_id is None and accounting is not None:
+        invocation_id = await accounting.create_invocation(
+            feature=AiFeature.DAILY_SUMMARY, trigger=trigger, chat_id=chat.telegram_chat_id,
+            actor_user_id=actor_user_id, summary_run_id=run_id,
+        )
+    elif invocation_id is not None and accounting is None:
+        accounting = AiAccountingService(session_factory)
     outcome = {"status": "failed", "error_category": "pipeline_failed"}
     try:
         async with session_factory() as session:
@@ -129,6 +143,14 @@ async def _generate_and_finalize(
         raise
     finally:
         if accounting is not None and invocation_id is not None:
+            if quota_access_service is not None and outcome["status"] != "succeeded":
+                try:
+                    await quota_access_service.release_if_no_provider_attempts(
+                        invocation_id=invocation_id,
+                        reason=outcome["error_category"] or "pre_provider_failure",
+                    )
+                except Exception:
+                    logger.exception("Could not release unused Daily Summary quota invocation_id=%s", invocation_id)
             await accounting.finish_invocation_outcome(
                 invocation_id=invocation_id,
                 status=outcome["status"],
@@ -189,6 +211,8 @@ async def attempt_daily_summary_run(
     summary_date,
     now_utc: datetime,
     actor_user_id: int | None = None,
+    source_message_id: int | None = None,
+    settings: Settings | None = None,
 ) -> DailySummaryOutcome:
     """One claim -> generate -> send cycle for one chat, for either trigger.
 
@@ -224,7 +248,9 @@ async def attempt_daily_summary_run(
         eligibility = evaluate_daily_summary_eligibility(
             settings=eligibility_settings,
             message_count_in_window=message_count,
-            already_run_today=existing is not None,  # a live 'claimed'/'generating'/'send_failed' row
+            # Completed runs were returned above. In-progress rows must reach
+            # the atomic claim so an expired worker lease can be reclaimed.
+            already_run_today=False,
         )
         if not eligibility.eligible:
             return DailySummaryOutcome(False, f"not_eligible:{eligibility.reason}")
@@ -243,6 +269,67 @@ async def attempt_daily_summary_run(
     if run is None:
         return DailySummaryOutcome(False, "claim_lost")
 
+    async def _release_unstarted_claim() -> None:
+        try:
+            async with session_factory() as session:
+                repo = SqlAlchemyActivityRepository(session)
+                await repo.release_unstarted_daily_summary_claim(run_id=run.id, claimed_at=run.claimed_at)
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "Could not release unstarted Daily Summary claim chat_id=%s run_id=%s",
+                chat.telegram_chat_id,
+                run.id,
+            )
+
+    quota_access_service = None
+    reserved_invocation_id = None
+    access_decision = None
+    if trigger == "manual":
+        settings = settings or get_settings()
+        owner_exempt = await resolve_owner_admin_exemption(
+            bot=bot,
+            chat_id=chat.telegram_chat_id,
+            admin_user_id=settings.admin_user_id,
+        )
+        quota_access_service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
+        # A manual summary is one stable logical run. Telegram message ID is
+        # retained as audit metadata, while recovery/reclaims reuse run.id.
+        idempotency_key = f"{AiFeature.DAILY_SUMMARY.value}:run:{run.id}"
+        try:
+            access_decision = await quota_access_service.reserve_feature_usage(
+                feature=AiFeature.DAILY_SUMMARY,
+                chat_id=chat.telegram_chat_id,
+                chat_type=chat.chat_type,
+                chat_title=chat.title,
+                actor_user_id=actor_user_id,
+                trigger="manual",
+                timezone_name=settings.bot_timezone,
+                idempotency_key=idempotency_key,
+                source_message_id=source_message_id,
+                summary_run_id=run.id,
+                owner_exempt=owner_exempt,
+                now=now_utc,
+            )
+        except Exception:
+            logger.exception(
+                "Daily Summary access reservation failed chat_id=%s run_id=%s",
+                chat.telegram_chat_id,
+                run.id,
+            )
+            await _release_unstarted_claim()
+            return DailySummaryOutcome(False, "access_unavailable")
+
+        if not access_decision.allowed:
+            await _release_unstarted_claim()
+            reason = (
+                access_decision.reason.value
+                if access_decision.reason is not None
+                else "duplicate_request"
+            )
+            return DailySummaryOutcome(False, reason, access_decision)
+        reserved_invocation_id = access_decision.invocation_id
+
     generated = await _generate_and_finalize(
         session_factory=session_factory,
         llm_client=llm_client,
@@ -254,6 +341,8 @@ async def attempt_daily_summary_run(
         actor_user_id=actor_user_id,
         window_from=window_from,
         window_to=window_to,
+        invocation_id=reserved_invocation_id,
+        quota_access_service=quota_access_service,
     )
     if not generated:
         return DailySummaryOutcome(False, "pipeline_failed")
@@ -318,6 +407,7 @@ class DailySummaryScheduler:
             window_to=window_to,
             summary_date=summary_date,
             now_utc=now_utc,
+            settings=self._settings,
         )
         return outcome.sent
 

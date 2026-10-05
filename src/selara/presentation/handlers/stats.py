@@ -42,7 +42,7 @@ from selara.domain.entities import ActivityStats, AchievementView, ChatSnapshot,
 from selara.infrastructure.db.models import ClanMemberModel, ClanModel
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
-from selara.presentation.auth import get_actor_role_definition
+from selara.presentation.auth import get_actor_role_definition, is_telegram_chat_admin
 from selara.presentation.charts import build_daily_activity_chart, build_leaderboard_chart, build_profile_chart
 from selara.presentation.db_recovery import safe_rollback
 from selara.presentation.formatters import (
@@ -905,7 +905,7 @@ async def _ensure_chat_admin(message: Message, bot: Bot) -> bool:
     except Exception:
         await message.answer("Не удалось проверить права администратора.")
         return False
-    if member.status not in {"creator", "administrator"}:
+    if not is_telegram_chat_admin(member):
         await message.answer("Награды в этом чате могут выдавать только админы.")
         return False
     return True

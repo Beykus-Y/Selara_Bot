@@ -21,6 +21,7 @@ from selara.infrastructure.db.chat_migration import ChatMigrationResult, migrate
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
     AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
     EconomyPrivateContextModel,
@@ -127,7 +128,8 @@ async def test_migrate_chat_id_moves_daily_summary_and_ai_accounting_records():
             session.add(run)
             await session.flush()
             invocation = AiFeatureInvocationModel(
-                feature="daily_summary", trigger="manual", chat_id=old_chat_id, summary_run_id=run.id,
+                feature="daily_summary", trigger="manual", chat_id=old_chat_id,
+                scope_type="chat", scope_id=str(old_chat_id), summary_run_id=run.id,
                 status="succeeded",
             )
             session.add(invocation)
@@ -150,9 +152,59 @@ async def test_migrate_chat_id_moves_daily_summary_and_ai_accounting_records():
             usage = (await session.execute(select(LlmUsageLogModel))).scalar_one()
             archive = (await session.execute(select(MessageArchiveModel))).scalar_one()
             assert {run.chat_id, invocation.chat_id, usage.chat_id, archive.chat_id} == {new_chat_id}
+            assert invocation.scope_type == "chat"
+            assert invocation.scope_id == str(new_chat_id)
             assert usage.invocation_id == invocation.id
             assert usage.summary_run_id == run.id
             assert usage.message_archive_id == archive.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_migrate_chat_id_merges_quota_usage_from_both_chat_ids_without_reset_or_loss():
+    engine, session_factory = await _session_factory()
+    try:
+        old_chat_id, new_chat_id = 519, 1519
+        period_start = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        period_end = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            session.add(ChatModel(telegram_chat_id=old_chat_id, type="group", title="Old chat"))
+            session.add(ChatModel(telegram_chat_id=new_chat_id, type="supergroup", title="New chat"))
+            await session.commit()
+            session.add_all([
+                AiFeatureQuotaUsageModel(
+                    feature="llm_admin", chat_id=old_chat_id, trigger="telegram_message",
+                    source_chat_id=old_chat_id, source_message_id=10,
+                    idempotency_key=f"llm_admin:{old_chat_id}:10", period_start=period_start,
+                    period_end=period_end, policy_key="llm_admin_free_daily_v1", quota_limit=10,
+                    access_tier="free", owner_exempt=False, status="consumed",
+                ),
+                AiFeatureQuotaUsageModel(
+                    feature="llm_admin", chat_id=new_chat_id, trigger="telegram_message",
+                    source_chat_id=new_chat_id, source_message_id=10,
+                    idempotency_key=f"llm_admin:{new_chat_id}:10", period_start=period_start,
+                    period_end=period_end, policy_key="llm_admin_free_daily_v1", quota_limit=10,
+                    access_tier="free", owner_exempt=False, status="consumed",
+                ),
+            ])
+            await session.commit()
+
+            result = await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+            await session.commit()
+            assert result.migrated
+
+        async with session_factory() as session:
+            from sqlalchemy import select
+
+            usage = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+            assert len(usage) == 2
+            assert {row.chat_id for row in usage} == {new_chat_id}
+            assert {row.source_message_id for row in usage} == {10}
+            assert {row.source_chat_id for row in usage} == {old_chat_id, new_chat_id}
+            assert {row.idempotency_key for row in usage} == {
+                f"llm_admin:{old_chat_id}:10", f"llm_admin:{new_chat_id}:10",
+            }
     finally:
         await engine.dispose()
 

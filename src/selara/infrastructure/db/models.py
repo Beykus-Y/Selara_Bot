@@ -2255,6 +2255,7 @@ class AiFeatureInvocationModel(Base):
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="running", server_default="running")
     source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    provider_attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summary_run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
     )
@@ -2270,6 +2271,49 @@ class AiFeatureInvocationModel(Base):
         Index("idx_ai_feature_invocations_feature_started", "feature", "started_at"),
         Index("idx_ai_feature_invocations_chat_started", "chat_id", "started_at"),
         Index("idx_ai_feature_invocations_summary_run", "summary_run_id"),
+    )
+
+
+class AiFeatureQuotaUsageModel(Base):
+    """One logical feature quota reservation, separate from provider-call cost."""
+
+    __tablename__ = "ai_feature_quota_usage"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    invocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Immutable Telegram identity at reservation time. `chat_id` tracks the
+    # current commercial scope and may change on group -> supergroup migration.
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    policy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    quota_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    access_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="consumed", server_default="consumed")
+    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
+        CheckConstraint("quota_limit > 0", name="ck_ai_feature_quota_positive_limit"),
+        CheckConstraint("status IN ('consumed', 'released')", name="ck_ai_feature_quota_status"),
+        UniqueConstraint("idempotency_key", name="uq_ai_feature_quota_idempotency"),
+        UniqueConstraint("invocation_id", name="uq_ai_feature_quota_invocation"),
+        Index("idx_ai_feature_quota_period_usage", "feature", "chat_id", "period_start", "status"),
     )
 
 

@@ -42,7 +42,15 @@ async def run(responses, execute=None):
     repo.get_last_user_message_at = AsyncMock(return_value=None)
     repo.search_glossary = AsyncMock(return_value=[])
     execute = execute or AsyncMock(return_value=top_result())
+    access_service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+            allowed=True, reused=False, invocation_id=None, reason=None,
+        )),
+        release_if_no_provider_attempts=AsyncMock(return_value=False),
+    )
     with patch.object(handler, 'has_permission', AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, 'resolve_owner_admin_exemption', AsyncMock(return_value=False)), \
+         patch.object(handler, 'FeatureAccessService', return_value=access_service), \
          patch.object(handler, 'LlmRepository', return_value=repo), \
          patch.object(handler, 'load_context', AsyncMock(return_value=SimpleNamespace(messages=[]))), \
          patch.object(handler, 'execute_tool', execute), \
@@ -50,7 +58,7 @@ async def run(responses, execute=None):
          patch.object(handler, '_send_dm_summary', AsyncMock()) as summary, \
          patch.object(handler, 'save_interaction', AsyncMock()) as saved:
         await handler._handle(message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True), client,
-            AsyncMock(), with_context=False, settings=settings)
+            AsyncMock(), with_context=False, settings=settings, session_factory=object())
     return client, execute, sent, summary, saved
 
 
@@ -156,15 +164,23 @@ async def test_malformed_tool_json_finalizes_invocation_after_provider_usage():
     repo.search_glossary = AsyncMock(return_value=[])
 
     with patch.object(handler, 'has_permission', AsyncMock(return_value=(True, None, None))), \
+         patch.object(handler, 'resolve_owner_admin_exemption', AsyncMock(return_value=False)), \
+         patch.object(handler, 'FeatureAccessService', return_value=SimpleNamespace(
+             reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+                 allowed=True, reused=False, invocation_id=41, reason=None,
+             )),
+             release_if_no_provider_attempts=AsyncMock(return_value=False),
+         )), \
          patch.object(handler, 'LlmRepository', return_value=repo), \
          patch.object(handler, 'save_interaction', AsyncMock()):
         with pytest.raises(json.JSONDecodeError):
             await handler._handle(
                 message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
-                llm_client, AsyncMock(), with_context=False, settings=settings,
+                llm_client, AsyncMock(), with_context=False, settings=settings, session_factory=object(),
             )
 
     accounting.report_provider_attempt.assert_awaited_once()
+    accounting.create_invocation.assert_not_awaited()
     accounting.finish_invocation_outcome.assert_awaited_once_with(
         invocation_id=41, status='failed', error_category='handler_error',
     )

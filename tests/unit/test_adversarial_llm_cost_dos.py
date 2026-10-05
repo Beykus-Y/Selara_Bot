@@ -98,6 +98,19 @@ def _admin_message(text: str) -> AsyncMock:
     return message
 
 
+@pytest.fixture(autouse=True)
+def _allow_feature_access_in_handler_unit_tests(monkeypatch):
+    service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+            allowed=True, reused=False, invocation_id=None, reason=None,
+        )),
+        release_if_no_provider_attempts=AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(llm_admin_module, "FeatureAccessService", lambda _repository: service)
+    monkeypatch.setattr(llm_admin_module, "resolve_owner_admin_exemption", AsyncMock(return_value=False))
+    return service
+
+
 @pytest.mark.asyncio
 async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
     """An adversarial (or simply chatty) LLM response that keeps requesting another
@@ -153,7 +166,8 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
         mock_repo_cls.return_value = repo_mock
 
         await _handle(
-            message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False
+            message, bot, activity_repo, _chat_settings(), llm_client, db_session,
+            with_context=False, session_factory=object(),
         )
 
     # _MAX_TOOL_ROUNDS = 8 in llm_admin.py - one Telegram message => up to 8 billed
@@ -217,7 +231,7 @@ async def test_llm_cooldown_throttles_immediate_repeat_invocation_by_same_admin(
             message = _admin_message("? привет")
             await _handle(
                 message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False,
-                settings=settings,
+                settings=settings, session_factory=object(),
             )
 
     # 5 rapid-fire invocations by the same admin -> only the first reaches

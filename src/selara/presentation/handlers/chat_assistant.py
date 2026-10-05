@@ -32,7 +32,7 @@ from selara.core.trigger_templates import build_trigger_template_variable_groups
 from selara.domain.entities import ChatSnapshot, ChatTrigger, CustomSocialAction, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
-from selara.presentation.auth import has_permission
+from selara.presentation.auth import has_permission, is_telegram_chat_admin
 from selara.presentation.targeting import resolve_chat_target_user
 from selara.presentation.family_tree import build_family_tree_image
 from selara.presentation.handlers.settings_common import settings_to_dict
@@ -142,7 +142,7 @@ def _is_chat_member_active(member: ChatMember) -> bool:
 
 
 def _is_chat_member_admin(member: ChatMember) -> bool:
-    return getattr(member, "status", None) in {"administrator", "creator"}
+    return is_telegram_chat_admin(member)
 
 
 def _format_user_mention(*, user_id: int, label: str) -> str:

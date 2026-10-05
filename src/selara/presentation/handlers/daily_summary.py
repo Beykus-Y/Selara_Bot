@@ -7,10 +7,13 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot
+from selara.application.feature_access import AccessReason, FeatureAccessDecision
 from selara.infrastructure.llm.client import LlmClient
 from selara.presentation.auth import has_permission
 from selara.presentation.daily_summary import attempt_daily_summary_run
+from selara.presentation.feature_access_messages import quota_exhausted_message
 
 router = Router(name="daily_summary")
 
@@ -23,7 +26,18 @@ _NOT_ELIGIBLE_MESSAGES: dict[str, str] = {
 }
 
 
-def _describe_outcome_reason(reason: str) -> str:
+def _describe_outcome_reason(
+    reason: str,
+    *,
+    access_decision: FeatureAccessDecision | None = None,
+    timezone_name: str = "UTC",
+) -> str:
+    if reason == AccessReason.QUOTA_EXHAUSTED.value and access_decision is not None:
+        return quota_exhausted_message(access_decision, timezone_name=timezone_name)
+    if reason == "access_unavailable":
+        return "Проверка доступа к итогам дня временно недоступна. Попробуйте позже."
+    if reason == AccessReason.DUPLICATE_REQUEST.value:
+        return "Этот запрос итогов уже был обработан. Повторный запуск не выполнялся."
     if reason == "already_run_today":
         return "Сегодня итоги уже были отправлены."
     if reason == "claim_lost":
@@ -46,6 +60,7 @@ async def summary_command(
     chat_settings: ChatSettings,
     session_factory,
     llm_client: LlmClient | None = None,
+    settings: Settings | None = None,
 ) -> None:
     if message.chat.type not in {"group", "supergroup"}:
         await message.answer("Команда доступна только в группе.")
@@ -55,6 +70,9 @@ async def summary_command(
     if llm_client is None:
         await message.answer("AI-функции сейчас недоступны — обратитесь к администратору бота.")
         return
+    if settings is None:
+        from selara.core.config import get_settings
+        settings = get_settings()
 
     allowed, _, _ = await has_permission(
         activity_repo,
@@ -88,6 +106,8 @@ async def summary_command(
         summary_date=now_utc.date(),
         now_utc=now_utc,
         actor_user_id=message.from_user.id,
+        source_message_id=message.message_id,
+        settings=settings,
     )
 
     if outcome.sent:
@@ -97,4 +117,10 @@ async def summary_command(
             pass
         return
 
-    await status_message.edit_text(_describe_outcome_reason(outcome.reason))
+    await status_message.edit_text(
+        _describe_outcome_reason(
+            outcome.reason,
+            access_decision=outcome.access_decision,
+            timezone_name=settings.bot_timezone,
+        )
+    )

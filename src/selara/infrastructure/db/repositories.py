@@ -3013,6 +3013,19 @@ class SqlAlchemyActivityRepository:
 
         return None
 
+    async def release_unstarted_daily_summary_claim(self, *, run_id: int, claimed_at: datetime) -> bool:
+        """Expire this claim token without deleting the stable run/history row."""
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.status == "claimed",
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+            )
+            .values(lease_until=_coerce_utc_datetime(claimed_at) - timedelta(microseconds=1))
+        )
+        return bool(result.rowcount)
+
     async def finalize_daily_summary_run_generated(
         self,
         *,

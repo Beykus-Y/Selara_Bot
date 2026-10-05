@@ -13,6 +13,7 @@ from selara.domain.glossary import normalize_glossary_text
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
     AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     AutoConfigSessionModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
@@ -146,6 +147,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -166,7 +168,18 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+
+async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    # `chat_id` is the current quota scope, while source_chat_id and the
+    # idempotency key preserve the immutable origin identity of each request.
+    await session.execute(
+        update(AiFeatureQuotaUsageModel)
+        .where(AiFeatureQuotaUsageModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
 
 
 async def _merge_activity_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
@@ -811,7 +824,20 @@ async def _move_ai_accounting_records(session: AsyncSession, *, old_chat_id: int
         await session.delete(source)
 
     await session.execute(
-        update(AiFeatureInvocationModel).where(AiFeatureInvocationModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type == "chat",
+        )
+        .values(chat_id=new_chat_id, scope_id=str(new_chat_id))
+    )
+    await session.execute(
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type != "chat",
+        )
+        .values(chat_id=new_chat_id)
     )
     await session.execute(
         update(LlmUsageLogModel).where(LlmUsageLogModel.chat_id == old_chat_id).values(chat_id=new_chat_id)

@@ -23,6 +23,7 @@ import pytest
 from aiogram.types import Message
 
 from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
 from selara.core.roles import PERM_MODERATE_USERS, PERM_USE_LLM_READONLY
 from selara.domain.entities import ChatRoleDefinition
 from selara.infrastructure.llm.tools import ToolCall, execute_tool
@@ -95,8 +96,16 @@ async def test_actor_with_only_readonly_permission_can_invoke_the_assistant(chat
     activity_repo = MagicMock()
     db_session = AsyncMock()
     message = _admin_message("? покажи топ")
+    access_service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+            allowed=True, reused=False, invocation_id=None, reason=None,
+        )),
+        release_if_no_provider_attempts=AsyncMock(return_value=False),
+    )
 
     with patch.object(llm_admin_module, "has_permission", new=fake_has_permission), \
+         patch.object(llm_admin_module, "resolve_owner_admin_exemption", new=AsyncMock(return_value=False)), \
+         patch.object(llm_admin_module, "FeatureAccessService", return_value=access_service), \
          patch.object(llm_admin_module, "LlmRepository") as mock_repo_cls, \
          patch.object(llm_admin_module, "load_context", new=AsyncMock(return_value=SimpleNamespace(messages=[]))), \
          patch.object(llm_admin_module, "save_interaction", new=AsyncMock()), \
@@ -106,7 +115,12 @@ async def test_actor_with_only_readonly_permission_can_invoke_the_assistant(chat
         repo_mock.search_glossary = AsyncMock(return_value=[])
         mock_repo_cls.return_value = repo_mock
 
-        await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False)
+        await _handle(
+            message, bot, activity_repo, chat_settings, llm_client, db_session,
+            with_context=False,
+            settings=Settings(bot_token="123:TEST", database_url="postgresql+asyncpg://localhost/test"),
+            session_factory=object(),
+        )
 
     message.reply.assert_any_await("⏳ Думаю...")
 
