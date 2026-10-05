@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +9,9 @@ import pytest
 
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
-from selara.presentation.handlers.game import router as game_router
+
+
+game_router = importlib.import_module("selara.presentation.handlers.game.router")
 
 
 @pytest.mark.asyncio
