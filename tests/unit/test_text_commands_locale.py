@@ -143,3 +143,160 @@ async def test_non_mutating_command_passes_chat_write_lock(monkeypatch: pytest.M
         session_factory=object(),
     )
     send_help.assert_awaited_once()
+
+
+def _locked(**overrides):
+    return _chat_settings(chat_write_locked=True, gacha_enabled=True, **overrides)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "handler_attr"),
+    [("гача генш", "_send_gacha_pull"), ("гача скип генш", "_send_gacha_skip")],
+)
+async def test_gacha_text_commands_are_blocked_by_chat_write_lock(
+    monkeypatch: pytest.MonkeyPatch, text: str, handler_attr: str
+) -> None:
+    message = _DummyMessage(text)
+    target = AsyncMock()
+    monkeypatch.setattr(text_commands, handler_attr, target)
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+    monkeypatch.setattr(text_commands, "_require_channel_subscription", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_check_and_maybe_restore_gacha", AsyncMock(side_effect=lambda m, r, cs: cs))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(),
+        session_factory=object(),
+    )
+
+    target.assert_not_awaited()
+    assert len(message.answers) == 1
+    assert "заблок" in message.answers[0][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_gacha_profile_is_not_blocked_by_chat_write_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage("моя гача генш")
+    target = AsyncMock()
+    monkeypatch.setattr(text_commands, "_send_gacha_profile", target)
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+    monkeypatch.setattr(text_commands, "_require_channel_subscription", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_check_and_maybe_restore_gacha", AsyncMock(side_effect=lambda m, r, cs: cs))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(),
+        session_factory=object(),
+    )
+
+    target.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_write_lock_does_not_alter_chat_settings_passed_to_gacha_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """-чат, `гача выкл`, +чат не должны тихо выключить custom RP в сохранённых настройках."""
+    message = _DummyMessage("гача выкл")
+    toggle = AsyncMock()
+    monkeypatch.setattr(text_commands, "_manage_gacha_toggle", toggle)
+    monkeypatch.setattr(text_commands, "_require_channel_subscription", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(custom_rp_enabled=True),
+        session_factory=object(),
+    )
+
+    toggle.assert_awaited_once()
+    assert toggle.await_args.args[3].custom_rp_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_custom_rp_is_skipped_under_write_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage("мой кастомный рп")
+    match = AsyncMock(return_value=object())
+    send = AsyncMock()
+    monkeypatch.setattr(text_commands, "match_custom_social_action", match)
+    monkeypatch.setattr(text_commands, "send_custom_social_action", send)
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(custom_rp_enabled=True),
+        session_factory=object(),
+    )
+
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_builtin_social_action_is_blocked_under_write_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage("обнять")
+    send = AsyncMock()
+    monkeypatch.setattr(text_commands, "_send_social_action", send)
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(),
+        session_factory=object(),
+    )
+
+    send.assert_not_awaited()
+    assert len(message.answers) == 1
+
+
+@pytest.mark.asyncio
+async def test_alias_to_social_action_is_blocked_under_write_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _DummyMessage("обнимашки")
+    send = AsyncMock()
+    monkeypatch.setattr(text_commands, "_send_social_action", send)
+    monkeypatch.setattr(text_commands, "_enforce_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(text_commands, "_handle_command_rank_phrase", AsyncMock(return_value=False))
+    alias = ChatTextAlias(
+        id=2,
+        chat_id=-100123,
+        command_key="social_hug",
+        alias_text_norm="обнимашки",
+        source_trigger_norm="обнять",
+        created_by_user_id=1,
+    )
+
+    await text_commands.text_commands_handler(
+        message,
+        activity_repo=_activity_repo(aliases=[alias]),
+        economy_repo=object(),
+        bot=object(),
+        settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
+        chat_settings=_locked(),
+        session_factory=object(),
+    )
+
+    send.assert_not_awaited()
+    assert len(message.answers) == 1
