@@ -387,3 +387,52 @@ async def test_pipeline_optional_infographic_records_id_cost_and_diagnostics(mon
     assert result.stage_usages[-1].stage == 'infographic'
     assert result.pipeline_cost_usd == sum(u.estimated_cost_usd for u in result.stage_usages)
     assert result.diagnostics.artifact_created and result.diagnostics.artifact_stage_enabled
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stops_before_next_provider_stage_after_claim_loss() -> None:
+    from selara.application.daily_summary.pipeline import DailySummaryClaimLost
+
+    messages = [
+        _msg(1, 1, 0, "Кто смотрел новый сезон?"),
+        _msg(2, 2, 1, "Да, вчера досмотрел", reply_to=1),
+    ]
+    repo = _FakeRepo(messages=messages, members=_members())
+    cards = SegmentTopicCardList(
+        topics=[
+            SegmentTopicCard(
+                title="Сериал",
+                start_message_id=1,
+                end_message_id=2,
+                participant_display_names=["Вася", "Петя"],
+                blurb="Обсудили новый сезон сериала.",
+            )
+        ]
+    )
+    merged = MergedThemeList(
+        themes=[MergedTheme(title="Сериал", source_card_indexes=[0], blurb="Итог по сериалу.", importance=4)]
+    )
+    llm_client = _FakeLlmClient(structured_responses=[cards, merged])
+    ownership_checks = 0
+
+    async def check_claim() -> bool:
+        nonlocal ownership_checks
+        ownership_checks += 1
+        return ownership_checks < 2
+
+    with pytest.raises(DailySummaryClaimLost):
+        await run_daily_summary_pipeline(
+            llm_client=llm_client,
+            repo=repo,
+            chat_id=-100,
+            chat_title="Test Chat",
+            summary_run_id=43,
+            window_from=_WINDOW_FROM,
+            window_to=_WINDOW_TO,
+            style="neutral",
+            persona_enabled=True,
+            claim_check=check_claim,
+        )
+
+    assert ownership_checks == 2
+    assert llm_client._structured_index == 1
