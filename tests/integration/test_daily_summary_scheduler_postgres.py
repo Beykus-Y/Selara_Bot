@@ -43,7 +43,7 @@ from selara.infrastructure.llm.features import AiFeature
 
 _CHAT_ID = -100555
 _USER_ID = 1001
-_NOW = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+_NOW = datetime.now(timezone.utc)
 
 
 async def _database():
@@ -1354,6 +1354,64 @@ async def test_concurrent_daily_summary_resends_claim_delivery_and_send_once(mon
         async with session_factory() as session:
             stored = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
         assert stored.status == "sent"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_generation_lease_stops_before_next_provider_stage():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class _ExpireLeaseAfterFirstProviderCall(_FakeLlmClient):
+            async def chat_structured(self, messages, *, response_model, max_tokens=None, accounting_context=None):
+                result = await super().chat_structured(
+                    messages, response_model=response_model, max_tokens=max_tokens,
+                    accounting_context=accounting_context,
+                )
+                if self._structured_calls == 1:
+                    async with session_factory() as session:
+                        await session.execute(
+                            update(DailySummaryRunModel)
+                            .where(
+                                DailySummaryRunModel.chat_id == _CHAT_ID,
+                                DailySummaryRunModel.summary_date == _NOW.date(),
+                                DailySummaryRunModel.trigger == "manual",
+                            )
+                            .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=1))
+                        )
+                        await session.commit()
+                return result
+
+        client = _ExpireLeaseAfterFirstProviderCall(
+            accounting_service=AiAccountingService(session_factory)
+        )
+        bot = _fake_bot()
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="manual",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+        )
+
+        assert outcome.reason == "claim_lost"
+        assert client._structured_calls == 1
+        bot.send_message.assert_not_awaited()
+        async with session_factory() as session:
+            run = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
+                chat_id=_CHAT_ID, summary_date=_NOW.date(), trigger="manual"
+            )
+            usage_rows = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert run is not None
+        assert run.status in {"claimed", "generating"}
+        assert run.lease_until <= datetime.now(timezone.utc)
+        assert len(usage_rows) == 1
     finally:
         await engine.dispose()
 
