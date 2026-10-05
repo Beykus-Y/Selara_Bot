@@ -64,6 +64,7 @@ def _repo(*, bundle: FamilyBundle | None = None, target_snapshot=None, remove_re
         find_chat_user_by_username=AsyncMock(return_value=target_snapshot),
         remove_graph_relationship=AsyncMock(return_value=remove_result),
         get_chat_display_name=AsyncMock(return_value=None),
+        is_active_chat_member=AsyncMock(return_value=True),
     )
     return repo
 

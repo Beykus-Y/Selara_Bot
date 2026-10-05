@@ -5799,7 +5799,7 @@ async def text_commands_handler(
             return
         text = rewritten
 
-    write_locked = bool(chat_settings.chat_write_locked) and message.chat.type in {"group", "supergroup"}
+    write_locked = bool(getattr(chat_settings, "chat_write_locked", False)) and message.chat.type in {"group", "supergroup"}
     if write_locked and chat_settings.custom_rp_enabled:
         chat_settings = replace(chat_settings, custom_rp_enabled=False)
 
