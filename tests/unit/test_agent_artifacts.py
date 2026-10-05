@@ -346,7 +346,9 @@ async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch
         pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
     await context.repository.session.commit()
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
-        claimed_at=claimed_at, generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
+        claimed_at=claimed_at, lease_until=datetime.now(timezone.utc) + timedelta(minutes=30),
+        generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
+        claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
         mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(return_value=SimpleNamespace(message_id=10)))
@@ -362,7 +364,9 @@ async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
     from selara.presentation.daily_summary import _send_and_mark
     claimed_at = datetime.now(timezone.utc)
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
-        claimed_at=claimed_at, generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
+        claimed_at=claimed_at, lease_until=claimed_at + timedelta(minutes=30),
+        generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
+        claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
         mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
     monkeypatch.setattr('selara.presentation.daily_summary.SqlAlchemyActivityRepository', lambda session: repo)
     bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
