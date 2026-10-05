@@ -24,6 +24,7 @@ from selara.domain.entities import ChatSnapshot, DailySummaryRun
 from selara.domain.glossary import GlossaryEntry
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.db.ai_accounting import AiAccountingService
+from selara.infrastructure.db.models import ChatModel
 from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext, deliver_artifact
 from selara.infrastructure.llm.tools import ToolCall
 from selara.presentation.llm_formatting import split_telegram_html
@@ -465,6 +466,48 @@ async def attempt_daily_summary_run(
                 extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
             )
 
+    async def _refresh_claimed_run_chat() -> tuple[bool, bool]:
+        """Follow a group migration that moved this claimed run to a new chat ID.
+
+        On a run-ID collision the source row has already been merged into the
+        canonical run and deleted; this worker stops before it creates an
+        invocation against stale chat/run identity.
+        """
+        nonlocal chat, chat_settings, run
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            current_run = await repo.get_daily_summary_run_by_id(run_id=run.id)
+            if current_run is None:
+                logger.info(
+                    "Daily Summary claim superseded by chat migration",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
+                )
+                return False, False
+            changed = current_run.chat_id != chat.telegram_chat_id
+            if changed:
+                chat_row = await session.get(ChatModel, current_run.chat_id)
+                migrated_settings = await repo.get_chat_settings(chat_id=current_run.chat_id)
+                if chat_row is None or migrated_settings is None:
+                    logger.warning(
+                        "Daily Summary migrated run has no canonical chat settings",
+                        extra={"chat_id": current_run.chat_id, "run_id": current_run.id, "trigger": trigger},
+                    )
+                    return False, False
+                chat = replace(
+                    chat,
+                    telegram_chat_id=current_run.chat_id,
+                    chat_type=chat_row.type,
+                    title=chat_row.title,
+                )
+                chat_settings = migrated_settings
+            run = current_run
+            return True, changed
+
+    active, _ = await _refresh_claimed_run_chat()
+    if not active:
+        await _release_unstarted_claim()
+        return DailySummaryOutcome(False, "claim_lost", access_decision)
+
     quota_access_service = None
     reserved_invocation_id = None
     if trigger == "manual":
@@ -520,13 +563,31 @@ async def attempt_daily_summary_run(
         reserved_invocation_id = access_decision.invocation_id
     else:
         # Revalidate after the claim, immediately before creating the logical
-        # invocation. This catches an entitlement revoked/expired during message
-        # counting or claim acquisition and releases that unstarted lease.
-        access_decision = await _resolve_scheduled_access()
-        if not access_decision.allowed:
+        # invocation. If Telegram migrated the group while resolving access,
+        # refresh run/chat identity and resolve access for the canonical ID.
+        for _ in range(3):
+            if not chat_settings.daily_summary_enabled:
+                await _release_unstarted_claim()
+                return DailySummaryOutcome(False, "not_eligible:disabled", access_decision)
+            previous_chat_id = chat.telegram_chat_id
+            access_decision = await _resolve_scheduled_access()
+            if not access_decision.allowed:
+                await _release_unstarted_claim()
+                reason = access_decision.reason or AccessReason.ACCESS_REQUIRED
+                return DailySummaryOutcome(False, reason.value, access_decision)
+            active, _ = await _refresh_claimed_run_chat()
+            if not active:
+                await _release_unstarted_claim()
+                return DailySummaryOutcome(False, "claim_lost", access_decision)
+            if chat.telegram_chat_id == previous_chat_id:
+                break
+        else:
             await _release_unstarted_claim()
-            reason = access_decision.reason or AccessReason.ACCESS_REQUIRED
-            return DailySummaryOutcome(False, reason.value, access_decision)
+            logger.error(
+                "Daily Summary chat identity kept changing during access check",
+                extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
+            )
+            return DailySummaryOutcome(False, "access_unavailable", access_decision)
 
     generated = await _generate_and_finalize(
         session_factory=session_factory,

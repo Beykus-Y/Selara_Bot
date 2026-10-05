@@ -21,6 +21,7 @@ from selara.application.daily_summary.schemas import MergedTheme, MergedThemeLis
 from selara.application.feature_access import AccessTier, FeatureEntitlement, FeatureAccessService
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
@@ -658,6 +659,123 @@ async def test_scheduled_generated_send_failed_resends_require_entitlement_and_r
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_group_migration_after_claim_reloads_canonical_chat_before_generation():
+    engine, session_factory = await _database()
+    try:
+        new_chat_id = _CHAT_ID - 100
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+
+        class MigrateDuringAccessRecheckResolver:
+            calls = 0
+
+            async def resolve(self, *, chat_id, feature, trigger):
+                self.calls += 1
+                if self.calls == 2:
+                    async with session_factory() as session:
+                        await migrate_chat_id(
+                            session,
+                            old_chat_id=_CHAT_ID,
+                            new_chat_id=new_chat_id,
+                            new_chat_type="supergroup",
+                            new_chat_title="Test Chat",
+                        )
+                        await session.commit()
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = MigrateDuringAccessRecheckResolver()
+        access = _paid_access(session_factory, resolver=resolver)
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="group", title="Test Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+            feature_access_service=access,
+        )
+
+        assert outcome.sent
+        assert resolver.calls == 3
+        bot.send_message.assert_awaited_once()
+        assert bot.send_message.await_args.kwargs["chat_id"] == new_chat_id
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            usages = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].chat_id == new_chat_id and runs[0].status == "sent"
+        assert len(invocations) == 1 and invocations[0].chat_id == new_chat_id
+        assert invocations[0].summary_run_id == runs[0].id
+        assert usages and all(row.chat_id == new_chat_id for row in usages)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_parallel_scheduled_claims_start_only_one_provider_pipeline(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        original_count = SqlAlchemyActivityRepository.count_archived_messages_in_window
+        both_counted = asyncio.Event()
+        count_calls = 0
+
+        async def wait_until_both_counted(self, **kwargs):
+            nonlocal count_calls
+            result = await original_count(self, **kwargs)
+            count_calls += 1
+            if count_calls == 2:
+                both_counted.set()
+            await both_counted.wait()
+            return result
+
+        monkeypatch.setattr(
+            SqlAlchemyActivityRepository,
+            "count_archived_messages_in_window",
+            wait_until_both_counted,
+        )
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "now_utc": _NOW,
+            "settings": _test_settings(),
+            "feature_access_service": _paid_access(session_factory),
+        }
+
+        left, right = await asyncio.gather(
+            attempt_daily_summary_run(**kwargs),
+            attempt_daily_summary_run(**kwargs),
+        )
+
+        assert sum(outcome.sent for outcome in (left, right)) == 1
+        assert sorted(outcome.reason for outcome in (left, right)) == ["claim_lost", "sent"]
+        assert client._structured_calls == 2
+        bot.send_message.assert_awaited_once()
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            usages = (await session.execute(select(LlmUsageLogModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].status == "sent"
+        assert len(invocations) == 1 and invocations[0].trigger == "scheduled"
+        assert len(usages) == 5
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_scheduled_owner_internal_chat_runs_without_paid_entitlement_or_manual_quota():
     engine, session_factory = await _database()
     try:
@@ -704,37 +822,33 @@ async def test_manual_and_scheduled_runs_share_date_but_keep_access_and_quota_in
         access = _paid_access(session_factory)
         settings = _test_settings()
 
-        scheduled = await attempt_daily_summary_run(
-            bot=bot,
-            session_factory=session_factory,
-            llm_client=client,
-            chat=chat,
-            trigger="scheduled",
-            window_to=_NOW,
-            summary_date=_NOW.date(),
-            now_utc=_NOW,
-            settings=settings,
-            feature_access_service=access,
-        )
-        async with session_factory() as session:
-            await SqlAlchemyActivityRepository(session).upsert_chat_settings(
+        scheduled, manual = await asyncio.gather(
+            attempt_daily_summary_run(
+                bot=bot,
+                session_factory=session_factory,
+                llm_client=client,
                 chat=chat,
-                values={"daily_summary_enabled": False},
-            )
-            await session.commit()
-        manual = await attempt_daily_summary_run(
-            bot=bot,
-            session_factory=session_factory,
-            llm_client=client,
-            chat=chat,
-            trigger="manual",
-            window_to=_NOW,
-            summary_date=_NOW.date(),
-            now_utc=_NOW,
-            actor_user_id=_USER_ID,
-            source_message_id=987,
-            settings=settings,
-            feature_access_service=access,
+                trigger="scheduled",
+                window_to=_NOW,
+                summary_date=_NOW.date(),
+                now_utc=_NOW,
+                settings=settings,
+                feature_access_service=access,
+            ),
+            attempt_daily_summary_run(
+                bot=bot,
+                session_factory=session_factory,
+                llm_client=client,
+                chat=chat,
+                trigger="manual",
+                window_to=_NOW,
+                summary_date=_NOW.date(),
+                now_utc=_NOW,
+                actor_user_id=_USER_ID,
+                source_message_id=987,
+                settings=settings,
+                feature_access_service=access,
+            ),
         )
 
         assert scheduled.sent and manual.sent
