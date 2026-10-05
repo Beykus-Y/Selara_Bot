@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class AccessTier(StrEnum):
     FREE = "free"
+    PAID = "paid"
     OWNER_INTERNAL = "owner_internal"
 
 
@@ -57,6 +58,8 @@ class FeatureAccessDecision:
     quota_usage_id: int | None = None
     policy_key: str | None = None
     reused: bool = False
+    entitlement_valid_until: datetime | None = None
+    entitlement_source: str | None = None
 
     @property
     def unlimited(self) -> bool:
@@ -78,6 +81,58 @@ class FeatureUsageSummary:
     unlimited: bool
     owner_exempt: bool
     policy_key: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureEntitlement:
+    """Resolved non-owner entitlement for one chat/feature/trigger.
+
+    This is a typed hand-off for a future entitlement store. PR3 ships only a
+    resolver that returns FREE; owner-internal access is derived separately
+    from a live Telegram administrator check.
+    """
+
+    access_tier: AccessTier
+    valid_until: datetime | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DailySummaryAccessStatus:
+    automatic_enabled: bool
+    automatic_access_allowed: bool
+    manual_used: int | None
+    manual_limit: int | None
+    manual_remaining: int | None
+    reset_at: datetime | None
+    access_tier: AccessTier
+    owner_exempt: bool
+    automatic_reason: AccessReason | None = None
+    entitlement_valid_until: datetime | None = None
+    entitlement_source: str | None = None
+
+
+class ChatEntitlementResolver(Protocol):
+    async def resolve(
+        self,
+        *,
+        chat_id: int,
+        feature: AiFeature,
+        trigger: str,
+    ) -> FeatureEntitlement: ...
+
+
+class NoPaidChatEntitlementResolver:
+    """Fail closed until PR4 connects a real entitlement source."""
+
+    async def resolve(
+        self,
+        *,
+        chat_id: int,
+        feature: AiFeature,
+        trigger: str,
+    ) -> FeatureEntitlement:
+        return FeatureEntitlement(access_tier=AccessTier.FREE)
 
 
 class FeatureQuotaRepository(Protocol):
@@ -169,8 +224,155 @@ def message_idempotency_key(*, feature: AiFeature, chat_id: int, source_message_
 class FeatureAccessService:
     """Single typed API for resolving and reserving user-facing feature access."""
 
-    def __init__(self, repository: FeatureQuotaRepository) -> None:
+    def __init__(
+        self,
+        repository: FeatureQuotaRepository,
+        *,
+        entitlement_resolver: ChatEntitlementResolver | None = None,
+    ) -> None:
         self._repository = repository
+        self._entitlement_resolver = entitlement_resolver or NoPaidChatEntitlementResolver()
+
+    async def resolve_feature_access(
+        self,
+        *,
+        feature: AiFeature,
+        chat_id: int,
+        trigger: str,
+        owner_exempt: bool = False,
+        now: datetime | None = None,
+    ) -> FeatureAccessDecision:
+        """Resolve feature entitlement without reserving or consuming quota."""
+        if owner_exempt:
+            return FeatureAccessDecision(
+                allowed=True,
+                feature=feature,
+                scope_type="chat",
+                scope_id=str(chat_id),
+                access_tier=AccessTier.OWNER_INTERNAL,
+                quota_limit=None,
+                quota_used=None,
+                quota_remaining=None,
+                period_start=None,
+                period_end=None,
+                owner_exempt=True,
+                entitlement_source="owner_admin",
+            )
+
+        try:
+            entitlement = await self._entitlement_resolver.resolve(
+                chat_id=chat_id,
+                feature=feature,
+                trigger=trigger,
+            )
+            if not isinstance(entitlement, FeatureEntitlement):
+                raise TypeError("Entitlement resolver returned an unsupported result")
+            if entitlement.access_tier == AccessTier.OWNER_INTERNAL:
+                raise ValueError("Owner-internal access requires a verified Telegram admin check")
+            if entitlement.access_tier not in (AccessTier.FREE, AccessTier.PAID):
+                raise ValueError("Entitlement resolver returned an unsupported access tier")
+        except Exception:
+            logger.debug(
+                "Feature entitlement resolver failed feature=%s trigger=%s chat_id=%s",
+                feature.value,
+                trigger,
+                chat_id,
+                exc_info=True,
+            )
+            return FeatureAccessDecision(
+                allowed=False,
+                feature=feature,
+                scope_type="chat",
+                scope_id=str(chat_id),
+                access_tier=AccessTier.FREE,
+                quota_limit=None,
+                quota_used=None,
+                quota_remaining=None,
+                period_start=None,
+                period_end=None,
+                reason=AccessReason.ACCESS_UNAVAILABLE,
+            )
+
+        entitlement_valid_until = entitlement.valid_until
+        if entitlement_valid_until is not None:
+            expiry_utc = entitlement_valid_until
+            if expiry_utc.tzinfo is None:
+                expiry_utc = expiry_utc.replace(tzinfo=timezone.utc)
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            if expiry_utc.astimezone(timezone.utc) <= current.astimezone(timezone.utc):
+                return FeatureAccessDecision(
+                    allowed=False,
+                    feature=feature,
+                    scope_type="chat",
+                    scope_id=str(chat_id),
+                    access_tier=AccessTier.FREE,
+                    quota_limit=None,
+                    quota_used=None,
+                    quota_remaining=None,
+                    period_start=None,
+                    period_end=None,
+                    reason=AccessReason.ACCESS_REQUIRED,
+                    entitlement_valid_until=entitlement_valid_until,
+                    entitlement_source=entitlement.source,
+                )
+
+        paid = entitlement.access_tier == AccessTier.PAID
+        return FeatureAccessDecision(
+            allowed=paid,
+            feature=feature,
+            scope_type="chat",
+            scope_id=str(chat_id),
+            access_tier=entitlement.access_tier,
+            quota_limit=None,
+            quota_used=None,
+            quota_remaining=None,
+            period_start=None,
+            period_end=None,
+            reason=None if paid else AccessReason.ACCESS_REQUIRED,
+            entitlement_valid_until=entitlement_valid_until,
+            entitlement_source=entitlement.source,
+        )
+
+    async def get_daily_summary_access_status(
+        self,
+        *,
+        chat_id: int,
+        automatic_enabled: bool,
+        owner_exempt: bool,
+        timezone_name: str,
+        now: datetime | None = None,
+    ) -> DailySummaryAccessStatus:
+        """Return the manual quota and scheduled entitlement state for service/admin use."""
+        manual_usage = await self.get_usage_summary(
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=chat_id,
+            trigger="manual",
+            timezone_name=timezone_name,
+            owner_exempt=owner_exempt,
+            now=now,
+        )
+        automatic_access = await self.resolve_feature_access(
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=chat_id,
+            trigger="scheduled",
+            owner_exempt=owner_exempt,
+            now=now,
+        )
+        return DailySummaryAccessStatus(
+            automatic_enabled=automatic_enabled,
+            automatic_access_allowed=automatic_access.allowed,
+            manual_used=manual_usage.quota_used,
+            manual_limit=manual_usage.quota_limit,
+            manual_remaining=manual_usage.quota_remaining,
+            reset_at=manual_usage.reset_at,
+            access_tier=automatic_access.access_tier,
+            owner_exempt=owner_exempt,
+            automatic_reason=automatic_access.reason,
+            entitlement_valid_until=automatic_access.entitlement_valid_until,
+            entitlement_source=automatic_access.entitlement_source,
+        )
 
     async def reserve_feature_usage(
         self,

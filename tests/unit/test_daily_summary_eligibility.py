@@ -39,6 +39,17 @@ def test_eligible_when_all_gates_pass() -> None:
     assert result.reason == "eligible"
 
 
+def test_preliminary_eligibility_checks_settings_without_counting_messages():
+    result = evaluate_daily_summary_eligibility(
+        settings=_enabled_chat_settings(),
+        message_count_in_window=None,
+        already_run_today=False,
+    )
+
+    assert result.eligible
+    assert result.reason == "eligible"
+
+
 def test_not_eligible_when_feature_disabled() -> None:
     result = evaluate_daily_summary_eligibility(
         settings=_enabled_chat_settings(daily_summary_enabled=False),

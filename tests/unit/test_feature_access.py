@@ -9,7 +9,10 @@ import pytest
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
+    FeatureEntitlement,
     FeatureAccessService,
+    FeatureUsageSummary,
+    NoPaidChatEntitlementResolver,
     QuotaPeriod,
     quota_period_bounds,
     resolve_feature_policy,
@@ -44,6 +47,138 @@ def test_internal_ai_features_have_no_commercial_quota(feature):
 def test_unsupported_daily_summary_trigger_is_not_silently_unlimited():
     with pytest.raises(ValueError, match="Unsupported Daily Summary trigger"):
         resolve_feature_policy(feature=AiFeature.DAILY_SUMMARY, trigger="unexpected")
+
+
+@pytest.mark.asyncio
+async def test_default_entitlement_resolver_fails_closed_without_reserving_quota():
+    repository = SimpleNamespace(reserve=AsyncMock(side_effect=AssertionError("must not reserve")))
+    service = FeatureAccessService(repository, entitlement_resolver=NoPaidChatEntitlementResolver())
+
+    decision = await service.resolve_feature_access(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="scheduled",
+    )
+
+    assert not decision.allowed
+    assert decision.reason == AccessReason.ACCESS_REQUIRED
+    assert decision.access_tier == AccessTier.FREE
+    repository.reserve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_paid_entitlement_is_typed_and_kept_separate_from_quota():
+    resolver = SimpleNamespace(
+        resolve=AsyncMock(return_value=FeatureEntitlement(
+            access_tier=AccessTier.PAID,
+            valid_until=datetime(2026, 11, 1, tzinfo=timezone.utc),
+            source="test_entitlement",
+        )),
+    )
+    service = FeatureAccessService(SimpleNamespace(), entitlement_resolver=resolver)
+
+    decision = await service.resolve_feature_access(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="scheduled",
+        now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert decision.allowed
+    assert decision.access_tier == AccessTier.PAID
+    assert decision.quota_limit is None
+    assert decision.entitlement_source == "test_entitlement"
+    assert decision.entitlement_valid_until == datetime(2026, 11, 1, tzinfo=timezone.utc)
+    resolver.resolve.assert_awaited_once_with(
+        chat_id=-100500,
+        feature=AiFeature.DAILY_SUMMARY,
+        trigger="scheduled",
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_paid_entitlement_and_resolver_errors_fail_closed():
+    resolver = SimpleNamespace(
+        resolve=AsyncMock(return_value=FeatureEntitlement(
+            access_tier=AccessTier.PAID,
+            valid_until=datetime(2026, 10, 4, tzinfo=timezone.utc),
+            source="test_entitlement",
+        )),
+    )
+    service = FeatureAccessService(SimpleNamespace(), entitlement_resolver=resolver)
+    expired = await service.resolve_feature_access(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="scheduled",
+        now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+    resolver.resolve.side_effect = RuntimeError("entitlement backend unavailable")
+    unavailable = await service.resolve_feature_access(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="scheduled",
+    )
+
+    assert not expired.allowed and expired.reason == AccessReason.ACCESS_REQUIRED
+    assert not unavailable.allowed and unavailable.reason == AccessReason.ACCESS_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_owner_internal_access_bypasses_entitlement_source():
+    resolver = SimpleNamespace(resolve=AsyncMock(side_effect=AssertionError("must not resolve")))
+    service = FeatureAccessService(SimpleNamespace(), entitlement_resolver=resolver)
+
+    decision = await service.resolve_feature_access(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        trigger="scheduled",
+        owner_exempt=True,
+    )
+
+    assert decision.allowed
+    assert decision.access_tier == AccessTier.OWNER_INTERNAL
+    assert decision.owner_exempt
+    assert decision.entitlement_source == "owner_admin"
+    resolver.resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_daily_summary_status_exposes_automatic_access_and_manual_quota():
+    period_end = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    usage = FeatureUsageSummary(
+        feature=AiFeature.DAILY_SUMMARY,
+        scope_type="chat",
+        scope_id="-100500",
+        access_tier=AccessTier.FREE,
+        quota_limit=10,
+        quota_used=4,
+        quota_remaining=6,
+        period_start=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        period_end=period_end,
+        reset_at=period_end,
+        unlimited=False,
+        owner_exempt=False,
+        policy_key="daily_summary_manual_free_monthly_v1",
+    )
+    repository = SimpleNamespace(usage_summary=AsyncMock(return_value=usage))
+    service = FeatureAccessService(repository)
+
+    status = await service.get_daily_summary_access_status(
+        chat_id=-100500,
+        automatic_enabled=True,
+        owner_exempt=False,
+        timezone_name="UTC",
+        now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert status.automatic_enabled
+    assert not status.automatic_access_allowed
+    assert status.manual_used == 4
+    assert status.manual_limit == 10
+    assert status.manual_remaining == 6
+    assert status.reset_at == period_end
+    assert status.access_tier == AccessTier.FREE
+    assert status.automatic_reason == AccessReason.ACCESS_REQUIRED
 
 
 def test_daily_period_uses_bot_timezone_midnight():
@@ -106,7 +241,7 @@ async def test_owner_non_admin_and_telegram_failure_do_not_get_exemption(caplog)
 
     bot.get_chat_member.side_effect = RuntimeError("Telegram temporarily unavailable")
     assert not await resolve_owner_admin_exemption(bot=bot, chat_id=-100500, admin_user_id=123)
-    assert "applying normal feature quota" in caplog.text
+    assert "applying normal feature access policy" in caplog.text
 
 
 @pytest.mark.asyncio

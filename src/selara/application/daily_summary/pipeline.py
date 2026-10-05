@@ -57,7 +57,7 @@ MAX_SEGMENTS_PER_RUN = 20
 MAX_ANALYST_TOOL_ROUNDS = 4
 MAX_THEMES_IN_WRITER = 6
 _EPISODE_GAP_MINUTES = 25
-_BETA_DISCLAIMER_TEXT = "🧪 Итоги дня — бета-функция Selara, доступна бесплатно на время тестирования."
+_BETA_DISCLAIMER_TEXT = "🧪 Итоги дня — бета-функция Selara."
 
 
 _WRITER_KEY_LINE = re.compile(r"^(title|theme(\d+)_(title|text))\s*:\s?(.*)$")

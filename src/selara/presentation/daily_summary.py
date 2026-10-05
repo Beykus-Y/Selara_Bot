@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
@@ -13,6 +14,8 @@ from selara.application.daily_summary.eligibility import evaluate_daily_summary_
 from selara.application.daily_summary.pipeline import run_daily_summary_pipeline
 from selara.application.daily_summary.schedule import compute_scheduled_window_to
 from selara.application.feature_access import (
+    AccessReason,
+    AccessTier,
     FeatureAccessDecision,
     FeatureAccessService,
 )
@@ -36,13 +39,63 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 900  # 15 minutes -- accuracy to the hour isn't critical (see TODO doc)
 _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" before it can be reclaimed
+_ACCESS_LOG_KEYS: OrderedDict[tuple[int, date, str], None] = OrderedDict()
+_MAX_ACCESS_LOG_KEYS = 4096
 
 
 @dataclass(frozen=True)
 class DailySummaryOutcome:
     sent: bool
-    reason: str  # "sent" | "not_eligible:<gate>" | "already_run_today" | "claim_lost" | "pipeline_failed" | "send_failed"
+    reason: str  # Includes eligibility, access, claim, generation and delivery outcomes.
     access_decision: FeatureAccessDecision | None = None
+
+
+def _log_scheduled_access_decision(
+    *,
+    chat_id: int,
+    summary_date: date,
+    decision: FeatureAccessDecision,
+) -> None:
+    if decision.allowed and decision.access_tier == AccessTier.OWNER_INTERNAL:
+        event = "owner_internal"
+        message = "Scheduled Daily Summary access granted: owner internal"
+        level = logging.INFO
+    elif decision.allowed and decision.access_tier == AccessTier.PAID:
+        event = "paid"
+        message = "Scheduled Daily Summary access granted: paid entitlement"
+        level = logging.INFO
+    elif decision.reason == AccessReason.ACCESS_REQUIRED:
+        event = "access_required"
+        message = "Scheduled Daily Summary skipped: access required"
+        level = logging.INFO
+    elif decision.reason == AccessReason.ACCESS_UNAVAILABLE:
+        event = "access_unavailable"
+        message = "Scheduled Daily Summary access unavailable"
+        level = logging.WARNING
+    else:
+        return
+
+    key = (chat_id, summary_date, event)
+    if key in _ACCESS_LOG_KEYS:
+        _ACCESS_LOG_KEYS.move_to_end(key)
+        return
+    _ACCESS_LOG_KEYS[key] = None
+    if len(_ACCESS_LOG_KEYS) > _MAX_ACCESS_LOG_KEYS:
+        _ACCESS_LOG_KEYS.popitem(last=False)
+
+    logger.log(
+        level,
+        message,
+        extra={
+            "chat_id": chat_id,
+            "summary_date": summary_date.isoformat(),
+            "trigger": "scheduled",
+            "feature": AiFeature.DAILY_SUMMARY.value,
+            "access_reason": decision.reason.value if decision.reason else None,
+            "access_tier": decision.access_tier.value,
+            "entitlement_source": decision.entitlement_source,
+        },
+    )
 
 
 def _resolve_timezone(timezone_name: str) -> ZoneInfo:
@@ -110,7 +163,10 @@ async def _generate_and_finalize(
                     ),
                 )
             except Exception as exc:
-                logger.exception("daily summary chat_id=%s run_id=%s: pipeline failed", chat.telegram_chat_id, run_id)
+                logger.exception(
+                    "Daily Summary pipeline failed",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": run_id, "trigger": trigger},
+                )
                 aggregate = await accounting.aggregate_invocation(invocation_id=invocation_id) if accounting and invocation_id else None
                 await repo.mark_daily_summary_run_failed(
                     run_id=run_id, error=str(exc),
@@ -190,7 +246,10 @@ async def _send_and_mark(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("daily summary chat_id=%s run_id=%s: failed to send", chat_id, run_id)
+            logger.exception(
+                "Daily Summary send failed",
+                extra={"chat_id": chat_id, "run_id": run_id},
+            )
             await repo.mark_daily_summary_run_send_failed(run_id=run_id, error=str(exc))
             await session.commit()
             return False
@@ -213,6 +272,7 @@ async def attempt_daily_summary_run(
     actor_user_id: int | None = None,
     source_message_id: int | None = None,
     settings: Settings | None = None,
+    feature_access_service: FeatureAccessService | None = None,
 ) -> DailySummaryOutcome:
     """One claim -> generate -> send cycle for one chat, for either trigger.
 
@@ -221,7 +281,58 @@ async def attempt_daily_summary_run(
     resent without re-running the LLM pipeline, and a live claim held by another
     concurrent caller is left alone (see `claim_daily_summary_run`).
     """
+    if trigger not in {"manual", "scheduled"}:
+        raise ValueError(f"Unsupported Daily Summary trigger: {trigger!r}")
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    if trigger == "scheduled":
+        settings = settings or get_settings()
+    feature_access_service = feature_access_service or FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(session_factory)
+    )
     window_from = window_to - timedelta(hours=24)
+    existing: DailySummaryRun | None = None
+
+    async def _resolve_scheduled_access() -> FeatureAccessDecision:
+        owner_exempt = await resolve_owner_admin_exemption(
+            bot=bot,
+            chat_id=chat.telegram_chat_id,
+            admin_user_id=settings.admin_user_id,
+        )
+        try:
+            decision = await feature_access_service.resolve_feature_access(
+                feature=AiFeature.DAILY_SUMMARY,
+                chat_id=chat.telegram_chat_id,
+                trigger="scheduled",
+                owner_exempt=owner_exempt,
+                now=now_utc,
+            )
+        except Exception:
+            logger.exception(
+                "Scheduled Daily Summary access check failed chat_id=%s summary_date=%s",
+                chat.telegram_chat_id,
+                summary_date,
+            )
+            decision = FeatureAccessDecision(
+                allowed=False,
+                feature=AiFeature.DAILY_SUMMARY,
+                scope_type="chat",
+                scope_id=str(chat.telegram_chat_id),
+                access_tier=AccessTier.FREE,
+                quota_limit=None,
+                quota_used=None,
+                quota_remaining=None,
+                period_start=None,
+                period_end=None,
+                reason=AccessReason.ACCESS_UNAVAILABLE,
+            )
+        _log_scheduled_access_decision(
+            chat_id=chat.telegram_chat_id,
+            summary_date=summary_date,
+            decision=decision,
+        )
+        return decision
 
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
@@ -229,21 +340,79 @@ async def attempt_daily_summary_run(
         if chat_settings is None:
             return DailySummaryOutcome(False, "not_eligible:no_settings")
 
-        existing = await repo.get_daily_summary_run(chat_id=chat.telegram_chat_id, summary_date=summary_date, trigger=trigger)
+        existing = await repo.get_daily_summary_run(
+            chat_id=chat.telegram_chat_id,
+            summary_date=summary_date,
+            trigger=trigger,
+        )
         if existing is not None and existing.status in ("sent", "failed"):
             return DailySummaryOutcome(False, "already_run_today")
-        if existing is not None and existing.status in ("generated", "send_failed"):
-            sent = await _send_and_mark(bot=bot, session_factory=session_factory, chat_id=chat.telegram_chat_id, run_id=existing.id)
+
+        is_resend = existing is not None and existing.status in ("generated", "send_failed")
+        # Manual /summary remains independent of the automatic toggle. Existing
+        # generated summaries keep their resend path and do not need another quota.
+        if trigger == "manual" and is_resend:
+            logger.info(
+                "Daily Summary resend",
+                extra={"chat_id": chat.telegram_chat_id, "run_id": existing.id, "trigger": trigger},
+            )
+            sent = await _send_and_mark(
+                bot=bot,
+                session_factory=session_factory,
+                chat_id=chat.telegram_chat_id,
+                run_id=existing.id,
+            )
             return DailySummaryOutcome(sent, "sent" if sent else "send_failed")
 
-        message_count = await repo.count_archived_messages_in_window(
-            chat_id=chat.telegram_chat_id, window_from=window_from, window_to=window_to
-        )
-        # `/summary` (trigger="manual") works regardless of whether the daily
-        # automation toggle is on -- only save_message/lock/threshold gate it. The
-        # scheduled path is the only one that must respect daily_summary_enabled.
+        # The toggle is only the scheduled execution setting. Check it before
+        # access resolution and preserve generated scheduled resends when the
+        # user has since turned off message archiving or a write lock is active.
+        if trigger == "scheduled" and not chat_settings.daily_summary_enabled:
+            return DailySummaryOutcome(False, "not_eligible:disabled")
+
+        if trigger == "scheduled":
+            if is_resend:
+                access_decision = await _resolve_scheduled_access()
+                if not access_decision.allowed:
+                    reason = access_decision.reason or AccessReason.ACCESS_REQUIRED
+                    return DailySummaryOutcome(False, reason.value, access_decision)
+                logger.info(
+                    "Daily Summary resend",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": existing.id, "trigger": trigger},
+                )
+                sent = await _send_and_mark(
+                    bot=bot,
+                    session_factory=session_factory,
+                    chat_id=chat.telegram_chat_id,
+                    run_id=existing.id,
+                )
+                return DailySummaryOutcome(sent, "sent" if sent else "send_failed", access_decision)
+
+        # Run the inexpensive settings gates before entitlement lookup. Archived
+        # message counting remains after the premium gate so free chats do not
+        # incur even that scheduler work on every polling tick.
         eligibility_settings = (
             chat_settings if trigger == "scheduled" else replace(chat_settings, daily_summary_enabled=True)
+        )
+        preliminary_eligibility = evaluate_daily_summary_eligibility(
+            settings=eligibility_settings,
+            message_count_in_window=None,
+            already_run_today=False,
+        )
+        if not preliminary_eligibility.eligible:
+            return DailySummaryOutcome(False, f"not_eligible:{preliminary_eligibility.reason}")
+
+        access_decision = None
+        if trigger == "scheduled":
+            access_decision = await _resolve_scheduled_access()
+            if not access_decision.allowed:
+                reason = access_decision.reason or AccessReason.ACCESS_REQUIRED
+                return DailySummaryOutcome(False, reason.value, access_decision)
+
+        message_count = await repo.count_archived_messages_in_window(
+            chat_id=chat.telegram_chat_id,
+            window_from=window_from,
+            window_to=window_to,
         )
         eligibility = evaluate_daily_summary_eligibility(
             settings=eligibility_settings,
@@ -253,7 +422,7 @@ async def attempt_daily_summary_run(
             already_run_today=False,
         )
         if not eligibility.eligible:
-            return DailySummaryOutcome(False, f"not_eligible:{eligibility.reason}")
+            return DailySummaryOutcome(False, f"not_eligible:{eligibility.reason}", access_decision)
 
         run: DailySummaryRun | None = await repo.claim_daily_summary_run(
             chat=chat,
@@ -267,7 +436,22 @@ async def attempt_daily_summary_run(
         await session.commit()
 
     if run is None:
-        return DailySummaryOutcome(False, "claim_lost")
+        return DailySummaryOutcome(False, "claim_lost", access_decision)
+
+    if (
+        existing is not None
+        and existing.status in ("claimed", "generating")
+        and existing.lease_until <= now_utc
+    ):
+        logger.info(
+            "Daily Summary run reclaimed",
+            extra={
+                "chat_id": chat.telegram_chat_id,
+                "run_id": run.id,
+                "trigger": trigger,
+                "summary_date": summary_date.isoformat(),
+            },
+        )
 
     async def _release_unstarted_claim() -> None:
         try:
@@ -277,14 +461,12 @@ async def attempt_daily_summary_run(
                 await session.commit()
         except Exception:
             logger.exception(
-                "Could not release unstarted Daily Summary claim chat_id=%s run_id=%s",
-                chat.telegram_chat_id,
-                run.id,
+                "Could not release unstarted Daily Summary claim",
+                extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
             )
 
     quota_access_service = None
     reserved_invocation_id = None
-    access_decision = None
     if trigger == "manual":
         settings = settings or get_settings()
         owner_exempt = await resolve_owner_admin_exemption(
@@ -292,7 +474,7 @@ async def attempt_daily_summary_run(
             chat_id=chat.telegram_chat_id,
             admin_user_id=settings.admin_user_id,
         )
-        quota_access_service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
+        quota_access_service = feature_access_service
         # A manual summary is one stable logical run. Telegram message ID is
         # retained as audit metadata, while recovery/reclaims reuse run.id.
         idempotency_key = f"{AiFeature.DAILY_SUMMARY.value}:run:{run.id}"
@@ -313,22 +495,38 @@ async def attempt_daily_summary_run(
             )
         except Exception:
             logger.exception(
-                "Daily Summary access reservation failed chat_id=%s run_id=%s",
-                chat.telegram_chat_id,
-                run.id,
+                "Daily Summary access reservation failed",
+                extra={"chat_id": chat.telegram_chat_id, "run_id": run.id, "trigger": trigger},
             )
             await _release_unstarted_claim()
             return DailySummaryOutcome(False, "access_unavailable")
 
         if not access_decision.allowed:
+            if access_decision.reason == AccessReason.QUOTA_EXHAUSTED:
+                logger.info(
+                    "Manual Daily Summary quota denied",
+                    extra={
+                        "chat_id": chat.telegram_chat_id,
+                        "run_id": run.id,
+                        "trigger": trigger,
+                        "access_reason": access_decision.reason.value,
+                        "quota_used": access_decision.quota_used,
+                        "quota_limit": access_decision.quota_limit,
+                    },
+                )
             await _release_unstarted_claim()
-            reason = (
-                access_decision.reason.value
-                if access_decision.reason is not None
-                else "duplicate_request"
-            )
+            reason = access_decision.reason.value if access_decision.reason is not None else "duplicate_request"
             return DailySummaryOutcome(False, reason, access_decision)
         reserved_invocation_id = access_decision.invocation_id
+    else:
+        # Revalidate after the claim, immediately before creating the logical
+        # invocation. This catches an entitlement revoked/expired during message
+        # counting or claim acquisition and releases that unstarted lease.
+        access_decision = await _resolve_scheduled_access()
+        if not access_decision.allowed:
+            await _release_unstarted_claim()
+            reason = access_decision.reason or AccessReason.ACCESS_REQUIRED
+            return DailySummaryOutcome(False, reason.value, access_decision)
 
     generated = await _generate_and_finalize(
         session_factory=session_factory,
@@ -345,10 +543,20 @@ async def attempt_daily_summary_run(
         quota_access_service=quota_access_service,
     )
     if not generated:
-        return DailySummaryOutcome(False, "pipeline_failed")
+        return DailySummaryOutcome(False, "pipeline_failed", access_decision)
+
+    logger.info(
+        "Daily Summary generated",
+        extra={
+            "chat_id": chat.telegram_chat_id,
+            "run_id": run.id,
+            "trigger": trigger,
+            "access_tier": access_decision.access_tier.value if access_decision else None,
+        },
+    )
 
     sent = await _send_and_mark(bot=bot, session_factory=session_factory, chat_id=chat.telegram_chat_id, run_id=run.id)
-    return DailySummaryOutcome(sent, "sent" if sent else "send_failed")
+    return DailySummaryOutcome(sent, "sent" if sent else "send_failed", access_decision)
 
 
 class DailySummaryScheduler:
@@ -359,11 +567,15 @@ class DailySummaryScheduler:
         session_factory: async_sessionmaker[AsyncSession],
         llm_client: LlmClient,
         settings: Settings,
+        feature_access_service: FeatureAccessService | None = None,
     ) -> None:
         self._bot = bot
         self._session_factory = session_factory
         self._llm_client = llm_client
         self._settings = settings
+        self._feature_access_service = feature_access_service or FeatureAccessService(
+            SqlAlchemyFeatureQuotaRepository(session_factory)
+        )
 
     async def run_once(self, *, now: datetime | None = None) -> int:
         now_utc = now or datetime.now(timezone.utc)
@@ -408,6 +620,7 @@ class DailySummaryScheduler:
             summary_date=summary_date,
             now_utc=now_utc,
             settings=self._settings,
+            feature_access_service=self._feature_access_service,
         )
         return outcome.sent
 
@@ -418,8 +631,15 @@ async def run_daily_summary_scheduler(
     session_factory: async_sessionmaker[AsyncSession],
     llm_client: LlmClient,
     settings: Settings,
+    feature_access_service: FeatureAccessService | None = None,
 ) -> None:
-    scheduler = DailySummaryScheduler(bot=bot, session_factory=session_factory, llm_client=llm_client, settings=settings)
+    scheduler = DailySummaryScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        llm_client=llm_client,
+        settings=settings,
+        feature_access_service=feature_access_service,
+    )
     while True:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         try:
