@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram import Dispatcher
 
 from selara.application.selara_ai_product import (
     SELARA_AI_CURRENCY,
@@ -18,10 +20,15 @@ from selara.application.selara_ai_product import (
     parse_invoice_payload,
 )
 from selara.core.config import Settings
-from selara.infrastructure.db.telegram_stars import PurchaseIntent, PreCheckoutResult
+from selara.infrastructure.db.telegram_stars import (
+    PaymentRefundClaim,
+    PaymentResult,
+    PurchaseIntent,
+    PreCheckoutResult,
+)
 from selara.presentation.handlers import premium
 from selara.presentation.handlers import private_panel
-from selara.presentation.payment_safe_dispatcher import _requires_durable_processing
+from selara.presentation.payment_safe_dispatcher import PaymentSafeDispatcher, _requires_durable_processing
 
 
 def test_selara_ai_price_and_duration_come_from_one_catalog_entry():
@@ -118,6 +125,208 @@ def test_payment_updates_are_processed_before_polling_acknowledges_them():
     assert not _requires_durable_processing(
         SimpleNamespace(pre_checkout_query=None, message=SimpleNamespace(successful_payment=None))
     )
+
+
+def test_payment_polling_override_tracks_the_aiogram_private_hook_signature():
+    upstream = inspect.signature(Dispatcher._polling)
+    override = inspect.signature(PaymentSafeDispatcher._polling)
+
+    assert tuple(override.parameters) == tuple(upstream.parameters)
+
+
+def test_payment_retry_backoff_is_exponential_and_capped():
+    assert [premium._payment_retry_delay(attempt) for attempt in range(1, 9)] == [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        60,
+        60,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_owner_can_refund_a_durably_claimed_rejected_payment(monkeypatch):
+    repository = SimpleNamespace(
+        claim_rejected_payment_refund=AsyncMock(
+            return_value=PaymentRefundClaim(
+                "claimed",
+                buyer_user_id=456,
+                telegram_payment_charge_id="charge-refund",
+                amount_stars=137,
+            )
+        ),
+        finish_rejected_payment_refund=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    bot = SimpleNamespace(refund_star_payment=AsyncMock(return_value=True))
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        text="/stars_refund 17",
+        answer=AsyncMock(),
+    )
+
+    await premium.refund_rejected_stars_payment(
+        message,
+        bot=bot,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=123),
+    )
+
+    repository.claim_rejected_payment_refund.assert_awaited_once_with(
+        payment_id=17,
+        requested_by_user_id=123,
+    )
+    bot.refund_star_payment.assert_awaited_once_with(
+        user_id=456,
+        telegram_payment_charge_id="charge-refund",
+    )
+    repository.finish_rejected_payment_refund.assert_awaited_once_with(
+        payment_id=17,
+        succeeded=True,
+        result_code="refunded",
+    )
+
+
+@pytest.mark.asyncio
+async def test_payment_persistence_retry_alerts_owner_after_three_failures(monkeypatch):
+    now = datetime.now(timezone.utc)
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(
+            side_effect=[RuntimeError("temporary failure")] * 3
+            + [PaymentResult("applied", chat_id=-100, valid_until=now + timedelta(days=30))]
+        ),
+        get_chat_title=AsyncMock(return_value="Test group"),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+    message = SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-retry",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    await premium.selara_ai_successful_payment(
+        message,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+        bot=bot,
+    )
+
+    assert repository.process_successful_payment.await_count == 4
+    bot.send_message.assert_awaited_once()
+    assert "Charge: charge-retry" in bot.send_message.await_args.kwargs["text"]
+    message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_timeout_does_not_repeat_the_committed_payment(monkeypatch):
+    monkeypatch.setattr(premium, "_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS", 0.01)
+    now = datetime.now(timezone.utc)
+
+    async def slow_answer(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(
+            return_value=PaymentResult("applied", chat_id=-100, valid_until=now + timedelta(days=30))
+        ),
+        get_chat_title=AsyncMock(return_value="Test group"),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    message = SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-confirmation-timeout",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=slow_answer,
+    )
+
+    await premium.selara_ai_successful_payment(
+        message,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=None, bot_timezone="UTC"),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    repository.process_successful_payment.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_start_stars_refund(monkeypatch):
+    repository_factory = lambda _factory: SimpleNamespace(
+        claim_rejected_payment_refund=AsyncMock()
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", repository_factory)
+    bot = SimpleNamespace(refund_star_payment=AsyncMock())
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=456),
+        text="/stars_refund 17",
+        answer=AsyncMock(),
+    )
+
+    await premium.refund_rejected_stars_payment(
+        message,
+        bot=bot,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=123),
+    )
+
+    bot.refund_star_payment.assert_not_awaited()
+    message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_payment_polling_waits_for_durable_handler_before_advancing_updates(monkeypatch):
+    dispatcher = PaymentSafeDispatcher()
+    payment_update = SimpleNamespace(pre_checkout_query=object(), message=None)
+    handler_started = asyncio.Event()
+    allow_commit = asyncio.Event()
+    durable_commit_finished = asyncio.Event()
+    next_update_requested = asyncio.Event()
+
+    async def process_payment(**_kwargs):
+        handler_started.set()
+        await allow_commit.wait()
+        durable_commit_finished.set()
+
+    async def listen_updates(*_args, **_kwargs):
+        yield payment_update
+        assert durable_commit_finished.is_set()
+        next_update_requested.set()
+
+    bot = SimpleNamespace(
+        id=1,
+        me=AsyncMock(return_value=SimpleNamespace(username="test-bot")),
+    )
+    monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
+    monkeypatch.setattr(dispatcher, "_process_update", process_payment)
+
+    polling = asyncio.create_task(dispatcher._polling(bot=bot))
+    await handler_started.wait()
+    assert not next_update_requested.is_set()
+    allow_commit.set()
+    await polling
+
+    assert durable_commit_finished.is_set()
+    assert next_update_requested.is_set()
 
 
 @pytest.mark.asyncio

@@ -26,9 +26,15 @@ from selara.infrastructure.db.models import (
     SelaraAiPurchaseIntentModel,
     UserChatActivityModel,
 )
+from selara.infrastructure.db.selara_ai_payment_refund import SelaraAiPaymentRefundModel
 from selara.infrastructure.llm.features import AiFeature
 
 logger = logging.getLogger(__name__)
+PURCHASE_INTENT_CREATE_COOLDOWN = timedelta(minutes=1)
+
+
+class PurchaseIntentRateLimited(Exception):
+    """Raised when the same buyer requests another invoice too soon for a chat."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +72,15 @@ class PaymentResult:
     chat_id: int | None = None
     valid_until: datetime | None = None
     entitlement_action: Literal["created", "extended"] | None = None
+    payment_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentRefundClaim:
+    state: Literal["claimed", "pending", "refunded", "failed", "not_found", "not_rejected"]
+    buyer_user_id: int | None = None
+    telegram_payment_charge_id: str | None = None
+    amount_stars: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +234,18 @@ class SqlAlchemyTelegramStarsRepository:
                     or not chat.is_bot_member
                 ):
                     raise ValueError("Purchase target is not an available bot chat")
+                recent_intent_id = await session.scalar(
+                    select(SelaraAiPurchaseIntentModel.id)
+                    .where(
+                        SelaraAiPurchaseIntentModel.buyer_user_id == buyer_user_id,
+                        SelaraAiPurchaseIntentModel.chat_id == chat_id,
+                        SelaraAiPurchaseIntentModel.created_at
+                        >= current - PURCHASE_INTENT_CREATE_COOLDOWN,
+                    )
+                    .limit(1)
+                )
+                if recent_intent_id is not None:
+                    raise PurchaseIntentRateLimited
                 row = SelaraAiPurchaseIntentModel(
                     id=intent_id,
                     buyer_user_id=buyer_user_id,
@@ -367,9 +394,15 @@ class SqlAlchemyTelegramStarsRepository:
                         provider_payment_charge_id=provider_payment_charge_id,
                     ):
                         logger.error("Telegram Stars charge identifier conflict; duplicate was not applied")
-                        result = PaymentResult("rejected", "charge_conflict")
+                        result = PaymentResult(
+                            "rejected", "charge_conflict", payment_id=existing_payment.id
+                        )
                     elif existing_payment.processing_state == "rejected":
-                        result = PaymentResult("rejected", existing_payment.processing_reason)
+                        result = PaymentResult(
+                            "rejected",
+                            existing_payment.processing_reason,
+                            payment_id=existing_payment.id,
+                        )
                     else:
                         result = await self._duplicate_result(session, existing_payment)
                 else:
@@ -407,7 +440,12 @@ class SqlAlchemyTelegramStarsRepository:
                     session.add(payment)
                     await session.flush()
                     if reason is not None:
-                        result = PaymentResult("rejected", reason, chat_id=intent.chat_id if intent else None)
+                        result = PaymentResult(
+                            "rejected",
+                            reason,
+                            chat_id=intent.chat_id if intent else None,
+                            payment_id=payment.id,
+                        )
                     else:
                         assert intent is not None
                         await _advisory_xact_lock(
@@ -452,6 +490,7 @@ class SqlAlchemyTelegramStarsRepository:
                             chat_id=intent.chat_id,
                             valid_until=entitlement.valid_until,
                             entitlement_action=entitlement_action,
+                            payment_id=payment.id,
                         )
 
         if result.state == "applied":
@@ -489,6 +528,71 @@ class SqlAlchemyTelegramStarsRepository:
                 )
             )
         return PaymentResult("duplicate", chat_id=chat_id, valid_until=valid_until)
+
+    async def claim_rejected_payment_refund(
+        self,
+        *,
+        payment_id: int,
+        requested_by_user_id: int,
+    ) -> PaymentRefundClaim:
+        """Durably claim one refund attempt for a rejected, unapplied payment."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                _require_postgresql(session)
+                payment = await session.scalar(
+                    select(SelaraAiPaymentModel)
+                    .where(SelaraAiPaymentModel.id == payment_id)
+                    .with_for_update()
+                )
+                if payment is None:
+                    return PaymentRefundClaim("not_found")
+                if payment.processing_state != "rejected":
+                    return PaymentRefundClaim("not_rejected")
+
+                refund = await session.get(
+                    SelaraAiPaymentRefundModel,
+                    payment_id,
+                    with_for_update=True,
+                )
+                if refund is not None:
+                    return PaymentRefundClaim(refund.status)
+
+                session.add(
+                    SelaraAiPaymentRefundModel(
+                        payment_id=payment_id,
+                        requested_by_user_id=requested_by_user_id,
+                        status="pending",
+                    )
+                )
+                return PaymentRefundClaim(
+                    "claimed",
+                    buyer_user_id=payment.buyer_user_id,
+                    telegram_payment_charge_id=payment.telegram_payment_charge_id,
+                    amount_stars=payment.amount_stars,
+                )
+
+    async def finish_rejected_payment_refund(
+        self,
+        *,
+        payment_id: int,
+        succeeded: bool,
+        result_code: str | None = None,
+    ) -> bool:
+        """Finish a claimed refund; a pending row is retained if delivery was ambiguous."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                _require_postgresql(session)
+                refund = await session.get(
+                    SelaraAiPaymentRefundModel,
+                    payment_id,
+                    with_for_update=True,
+                )
+                if refund is None or refund.status != "pending":
+                    return False
+                refund.status = "refunded" if succeeded else "failed"
+                refund.completed_at = datetime.now(timezone.utc)
+                refund.result_code = result_code
+                return True
 
     async def get_entitlement(self, *, chat_id: int, product_key: str = SELARA_AI_PRODUCT_KEY) -> ChatEntitlementModel | None:
         async with self._session_factory() as session:

@@ -5,7 +5,7 @@ from datetime import timedelta
 from uuid import UUID
 
 SELARA_AI_PRODUCT_KEY = "selara_ai_monthly"
-SELARA_AI_TERMS_VERSION = "v1"
+SELARA_AI_TERMS_VERSION = "v2"
 SELARA_AI_CURRENCY = "XTR"
 SELARA_AI_DURATION = timedelta(days=30)
 PURCHASE_INTENT_TTL = timedelta(minutes=15)

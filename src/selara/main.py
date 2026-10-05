@@ -201,7 +201,7 @@ async def _run_bot(settings, session_factory) -> None:
         )
         await daily_summary_stt_queue.start()
 
-    polling_kwargs: dict = {"settings": settings}
+    polling_kwargs: dict = {"settings": settings, "session_factory": session_factory}
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:

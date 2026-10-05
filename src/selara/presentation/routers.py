@@ -21,7 +21,10 @@ from selara.presentation.handlers.message_archive import (
 )
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
-from selara.presentation.handlers.premium import router as premium_router
+from selara.presentation.handlers.premium import (
+    build_payment_router,
+    router as premium_router,
+)
 from selara.presentation.handlers.relationships import router as relationships_router
 from selara.presentation.handlers.settings import router as settings_router
 from selara.presentation.handlers.stats import router as stats_router
@@ -46,68 +49,73 @@ def build_router(
     llm_client: LlmClient | None = None,
 ) -> Router:
     root = Router(name="root")
+    application = Router(name="application")
 
-    root.message.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.message.outer_middleware(DBSessionMiddleware(session_factory))
-    root.message.outer_middleware(ChatMigrationMiddleware())
-    root.message.outer_middleware(BotBanMiddleware())
-    root.message.outer_middleware(ChatSettingsMiddleware())
-    root.message.outer_middleware(ChatWriteLockMiddleware())
-    root.message.outer_middleware(CommandCleanupMiddleware())
-    root.message.outer_middleware(CommandAccessMiddleware())
-    root.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
+    application.message.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.message.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message.outer_middleware(ChatMigrationMiddleware())
+    application.message.outer_middleware(BotBanMiddleware())
+    application.message.outer_middleware(ChatSettingsMiddleware())
+    application.message.outer_middleware(ChatWriteLockMiddleware())
+    application.message.outer_middleware(CommandCleanupMiddleware())
+    application.message.outer_middleware(CommandAccessMiddleware())
+    application.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
-    root.edited_message.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.edited_message.outer_middleware(DBSessionMiddleware(session_factory))
-    root.edited_message.outer_middleware(ChatSettingsMiddleware())
-    root.edited_message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
+    application.edited_message.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.edited_message.outer_middleware(DBSessionMiddleware(session_factory))
+    application.edited_message.outer_middleware(ChatSettingsMiddleware())
+    application.edited_message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
-    root.callback_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.callback_query.outer_middleware(DBSessionMiddleware(session_factory))
-    root.callback_query.outer_middleware(BotBanMiddleware())
-    root.callback_query.outer_middleware(ChatSettingsMiddleware())
-    root.callback_query.outer_middleware(ChatWriteLockMiddleware())
+    application.callback_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.callback_query.outer_middleware(DBSessionMiddleware(session_factory))
+    application.callback_query.outer_middleware(BotBanMiddleware())
+    application.callback_query.outer_middleware(ChatSettingsMiddleware())
+    application.callback_query.outer_middleware(ChatWriteLockMiddleware())
 
-    root.pre_checkout_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.pre_checkout_query.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message_reaction.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.message_reaction.outer_middleware(DBSessionMiddleware(session_factory))
 
-    root.message_reaction.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.message_reaction.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message_reaction_count.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.message_reaction_count.outer_middleware(DBSessionMiddleware(session_factory))
 
-    root.message_reaction_count.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.message_reaction_count.outer_middleware(DBSessionMiddleware(session_factory))
+    application.inline_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.inline_query.outer_middleware(DBSessionMiddleware(session_factory))
 
-    root.inline_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.inline_query.outer_middleware(DBSessionMiddleware(session_factory))
+    application.chosen_inline_result.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.chosen_inline_result.outer_middleware(DBSessionMiddleware(session_factory))
 
-    root.chosen_inline_result.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.chosen_inline_result.outer_middleware(DBSessionMiddleware(session_factory))
+    application.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    application.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
 
-    root.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    root.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
+    # Payment updates bypass general catch-all handlers and their middleware.
+    # Their handlers create their own DB sessions and keep polling blocked until
+    # confirmed payments have a durable economic effect.
+    root.include_router(build_payment_router())
 
-    root.include_router(autoconfig_router)
-    root.include_router(admin_broadcasts_router)
-    root.include_router(message_archive_router)
-    root.include_router(help_router)
-    root.include_router(stats_router)
-    root.include_router(chat_assistant_router)
-    root.include_router(economy_router)
-    root.include_router(game_router)
-    root.include_router(clans_router)
-    root.include_router(relationships_router)
-    root.include_router(moderation_router)
-    root.include_router(settings_router)
-    root.include_router(aliases_router)
-    root.include_router(engagement_router)
-    root.include_router(feedback_router)
-    root.include_router(premium_router)
-    root.include_router(private_panel_router)
+    application.include_router(autoconfig_router)
+    application.include_router(admin_broadcasts_router)
+    application.include_router(message_archive_router)
+    application.include_router(help_router)
+    application.include_router(stats_router)
+    application.include_router(chat_assistant_router)
+    application.include_router(economy_router)
+    application.include_router(game_router)
+    application.include_router(clans_router)
+    application.include_router(relationships_router)
+    application.include_router(moderation_router)
+    application.include_router(settings_router)
+    application.include_router(aliases_router)
+    application.include_router(engagement_router)
+    application.include_router(feedback_router)
+    application.include_router(premium_router)
+    application.include_router(private_panel_router)
     if llm_client is not None:
-        root.include_router(llm_admin_router)
-        root.include_router(daily_summary_router)
-    root.include_router(text_commands_router)
+        application.include_router(llm_admin_router)
+        application.include_router(daily_summary_router)
+    application.include_router(text_commands_router)
     if stt_client is not None:
-        root.include_router(voice_router)
+        application.include_router(voice_router)
+
+    root.include_router(application)
 
     return root

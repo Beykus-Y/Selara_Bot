@@ -7,7 +7,7 @@ from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -17,8 +17,6 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy.exc import SQLAlchemyError
-
 from selara.application.selara_ai_product import (
     SELARA_AI_PRODUCT_KEY,
     SELARA_AI_TERMS_VERSION,
@@ -26,7 +24,11 @@ from selara.application.selara_ai_product import (
     get_selara_ai_product,
 )
 from selara.core.config import Settings
-from selara.infrastructure.db.telegram_stars import PaymentResult, SqlAlchemyTelegramStarsRepository
+from selara.infrastructure.db.telegram_stars import (
+    PaymentResult,
+    PurchaseIntentRateLimited,
+    SqlAlchemyTelegramStarsRepository,
+)
 from selara.presentation.auth import is_telegram_chat_admin, resolve_owner_admin_exemption
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,15 @@ _CHECKOUT_ACCESS_ERROR = "Для оплаты нужно быть админис
 _CHECKOUT_RETRY_ERROR = "Не удалось проверить чат. Попробуйте открыть /premium и повторить оплату позже."
 _PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
 _PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
+_PAYMENT_RETRY_ALERT_ATTEMPT = 3
+_PAYMENT_RETRY_MAX_SECONDS = 60
+_PAYMENT_OWNER_ALERT_TIMEOUT_SECONDS = 3.0
+_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS = 3.0
+_STAR_REFUND_TIMEOUT_SECONDS = 10.0
+
+
+def _payment_retry_delay(attempt: int) -> int:
+    return min(2 ** max(attempt - 1, 0), _PAYMENT_RETRY_MAX_SECONDS)
 
 
 def _terms_text() -> str:
@@ -49,7 +60,9 @@ def _terms_text() -> str:
         "оформить доступ для выбранного чата. Доступ после оплаты принадлежит чату "
         "и сохраняется до окончания срока, даже если покупатель перестанет быть "
         "администратором.\n"
-        "5. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
+        "5. Работа AI-функций зависит от доступности настроенного AI-провайдера и конфигурации бота. "
+        "При временной недоступности или отключении провайдера функции могут быть приостановлены до конца оплаченного срока.\n"
+        "6. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
         "Нажимая кнопку принятия условий перед счётом, вы подтверждаете, что прочитали и принимаете эти условия."
     )
 
@@ -366,6 +379,10 @@ async def accept_terms_and_buy_selara_ai(
             terms_version=SELARA_AI_TERMS_VERSION,
             terms_accepted_at=datetime.now(timezone.utc),
         )
+    except PurchaseIntentRateLimited:
+        logger.info("Selara AI invoice creation rate limited chat_id=%s", chat_id)
+        await _edit_callback_message(query, "Счёт для этого чата уже создавался недавно. Подождите минуту и попробуйте снова.")
+        return
     except Exception:
         logger.exception("Selara AI purchase intent creation failed chat_id=%s", chat_id)
         await _edit_callback_message(query, "Не удалось создать счёт. Попробуйте позже.")
@@ -489,7 +506,6 @@ async def _validate_pre_checkout(
     return False, _CHECKOUT_RETRY_ERROR
 
 
-@router.pre_checkout_query()
 async def selara_ai_pre_checkout(
     query: PreCheckoutQuery,
     bot: Bot,
@@ -527,17 +543,19 @@ async def selara_ai_pre_checkout(
         )
 
 
-@router.message(F.chat.type == "private", F.successful_payment)
 async def selara_ai_successful_payment(
     message: Message,
     session_factory,
     settings: Settings,
+    bot: Bot,
 ) -> None:
     payment = message.successful_payment
     if payment is None or message.from_user is None:
         return
     logger.info("Telegram Stars successful_payment received")
     repository = SqlAlchemyTelegramStarsRepository(session_factory)
+    attempt = 0
+    owner_alert_sent = False
     while True:
         try:
             result = await repository.process_successful_payment(
@@ -552,25 +570,49 @@ async def selara_ai_successful_payment(
             break
         except asyncio.CancelledError:
             raise
-        except (SQLAlchemyError, OSError, TimeoutError):
-            logger.error("Telegram Stars payment persistence failed; retaining update for retry")
-            await asyncio.sleep(5)
         except Exception as exc:
-            # A confirmed Telegram payment must not be acknowledged before its
-            # economic effect is durable. Keep retrying this one update and log
-            # the type without dumping the Telegram update or payment metadata.
+            # Never acknowledge a confirmed payment before its economic effect
+            # is durable. Alert once, then keep a capped exponential backoff.
+            attempt += 1
+            delay = _payment_retry_delay(attempt)
             logger.error(
-                "Telegram Stars payment processing failed; retaining update for retry exception_type=%s",
+                "Telegram Stars payment processing failed; retaining update for retry "
+                "attempt=%s retry_in_seconds=%s exception_type=%s",
+                attempt,
+                delay,
                 type(exc).__name__,
             )
-            await asyncio.sleep(5)
+            if attempt >= _PAYMENT_RETRY_ALERT_ATTEMPT and not owner_alert_sent:
+                owner_alert_sent = True
+                await _send_payment_owner_alert(
+                    bot=bot,
+                    settings=settings,
+                    text=(
+                        "🚨 Не удалось записать подтверждённый Telegram Stars платёж. "
+                        "Обработка и polling приостановлены до успешной записи.\n"
+                        f"Charge: {payment.telegram_payment_charge_id}\n"
+                        f"Попыток: {attempt}; последняя ошибка: {type(exc).__name__}."
+                    ),
+                    log_event="persistence_retry",
+                )
+            await asyncio.sleep(delay)
 
     if result.state == "rejected":
+        await _notify_owner_of_rejected_payment(bot=bot, settings=settings, result=result)
         await _send_payment_reconciliation_message(message, result)
         return
     if result.chat_id is None or result.valid_until is None:
         # The update is already durably recorded. Retry delivery only; never
         # re-run the economic effect to recover this user-facing message.
+        await _send_payment_owner_alert(
+            bot=bot,
+            settings=settings,
+            text=(
+                "🚨 Telegram Stars платёж сохранён, но подтверждение доступа не удалось собрать. "
+                f"Payment record: {result.payment_id or 'unknown'}; требуется ручная проверка."
+            ),
+            log_event="confirmation_context_missing",
+        )
         await _send_payment_reconciliation_message(message, result)
         return
     try:
@@ -581,11 +623,12 @@ async def selara_ai_successful_payment(
     label = escape(_chat_label(chat_title, result.chat_id))
     until = _format_date(result.valid_until, settings.bot_timezone)
     try:
-        await message.answer(
-            f"✅ Selara AI активирована для <b>{label}</b> до <b>{until}</b>.\n"
-            "Включены автоматические итоги дня и AI-функции чата. Продление не автоматическое.",
-            parse_mode="HTML",
-        )
+        async with asyncio.timeout(_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS):
+            await message.answer(
+                f"✅ Selara AI активирована для <b>{label}</b> до <b>{until}</b>.\n"
+                "Включены автоматические итоги дня и AI-функции чата. Продление не автоматическое.",
+                parse_mode="HTML",
+            )
     except Exception as exc:
         logger.error(
             "Selara AI payment confirmation delivery failed chat_id=%s exception_type=%s",
@@ -596,9 +639,147 @@ async def selara_ai_successful_payment(
 
 async def _send_payment_reconciliation_message(message: Message, result: PaymentResult) -> None:
     try:
-        await message.answer(
-            "Telegram подтвердил оплату, но не удалось автоматически активировать Selara AI. "
-            "Платёж сохранён для проверки; обратитесь к владельцу бота."
+        async with asyncio.timeout(_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS):
+            await message.answer(
+                "Telegram подтвердил оплату, но не удалось автоматически активировать Selara AI. "
+                "Платёж сохранён для проверки; обратитесь к владельцу бота."
+            )
+    except Exception as exc:
+        logger.error(
+            "Selara AI payment support message delivery failed exception_type=%s",
+            type(exc).__name__,
         )
-    except TelegramAPIError:
-        logger.exception("Selara AI payment support message delivery failed")
+
+
+async def _send_payment_owner_alert(*, bot: Bot, settings: Settings, text: str, log_event: str) -> None:
+    admin_user_id = settings.admin_user_id
+    if admin_user_id is None:
+        logger.error("Telegram Stars owner alert skipped event=%s reason=admin_not_configured", log_event)
+        return
+    try:
+        async with asyncio.timeout(_PAYMENT_OWNER_ALERT_TIMEOUT_SECONDS):
+            await bot.send_message(chat_id=admin_user_id, text=text)
+    except Exception as exc:
+        logger.error(
+            "Telegram Stars owner alert delivery failed event=%s exception_type=%s",
+            log_event,
+            type(exc).__name__,
+        )
+
+
+async def _notify_owner_of_rejected_payment(*, bot: Bot, settings: Settings, result: PaymentResult) -> None:
+    payment_id = result.payment_id
+    if payment_id is None:
+        logger.error("Rejected Telegram Stars payment has no persisted payment id")
+        return
+    await _send_payment_owner_alert(
+        bot=bot,
+        settings=settings,
+        text=(
+            "⚠️ Telegram подтвердил Stars платёж, но Selara AI не активирована.\n"
+            f"Payment record: {payment_id}; reason: {result.reason or 'unknown'}.\n"
+            f"Чтобы вернуть Stars для этой отклонённой оплаты: /stars_refund {payment_id}"
+        ),
+        log_event="rejected_payment",
+    )
+
+
+@router.message(Command("stars_refund"))
+async def refund_rejected_stars_payment(
+    message: Message,
+    bot: Bot,
+    session_factory,
+    settings: Settings,
+) -> None:
+    if message.chat.type != "private" or message.from_user is None:
+        return
+    if settings.admin_user_id is None or message.from_user.id != settings.admin_user_id:
+        await message.answer("Команда доступна только владельцу бота в личном чате.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) <= 0:
+        await message.answer("Использование: /stars_refund <payment_id>.")
+        return
+
+    payment_id = int(parts[1])
+    repository = SqlAlchemyTelegramStarsRepository(session_factory)
+    claim = await repository.claim_rejected_payment_refund(
+        payment_id=payment_id,
+        requested_by_user_id=message.from_user.id,
+    )
+    if claim.state == "not_found":
+        await message.answer("Платёж с таким номером не найден.")
+        return
+    if claim.state == "not_rejected":
+        await message.answer("Эта оплата не отклонена; команда возвращает только отклонённые платежи.")
+        return
+    if claim.state == "refunded":
+        await message.answer("Для этого платежа возврат уже записан.")
+        return
+    if claim.state == "pending":
+        await message.answer(
+            "Возврат уже начат, но Telegram не подтвердил результат. Проверьте Stars-транзакции; "
+            "повторно команду не запускайте."
+        )
+        return
+    if claim.state == "failed":
+        await message.answer(
+            "Telegram отклонил предыдущую попытку. Проверьте платёж вручную перед дальнейшими действиями."
+        )
+        return
+    if claim.buyer_user_id is None or claim.telegram_payment_charge_id is None:
+        await message.answer("Не хватает данных платежа для возврата; требуется ручная проверка.")
+        return
+
+    try:
+        async with asyncio.timeout(_STAR_REFUND_TIMEOUT_SECONDS):
+            refunded = await bot.refund_star_payment(
+                user_id=claim.buyer_user_id,
+                telegram_payment_charge_id=claim.telegram_payment_charge_id,
+            )
+    except TelegramBadRequest as exc:
+        await repository.finish_rejected_payment_refund(
+            payment_id=payment_id,
+            succeeded=False,
+            result_code=type(exc).__name__,
+        )
+        logger.warning("Telegram Stars refund rejected payment_id=%s exception_type=%s", payment_id, type(exc).__name__)
+        await message.answer("Telegram отклонил возврат. Запись сохранена для ручной проверки.")
+        return
+    except Exception as exc:
+        # A timeout or transport error may happen after Telegram applied the
+        # refund. Keep the durable row pending so a retry cannot double-refund.
+        logger.error(
+            "Telegram Stars refund outcome is uncertain payment_id=%s exception_type=%s",
+            payment_id,
+            type(exc).__name__,
+        )
+        await message.answer(
+            "Ответ Telegram не получен. Возврат отмечен как ожидающий проверки; повторно не запускайте команду."
+        )
+        return
+
+    if not refunded:
+        await repository.finish_rejected_payment_refund(
+            payment_id=payment_id,
+            succeeded=False,
+            result_code="api_returned_false",
+        )
+        await message.answer("Telegram не подтвердил возврат. Запись сохранена для ручной проверки.")
+        return
+
+    await repository.finish_rejected_payment_refund(
+        payment_id=payment_id,
+        succeeded=True,
+        result_code="refunded",
+    )
+    logger.info("Telegram Stars refund completed payment_id=%s", payment_id)
+    await message.answer(f"Возврат {claim.amount_stars or 0} ⭐ подтверждён Telegram.")
+
+
+def build_payment_router() -> Router:
+    payment_router = Router(name="selara_ai_payments")
+    payment_router.pre_checkout_query.register(selara_ai_pre_checkout)
+    payment_router.message.register(refund_rejected_stars_payment, Command("stars_refund"))
+    payment_router.message.register(selara_ai_successful_payment, F.successful_payment)
+    return payment_router

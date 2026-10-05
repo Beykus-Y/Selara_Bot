@@ -21,8 +21,10 @@ from selara.infrastructure.db.models import (
     SelaraAiPaymentModel,
     SelaraAiPurchaseIntentModel,
 )
+from selara.infrastructure.db.selara_ai_payment_refund import SelaraAiPaymentRefundModel
 from selara.infrastructure.db.telegram_stars import (
     PreCheckoutResult,
+    PurchaseIntentRateLimited,
     SqlAlchemyChatEntitlementResolver,
     SqlAlchemyTelegramStarsRepository,
 )
@@ -152,6 +154,29 @@ async def test_price_change_after_invoice_does_not_change_the_server_side_intent
         assert accepted.accepted
         assert result.state == "applied"
         assert result.valid_until == _NOW + timedelta(days=30)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_purchase_intent_creation_is_rate_limited_per_buyer_and_chat():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_751_022
+        await _seed_chats(factory, chat_id)
+        await _intent(factory, chat_id=chat_id)
+
+        with pytest.raises(PurchaseIntentRateLimited):
+            await _intent(factory, chat_id=chat_id, now=_NOW + timedelta(seconds=30))
+
+        allowed_after_cooldown = await _intent(
+            factory,
+            chat_id=chat_id,
+            now=_NOW + timedelta(seconds=61),
+        )
+        assert allowed_after_cooldown.buyer_user_id == _BUYER
     finally:
         await engine.dispose()
 
@@ -300,6 +325,87 @@ async def test_invalid_successful_payment_is_audited_without_entitlement(
         assert payment.processing_state == "rejected"
         assert payment.processing_reason == expected_reason
         assert entitlement_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_rejected_payment_refund_claim_is_single_use_and_audited():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_751_020
+        await _seed_chats(factory, chat_id)
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        intent = await _intent(factory, chat_id=chat_id)
+        rejected = await _payment(
+            repository,
+            intent,
+            charge_id="stars-refund-claim",
+            amount_stars=136,
+        )
+        assert rejected.state == "rejected"
+        assert rejected.payment_id is not None
+
+        claims = await asyncio.gather(
+            repository.claim_rejected_payment_refund(
+                payment_id=rejected.payment_id,
+                requested_by_user_id=_BUYER + 10,
+            ),
+            repository.claim_rejected_payment_refund(
+                payment_id=rejected.payment_id,
+                requested_by_user_id=_BUYER + 11,
+            ),
+        )
+        assert sorted(claim.state for claim in claims) == ["claimed", "pending"]
+        claimed = next(claim for claim in claims if claim.state == "claimed")
+        assert claimed.buyer_user_id == _BUYER
+        assert claimed.telegram_payment_charge_id == "stars-refund-claim"
+        assert claimed.amount_stars == 136
+
+        assert await repository.finish_rejected_payment_refund(
+            payment_id=rejected.payment_id,
+            succeeded=True,
+            result_code="refunded",
+        )
+        already_refunded = await repository.claim_rejected_payment_refund(
+            payment_id=rejected.payment_id,
+            requested_by_user_id=_BUYER + 12,
+        )
+        assert already_refunded.state == "refunded"
+
+        async with factory() as session:
+            audit = await session.get(SelaraAiPaymentRefundModel, rejected.payment_id)
+        assert audit is not None
+        assert audit.status == "refunded"
+        assert audit.completed_at is not None
+        assert audit.result_code == "refunded"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_applied_payment_cannot_be_refunded_by_rejected_payment_command():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_751_021
+        await _seed_chats(factory, chat_id)
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        intent = await _intent(factory, chat_id=chat_id)
+        applied = await _payment(repository, intent, charge_id="stars-refund-applied")
+
+        result = await repository.claim_rejected_payment_refund(
+            payment_id=applied.payment_id,
+            requested_by_user_id=_BUYER,
+        )
+
+        assert result.state == "not_rejected"
+        async with factory() as session:
+            refund_count = await session.scalar(select(func.count(SelaraAiPaymentRefundModel.payment_id)))
+        assert refund_count == 0
     finally:
         await engine.dispose()
 
