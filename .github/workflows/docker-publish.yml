@@ -41,6 +41,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "short_sha=${CI_SHA::7}" >> "$GITHUB_OUTPUT"
+
           if [[ "$EVENT_NAME" != "workflow_run" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -76,11 +78,10 @@ jobs:
         id: meta_app
         uses: docker/metadata-action@v5
         with:
-          context: git
           images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
 
       - name: Build and push app image
         if: steps.freshness.outputs.publish == 'true'
@@ -99,11 +100,10 @@ jobs:
         id: meta_web
         uses: docker/metadata-action@v5
         with:
-          context: git
           images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-web
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
 
       - name: Build and push web image
         if: steps.freshness.outputs.publish == 'true'
@@ -124,11 +124,10 @@ jobs:
         id: meta_gacha
         uses: docker/metadata-action@v5
         with:
-          context: git
           images: ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-gacha
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
 
       - name: Build and push gacha image
         if: steps.freshness.outputs.publish == 'true'
