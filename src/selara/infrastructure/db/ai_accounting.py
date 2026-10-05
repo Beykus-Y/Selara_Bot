@@ -9,7 +9,10 @@ from decimal import Decimal
 from sqlalchemy import case, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.infrastructure.db.feature_quota import feature_quota_lock_key
+from selara.infrastructure.db.feature_quota import (
+    feature_quota_idempotency_lock_key,
+    feature_quota_lock_key,
+)
 from selara.infrastructure.db.models import AiFeatureInvocationModel, AiFeatureQuotaUsageModel, LlmUsageLogModel
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallUsage
 
@@ -79,11 +82,22 @@ class AiAccountingService:
                 quota_usage = await session.scalar(
                     select(AiFeatureQuotaUsageModel)
                     .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
-                    .with_for_update()
                 )
                 if quota_usage is not None:
                     if session.bind is None or session.bind.dialect.name != "postgresql":
                         raise RuntimeError("Quota-backed provider attempts require PostgreSQL")
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": feature_quota_idempotency_lock_key(
+                            idempotency_key=quota_usage.idempotency_key,
+                        )},
+                    )
+                    quota_usage = await session.scalar(
+                        select(AiFeatureQuotaUsageModel)
+                        .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                    )
+                    if quota_usage is None:
+                        raise RuntimeError(f"Quota reservation for AI invocation {invocation_id} disappeared")
                     await session.execute(
                         text("SELECT pg_advisory_xact_lock(:lock_key)"),
                         {"lock_key": feature_quota_lock_key(
@@ -92,6 +106,13 @@ class AiAccountingService:
                             period_start=quota_usage.period_start,
                         )},
                     )
+                    quota_usage = await session.scalar(
+                        select(AiFeatureQuotaUsageModel)
+                        .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                        .with_for_update()
+                    )
+                    if quota_usage is None:
+                        raise RuntimeError(f"Quota reservation for AI invocation {invocation_id} disappeared")
                     if quota_usage.status != "consumed":
                         raise RuntimeError("Cannot start a provider attempt for released quota")
 

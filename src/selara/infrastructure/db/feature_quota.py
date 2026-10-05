@@ -21,12 +21,18 @@ from selara.infrastructure.db.models import (
     LlmUsageLogModel,
     UserModel,
 )
+from selara.infrastructure.llm.features import AiFeature
 
 logger = logging.getLogger(__name__)
 
 
 def feature_quota_lock_key(*, feature: str, chat_id: int, period_start) -> int:
     payload = f"{feature}\0{chat_id}\0{period_start.isoformat()}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+
+
+def feature_quota_idempotency_lock_key(*, idempotency_key: str) -> int:
+    payload = f"quota-idempotency\0{idempotency_key}".encode("utf-8")
     return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
 
 
@@ -65,6 +71,10 @@ class SqlAlchemyFeatureQuotaRepository:
                     raise RuntimeError("Feature quota reservations require PostgreSQL advisory locks")
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": feature_quota_idempotency_lock_key(idempotency_key=idempotency_key)},
+                )
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": self._lock_key(
                         feature=policy.feature.value, chat_id=chat_id, period_start=period_start,
                     )},
@@ -72,11 +82,134 @@ class SqlAlchemyFeatureQuotaRepository:
                 existing = await session.scalar(
                     select(AiFeatureQuotaUsageModel).where(
                         AiFeatureQuotaUsageModel.idempotency_key == idempotency_key,
-                    )
+                    ).with_for_update()
                 )
                 if existing is not None:
                     if existing.feature != policy.feature.value:
                         raise RuntimeError("Feature quota idempotency key was reused across features")
+                    if existing.chat_id not in (None, chat_id):
+                        logger.warning(
+                            "Feature quota idempotency key reused in another chat feature=%s old_chat_id=%s chat_id=%s",
+                            policy.feature.value, existing.chat_id, chat_id,
+                        )
+                        return self._decision(
+                            allowed=False,
+                            policy=policy,
+                            chat_id=chat_id,
+                            owner_exempt=False,
+                            used=None,
+                            period_start=period_start,
+                            period_end=period_end,
+                            invocation_id=existing.invocation_id,
+                            usage_id=existing.id,
+                            reused=True,
+                            reason=AccessReason.DUPLICATE_REQUEST,
+                        )
+
+                    if (
+                        existing.status == "released"
+                        and policy.feature == AiFeature.DAILY_SUMMARY
+                        and trigger == "manual"
+                        and existing.summary_run_id == summary_run_id
+                    ):
+                        invocation = await session.scalar(
+                            select(AiFeatureInvocationModel)
+                            .where(AiFeatureInvocationModel.id == existing.invocation_id)
+                            .with_for_update()
+                        )
+                        provider_attempts = await session.scalar(
+                            select(func.count(LlmUsageLogModel.id)).where(
+                                LlmUsageLogModel.invocation_id == existing.invocation_id,
+                            )
+                        )
+                        if (
+                            invocation is None
+                            or invocation.provider_attempt_started_at is not None
+                            or provider_attempts
+                        ):
+                            logger.warning(
+                                "Released feature quota cannot be reacquired after provider start feature=%s chat_id=%s invocation_id=%s",
+                                policy.feature.value, chat_id, existing.invocation_id,
+                            )
+                            return self._decision(
+                                allowed=False,
+                                policy=policy,
+                                chat_id=chat_id,
+                                owner_exempt=False,
+                                used=None,
+                                period_start=period_start,
+                                period_end=period_end,
+                                invocation_id=existing.invocation_id,
+                                usage_id=existing.id,
+                                reused=True,
+                                reason=AccessReason.DUPLICATE_REQUEST,
+                            )
+
+                        used = await self._count_used(
+                            session,
+                            feature=policy.feature.value,
+                            chat_id=chat_id,
+                            period_start=period_start,
+                        )
+                        if not owner_exempt and used >= policy.limit:
+                            logger.info(
+                                "Released feature quota reacquire denied feature=%s chat_id=%s used=%s limit=%s",
+                                policy.feature.value, chat_id, used, policy.limit,
+                            )
+                            return self._decision(
+                                allowed=False,
+                                policy=policy,
+                                chat_id=chat_id,
+                                owner_exempt=False,
+                                used=used,
+                                period_start=period_start,
+                                period_end=period_end,
+                                invocation_id=existing.invocation_id,
+                                usage_id=existing.id,
+                                reused=True,
+                                reason=AccessReason.QUOTA_EXHAUSTED,
+                            )
+
+                        existing.chat_id = chat_id
+                        existing.period_start = period_start
+                        existing.period_end = period_end
+                        existing.policy_key = policy.policy_key
+                        existing.quota_limit = policy.limit
+                        existing.created_at = func.now()
+                        existing.access_tier = (
+                            AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
+                        ).value
+                        existing.owner_exempt = owner_exempt
+                        existing.status = "consumed"
+                        existing.release_reason = None
+                        existing.released_at = None
+                        invocation.chat_id = chat_id
+                        invocation.scope_type = "chat"
+                        invocation.scope_id = str(chat_id)
+                        invocation.status = "running"
+                        invocation.error_category = None
+                        invocation.started_at = func.now()
+                        invocation.completed_at = None
+                        current_used = None if owner_exempt else used + 1
+                        decision = self._decision(
+                            allowed=True,
+                            policy=policy,
+                            chat_id=chat_id,
+                            owner_exempt=owner_exempt,
+                            used=current_used,
+                            period_start=period_start,
+                            period_end=period_end,
+                            invocation_id=existing.invocation_id,
+                            usage_id=existing.id,
+                            reused=True,
+                            reason=None,
+                        )
+                        logger.info(
+                            "Released feature quota reservation reacquired feature=%s chat_id=%s usage_id=%s invocation_id=%s",
+                            policy.feature.value, chat_id, existing.id, existing.invocation_id,
+                        )
+                        return decision
+
                     used = await self._count_used(
                         session,
                         feature=policy.feature.value,
@@ -250,7 +383,16 @@ class SqlAlchemyFeatureQuotaRepository:
                 usage = await session.scalar(
                     select(AiFeatureQuotaUsageModel)
                     .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
-                    .with_for_update()
+                )
+                if usage is None or usage.status != "consumed":
+                    return False
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": feature_quota_idempotency_lock_key(idempotency_key=usage.idempotency_key)},
+                )
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel)
+                    .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
                 )
                 if usage is None or usage.status != "consumed":
                     return False
@@ -260,6 +402,13 @@ class SqlAlchemyFeatureQuotaRepository:
                         feature=usage.feature, chat_id=usage.chat_id or 0, period_start=usage.period_start,
                     )},
                 )
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel)
+                    .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                    .with_for_update()
+                )
+                if usage is None or usage.status != "consumed":
+                    return False
                 provider_attempts = await session.scalar(
                     select(func.count(LlmUsageLogModel.id)).where(
                         LlmUsageLogModel.invocation_id == invocation_id,

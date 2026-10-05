@@ -349,11 +349,15 @@ async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monk
             admin_user_id=None,
         )
 
-        async def die_after_reservation(**kwargs):
+        async def cancel_before_provider_attempt(**kwargs):
             raise asyncio.CancelledError
 
-        real_generate = daily_summary_module._generate_and_finalize
-        monkeypatch.setattr(daily_summary_module, "_generate_and_finalize", die_after_reservation)
+        real_pipeline = daily_summary_module.run_daily_summary_pipeline
+        monkeypatch.setattr(
+            daily_summary_module,
+            "run_daily_summary_pipeline",
+            cancel_before_provider_attempt,
+        )
         client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
 
         with pytest.raises(asyncio.CancelledError):
@@ -371,9 +375,16 @@ async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monk
             await session.commit()
             quota_before_reclaim = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
         assert len(quota_before_reclaim) == 1
+        assert quota_before_reclaim[0].status == "released"
         original_invocation_id = quota_before_reclaim[0].invocation_id
+        async with session_factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, original_invocation_id)
+            provider_call_count = await session.scalar(select(func.count(LlmUsageLogModel.id)))
+        assert invocation.status == "failed"
+        assert invocation.provider_attempt_started_at is None
+        assert provider_call_count == 0
 
-        monkeypatch.setattr(daily_summary_module, "_generate_and_finalize", real_generate)
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", real_pipeline)
         recovered = await attempt_daily_summary_run(
             bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
             trigger="manual", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
@@ -393,9 +404,22 @@ async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monk
             )
         assert len(runs) == 1 and runs[0].id == original_run_id and runs[0].status == "sent"
         assert len(quota) == 1 and quota[0].invocation_id == original_invocation_id
+        assert quota[0].status == "consumed"
+        assert quota[0].released_at is None and quota[0].release_reason is None
         assert quota[0].source_message_id == 4242  # first message remains audit metadata
         assert invocation.summary_run_id == original_run_id
+        assert invocation.status == "succeeded"
         assert provider_calls > 0
+        usage_summary = await FeatureAccessService(
+            SqlAlchemyFeatureQuotaRepository(session_factory),
+        ).get_usage_summary(
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=_CHAT_ID,
+            trigger="manual",
+            timezone_name="UTC",
+            now=_NOW + timedelta(minutes=40),
+        )
+        assert usage_summary.quota_used == 1
     finally:
         await engine.dispose()
 
