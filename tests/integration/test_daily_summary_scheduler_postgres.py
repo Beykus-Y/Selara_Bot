@@ -7,6 +7,7 @@ state) and a fake LlmClient (no network) to keep this fast and deterministic.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -526,6 +527,7 @@ async def test_scheduled_trigger_is_blocked_when_automation_is_disabled() -> Non
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_scheduled_free_chat_is_denied_before_count_claim_quota_or_provider(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=daily_summary_module.__name__)
     engine, session_factory = await _database()
     try:
         await _seed_chat(session_factory, message_count=60, min_messages=50)
@@ -934,6 +936,12 @@ async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_e
         allowed_chat_id = _CHAT_ID + 1
         await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
         await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id)
+        async with session_factory() as session:
+            messages = (await session.execute(select(MessageArchiveModel))).scalars().all()
+            for index, message in enumerate(messages):
+                message.snapshot_at = _NOW - timedelta(hours=5) + timedelta(minutes=index)
+                message.sent_at = message.snapshot_at
+            await session.commit()
 
         class OneChatResolver:
             async def resolve(self, *, chat_id, feature, trigger):
