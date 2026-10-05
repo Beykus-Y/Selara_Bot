@@ -288,3 +288,32 @@ async def test_artifact_delivery_is_terminal_only_on_confirmed_success(delivered
     else:
         assert c.chat_with_tools.await_count == 2 and executed == ['send_artifact', 'get_top']
         send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_llm_error_before_provider_call_replaces_the_thinking_placeholder():
+    """e.g. the accounting marker cannot be committed (fail-closed): the user must get an
+    error instead of a permanent "Думаю..." message."""
+    llm_client = AsyncMock()
+    llm_client.chat_with_tools = AsyncMock(side_effect=RuntimeError("accounting marker commit failed"))
+    bot = AsyncMock()
+    message = _admin_message("? привет")
+
+    with patch.object(llm_admin_module, "has_permission", new=AsyncMock(return_value=(True, None, None))), \
+         patch.object(llm_admin_module, "LlmRepository") as mock_repo_cls, \
+         patch.object(llm_admin_module, "load_context", new=AsyncMock(return_value=SimpleNamespace(messages=[]))), \
+         patch.object(llm_admin_module, "save_interaction", new=AsyncMock()), \
+         patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
+        repo_mock = MagicMock()
+        repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        repo_mock.search_glossary = AsyncMock(return_value=[])
+        mock_repo_cls.return_value = repo_mock
+
+        await _handle(
+            message, bot, MagicMock(), _chat_settings(), llm_client, AsyncMock(),
+            with_context=False, session_factory=object(),
+        )
+
+    edit_text = message.reply.return_value.edit_text
+    edit_text.assert_awaited_once()
+    assert "Ошибка AI-ассистента" in edit_text.await_args.args[0]

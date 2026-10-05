@@ -37,6 +37,7 @@ router = Router(name="premium")
 
 _CHECKOUT_ACCESS_ERROR = "Для оплаты нужно быть администратором выбранного чата, а Selara должна оставаться в нём."
 _CHECKOUT_RETRY_ERROR = "Не удалось проверить чат. Попробуйте открыть /premium и повторить оплату позже."
+_CHECKOUT_PROVIDER_ERROR = "AI-провайдер временно недоступен, оплата не выполнена. Попробуйте позже через /premium."
 _PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
 _PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
 _PAYMENT_RETRY_ALERT_ATTEMPT = 3
@@ -425,6 +426,7 @@ async def _validate_pre_checkout(
     *,
     bot: Bot,
     repository: SqlAlchemyTelegramStarsRepository,
+    settings: Settings | None = None,
 ) -> tuple[bool, str]:
     intent = await repository.get_purchase_intent(invoice_payload=query.invoice_payload)
     if intent is None:
@@ -451,6 +453,13 @@ async def _validate_pre_checkout(
     if not intent.terms_version or intent.terms_accepted_at is None:
         logger.warning("Telegram Stars pre-checkout rejected reason=terms_not_accepted")
         return False, "Перед оплатой нужно прочитать и принять условия через /premium."
+
+    # The invoice was issued while the provider was configured; re-check right before
+    # the charge so a config change in between cannot take Stars for a dead feature.
+    # This only declines before payment; successful_payment never depends on it.
+    if settings is not None and llm_runtime_config(settings) is None:
+        logger.warning("Telegram Stars pre-checkout rejected reason=provider_unavailable")
+        return False, _CHECKOUT_PROVIDER_ERROR
 
     authorized, reason = await _is_purchase_authorized(
         bot=bot,
@@ -511,6 +520,7 @@ async def selara_ai_pre_checkout(
     query: PreCheckoutQuery,
     bot: Bot,
     session_factory,
+    settings: Settings | None = None,
 ) -> None:
     repository = SqlAlchemyTelegramStarsRepository(session_factory)
     accepted = False
@@ -521,6 +531,7 @@ async def selara_ai_pre_checkout(
                 query,
                 bot=bot,
                 repository=repository,
+                settings=settings,
             )
     except TimeoutError:
         logger.warning("Telegram Stars pre-checkout validation timed out")
@@ -621,13 +632,24 @@ async def selara_ai_successful_payment(
     except Exception:
         logger.exception("Selara AI payment confirmation could not load chat title chat_id=%s", result.chat_id)
         chat_title = None
+    try:
+        summary_enabled = await repository.get_chat_daily_summary_enabled(chat_id=result.chat_id)
+    except Exception:
+        logger.exception("Selara AI payment confirmation could not load summary setting chat_id=%s", result.chat_id)
+        summary_enabled = None
     label = escape(_chat_label(chat_title, result.chat_id))
     until = _format_date(result.valid_until, settings.bot_timezone)
+    if summary_enabled is True:
+        summary_note = "Автоматические итоги дня уже включены в чате и будут приходить."
+    elif summary_enabled is False:
+        summary_note = "Автоматические итоги дня доступны, но в чате они выключены: включите их в настройках группы."
+    else:
+        summary_note = "Автоматические итоги дня доступны; убедитесь, что они включены в настройках группы."
     try:
         async with asyncio.timeout(_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS):
             await message.answer(
                 f"✅ Selara AI активирована для <b>{label}</b> до <b>{until}</b>.\n"
-                "Включены автоматические итоги дня и AI-функции чата. Продление не автоматическое.",
+                f"{summary_note} Продление не автоматическое.",
                 parse_mode="HTML",
             )
     except Exception as exc:
@@ -670,6 +692,20 @@ async def _send_payment_owner_alert(*, bot: Bot, settings: Settings, text: str, 
 
 async def _notify_owner_of_rejected_payment(*, bot: Bot, settings: Settings, result: PaymentResult) -> None:
     payment_id = result.payment_id
+    if payment_id is None and result.conflicting_payment_id is not None:
+        # The conflicting update was not stored, so there is nothing for /stars_refund
+        # to act on; pointing at the existing payment would refund the wrong record.
+        await _send_payment_owner_alert(
+            bot=bot,
+            settings=settings,
+            text=(
+                "⚠️ Telegram прислал платёж с charge id, который уже занят другой записью "
+                f"(payment record: {result.conflicting_payment_id}). Новый платёж не применён и не сохранён; "
+                "нужна ручная проверка в Stars-транзакциях."
+            ),
+            log_event="charge_conflict",
+        )
+        return
     if payment_id is None:
         logger.error("Rejected Telegram Stars payment has no persisted payment id")
         return
@@ -683,6 +719,36 @@ async def _notify_owner_of_rejected_payment(*, bot: Bot, settings: Settings, res
         ),
         log_event="rejected_payment",
     )
+
+
+async def _finish_refund_record(
+    repository: SqlAlchemyTelegramStarsRepository,
+    *,
+    payment_id: int,
+    succeeded: bool,
+    result_code: str,
+) -> bool:
+    """Persist the refund outcome; the payment router has no error middleware, so never raise."""
+    try:
+        await repository.finish_rejected_payment_refund(
+            payment_id=payment_id,
+            succeeded=succeeded,
+            result_code=result_code,
+        )
+    except Exception as exc:
+        logger.error(
+            "Telegram Stars refund outcome could not be saved payment_id=%s result_code=%s exception_type=%s",
+            payment_id,
+            result_code,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+_REFUND_RECORD_FAILED_NOTE = (
+    " Не удалось записать результат в базу: запись останется ожидающей, проверьте её вручную."
+)
 
 
 async def refund_rejected_stars_payment(
@@ -746,21 +812,22 @@ async def refund_rejected_stars_payment(
     except TelegramBadRequest as exc:
         if "CHARGE_ALREADY_REFUNDED" in (exc.message or ""):
             # Telegram already returned these Stars: the canonical state is refunded.
-            await repository.finish_rejected_payment_refund(
-                payment_id=payment_id,
-                succeeded=True,
-                result_code="already_refunded",
+            saved = await _finish_refund_record(
+                repository, payment_id=payment_id, succeeded=True, result_code="already_refunded"
             )
             logger.info("Telegram Stars charge was already refunded payment_id=%s", payment_id)
-            await message.answer("Возврат по этому платежу уже был выполнен.")
+            await message.answer(
+                "Возврат по этому платежу уже был выполнен." + ("" if saved else _REFUND_RECORD_FAILED_NOTE)
+            )
             return
-        await repository.finish_rejected_payment_refund(
-            payment_id=payment_id,
-            succeeded=False,
-            result_code=type(exc).__name__,
+        saved = await _finish_refund_record(
+            repository, payment_id=payment_id, succeeded=False, result_code=type(exc).__name__
         )
         logger.warning("Telegram Stars refund rejected payment_id=%s exception_type=%s", payment_id, type(exc).__name__)
-        await message.answer("Telegram отклонил возврат. Запись сохранена для ручной проверки.")
+        await message.answer(
+            "Telegram отклонил возврат. Запись сохранена для ручной проверки."
+            + ("" if saved else _REFUND_RECORD_FAILED_NOTE)
+        )
         return
     except Exception as exc:
         # A timeout or transport error may happen after Telegram applied the
@@ -776,21 +843,20 @@ async def refund_rejected_stars_payment(
         return
 
     if not refunded:
-        await repository.finish_rejected_payment_refund(
-            payment_id=payment_id,
-            succeeded=False,
-            result_code="api_returned_false",
+        saved = await _finish_refund_record(
+            repository, payment_id=payment_id, succeeded=False, result_code="api_returned_false"
         )
-        await message.answer("Telegram не подтвердил возврат. Запись сохранена для ручной проверки.")
+        await message.answer(
+            "Telegram не подтвердил возврат. Запись сохранена для ручной проверки."
+            + ("" if saved else _REFUND_RECORD_FAILED_NOTE)
+        )
         return
 
-    await repository.finish_rejected_payment_refund(
-        payment_id=payment_id,
-        succeeded=True,
-        result_code="refunded",
-    )
+    saved = await _finish_refund_record(repository, payment_id=payment_id, succeeded=True, result_code="refunded")
     logger.info("Telegram Stars refund completed payment_id=%s", payment_id)
-    await message.answer(f"Возврат {claim.amount_stars or 0} ⭐ подтверждён Telegram.")
+    await message.answer(
+        f"Возврат {claim.amount_stars or 0} ⭐ подтверждён Telegram." + ("" if saved else _REFUND_RECORD_FAILED_NOTE)
+    )
 
 
 def build_payment_router() -> Router:

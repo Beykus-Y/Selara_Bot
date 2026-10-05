@@ -192,6 +192,8 @@ class TelegramFlagCache:
         self._max = max_entries
         self._clock = clock
         self._items: dict[tuple, tuple[float, bool]] = {}
+        # In-flight lookups by (chat_id, user_id), so concurrent cache misses share one Telegram call.
+        self.inflight: dict[tuple[int, int], asyncio.Future[bool | None]] = {}
 
     def get(self, key: tuple) -> bool | None:
         entry = self._items.get(key)
@@ -231,13 +233,23 @@ async def resolve_telegram_flags(
     owner_value = cache.get(owner_key) if admin_user_id is not None else False
     user_value = cache.get(user_key)
 
-    async def lookup(target_id: int) -> bool | None:
+    async def fetch(target_id: int) -> bool | None:
         try:
             member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=target_id), timeout=timeout)
             return bool(is_admin(member))
         except Exception:
             logger.warning("Telegram admin lookup failed chat_id=%s", chat_id, exc_info=True)
             return None
+
+    async def lookup(target_id: int) -> bool | None:
+        flight_key = (chat_id, target_id)
+        task = cache.inflight.get(flight_key)
+        if task is None:
+            task = asyncio.ensure_future(fetch(target_id))
+            cache.inflight[flight_key] = task
+            task.add_done_callback(lambda _task, key=flight_key: cache.inflight.pop(key, None))
+        # shield: one caller being cancelled must not cancel the lookup other callers wait on.
+        return await asyncio.shield(task)
 
     wanted: list[int] = []
     if owner_value is None and admin_user_id is not None:

@@ -40,6 +40,8 @@ def _describe_outcome_reason(
         return "Этот запрос итогов уже был обработан. Повторный запуск не выполнялся."
     if reason == "already_run_today":
         return "Сегодня итоги уже были отправлены."
+    if reason == "already_failed_today":
+        return "Сегодняшняя попытка собрать итоги завершилась ошибкой. Повторный запуск в этот день недоступен."
     if reason == "claim_lost":
         return "Итоги уже формируются — подождите немного."
     if reason == "pipeline_failed":

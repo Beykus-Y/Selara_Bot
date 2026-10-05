@@ -275,3 +275,30 @@ def test_llm_runtime_config_rejects_unusable_settings_consistently(overrides):
     assert checkout_ready(bad) is False
     with pytest.raises(SelaraAiProductUnavailable):
         _product_for_settings(bad)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cache_misses_share_one_telegram_lookup():
+    import asyncio
+
+    calls: list[int] = []
+    release = asyncio.Event()
+
+    class SlowBot:
+        async def get_chat_member(self, *, chat_id, user_id):
+            calls.append(user_id)
+            await release.wait()
+            return user_id
+
+        admins = {77, 900}
+
+    bot = SlowBot()
+    cache = TelegramFlagCache()
+    tasks = [asyncio.create_task(_flags(bot, cache)) for _ in range(5)]
+    await asyncio.sleep(0.01)
+    release.set()
+    results = await asyncio.gather(*tasks)
+
+    assert all(result == (True, False) for result in results)
+    assert sorted(calls) == [77, 900]  # one lookup per target, not one per concurrent request
+    assert cache.inflight == {}

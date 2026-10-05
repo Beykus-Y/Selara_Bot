@@ -615,3 +615,188 @@ async def test_private_panel_pending_inputs_do_not_consume_successful_payment(mo
     for pending_filter in filters:
         assert await pending_filter(paid_message) is False
         assert await pending_filter(normal_message) is True
+
+
+def _provider_settings(monkeypatch, *, llm_enabled: bool) -> Settings:
+    monkeypatch.setenv("BOT_TOKEN", "123:TEST")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/selara_test")
+    monkeypatch.setenv("LLM_ENABLED", "true" if llm_enabled else "false")
+    monkeypatch.setenv("LLM_API_KEY", "test-provider-key")
+    monkeypatch.setenv("SELARA_AI_PRICE_STARS", "137")
+    return Settings(_env_file=None)
+
+
+def _open_intent() -> PurchaseIntent:
+    return PurchaseIntent(
+        id="5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        buyer_user_id=123,
+        source_chat_id=-100,
+        chat_id=-100,
+        chat_title="Test",
+        product_key=SELARA_AI_PRODUCT_KEY,
+        amount_stars=137,
+        currency="XTR",
+        duration_seconds=2_592_000,
+        invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        status="open",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        pre_checkout_query_id=None,
+        pre_checkout_accepted_at=None,
+        consumed_at=None,
+        terms_version="v1",
+        terms_accepted_at=datetime.now(timezone.utc),
+    )
+
+
+def _pre_checkout_query(intent: PurchaseIntent) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="query-1",
+        invoice_payload=intent.invoice_payload,
+        from_user=SimpleNamespace(id=123),
+        total_amount=137,
+        currency="XTR",
+        answer=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("llm_enabled,expected_ok", [(False, False), (True, True)])
+async def test_pre_checkout_rechecks_the_llm_provider_before_accepting(monkeypatch, llm_enabled, expected_ok):
+    intent = _open_intent()
+    repository = SimpleNamespace(
+        get_purchase_intent=AsyncMock(return_value=intent),
+        accept_pre_checkout=AsyncMock(return_value=PreCheckoutResult(True, chat_id=-100)),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    authority = AsyncMock(return_value=(True, None))
+    monkeypatch.setattr(premium, "_is_purchase_authorized", authority)
+    settings = _provider_settings(monkeypatch, llm_enabled=llm_enabled)
+    query = _pre_checkout_query(intent)
+
+    await premium.selara_ai_pre_checkout(query, bot=object(), session_factory=object(), settings=settings)
+
+    query.answer.assert_awaited_once()
+    assert query.answer.await_args.kwargs["ok"] is expected_ok
+    if expected_ok:
+        repository.accept_pre_checkout.assert_awaited_once()
+    else:
+        repository.accept_pre_checkout.assert_not_awaited()
+        authority.assert_not_awaited()
+
+
+def _payment_message(now: datetime) -> SimpleNamespace:
+    return SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-confirmation-text",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary_enabled,expected,forbidden",
+    [
+        (True, "уже включены", "выключены"),
+        (False, "выключены: включите", "уже включены"),
+        (None, "убедитесь", "уже включены"),
+    ],
+)
+async def test_confirmation_does_not_promise_automatic_summaries_when_toggle_is_off(
+    monkeypatch, summary_enabled, expected, forbidden
+):
+    now = datetime.now(timezone.utc)
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(
+            return_value=PaymentResult("applied", chat_id=-100, valid_until=now + timedelta(days=30))
+        ),
+        get_chat_title=AsyncMock(return_value="Test group"),
+        get_chat_daily_summary_enabled=AsyncMock(
+            return_value=summary_enabled,
+            side_effect=RuntimeError("db down") if summary_enabled is None else None,
+        ),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    message = _payment_message(now)
+
+    await premium.selara_ai_successful_payment(
+        message,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=None, bot_timezone="UTC"),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    text = message.answer.await_args.args[0]
+    assert expected in text
+    assert forbidden not in text
+    assert "AI-функции чата" not in text
+
+
+@pytest.mark.asyncio
+async def test_charge_conflict_alert_names_existing_payment_and_offers_no_refund(monkeypatch):
+    now = datetime.now(timezone.utc)
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(
+            return_value=PaymentResult("rejected", "charge_conflict", conflicting_payment_id=41)
+        ),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    message = _payment_message(now)
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    await premium.selara_ai_successful_payment(
+        message,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+        bot=bot,
+    )
+
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "payment record: 41" in text
+    assert "/stars_refund" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (
+            TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: CHARGE_ALREADY_REFUNDED"),
+            "уже был выполнен",
+        ),
+        (TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: other"), "отклонил возврат"),
+    ],
+)
+async def test_refund_reply_is_sent_even_when_saving_the_outcome_fails(monkeypatch, error, expected):
+    repository = SimpleNamespace(
+        claim_rejected_payment_refund=AsyncMock(
+            return_value=PaymentRefundClaim(
+                "claimed", buyer_user_id=456, telegram_payment_charge_id="charge-refund", amount_stars=137
+            )
+        ),
+        finish_rejected_payment_refund=AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    bot = SimpleNamespace(refund_star_payment=AsyncMock(side_effect=error))
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        text="/stars_refund 17",
+        answer=AsyncMock(),
+    )
+
+    await premium.refund_rejected_stars_payment(
+        message, bot=bot, session_factory=object(), settings=SimpleNamespace(admin_user_id=123)
+    )
+
+    message.answer.assert_awaited_once()
+    text = message.answer.await_args.args[0]
+    assert expected in text
+    assert "Не удалось записать результат" in text
