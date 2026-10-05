@@ -154,6 +154,7 @@ async def _generate_and_finalize(
                 return bool(
                     current_run is not None
                     and current_run.claimed_at == claimed_at
+                    and current_run.chat_id == chat.telegram_chat_id
                     and current_run.status in ("claimed", "generating")
                 )
 
@@ -195,6 +196,9 @@ async def _generate_and_finalize(
                     outcome["error_category"] = "claim_lost"
                     return None
                 return False
+
+            if not await ensure_claim_owned():
+                raise DailySummaryClaimLost(f"Daily Summary claim lost before finalizing run {run_id}")
 
             aggregate = await accounting.aggregate_summary_run(summary_run_id=run_id) if accounting else None
             context_stt_cost = await repo.sum_context_stt_cost_in_window(
@@ -271,6 +275,7 @@ async def _send_and_mark(
             return bool(
                 current_run is not None
                 and current_run.claimed_at == delivery_claimed_at
+                and current_run.chat_id == chat_id
                 and current_run.status in ("generated", "send_failed")
                 and current_run.lease_until > datetime.now(timezone.utc)
             )
