@@ -382,6 +382,18 @@ async def _handle(
                 except Exception:
                     await message.reply(error_text)
                 return
+            except Exception:
+                # e.g. the accounting marker could not be committed before the provider call
+                # (fail-closed). Without this the "Думаю..." placeholder would stay forever.
+                log.exception("llm_admin: LLM request failed before reaching the provider")
+                outcome["status"] = "failed"
+                outcome["error_category"] = "accounting_unavailable"
+                error_text = "⚠️ Ошибка AI-ассистента: не удалось выполнить запрос. Попробуйте позже."
+                try:
+                    await thinking_msg.edit_text(error_text)
+                except Exception:
+                    await message.reply(error_text)
+                return
 
             response = response.value if isinstance(response, LlmCallResult) else response
             if not response or not response.choices:

@@ -43,6 +43,7 @@ _POLL_INTERVAL_SECONDS = 900  # 15 minutes -- accuracy to the hour isn't critica
 _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" before it can be reclaimed
 _ACCESS_LOG_KEYS: OrderedDict[tuple[int, date, str], None] = OrderedDict()
 _MAX_ACCESS_LOG_KEYS = 4096
+_OWNER_DENIAL_CACHE_TTL = timedelta(hours=2)  # how long a scheduler remembers "owner is not admin here"
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,7 @@ async def attempt_daily_summary_run(
     source_message_id: int | None = None,
     settings: Settings | None = None,
     feature_access_service: FeatureAccessService | None = None,
+    owner_denial_cache: dict[int, datetime] | None = None,
 ) -> DailySummaryOutcome:
     """One claim -> generate -> send cycle for one chat, for either trigger.
 
@@ -354,20 +356,42 @@ async def attempt_daily_summary_run(
     window_from = window_to - timedelta(hours=24)
     existing: DailySummaryRun | None = None
 
-    async def _resolve_scheduled_access() -> FeatureAccessDecision:
+    async def _owner_exempt_for_denied_chat() -> bool:
+        # Entitlement is resolved first so paid chats never pay for a
+        # getChatMember call. Chats that stay denied would repeat the call on
+        # every tick, so a negative answer is remembered for a while.
+        cached_until = owner_denial_cache.get(chat.telegram_chat_id) if owner_denial_cache is not None else None
+        if cached_until is not None and now_utc < cached_until:
+            return False
         owner_exempt = await resolve_owner_admin_exemption(
             bot=bot,
             chat_id=chat.telegram_chat_id,
             admin_user_id=settings.admin_user_id,
         )
+        if owner_denial_cache is not None:
+            if owner_exempt:
+                owner_denial_cache.pop(chat.telegram_chat_id, None)
+            else:
+                owner_denial_cache[chat.telegram_chat_id] = now_utc + _OWNER_DENIAL_CACHE_TTL
+        return owner_exempt
+
+    async def _resolve_scheduled_access() -> FeatureAccessDecision:
         try:
             decision = await feature_access_service.resolve_feature_access(
                 feature=AiFeature.DAILY_SUMMARY,
                 chat_id=chat.telegram_chat_id,
                 trigger="scheduled",
-                owner_exempt=owner_exempt,
+                owner_exempt=False,
                 now=now_utc,
             )
+            if not decision.allowed and await _owner_exempt_for_denied_chat():
+                decision = await feature_access_service.resolve_feature_access(
+                    feature=AiFeature.DAILY_SUMMARY,
+                    chat_id=chat.telegram_chat_id,
+                    trigger="scheduled",
+                    owner_exempt=True,
+                    now=now_utc,
+                )
         except Exception:
             logger.exception(
                 "Scheduled Daily Summary access check failed chat_id=%s summary_date=%s",
@@ -405,7 +429,9 @@ async def attempt_daily_summary_run(
             summary_date=summary_date,
             trigger=trigger,
         )
-        if existing is not None and existing.status in ("sent", "failed"):
+        if existing is not None and existing.status == "failed":
+            return DailySummaryOutcome(False, "already_failed_today")
+        if existing is not None and existing.status == "sent":
             return DailySummaryOutcome(False, "already_run_today")
 
         is_resend = existing is not None and existing.status in ("generated", "send_failed")
@@ -805,11 +831,15 @@ class DailySummaryScheduler:
             SqlAlchemyFeatureQuotaRepository(session_factory),
             entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
         )
+        self._owner_denial_cache: dict[int, datetime] = {}
 
     async def run_once(self, *, now: datetime | None = None) -> int:
-        now_utc = now or datetime.now(timezone.utc)
-        if now_utc.tzinfo is None:
-            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        # An explicit `now` pins every chat to the same instant (tests, replays).
+        # Otherwise each chat gets a fresh clock: a long tick must not hand late
+        # chats a claim whose lease was computed from the start of the tick.
+        pinned_now = now
+        if pinned_now is not None and pinned_now.tzinfo is None:
+            pinned_now = pinned_now.replace(tzinfo=timezone.utc)
 
         async with self._session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
@@ -819,7 +849,8 @@ class DailySummaryScheduler:
         sent_count = 0
         for chat in chats:
             try:
-                if await self._process_chat(chat=chat, now_utc=now_utc, local_tz=local_tz):
+                chat_now = pinned_now or datetime.now(timezone.utc)
+                if await self._process_chat(chat=chat, now_utc=chat_now, local_tz=local_tz):
                     sent_count += 1
             except asyncio.CancelledError:
                 raise
@@ -850,6 +881,7 @@ class DailySummaryScheduler:
             now_utc=now_utc,
             settings=self._settings,
             feature_access_service=self._feature_access_service,
+            owner_denial_cache=self._owner_denial_cache,
         )
         return outcome.sent
 

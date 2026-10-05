@@ -22,6 +22,7 @@ from selara.application.selara_ai_product import (
 from selara.infrastructure.db.models import (
     ChatEntitlementModel,
     ChatModel,
+    ChatSettingsModel,
     SelaraAiPaymentModel,
     SelaraAiPurchaseIntentModel,
     UserChatActivityModel,
@@ -73,6 +74,9 @@ class PaymentResult:
     valid_until: datetime | None = None
     entitlement_action: Literal["created", "extended"] | None = None
     payment_id: int | None = None
+    # Set only for charge_conflict: the already stored payment that owns the charge id.
+    # The conflicting update itself is not persisted, so it has no refundable payment_id.
+    conflicting_payment_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +399,7 @@ class SqlAlchemyTelegramStarsRepository:
                     ):
                         logger.error("Telegram Stars charge identifier conflict; duplicate was not applied")
                         result = PaymentResult(
-                            "rejected", "charge_conflict", payment_id=existing_payment.id
+                            "rejected", "charge_conflict", conflicting_payment_id=existing_payment.id
                         )
                     elif existing_payment.processing_state == "rejected":
                         result = PaymentResult(
@@ -607,6 +611,12 @@ class SqlAlchemyTelegramStarsRepository:
         async with self._session_factory() as session:
             return await session.scalar(
                 select(ChatModel.title).where(ChatModel.telegram_chat_id == chat_id)
+            )
+
+    async def get_chat_daily_summary_enabled(self, *, chat_id: int) -> bool | None:
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(ChatSettingsModel.daily_summary_enabled).where(ChatSettingsModel.chat_id == chat_id)
             )
 
     async def active_paid_chat_count(self, *, now: datetime | None = None) -> int:

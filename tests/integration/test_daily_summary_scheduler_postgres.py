@@ -1559,3 +1559,136 @@ async def test_crashed_daily_summary_delivery_lease_can_be_reclaimed():
         assert recovered_token != first_token
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_paid_chat_does_not_call_get_chat_member() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        bot = _fake_bot(owner_status="administrator")
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(admin_user_id=_USER_ID),
+            feature_access_service=_paid_access(session_factory),
+        )
+
+        assert outcome.sent
+        assert outcome.access_decision.access_tier == AccessTier.PAID
+        bot.get_chat_member.assert_not_awaited()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_free_chat_owner_check_is_cached_between_ticks() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        bot = _fake_bot(owner_status="left")
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        cache: dict[int, datetime] = {}
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "settings": _test_settings(admin_user_id=_USER_ID),
+            "owner_denial_cache": cache,
+        }
+
+        first = await attempt_daily_summary_run(now_utc=_NOW, **kwargs)
+        second = await attempt_daily_summary_run(now_utc=_NOW + timedelta(minutes=15), **kwargs)
+        assert first.reason == "access_required" and second.reason == "access_required"
+        assert bot.get_chat_member.await_count == 1
+
+        later = await attempt_daily_summary_run(now_utc=_NOW + timedelta(hours=3), **kwargs)
+        assert later.reason == "access_required"
+        assert bot.get_chat_member.await_count == 2
+
+        # The cache only remembers denials: once the owner is an admin the chat is served.
+        bot.get_chat_member.return_value = SimpleNamespace(status="administrator")
+        promoted = await attempt_daily_summary_run(now_utc=_NOW + timedelta(hours=6), **kwargs)
+        assert promoted.sent
+        assert promoted.access_decision.access_tier == AccessTier.OWNER_INTERNAL
+        assert _CHAT_ID not in cache
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduler_takes_a_fresh_clock_per_chat_unless_now_is_pinned(monkeypatch) -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID + 1)
+        seen: list[datetime] = []
+
+        async def fake_attempt(**kwargs):
+            seen.append(kwargs["now_utc"])
+            await asyncio.sleep(0.01)  # a slow chat: the next one must not reuse the tick's start time
+            return SimpleNamespace(sent=False)
+
+        monkeypatch.setattr(daily_summary_module, "attempt_daily_summary_run", fake_attempt)
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=_fake_bot(),
+            session_factory=session_factory,
+            llm_client=_FakeLlmClient(),
+            settings=_test_settings(),
+        )
+
+        await scheduler.run_once()
+        assert len(seen) == 2
+        assert seen[1] > seen[0]
+
+        seen.clear()
+        await scheduler.run_once(now=_NOW)
+        assert seen == [_NOW, _NOW]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_manual_retry_after_failed_run_explains_the_failure() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        bot = _fake_bot()
+        client = _FakeLlmClient()
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": chat,
+            "trigger": "manual",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+        }
+        await attempt_daily_summary_run(now_utc=_NOW, **kwargs)
+        async with session_factory() as session:
+            await session.execute(update(DailySummaryRunModel).values(status="failed"))
+            await session.commit()
+
+        again = await attempt_daily_summary_run(now_utc=_NOW + timedelta(minutes=1), **kwargs)
+
+        assert again.sent is False
+        assert again.reason == "already_failed_today"
+    finally:
+        await engine.dispose()
