@@ -11,7 +11,7 @@ from selara.application.feature_access import (
     FeatureUsageSummary,
     quota_period_bounds,
 )
-from selara.application.selara_ai_status import build_chat_ai_access_status
+from selara.application.selara_ai_status import TelegramFlagCache, build_chat_ai_access_status, resolve_telegram_flags
 
 _NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
 
@@ -168,3 +168,58 @@ def test_quota_period_bounds_December_rolls_to_next_year():
     policy = FeatureQuotaPolicy(AiFeature.DAILY_SUMMARY, "k", 10, QuotaPeriod.MONTH)
     start, end = quota_period_bounds(policy=policy, now=datetime(2026, 12, 31, 23, 59, tzinfo=timezone.utc), timezone_name="UTC")
     assert (start, end) == (datetime(2026, 12, 1, tzinfo=timezone.utc), datetime(2027, 1, 1, tzinfo=timezone.utc))
+
+
+class _Bot:
+    def __init__(self, admins: set[int], *, fail: bool = False) -> None:
+        self.admins = admins
+        self.fail = fail
+        self.calls: list[int] = []
+
+    async def get_chat_member(self, *, chat_id, user_id):
+        self.calls.append(user_id)
+        if self.fail:
+            raise RuntimeError("telegram down")
+        return user_id
+
+
+async def _flags(bot, cache, *, user_id=77, admin_user_id=900):
+    return await resolve_telegram_flags(
+        bot=bot, chat_id=-1001, user_id=user_id, admin_user_id=admin_user_id,
+        is_admin=lambda member: member in bot.admins, cache=cache,
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_flags_are_cached_per_chat_and_user_until_ttl():
+    now = [0.0]
+    cache = TelegramFlagCache(ttl_seconds=45, clock=lambda: now[0])
+    bot = _Bot({77})
+    assert await _flags(bot, cache) == (False, True)
+    assert await _flags(bot, cache) == (False, True)
+    assert sorted(bot.calls) == [77, 900]
+    assert await _flags(bot, cache, user_id=78) == (False, False)  # other user: one new lookup
+    assert sorted(bot.calls) == [77, 78, 900]
+    now[0] = 46.0
+    await _flags(bot, cache)
+    assert len(bot.calls) == 5  # expired entries are looked up again
+
+
+@pytest.mark.asyncio
+async def test_telegram_flag_failures_are_not_cached_and_not_treated_as_admin():
+    cache = TelegramFlagCache()
+    broken = _Bot({77, 900}, fail=True)
+    assert await _flags(broken, cache) == (False, False)
+    healthy = _Bot({77})
+    assert await _flags(healthy, cache) == (False, True)  # the failure was not cached
+    assert len(healthy.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_exempt_chat_hides_purchase_and_owner_viewer_needs_one_lookup():
+    cache = TelegramFlagCache()
+    bot = _Bot({900, 77})
+    assert await _flags(bot, cache) == (True, False)
+    owner_bot = _Bot({900})
+    assert await _flags(owner_bot, TelegramFlagCache(), user_id=900) == (True, False)
+    assert owner_bot.calls == [900]

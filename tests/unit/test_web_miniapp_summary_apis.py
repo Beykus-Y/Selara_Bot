@@ -189,15 +189,19 @@ class _AiResolver:
         return self._entitlement
 
 
+_BOT_CALLS: list[int] = []
+
+
 def _patch_ai_access(monkeypatch, *, entitlement, owner_exempt: bool = False, telegram_admin: bool = True) -> None:
-    async def fake_owner_exemption(**kwargs):
-        return owner_exempt
+    _BOT_CALLS.clear()
+    admin_ids = {900} if owner_exempt else set()
+    if telegram_admin:
+        admin_ids.add(77)
 
     monkeypatch.setattr(web_app_module, "SqlAlchemyFeatureQuotaRepository", lambda session_factory: _AiQuotaRepository())
     monkeypatch.setattr(
         web_app_module, "SqlAlchemyChatEntitlementResolver", lambda session_factory: _AiResolver(entitlement)
     )
-    monkeypatch.setattr(web_app_module, "resolve_owner_admin_exemption", fake_owner_exemption)
 
     class _FakeBot:
         def __init__(self, *args, **kwargs) -> None:
@@ -208,10 +212,11 @@ def _patch_ai_access(monkeypatch, *, entitlement, owner_exempt: bool = False, te
             self.session = _Session()
 
         async def get_chat_member(self, *, chat_id, user_id):
-            return object()
+            _BOT_CALLS.append(user_id)
+            return SimpleNamespace(uid=user_id)
 
     monkeypatch.setattr(web_app_module, "Bot", _FakeBot)
-    monkeypatch.setattr(web_app_module, "is_telegram_chat_admin", lambda member: telegram_admin)
+    monkeypatch.setattr(web_app_module, "is_telegram_chat_admin", lambda member: member.uid in admin_ids)
 
 
 def _ai_state(*, summary_enabled: bool = False, admin_user_id: int | None = None, **overrides):
@@ -289,3 +294,15 @@ async def test_miniapp_ai_access_cta_follows_live_telegram_admin_and_provider_re
     async with _hub_client(monkeypatch, _ai_state(llm_enabled=False)) as client:
         no_provider = (await client.get("/api/miniapp/chat/-1001/ai-access")).json()
     assert no_provider["can_manage_purchase"] is True and no_provider["checkout_configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_miniapp_ai_access_api_caches_live_telegram_lookups_briefly(monkeypatch) -> None:
+    from selara.application.feature_access import AccessTier, FeatureEntitlement
+
+    _patch_ai_access(monkeypatch, entitlement=FeatureEntitlement(access_tier=AccessTier.FREE))
+    async with _hub_client(monkeypatch, _ai_state(admin_user_id=900)) as client:
+        first = (await client.get("/api/miniapp/chat/-1001/ai-access")).json()
+        second = (await client.get("/api/miniapp/chat/-1001/ai-access")).json()
+    assert first["can_manage_purchase"] is True and second["can_manage_purchase"] is True
+    assert sorted(_BOT_CALLS) == [77, 900]  # one live lookup each, not one per request

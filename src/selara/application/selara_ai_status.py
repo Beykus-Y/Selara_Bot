@@ -7,7 +7,10 @@ payload and keeps "could not check" distinct from "free".
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -173,3 +176,77 @@ async def build_chat_ai_access_status(
             "state": _automatic_state(enabled=automatic_enabled, allowed=automatic.allowed, available=True),
         },
     }
+
+
+class TelegramFlagCache:
+    """Short TTL cache for live Telegram answers; only successful lookups are stored."""
+
+    def __init__(self, *, ttl_seconds: float = 45.0, max_entries: int = 2048, clock: Callable[[], float] = time.monotonic):
+        self._ttl = ttl_seconds
+        self._max = max_entries
+        self._clock = clock
+        self._items: dict[tuple, tuple[float, bool]] = {}
+
+    def get(self, key: tuple) -> bool | None:
+        entry = self._items.get(key)
+        if entry is None:
+            return None
+        if entry[0] <= self._clock():
+            self._items.pop(key, None)
+            return None
+        return entry[1]
+
+    def put(self, key: tuple, value: bool) -> None:
+        if len(self._items) >= self._max:
+            now = self._clock()
+            self._items = {k: v for k, v in self._items.items() if v[0] > now}
+            if len(self._items) >= self._max:
+                self._items.clear()
+        self._items[key] = (self._clock() + self._ttl, value)
+
+
+async def resolve_telegram_flags(
+    *,
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    admin_user_id: int | None,
+    is_admin: Callable[[Any], bool],
+    cache: TelegramFlagCache,
+    timeout: float = 4.0,
+) -> tuple[bool, bool]:
+    """Return ``(owner_exempt, can_manage_purchase)`` from live Telegram admin status.
+
+    Missing answers are fetched concurrently. Failures and timeouts are treated as
+    "not admin" for this response but never cached.
+    """
+    owner_key = ("owner", chat_id)
+    user_key = ("user", chat_id, user_id)
+    owner_value = cache.get(owner_key) if admin_user_id is not None else False
+    user_value = cache.get(user_key)
+
+    async def lookup(target_id: int) -> bool | None:
+        try:
+            member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=target_id), timeout=timeout)
+            return bool(is_admin(member))
+        except Exception:
+            logger.warning("Telegram admin lookup failed chat_id=%s", chat_id, exc_info=True)
+            return None
+
+    wanted: list[int] = []
+    if owner_value is None and admin_user_id is not None:
+        wanted.append(admin_user_id)
+    if user_value is None and user_id not in wanted:
+        wanted.append(user_id)
+    answers = dict(zip(wanted, await asyncio.gather(*(lookup(target) for target in wanted))))
+
+    if owner_value is None and admin_user_id is not None:
+        owner_value = answers.get(admin_user_id)
+        if owner_value is not None:
+            cache.put(owner_key, owner_value)
+    if user_value is None:
+        user_value = answers.get(user_id)
+        if user_value is not None:
+            cache.put(user_key, user_value)
+    owner_exempt = bool(owner_value)
+    return owner_exempt, (False if owner_exempt else bool(user_value))

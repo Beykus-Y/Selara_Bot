@@ -139,7 +139,7 @@ async def test_postgres_ai_analytics_match_window_aggregate_and_keep_marker_only
         assert by_model["gpt-b"]["completion_tokens"] == 30
         assert marker_only == 1
         assert {row["stage"] for row in stages} >= {"writer", "tool_round"}
-        assert sum(row["provider_calls"] for row in daily) == aggregate.provider_calls - 1
+        assert sum(row["provider_calls"] for row in daily) == aggregate.provider_calls
         assert sum(row["invocations"] for row in daily) == aggregate.invocations
     finally:
         await engine.dispose()

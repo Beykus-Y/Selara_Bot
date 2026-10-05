@@ -51,7 +51,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.feature_access import FeatureAccessService
-from selara.application.selara_ai_status import build_chat_ai_access_status, checkout_ready
+from selara.application.selara_ai_status import (
+    TelegramFlagCache,
+    build_chat_ai_access_status,
+    checkout_ready,
+    resolve_telegram_flags,
+)
 from selara.application.admin_broadcasts import (
     BroadcastFormatError,
     ParsedBroadcast,
@@ -124,7 +129,7 @@ from selara.infrastructure.db.repositories import (
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.presentation import game_state as game_state_module
 from selara.presentation.audit import log_chat_action
-from selara.presentation.auth import has_permission, is_telegram_chat_admin, resolve_owner_admin_exemption
+from selara.presentation.auth import has_permission, is_telegram_chat_admin
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.game_state import (
@@ -5065,6 +5070,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             status_code=200,
         )
 
+    telegram_flag_cache = TelegramFlagCache()
+
     @app.get("/api/miniapp/chat/{chat_id}/ai-access")
     async def miniapp_chat_ai_access_api(chat_id: int, request: Request):
         """Selara AI status for one chat; loaded separately from the heavy overview."""
@@ -5079,32 +5086,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
             await session.commit()
 
-        owner_exempt = False
-        if settings.admin_user_id is not None:
-            try:
-                owner_exempt = await asyncio.wait_for(
-                    resolve_owner_admin_exemption(
-                        bot=await _get_game_bot(),
-                        chat_id=chat_id,
-                        admin_user_id=settings.admin_user_id,
-                    ),
-                    timeout=4,
-                )
-            except Exception:
-                logger.warning("Owner exemption check failed for AI status chat_id=%s", chat_id, exc_info=True)
-                owner_exempt = False
-
-        # Checkout authorizes the buyer by live Telegram admin status, so mirror that here.
-        can_manage = False
-        if not owner_exempt:
-            try:
-                member = await asyncio.wait_for(
-                    (await _get_game_bot()).get_chat_member(chat_id=chat_id, user_id=user.telegram_user_id),
-                    timeout=4,
-                )
-                can_manage = is_telegram_chat_admin(member)
-            except Exception:
-                logger.warning("Telegram admin check failed for AI purchase CTA chat_id=%s", chat_id, exc_info=True)
+        # Live Telegram answers (owner exemption, requester admin status) are cached briefly.
+        owner_exempt, can_manage = await resolve_telegram_flags(
+            bot=await _get_game_bot(),
+            chat_id=chat_id,
+            user_id=user.telegram_user_id,
+            admin_user_id=settings.admin_user_id,
+            is_admin=is_telegram_chat_admin,
+            cache=telegram_flag_cache,
+        )
 
         access_service = FeatureAccessService(
             SqlAlchemyFeatureQuotaRepository(session_factory),

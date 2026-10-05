@@ -858,7 +858,8 @@ def build_miniapp_admin_router(
         def add(key: str, label: str, status: str, detail: str | None = None) -> None:
             checks.append({"key": key, "label": label, "status": status, "detail": detail or ""})
 
-        if settings.llm_enabled and settings.llm_api_key:
+        # Same normalization as checkout_ready / premium._product_for_settings.
+        if settings.llm_enabled and (settings.llm_api_key or "").strip():
             add("llm_provider", "AI-провайдер", "ok", "Настроен.")
         elif not settings.llm_enabled:
             add("llm_provider", "AI-провайдер", "unavailable", "LLM_ENABLED выключен.")
@@ -866,9 +867,16 @@ def build_miniapp_admin_router(
             add("llm_provider", "AI-провайдер", "unavailable", "LLM_API_KEY не задан.")
 
         if settings.selara_ai_price_stars is not None:
-            add("stars_price", "Цена Stars", "ok", f"Checkout включён: {settings.selara_ai_price_stars} ⭐.")
+            add("stars_price", "Цена Stars", "ok", f"Цена задана: {settings.selara_ai_price_stars} ⭐.")
         else:
-            add("stars_price", "Цена Stars", "missing", "Checkout выключен: SELARA_AI_PRICE_STARS не настроен.")
+            add("stars_price", "Цена Stars", "missing", "SELARA_AI_PRICE_STARS не настроен.")
+
+        if checkout_ready(settings):
+            add("checkout", "Checkout", "ok", "Покупка Selara AI доступна.")
+        elif settings.selara_ai_price_stars is None:
+            add("checkout", "Checkout", "missing", "Checkout выключен: SELARA_AI_PRICE_STARS не настроен.")
+        else:
+            add("checkout", "Checkout", "unavailable", "Checkout выключен: AI-провайдер не настроен.")
 
         try:
             await session.scalar(select(SelaraAiPaymentModel.id).limit(1))

@@ -42,9 +42,10 @@ from selara.infrastructure.db.selara_ai_payment_refund import SelaraAiPaymentRef
 from selara.web import app as web_app_module
 
 
-def _settings(admin_user_id: int | None = 77) -> Settings:
+def _settings(admin_user_id: int | None = 77, **extra) -> Settings:
     return Settings.model_validate(
         {
+            **extra,
             "BOT_TOKEN": "123456:TEST",
             "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
             "WEB_AUTH_SECRET": "test-secret",
@@ -128,7 +129,9 @@ class _FakeWebAuthRepository:
 
 
 @asynccontextmanager
-async def _client(monkeypatch, *, admin_user_id: int | None = 77, current_user: UserSnapshot | None = None):
+async def _client(
+    monkeypatch, *, admin_user_id: int | None = 77, current_user: UserSnapshot | None = None, **settings_extra
+):
     engine = create_engine("sqlite:///:memory:")
     UserChatMessageEventModel.metadata.create_all(
         engine,
@@ -156,7 +159,9 @@ async def _client(monkeypatch, *, admin_user_id: int | None = 77, current_user: 
     _FakeWebAuthRepository.current_user = current_user
     _FakeWebAuthRepository.created_user_ids = []
     monkeypatch.setattr(web_app_module, "SqlAlchemyWebAuthRepository", _FakeWebAuthRepository)
-    app = web_app_module.create_web_app(settings=_settings(admin_user_id), session_factory=session_factory)
+    app = web_app_module.create_web_app(
+        settings=_settings(admin_user_id, **settings_extra), session_factory=session_factory
+    )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
         if current_user is not None:
             client.cookies.set(_settings().web_session_cookie_name, "signed-session")
@@ -682,3 +687,28 @@ async def test_ai_readiness_reports_missing_price_without_exposing_secrets(monke
     assert "SELARA_AI_PRICE_STARS" in checks["stars_price"]["detail"]
     assert checks["llm_provider"]["status"] == "unavailable"
     assert "123456:TEST" not in response.text and "test-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_ai_readiness_separates_price_from_checkout_and_normalizes_provider_key(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+
+    async def checks(**settings_extra):
+        async with _client(monkeypatch, current_user=admin, **settings_extra) as (client, _session_factory):
+            body = (await client.get("/api/miniapp/admin/ai/readiness")).json()
+        return body, {item["key"]: item for item in body["checks"]}
+
+    # Price set but provider disabled: the price row stays about the price, checkout is off.
+    body, rows = await checks(SELARA_AI_PRICE_STARS=100, LLM_ENABLED="false", LLM_API_KEY="key")
+    assert rows["stars_price"]["status"] == "ok" and "Checkout" not in rows["stars_price"]["detail"]
+    assert rows["llm_provider"]["status"] == "unavailable"
+    assert rows["checkout"]["status"] == "unavailable" and body["checkout"]["configured"] is False
+
+    # A whitespace-only key is not configured, exactly like /premium.
+    body, rows = await checks(SELARA_AI_PRICE_STARS=100, LLM_ENABLED="true", LLM_API_KEY="   ")
+    assert rows["llm_provider"]["status"] == "unavailable"
+    assert rows["checkout"]["status"] == "unavailable" and body["checkout"]["configured"] is False
+
+    body, rows = await checks(SELARA_AI_PRICE_STARS=100, LLM_ENABLED="true", LLM_API_KEY="key")
+    assert rows["llm_provider"]["status"] == "ok" and rows["checkout"]["status"] == "ok"
+    assert body["checkout"]["configured"] is True

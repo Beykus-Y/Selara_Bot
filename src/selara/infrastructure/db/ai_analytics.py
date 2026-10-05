@@ -234,6 +234,16 @@ class AdminAiAnalyticsRepository:
             .where(*in_window)
             .group_by(inv_day)
         )
+        has_usage = (
+            select(LlmUsageLogModel.id)
+            .where(LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id)
+            .exists()
+        )
+        markers = await self._session.execute(
+            select(inv_day, func.count(AiFeatureInvocationModel.id))
+            .where(*in_window, AiFeatureInvocationModel.provider_attempt_started_at.is_not(None), ~has_usage)
+            .group_by(inv_day)
+        )
         days: dict[str, dict] = {}
 
         def day(key: str) -> dict:
@@ -245,8 +255,11 @@ class AdminAiAnalyticsRepository:
             day(_day_key(key))["invocations"] = int(count)
         for key, calls, cost in usage.all():
             item = day(_day_key(key))
-            item["provider_calls"] = int(calls)
+            item["provider_calls"] += int(calls)
             item["known_cost_usd"] = Decimal(cost)
+        for key, marker_count in markers.all():
+            # Marker-only attempts are provider calls with unknown cost, as in aggregate_window.
+            day(_day_key(key))["provider_calls"] += int(marker_count)
         return [days[key] for key in sorted(days)]
 
     # ----- Monetization ------------------------------------------------------
