@@ -162,12 +162,16 @@ class PendingCfgInputFilter(Filter):
     async def __call__(self, message: Message) -> bool:
         if message.chat.type != "private" or message.from_user is None:
             return False
+        if getattr(message, "successful_payment", None) is not None:
+            return False
         return _get_pending_cfg_input(message.from_user.id) is not None
 
 
 class PendingAdminInputFilter(Filter):
     async def __call__(self, message: Message) -> bool:
         if message.chat.type != "private" or message.from_user is None:
+            return False
+        if getattr(message, "successful_payment", None) is not None:
             return False
         return _get_pending_admin_input(message.from_user.id) is not None
 

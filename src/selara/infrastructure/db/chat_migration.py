@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, exists, func, literal, select, update
+from sqlalchemy import delete, exists, func, literal, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from selara.domain.glossary import normalize_glossary_text
+from selara.infrastructure.db.telegram_stars import entitlement_lock_key
 
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
+    AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     AutoConfigSessionModel,
+    ChatEntitlementModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
@@ -28,6 +33,10 @@ from selara.infrastructure.db.models import (
     LlmChatGlossaryHistoryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
+    LlmUsageLogModel,
+    SelaraAiPurchaseIntentModel,
+    DailySummaryRunModel,
+    MessageArchiveModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -72,6 +81,12 @@ async def migrate_chat_id(
         new_chat_title=new_chat_title,
     )
 
+    await _migrate_selara_ai_purchases(
+        session,
+        old_chat_id=old_chat_id,
+        new_chat_id=new_chat_id,
+    )
+
     dialect = session.bind.dialect.name if session.bind else "unknown"
     if dialect == "postgresql":
         skipped_account_conflicts = await _migrate_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
@@ -85,6 +100,89 @@ async def migrate_chat_id(
         migrated=True,
         skipped_account_conflicts=skipped_account_conflicts,
     )
+
+
+async def _migrate_selara_ai_purchases(
+    session: AsyncSession,
+    *,
+    old_chat_id: int,
+    new_chat_id: int,
+) -> None:
+    """Retarget pending invoices and merge paid time without losing either balance."""
+    await session.execute(
+        update(SelaraAiPurchaseIntentModel)
+        .where(SelaraAiPurchaseIntentModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
+
+    products = list(
+        await session.scalars(
+            select(ChatEntitlementModel.product_key).where(ChatEntitlementModel.chat_id == old_chat_id)
+        )
+    )
+    for product_key in products:
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            lock_keys = sorted(
+                (
+                    entitlement_lock_key(chat_id=old_chat_id, product_key=product_key),
+                    entitlement_lock_key(chat_id=new_chat_id, product_key=product_key),
+                )
+            )
+            for lock_key in lock_keys:
+                await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+
+        rows = list(
+            await session.scalars(
+                select(ChatEntitlementModel)
+                .where(
+                    ChatEntitlementModel.chat_id.in_((old_chat_id, new_chat_id)),
+                    ChatEntitlementModel.product_key == product_key,
+                )
+                .order_by(ChatEntitlementModel.chat_id)
+                .with_for_update()
+            )
+        )
+        old_entitlement = next((row for row in rows if row.chat_id == old_chat_id), None)
+        new_entitlement = next((row for row in rows if row.chat_id == new_chat_id), None)
+        if old_entitlement is None:
+            continue
+        if new_entitlement is None:
+            old_entitlement.chat_id = new_chat_id
+            old_entitlement.updated_at = func.now()
+            continue
+
+        now = datetime.now(timezone.utc)
+        old_until = _as_utc(old_entitlement.valid_until)
+        new_until = _as_utc(new_entitlement.valid_until)
+        active_rows = [row for row in rows if row.status == "active"]
+        remaining_seconds = sum(
+            max(0.0, (_as_utc(row.valid_until) - now).total_seconds())
+            for row in active_rows
+        )
+        if active_rows:
+            if remaining_seconds > 0:
+                new_entitlement.valid_until = now + timedelta(seconds=remaining_seconds)
+            else:
+                new_entitlement.valid_until = max(_as_utc(row.valid_until) for row in active_rows)
+            new_entitlement.status = "active"
+            new_entitlement.valid_from = min(_as_utc(row.valid_from) for row in active_rows)
+        else:
+            # Revoked payment time is not an active balance and must not be
+            # reactivated by merging it into an expired active entitlement.
+            new_entitlement.valid_until = max(old_until, new_until)
+            new_entitlement.valid_from = min(
+                _as_utc(old_entitlement.valid_from),
+                _as_utc(new_entitlement.valid_from),
+            )
+            new_entitlement.status = "revoked"
+        new_entitlement.updated_at = func.now()
+        await session.delete(old_entitlement)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 async def _ensure_target_chat(
@@ -142,6 +240,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -162,7 +261,18 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _move_simple_chat_refs(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+
+async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    # `chat_id` is the current quota scope, while source_chat_id and the
+    # idempotency key preserve the immutable origin identity of each request.
+    await session.execute(
+        update(AiFeatureQuotaUsageModel)
+        .where(AiFeatureQuotaUsageModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
 
 
 async def _merge_activity_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
@@ -738,6 +848,92 @@ async def _move_llm_context_and_actions(session: AsyncSession, *, old_chat_id: i
     # A Telegram group upgrade preserves the logical chat and its artifacts.
     await session.execute(
         update(LlmArtifactModel).where(LlmArtifactModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+
+    await _move_ai_accounting_records(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+
+
+async def _move_ai_accounting_records(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    """Move archive, summary and accounting history, merging possible target duplicates."""
+    archive_rows = (await session.execute(
+        select(MessageArchiveModel).where(MessageArchiveModel.chat_id == old_chat_id)
+    )).scalars().all()
+    for source in archive_rows:
+        target = (await session.execute(
+            select(MessageArchiveModel).where(
+                MessageArchiveModel.chat_id == new_chat_id,
+                MessageArchiveModel.telegram_message_id == source.telegram_message_id,
+                MessageArchiveModel.snapshot_hash == source.snapshot_hash,
+            )
+        )).scalar_one_or_none()
+        if target is None:
+            source.chat_id = new_chat_id
+            continue
+        await session.execute(
+            update(LlmUsageLogModel)
+            .where(LlmUsageLogModel.message_archive_id == source.id)
+            .values(message_archive_id=target.id)
+        )
+        if target.transcript is None and source.transcript is not None:
+            target.transcript = source.transcript
+            target.transcribed_at = source.transcribed_at
+        await session.delete(source)
+
+    summary_rows = (await session.execute(
+        select(DailySummaryRunModel).where(DailySummaryRunModel.chat_id == old_chat_id)
+    )).scalars().all()
+    status_rank = {"claimed": 0, "generating": 1, "failed": 2, "send_failed": 3, "generated": 4, "sent": 5}
+    for source in summary_rows:
+        target = (await session.execute(
+            select(DailySummaryRunModel).where(
+                DailySummaryRunModel.chat_id == new_chat_id,
+                DailySummaryRunModel.summary_date == source.summary_date,
+                DailySummaryRunModel.trigger == source.trigger,
+            )
+        )).scalar_one_or_none()
+        if target is None:
+            source.chat_id = new_chat_id
+            continue
+        await session.execute(
+            update(LlmUsageLogModel)
+            .where(LlmUsageLogModel.summary_run_id == source.id)
+            .values(summary_run_id=target.id)
+        )
+        await session.execute(
+            update(AiFeatureInvocationModel)
+            .where(AiFeatureInvocationModel.summary_run_id == source.id)
+            .values(summary_run_id=target.id)
+        )
+        target.pipeline_cost_usd += source.pipeline_cost_usd
+        target.context_stt_cost_usd += source.context_stt_cost_usd
+        target.pipeline_has_unknown_cost = target.pipeline_has_unknown_cost or source.pipeline_has_unknown_cost
+        if target.generated_text is None:
+            target.generated_text = source.generated_text
+            target.topics_json = source.topics_json
+            target.diagnostics_json = source.diagnostics_json
+        if status_rank.get(source.status, 0) > status_rank.get(target.status, 0):
+            target.status = source.status
+            target.sent_at = target.sent_at or source.sent_at
+        await session.delete(source)
+
+    await session.execute(
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type == "chat",
+        )
+        .values(chat_id=new_chat_id, scope_id=str(new_chat_id))
+    )
+    await session.execute(
+        update(AiFeatureInvocationModel)
+        .where(
+            AiFeatureInvocationModel.chat_id == old_chat_id,
+            AiFeatureInvocationModel.scope_type != "chat",
+        )
+        .values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(LlmUsageLogModel).where(LlmUsageLogModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
     )
 
 

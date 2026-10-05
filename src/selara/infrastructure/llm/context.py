@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.llm.client import LlmClient, LlmClientError
+from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.prompts import CONTEXT_COMPRESSION_SYSTEM_PROMPT, MAX_TOKENS_COMPRESSION
 
 log = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ async def maybe_compress(
     threshold: int,
     llm_repo: LlmRepository,
     llm_client: LlmClient,
+    accounting_context: LlmAccountingContext | None = None,
 ) -> bool:
     count = await llm_repo.count_uncompressed_context_messages(chat_id=chat_id)
     if count < threshold:
@@ -133,14 +135,16 @@ async def maybe_compress(
     ]
 
     try:
-        summary_text = await llm_client.summarize(compression_prompt, max_tokens=MAX_TOKENS_COMPRESSION)
+        result = await llm_client.summarize(
+            compression_prompt, max_tokens=MAX_TOKENS_COMPRESSION, accounting_context=accounting_context
+        )
     except LlmClientError as exc:
         log.warning("llm context compression failed: %s", exc.message)
         return False
 
     await llm_repo.add_summary(
         chat_id=chat_id,
-        content=summary_text,
+        content=result.value,
         period_start=period_start,
         period_end=period_end,
         messages_count=len(msgs),

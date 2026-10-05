@@ -2,6 +2,7 @@ import hashlib
 from collections import defaultdict
 from collections.abc import Collection, Sequence
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -2536,7 +2537,8 @@ class SqlAlchemyActivityRepository:
             generated_text=row.generated_text,
             topics_json=row.topics_json,
             diagnostics_json=row.diagnostics_json,
-            pipeline_cost_usd=float(row.pipeline_cost_usd),
+            pipeline_cost_usd=Decimal(row.pipeline_cost_usd),
+            pipeline_has_unknown_cost=bool(row.pipeline_has_unknown_cost),
             context_stt_cost_usd=float(row.context_stt_cost_usd),
             created_at=_coerce_utc_datetime(row.created_at),
             sent_at=_normalize_optional_datetime(row.sent_at),
@@ -2928,6 +2930,8 @@ class SqlAlchemyActivityRepository:
         left untouched and this returns None -- callers should then use
         `get_daily_summary_run` to see what state it's actually in (e.g. to
         just resend an already-`generated` run instead of regenerating it).
+        Every successful claim refreshes `claimed_at`; state writes must include
+        that value as a fencing token so a reclaimed worker cannot overwrite it.
 
         This must stay a single atomic statement on Postgres (INSERT ... ON
         CONFLICT ... DO UPDATE ... WHERE ...) -- a read-then-write here would
@@ -3011,65 +3015,188 @@ class SqlAlchemyActivityRepository:
 
         return None
 
+    async def release_unstarted_daily_summary_claim(self, *, run_id: int, claimed_at: datetime) -> bool:
+        """Expire this claim token without deleting the stable run/history row."""
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.status == "claimed",
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+            )
+            .values(lease_until=_coerce_utc_datetime(claimed_at) - timedelta(microseconds=1))
+        )
+        return bool(result.rowcount)
+
     async def finalize_daily_summary_run_generated(
         self,
         *,
         run_id: int,
+        claimed_at: datetime,
         generated_text: str,
         topics_json: object,
-        pipeline_cost_usd: float,
+        pipeline_cost_usd: Decimal | float,
         context_stt_cost_usd: float,
         diagnostics_json: object | None = None,
-    ) -> None:
-        await self._session.execute(
+        pipeline_has_unknown_cost: bool = False,
+    ) -> bool:
+        result = await self._session.execute(
             update(DailySummaryRunModel)
-            .where(DailySummaryRunModel.id == run_id)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("claimed", "generating")),
+            )
             .values(
                 status="generated",
+                lease_until=datetime.now(timezone.utc) - timedelta(microseconds=1),
                 generated_text=generated_text,
                 topics_json=topics_json,
                 diagnostics_json=diagnostics_json,
                 pipeline_cost_usd=pipeline_cost_usd,
+                pipeline_has_unknown_cost=pipeline_has_unknown_cost,
                 context_stt_cost_usd=context_stt_cost_usd,
             )
         )
+        return result.rowcount == 1
 
-    async def mark_daily_summary_run_sent(self, *, run_id: int, sent_at: datetime) -> None:
-        await self._session.execute(
+    async def claim_daily_summary_delivery(
+        self,
+        *,
+        run_id: int,
+        claimed_at: datetime,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> datetime | None:
+        """Atomically reserve the right to send a generated run.
+
+        Finalization expires the generation lease; this compare-and-set refreshes
+        claimed_at before Telegram I/O. A crashed sender can be retried when its
+        delivery lease expires.
+        """
+        expected_claimed_at = _coerce_utc_datetime(claimed_at)
+        delivery_claimed_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        if delivery_claimed_at <= expected_claimed_at:
+            delivery_claimed_at = expected_claimed_at + timedelta(microseconds=1)
+
+        result = await self._session.execute(
             update(DailySummaryRunModel)
-            .where(DailySummaryRunModel.id == run_id)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == expected_claimed_at,
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+                DailySummaryRunModel.lease_until <= delivery_claimed_at,
+            )
+            .values(
+                claimed_at=delivery_claimed_at,
+                lease_until=delivery_claimed_at + timedelta(seconds=lease_seconds),
+            )
+        )
+        return delivery_claimed_at if result.rowcount == 1 else None
+
+    async def is_daily_summary_delivery_claim_current(
+        self,
+        *,
+        run_id: int,
+        chat_id: int,
+        claimed_at: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        check_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        row = (
+            await self._session.execute(
+                select(
+                    DailySummaryRunModel.chat_id,
+                    DailySummaryRunModel.claimed_at,
+                    DailySummaryRunModel.status,
+                    DailySummaryRunModel.lease_until,
+                ).where(DailySummaryRunModel.id == run_id)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        return bool(
+            row[0] == chat_id
+            and _coerce_utc_datetime(row[1]) == _coerce_utc_datetime(claimed_at)
+            and row[2] in ("generated", "send_failed")
+            and _coerce_utc_datetime(row[3]) > check_at
+        )
+
+    async def mark_daily_summary_run_sent(self, *, run_id: int, claimed_at: datetime, sent_at: datetime) -> bool:
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+            )
             .values(status="sent", sent_at=_coerce_utc_datetime(sent_at))
         )
+        return result.rowcount == 1
 
-    async def mark_daily_summary_run_send_failed(self, *, run_id: int, error: str) -> None:
-        await self._session.execute(
-            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="send_failed", error=error)
+    async def mark_daily_summary_run_send_failed(
+        self, *, run_id: int, claimed_at: datetime, error: str
+    ) -> bool:
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+            )
+            .values(
+                status="send_failed",
+                error=error,
+                lease_until=datetime.now(timezone.utc) - timedelta(microseconds=1),
+            )
         )
+        return result.rowcount == 1
 
-    async def mark_daily_summary_run_failed(self, *, run_id: int, error: str) -> None:
-        await self._session.execute(
-            update(DailySummaryRunModel).where(DailySummaryRunModel.id == run_id).values(status="failed", error=error)
+    async def mark_daily_summary_run_failed(
+        self, *, run_id: int, claimed_at: datetime, error: str, pipeline_cost_usd: Decimal | float | None = None,
+        pipeline_has_unknown_cost: bool | None = None,
+    ) -> bool:
+        values = {"status": "failed", "error": error}
+        if pipeline_cost_usd is not None:
+            values["pipeline_cost_usd"] = pipeline_cost_usd
+        if pipeline_has_unknown_cost is not None:
+            values["pipeline_has_unknown_cost"] = pipeline_has_unknown_cost
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
+                DailySummaryRunModel.status.in_(("claimed", "generating")),
+            )
+            .values(**values)
         )
+        return result.rowcount == 1
 
     async def record_llm_usage(
         self,
         *,
-        chat_id: int,
+        chat_id: int | None,
         feature: str,
         stage: str,
         model: str,
-        estimated_cost_usd: float,
+        estimated_cost_usd: float | None,
+        invocation_id: int | None = None,
+        call_id: str | None = None,
         summary_run_id: int | None = None,
         message_archive_id: int | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        total_tokens: int | None = None,
         audio_seconds: float | None = None,
+        pricing_status: str = "legacy",
+        status: str = "succeeded",
+        attempt_number: int | None = None,
+        error_category: str | None = None,
     ) -> None:
-        if (summary_run_id is None) == (message_archive_id is None):
-            raise ValueError("exactly one of summary_run_id/message_archive_id must be set")
-
         self._session.add(
             LlmUsageLogModel(
+                call_id=call_id,
+                invocation_id=invocation_id,
                 summary_run_id=summary_run_id,
                 message_archive_id=message_archive_id,
                 chat_id=chat_id,
@@ -3078,8 +3205,13 @@ class SqlAlchemyActivityRepository:
                 model=model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 audio_seconds=audio_seconds,
                 estimated_cost_usd=estimated_cost_usd,
+                pricing_status=pricing_status,
+                status=status,
+                attempt_number=attempt_number,
+                error_category=error_category,
             )
         )
         await self._session.flush()

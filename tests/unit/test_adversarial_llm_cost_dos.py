@@ -7,10 +7,9 @@ least junior_admin). But within that population there is still no cooldown at al
 - No per-admin/per-chat throttle on invoking `?`/`??`.
 - Each single invocation can trigger up to _MAX_TOOL_ROUNDS=8 round-trips to the paid
   chat completion API before giving up (tool-calling loop in _handle).
-- Every invocation additionally fires a "DM summary" chat_simple call
-  (_send_dm_summary) and, when in ??-context mode, a context-compression summarize()
-  call once the threshold is hit - so a single user message can fan out into up to
-  ~10 billed LLM calls, repeatable with no cooldown.
+- A ?? invocation can additionally perform one context-compression summarize()
+  call when the threshold is hit. The DM receipt is deterministic and makes no
+  additional provider call.
 
 This test proves the amplification factor mechanically (a maximally adversarial LLM
 response that always requests another tool round drives chat_with_tools to the full
@@ -99,6 +98,19 @@ def _admin_message(text: str) -> AsyncMock:
     return message
 
 
+@pytest.fixture(autouse=True)
+def _allow_feature_access_in_handler_unit_tests(monkeypatch):
+    service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+            allowed=True, reused=False, invocation_id=None, reason=None,
+        )),
+        release_if_no_provider_attempts=AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(llm_admin_module, "FeatureAccessService", lambda _repository, **_kwargs: service)
+    monkeypatch.setattr(llm_admin_module, "resolve_owner_admin_exemption", AsyncMock(return_value=False))
+    return service
+
+
 @pytest.mark.asyncio
 async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
     """An adversarial (or simply chatty) LLM response that keeps requesting another
@@ -154,14 +166,16 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
         mock_repo_cls.return_value = repo_mock
 
         await _handle(
-            message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False
+            message, bot, activity_repo, _chat_settings(), llm_client, db_session,
+            with_context=False, session_factory=object(),
         )
 
     # _MAX_TOOL_ROUNDS = 8 in llm_admin.py - one Telegram message => up to 8 billed
-    # chat completion calls, plus one more for the DM summary. No budget/cost check
+    # chat completion calls. The deterministic DM receipt adds no provider call. No budget/cost check
     # short-circuits this early within a single invocation (cross-invocation
     # repeats are now throttled by the #3 cooldown fix -- see next test).
     assert call_count == llm_admin_module._MAX_TOOL_ROUNDS
+    llm_client.chat_simple.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -217,7 +231,7 @@ async def test_llm_cooldown_throttles_immediate_repeat_invocation_by_same_admin(
             message = _admin_message("? привет")
             await _handle(
                 message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False,
-                settings=settings,
+                settings=settings, session_factory=object(),
             )
 
     # 5 rapid-fire invocations by the same admin -> only the first reaches

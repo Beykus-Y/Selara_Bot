@@ -14,7 +14,7 @@ class DailySummaryEligibility:
 def evaluate_daily_summary_eligibility(
     *,
     settings: ChatSettings,
-    message_count_in_window: int,
+    message_count_in_window: int | None,
     already_run_today: bool,
 ) -> DailySummaryEligibility:
     """Pure gate check for whether a chat may get a daily summary run right now.
@@ -37,7 +37,10 @@ def evaluate_daily_summary_eligibility(
     if already_run_today:
         return DailySummaryEligibility(False, "already_run_today")
 
-    if message_count_in_window < settings.daily_summary_min_messages:
+    if (
+        message_count_in_window is not None
+        and message_count_in_window < settings.daily_summary_min_messages
+    ):
         return DailySummaryEligibility(False, "not_enough_messages")
 
     return DailySummaryEligibility(True, "eligible")

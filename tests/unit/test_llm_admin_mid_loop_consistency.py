@@ -30,6 +30,19 @@ import selara.presentation.handlers.llm_admin as llm_admin_module
 from selara.presentation.handlers.llm_admin import _handle
 
 
+@pytest.fixture(autouse=True)
+def _allow_feature_access_in_handler_unit_tests(monkeypatch):
+    service = SimpleNamespace(
+        reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+            allowed=True, reused=False, invocation_id=None, reason=None,
+        )),
+        release_if_no_provider_attempts=AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(llm_admin_module, "FeatureAccessService", lambda _repository, **_kwargs: service)
+    monkeypatch.setattr(llm_admin_module, "resolve_owner_admin_exemption", AsyncMock(return_value=False))
+    return service
+
+
 def _chat_settings() -> ChatSettings:
     return ChatSettings(
         top_limit_default=10,
@@ -138,7 +151,8 @@ async def test_send_chat_action_failure_does_not_crash_the_tool_loop():
 
         # Must not raise.
         await _handle(
-            message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False
+            message, bot, activity_repo, _chat_settings(), llm_client, db_session,
+            with_context=False, session_factory=object(),
         )
 
     assert call_count == 1
@@ -219,7 +233,8 @@ async def test_completed_moderation_action_is_committed_before_next_round_can_lo
          patch.object(llm_admin_module, "save_interaction", new=AsyncMock()), \
          patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
         await _handle(
-            message, bot, activity_repo, _chat_settings(), llm_client, db_session, with_context=False
+            message, bot, activity_repo, _chat_settings(), llm_client, db_session,
+            with_context=False, session_factory=object(),
         )
 
     assert rounds == 2
@@ -263,7 +278,8 @@ async def test_artifact_delivery_is_terminal_only_on_confirmed_success(delivered
          patch.object(llm_admin_module, 'save_interaction', AsyncMock()) as saved, \
          patch.object(llm_admin_module, '_send_dm_summary', AsyncMock()):
         await _handle(message, AsyncMock(), MagicMock(), _chat_settings(), c, AsyncMock(),
-            with_context=False, settings=Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:'))
+            with_context=False, settings=Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:'),
+            session_factory=object())
     if delivered:
         assert c.chat_with_tools.await_count == 1 and executed == ['send_artifact']
         send_text.assert_not_awaited()
@@ -272,3 +288,32 @@ async def test_artifact_delivery_is_terminal_only_on_confirmed_success(delivered
     else:
         assert c.chat_with_tools.await_count == 2 and executed == ['send_artifact', 'get_top']
         send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_llm_error_before_provider_call_replaces_the_thinking_placeholder():
+    """e.g. the accounting marker cannot be committed (fail-closed): the user must get an
+    error instead of a permanent "Думаю..." message."""
+    llm_client = AsyncMock()
+    llm_client.chat_with_tools = AsyncMock(side_effect=RuntimeError("accounting marker commit failed"))
+    bot = AsyncMock()
+    message = _admin_message("? привет")
+
+    with patch.object(llm_admin_module, "has_permission", new=AsyncMock(return_value=(True, None, None))), \
+         patch.object(llm_admin_module, "LlmRepository") as mock_repo_cls, \
+         patch.object(llm_admin_module, "load_context", new=AsyncMock(return_value=SimpleNamespace(messages=[]))), \
+         patch.object(llm_admin_module, "save_interaction", new=AsyncMock()), \
+         patch.object(llm_admin_module, "maybe_compress", new=AsyncMock()):
+        repo_mock = MagicMock()
+        repo_mock.get_last_user_message_at = AsyncMock(return_value=None)
+        repo_mock.search_glossary = AsyncMock(return_value=[])
+        mock_repo_cls.return_value = repo_mock
+
+        await _handle(
+            message, bot, MagicMock(), _chat_settings(), llm_client, AsyncMock(),
+            with_context=False, session_factory=object(),
+        )
+
+    edit_text = message.reply.return_value.edit_text
+    edit_text.assert_awaited_once()
+    assert "Ошибка AI-ассистента" in edit_text.await_args.args[0]

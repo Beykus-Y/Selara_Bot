@@ -127,3 +127,6 @@ jobs:
 
       - name: Test Mini App broadcast selection in mobile browser
         run: python ../scripts/test_miniapp_admin_broadcast_browser.py
+
+      - name: Test Mini App Selara AI panel and admin analytics in mobile browser
+        run: python ../scripts/test_miniapp_selara_ai_browser.py

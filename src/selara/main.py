@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from selara.application.achievements import get_achievement_catalog_from_settings
@@ -10,11 +10,13 @@ from selara.core.config import get_settings
 from selara.core.logging import configure_logging
 from selara.infrastructure.backup import run_daily_backup_scheduler
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
-from selara.infrastructure.llm import LlmClient, LlmConfig
+from selara.infrastructure.llm import LlmClient
+from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -28,6 +30,7 @@ from selara.presentation.middlewares.error_alert_config import load_error_alert_
 from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
+from selara.presentation.payment_safe_dispatcher import PaymentSafeDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
+        BotCommand(command="premium", description="Купить Selara AI для чата"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
         BotCommand(command="game", description="Выбрать и запустить игру в чате"),
@@ -78,25 +82,14 @@ def _build_stt_client(settings) -> SttClient | None:
         return None
 
 
-def _build_llm_client(settings) -> LlmClient | None:
-    if not settings.llm_enabled:
+def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
+    config, problem = llm_runtime_problem(settings)
+    if config is None:
+        if settings.llm_enabled:
+            logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", problem)
         return None
-    if not settings.llm_api_key.strip():
-        logger.warning("LLM включён (LLM_ENABLED=true), но LLM_API_KEY не задан — AI-ассистент отключён.")
-        return None
-    try:
-        config = LlmConfig(
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            base_url=settings.llm_base_url or None,
-            timeout_seconds=settings.llm_timeout_seconds,
-            summary_model=settings.llm_summary_model,
-            supports_structured_output=settings.llm_supports_structured_output,
-        )
-        return LlmClient(config)
-    except ValueError as exc:
-        logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", exc)
-        return None
+    accounting = AiAccountingService(session_factory) if session_factory is not None else None
+    return LlmClient(config, accounting_service=accounting)
 
 
 async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
@@ -145,9 +138,9 @@ async def _run_bot(settings, session_factory) -> None:
         live_event_publisher=GAME_STORE.publish_event,
     )
     stt_client = _build_stt_client(settings)
-    llm_client = _build_llm_client(settings)
+    llm_client = _build_llm_client(settings, session_factory)
     logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
-    dispatcher = Dispatcher()
+    dispatcher = PaymentSafeDispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
     await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
@@ -197,7 +190,7 @@ async def _run_bot(settings, session_factory) -> None:
         )
         await daily_summary_stt_queue.start()
 
-    polling_kwargs: dict = {"settings": settings}
+    polling_kwargs: dict = {"settings": settings, "session_factory": session_factory}
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:

@@ -14,20 +14,25 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
-from selara.infrastructure.llm.client import LlmClient, LlmClientError
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
+from selara.infrastructure.llm.client import LlmCallResult, LlmClient, LlmClientError
+from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.context import (
     build_glossary_context,
     load_context,
     maybe_compress,
     save_interaction,
 )
+from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.prompts import (
     ADMIN_SYSTEM_PROMPT,
 )
@@ -40,7 +45,8 @@ from selara.infrastructure.llm.tools import (
     get_tool_definitions,
     get_tool_status,
 )
-from selara.presentation.auth import has_permission
+from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
@@ -101,8 +107,12 @@ async def llm_admin_context_handler(
     llm_client: LlmClient,
     db_session: AsyncSession,
     settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=True, settings=settings)
+    await _handle(
+        message, bot, activity_repo, chat_settings, llm_client, db_session,
+        with_context=True, settings=settings, session_factory=session_factory,
+    )
 
 
 @router.message(
@@ -117,8 +127,12 @@ async def llm_admin_nocontext_handler(
     llm_client: LlmClient,
     db_session: AsyncSession,
     settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    await _handle(message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False, settings=settings)
+    await _handle(
+        message, bot, activity_repo, chat_settings, llm_client, db_session,
+        with_context=False, settings=settings, session_factory=session_factory,
+    )
 
 
 async def _handle(
@@ -131,6 +145,7 @@ async def _handle(
     *,
     with_context: bool,
     settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     if not chat_settings.llm_enabled:
         return
@@ -188,10 +203,7 @@ async def _handle(
 
     llm_repo = LlmRepository(db_session)
 
-    # #3: the assistant is gated on moderate_users, but nothing stopped the
-    # same admin repeating it immediately -- a single invocation can already
-    # fan out to ~10 billed calls (up to 8 tool rounds + DM summary +
-    # compression).
+    # #3: cooldown prevents an admin from repeating an invocation immediately.
     if settings is None:
         from selara.core.config import get_settings
         settings = get_settings()
@@ -207,212 +219,316 @@ async def _handle(
             await message.reply(f"⏳ Слишком часто. Подожди {wait_left} сек.")
             return
 
+    accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
     thinking_msg = await message.reply("⏳ Думаю...")
+    if session_factory is None:
+        log.error("Feature quota service unavailable: session factory was not injected chat_id=%s", message.chat.id)
+        await thinking_msg.edit_text("⚠️ Проверка доступа временно недоступна. Попробуйте позже.")
+        return
 
-    actor = UserSnapshot(
-        telegram_user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_bot=bool(message.from_user.is_bot),
+    access_service = FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(session_factory),
+        entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
     )
-    chat_snapshot = ChatSnapshot(
-        telegram_chat_id=message.chat.id,
-        chat_type=message.chat.type,
-        title=message.chat.title,
-    )
-
-    context_messages: list[dict] = []
-    if with_context:
-        loaded = await load_context(chat_id=message.chat.id, llm_repo=llm_repo)
-        context_messages = loaded.messages
-
-    admin_tag = f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id)
-    import os
-
-    from selara.infrastructure.llm.tools import _BOT_DOCS_DIR
-    doc_files = []
-    if os.path.exists(_BOT_DOCS_DIR):
-        for filename in sorted(os.listdir(_BOT_DOCS_DIR)):
-            if filename.endswith(".md"):
-                filepath = os.path.join(_BOT_DOCS_DIR, filename)
-                title = filename
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        first_line = f.readline().strip()
-                        if first_line.startswith("#"):
-                            title = first_line.lstrip("#").strip()
-                except Exception:
-                    pass
-                doc_files.append(f"- {filename}: {title}")
-    doc_files_list = "\n".join(doc_files) if doc_files else "(нет доступных документов)"
-
-    # #1: chat title is renameable by anyone with Telegram's "change group
-    # info" right (not any bot permission) and rides into the system prompt
-    # on every future call. Marking it as untrusted data is defense-in-depth
-    # only, not a security boundary -- authorization stays entirely in
-    # execute_tool()'s deterministic checks regardless of what the model
-    # does with this text.
-    system_prompt = ADMIN_SYSTEM_PROMPT.format(
-        chat_title=_untrusted(message.chat.title) if message.chat.title else str(message.chat.id),
-        chat_id=message.chat.id,
-        admin_tag=admin_tag,
-        admin_user_id=message.from_user.id,
-        doc_files_list=doc_files_list,
-    )
-
-    user_content = f"[{message.from_user.first_name or admin_tag}] {admin_tag}: {query}"
-    glossary_context = await build_glossary_context(chat_id=message.chat.id, query=query, llm_repo=llm_repo)
-
-    messages: list[dict] = [
-        {"role": "system", "content": system_prompt},
-        *context_messages,
-        *([glossary_context] if glossary_context else []),
-        {"role": "user", "content": user_content},
-    ]
-
-    tool_results: list[ToolResult] = []
-    tool_messages: list[dict] = []
-    final_answer = ""
-    empty_completions = 0
-
-    from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
-    artifact_context = ArtifactRequestContext(
-        repository=ArtifactRepository(db_session), renderer_url=getattr(settings, "artifact_renderer_url", "http://artifact-renderer:8090"),
-        chat_id=message.chat.id, creator_id=message.from_user.id, message_id=message.message_id,
-        thread_id=message.message_thread_id,
-    )
-
-    tool_ctx = dict(
-        artifact_context=artifact_context,
-        chat_snapshot=chat_snapshot,
-        actor_snapshot=actor,
-        activity_repo=activity_repo,
-        llm_repo=llm_repo,
+    owner_exempt = await resolve_owner_admin_exemption(
         bot=bot,
-    )
-
-    for _round in range(_MAX_TOOL_ROUNDS):
-        try:
-            await bot.send_chat_action(message.chat.id, "typing")
-        except Exception:
-            pass
-        try:
-            response = await llm_client.chat_with_tools(messages=messages, tools=get_tool_definitions())
-        except LlmClientError as exc:
-            error_text = f"⚠️ Ошибка AI-ассистента: {exc.message}"
-            try:
-                await thinking_msg.edit_text(error_text)
-            except Exception:
-                await message.reply(error_text)
-            return
-
-        if not response or not response.choices:
-            log.warning("llm_admin: empty choices after %d tools", len(tool_results))
-            if empty_completions < 2:
-                empty_completions += 1
-                messages.append(_empty_answer_recovery())
-                continue
-            final_answer = _verified_fallback(tool_results)
-            break
-
-        choice = response.choices[0]
-        msg = choice.message
-
-        # Some compatible providers report stop even with executable tool calls.
-        # Actual calls take precedence over that metadata.
-        if not msg.tool_calls:
-            if (msg.content or "").strip():
-                final_answer = msg.content
-                break
-            log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
-                choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
-                len(artifact_context.sent_artifacts))
-            if empty_completions < 2:
-                empty_completions += 1
-                # Do not send a null assistant message back to strict providers.
-                messages.append(_empty_answer_recovery())
-                continue
-            final_answer = _verified_fallback(tool_results)
-            break
-
-        messages.append(msg.model_dump(exclude_none=True))
-        for tc in msg.tool_calls:
-            call = ToolCall(
-                name=tc.function.name,
-                arguments=json.loads(tc.function.arguments),
-                call_id=tc.id,
-            )
-            status = get_tool_status(call.name, call.arguments)
-            if status:
-                try:
-                    await thinking_msg.edit_text(f"⚙️ {status}")
-                except Exception:
-                    pass
-            result = await execute_tool(call, **tool_ctx)
-            tool_results.append(result)
-            if result.success and result.db_action_id is not None:
-                # #22: commit immediately so a crash on a *later* round can
-                # no longer roll back an already-completed action's DB state
-                # and audit row while the real Telegram side effect stands.
-                await db_session.commit()
-            tool_msg = {
-                "role": "tool",
-                "tool_call_id": result.call_id,
-                "content": result.result_text,
-            }
-            messages.append(tool_msg)
-            tool_messages.append(tool_msg)
-            if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
-                # The caption is the answer. Do not request another completion or
-                # execute trailing tools after a confirmed delivered answer.
-                final_answer = str(call.arguments.get("caption", ""))
-                break
-        if artifact_context.sent_artifacts and result.success and call.name == "send_artifact":
-            break
-    else:
-        final_answer = _verified_fallback(tool_results)
-
-    if artifact_context.sent_artifacts:
-        try:
-            await thinking_msg.delete()
-        except Exception:
-            log.warning("Could not remove artifact progress message", exc_info=True)
-    else:
-        final_answer = final_answer.strip() or _verified_fallback(tool_results)
-        await _send_formatted_answer(message, thinking_msg, final_answer)
-    chat_answer = final_answer
-    if artifact_context.sent_artifacts:
-        final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
-
-    await save_interaction(
         chat_id=message.chat.id,
-        admin_user_id=message.from_user.id,
-        user_query_content=user_content,
-        assistant_response=final_answer,
-        tool_messages=tool_messages,
-        llm_repo=llm_repo,
-        is_context=with_context,
+        admin_user_id=settings.admin_user_id,
     )
-
-    if with_context:
-        await maybe_compress(
+    try:
+        decision = await access_service.reserve_feature_usage(
+            feature=AiFeature.LLM_ADMIN,
             chat_id=message.chat.id,
-            threshold=chat_settings.llm_context_threshold,
-            llm_repo=llm_repo,
-            llm_client=llm_client,
+            chat_type=message.chat.type,
+            chat_title=message.chat.title,
+            actor_user_id=message.from_user.id,
+            actor_is_bot=bool(message.from_user.is_bot),
+            trigger="telegram_message",
+            timezone_name=settings.bot_timezone,
+            idempotency_key=message_idempotency_key(
+                feature=AiFeature.LLM_ADMIN,
+                chat_id=message.chat.id,
+                source_message_id=message.message_id,
+            ),
+            source_message_id=message.message_id,
+            mode="context" if with_context else "no_context",
+            owner_exempt=owner_exempt,
+        )
+    except Exception:
+        log.exception("Feature quota reservation failed chat_id=%s message_id=%s", message.chat.id, message.message_id)
+        await thinking_msg.edit_text("⚠️ Проверка доступа временно недоступна. Попробуйте позже.")
+        return
+
+    if decision.reused:
+        await thinking_msg.edit_text("Этот запрос уже был обработан. Повторный запуск не выполнялся.")
+        return
+    if not decision.allowed:
+        if decision.reason == AccessReason.QUOTA_EXHAUSTED:
+            text = quota_exhausted_message(decision, timezone_name=settings.bot_timezone)
+        else:
+            text = "⚠️ Сейчас не удалось разрешить запрос. Попробуйте позже."
+        await thinking_msg.edit_text(text)
+        return
+
+    invocation_id = decision.invocation_id
+    call_context = LlmAccountingContext(
+        invocation_id=invocation_id, feature=AiFeature.LLM_ADMIN, stage="assistant_round",
+        chat_id=message.chat.id, actor_user_id=message.from_user.id,
+        telegram_message_id=message.message_id,
+    ) if invocation_id is not None else None
+
+    outcome = {"status": "failed", "error_category": "handler_error"}
+
+    async def _run_invocation() -> None:
+        actor = UserSnapshot(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            is_bot=bool(message.from_user.is_bot),
+        )
+        chat_snapshot = ChatSnapshot(
+            telegram_chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            title=message.chat.title,
         )
 
-    await _send_dm_summary(
-        bot=bot,
-        admin_user_id=message.from_user.id,
-        chat_title=message.chat.title or str(message.chat.id),
-        query=query,
-        tool_results=tool_results,
-        final_answer=chat_answer,
-        llm_client=llm_client,
-        sent_artifacts=artifact_context.sent_artifacts,
-    )
+        context_messages: list[dict] = []
+        if with_context:
+            loaded = await load_context(chat_id=message.chat.id, llm_repo=llm_repo)
+            context_messages = loaded.messages
+
+        admin_tag = f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id)
+        import os
+
+        from selara.infrastructure.llm.tools import _BOT_DOCS_DIR
+        doc_files = []
+        if os.path.exists(_BOT_DOCS_DIR):
+            for filename in sorted(os.listdir(_BOT_DOCS_DIR)):
+                if filename.endswith(".md"):
+                    filepath = os.path.join(_BOT_DOCS_DIR, filename)
+                    title = filename
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            first_line = f.readline().strip()
+                            if first_line.startswith("#"):
+                                title = first_line.lstrip("#").strip()
+                    except Exception:
+                        pass
+                    doc_files.append(f"- {filename}: {title}")
+        doc_files_list = "\n".join(doc_files) if doc_files else "(нет доступных документов)"
+
+        # #1: chat title is renameable by anyone with Telegram's "change group
+        # info" right (not any bot permission) and rides into the system prompt
+        # on every future call. Marking it as untrusted data is defense-in-depth
+        # only, not a security boundary -- authorization stays entirely in
+        # execute_tool()'s deterministic checks regardless of what the model
+        # does with this text.
+        system_prompt = ADMIN_SYSTEM_PROMPT.format(
+            chat_title=_untrusted(message.chat.title) if message.chat.title else str(message.chat.id),
+            chat_id=message.chat.id,
+            admin_tag=admin_tag,
+            admin_user_id=message.from_user.id,
+            doc_files_list=doc_files_list,
+        )
+
+        user_content = f"[{message.from_user.first_name or admin_tag}] {admin_tag}: {query}"
+        glossary_context = await build_glossary_context(chat_id=message.chat.id, query=query, llm_repo=llm_repo)
+
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            *context_messages,
+            *([glossary_context] if glossary_context else []),
+            {"role": "user", "content": user_content},
+        ]
+
+        tool_results: list[ToolResult] = []
+        tool_messages: list[dict] = []
+        final_answer = ""
+        empty_completions = 0
+
+        from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
+        artifact_context = ArtifactRequestContext(
+            repository=ArtifactRepository(db_session), renderer_url=getattr(settings, "artifact_renderer_url", "http://artifact-renderer:8090"),
+            chat_id=message.chat.id, creator_id=message.from_user.id, message_id=message.message_id,
+            thread_id=message.message_thread_id,
+        )
+
+        tool_ctx = dict(
+            artifact_context=artifact_context,
+            chat_snapshot=chat_snapshot,
+            actor_snapshot=actor,
+            activity_repo=activity_repo,
+            llm_repo=llm_repo,
+            bot=bot,
+        )
+
+        for _round in range(_MAX_TOOL_ROUNDS):
+            try:
+                await bot.send_chat_action(message.chat.id, "typing")
+            except Exception:
+                pass
+            try:
+                request_kwargs = {"messages": messages, "tools": get_tool_definitions()}
+                if call_context is not None:
+                    request_kwargs["accounting_context"] = call_context
+                response = await llm_client.chat_with_tools(**request_kwargs)
+            except LlmClientError as exc:
+                outcome["status"] = "failed"
+                outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
+                error_text = f"⚠️ Ошибка AI-ассистента: {exc.message}"
+                try:
+                    await thinking_msg.edit_text(error_text)
+                except Exception:
+                    await message.reply(error_text)
+                return
+            except Exception:
+                # e.g. the accounting marker could not be committed before the provider call
+                # (fail-closed). Without this the "Думаю..." placeholder would stay forever.
+                log.exception("llm_admin: LLM request failed before reaching the provider")
+                outcome["status"] = "failed"
+                outcome["error_category"] = "accounting_unavailable"
+                error_text = "⚠️ Ошибка AI-ассистента: не удалось выполнить запрос. Попробуйте позже."
+                try:
+                    await thinking_msg.edit_text(error_text)
+                except Exception:
+                    await message.reply(error_text)
+                return
+
+            response = response.value if isinstance(response, LlmCallResult) else response
+            if not response or not response.choices:
+                log.warning("llm_admin: empty choices after %d tools", len(tool_results))
+                if empty_completions < 2:
+                    empty_completions += 1
+                    messages.append(_empty_answer_recovery())
+                    continue
+                final_answer = _verified_fallback(tool_results)
+                break
+
+            choice = response.choices[0]
+            msg = choice.message
+
+            # Some compatible providers report stop even with executable tool calls.
+            # Actual calls take precedence over that metadata.
+            if not msg.tool_calls:
+                if (msg.content or "").strip():
+                    final_answer = msg.content
+                    break
+                log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
+                    choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
+                    len(artifact_context.sent_artifacts))
+                if empty_completions < 2:
+                    empty_completions += 1
+                    # Do not send a null assistant message back to strict providers.
+                    messages.append(_empty_answer_recovery())
+                    continue
+                final_answer = _verified_fallback(tool_results)
+                break
+
+            messages.append(msg.model_dump(exclude_none=True))
+            for tc in msg.tool_calls:
+                call = ToolCall(
+                    name=tc.function.name,
+                    arguments=json.loads(tc.function.arguments),
+                    call_id=tc.id,
+                )
+                status = get_tool_status(call.name, call.arguments)
+                if status:
+                    try:
+                        await thinking_msg.edit_text(f"⚙️ {status}")
+                    except Exception:
+                        pass
+                result = await execute_tool(call, **tool_ctx)
+                tool_results.append(result)
+                if result.success and result.db_action_id is not None:
+                    # #22: commit immediately so a crash on a *later* round can
+                    # no longer roll back an already-completed action's DB state
+                    # and audit row while the real Telegram side effect stands.
+                    await db_session.commit()
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": result.call_id,
+                    "content": result.result_text,
+                }
+                messages.append(tool_msg)
+                tool_messages.append(tool_msg)
+                if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
+                    # The caption is the answer. Do not request another completion or
+                    # execute trailing tools after a confirmed delivered answer.
+                    final_answer = str(call.arguments.get("caption", ""))
+                    break
+            if artifact_context.sent_artifacts and result.success and call.name == "send_artifact":
+                break
+        else:
+            final_answer = _verified_fallback(tool_results)
+
+        if artifact_context.sent_artifacts:
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                log.warning("Could not remove artifact progress message", exc_info=True)
+        else:
+            final_answer = final_answer.strip() or _verified_fallback(tool_results)
+            await _send_formatted_answer(message, thinking_msg, final_answer)
+        chat_answer = final_answer
+        if artifact_context.sent_artifacts:
+            final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
+
+        await save_interaction(
+            chat_id=message.chat.id,
+            admin_user_id=message.from_user.id,
+            user_query_content=user_content,
+            assistant_response=final_answer,
+            tool_messages=tool_messages,
+            llm_repo=llm_repo,
+            is_context=with_context,
+        )
+
+        if with_context:
+            await maybe_compress(
+                chat_id=message.chat.id,
+                threshold=chat_settings.llm_context_threshold,
+                llm_repo=llm_repo,
+                llm_client=llm_client,
+                accounting_context=(LlmAccountingContext(
+                    invocation_id=invocation_id, feature=AiFeature.LLM_CONTEXT_COMPRESSION, stage="context_compression",
+                    chat_id=message.chat.id, actor_user_id=message.from_user.id,
+                    telegram_message_id=message.message_id,
+                ) if invocation_id is not None else None),
+            )
+
+        await _send_dm_summary(
+            bot=bot,
+            admin_user_id=message.from_user.id,
+            chat_title=message.chat.title or str(message.chat.id),
+            query=query,
+            tool_results=tool_results,
+            final_answer=chat_answer,
+            sent_artifacts=artifact_context.sent_artifacts,
+        )
+        outcome["status"] = "succeeded"
+        outcome["error_category"] = None
+
+    try:
+        await _run_invocation()
+    finally:
+        if accounting is not None and invocation_id is not None:
+            if outcome["status"] != "succeeded":
+                try:
+                    await access_service.release_if_no_provider_attempts(
+                        invocation_id=invocation_id,
+                        reason=outcome["error_category"] or "pre_provider_failure",
+                    )
+                except Exception:
+                    log.exception("Could not release unused feature quota invocation_id=%s", invocation_id)
+            try:
+                await accounting.finish_invocation_outcome(
+                    invocation_id=invocation_id,
+                    status=outcome["status"],
+                    error_category=outcome["error_category"],
+                )
+            except Exception:
+                log.exception("Could not finalize llm_admin invocation id=%s", invocation_id)
 
 
 def _empty_answer_recovery() -> dict:
@@ -482,7 +598,6 @@ async def _send_dm_summary(
     query: str,
     tool_results: list[ToolResult],
     final_answer: str,
-    llm_client: LlmClient,
     sent_artifacts: list[str] | None = None,
 ) -> None:
     # This is an operational receipt, not a generative retelling. Preserve

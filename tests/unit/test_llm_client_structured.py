@@ -34,7 +34,8 @@ async def test_chat_structured_parses_and_validates_valid_json() -> None:
 
     result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
 
-    assert result == _Topic(title="VPN", start_message_id=42)
+    assert result.value == _Topic(title="VPN", start_message_id=42)
+    assert len(result.usages) == 1
 
 
 @pytest.mark.asyncio
@@ -93,9 +94,10 @@ async def test_chat_structured_retries_once_on_invalid_json_then_succeeds() -> N
 
     result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
 
-    assert result.title == "x"
+    assert result.value.title == "x"
     assert client._client.chat.completions.create.await_count == 2
-    assert client.last_retry_count == 1
+    assert [usage.attempt_number for usage in result.usages] == [1, 2]
+    assert result.corrective_retries == 1
 
 
 @pytest.mark.asyncio
@@ -129,9 +131,24 @@ async def test_chat_structured_records_zero_retries_on_first_try_success() -> No
         return_value=_response_with_content(json.dumps({"title": "x", "start_message_id": 1}))
     )
 
-    await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
+    result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
+    assert len(result.usages) == 1
+    assert result.corrective_retries == 0
 
-    assert client.last_retry_count == 0
+
+@pytest.mark.asyncio
+async def test_chat_structured_invalid_first_and_second_response_reports_one_retry() -> None:
+    client = LlmClient(LlmConfig(api_key="test-key", model="test-model"))
+    client._client.chat.completions.create = AsyncMock(
+        side_effect=[_response_with_content("invalid one"), _response_with_content("invalid two")]
+    )
+
+    with pytest.raises(LlmClientError) as caught:
+        await client.chat_structured(messages=[], response_model=_Topic)
+
+    assert len(caught.value.usages) == 2
+    assert sum(usage.status == "validation_failed" for usage in caught.value.usages) == 2
+    assert caught.value.corrective_retries == 1
 
 
 @pytest.mark.asyncio
@@ -147,25 +164,45 @@ async def test_chat_structured_retries_once_on_schema_mismatch_then_succeeds() -
 
     result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
 
-    assert result.start_message_id == 1
+    assert result.value.start_message_id == 1
     assert client._client.chat.completions.create.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_chat_structured_records_last_usage_for_cost_accounting() -> None:
-    # the daily summary pipeline reads client.last_usage/last_model right after each
-    # call to log per-stage cost -- chat_structured's return value stays the parsed
-    # model, so usage has to travel out via this side-channel instead.
-    config = LlmConfig(api_key="test-key", model="main-model", summary_model="cheap-model")
+async def test_chat_structured_returns_per_call_usage_and_actual_model() -> None:
+    config = LlmConfig(api_key="test-key", model="main-model", summary_model="gpt-4o-mini")
     client = LlmClient(config)
     response = _response_with_content(json.dumps({"title": "x", "start_message_id": 1}))
     response.usage = MagicMock(prompt_tokens=123, completion_tokens=45)
     client._client.chat.completions.create = AsyncMock(return_value=response)
 
-    await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
+    result = await client.chat_structured(messages=[{"role": "user", "content": "go"}], response_model=_Topic)
+    usage = result.usages[0]
+    assert (usage.prompt_tokens, usage.completion_tokens) == (123, 45)
+    assert usage.model == "gpt-4o-mini"
+    assert usage.estimated_cost_usd is not None
 
-    assert client.last_usage == (123, 45)
-    assert client.last_model == "cheap-model"
+
+@pytest.mark.asyncio
+async def test_structured_retry_returns_both_billable_attempts() -> None:
+    client = LlmClient(LlmConfig(api_key="test-key", model="test-model", summary_model="gpt-4o-mini"))
+    first = _response_with_content("not json")
+    first.usage = MagicMock(prompt_tokens=100, completion_tokens=20, total_tokens=120)
+    second = _response_with_content(json.dumps({"title": "ok", "start_message_id": 1}))
+    second.usage = MagicMock(prompt_tokens=120, completion_tokens=30, total_tokens=150)
+    client._client.chat.completions.create = AsyncMock(side_effect=[first, second])
+
+    result = await client.chat_structured(messages=[], response_model=_Topic)
+
+    assert [(u.prompt_tokens, u.completion_tokens) for u in result.usages] == [(100, 20), (120, 30)]
+    assert sum(u.prompt_tokens for u in result.usages) == 220
+    assert sum(u.completion_tokens for u in result.usages) == 50
+    assert result.usages[0].status == "validation_failed"
+    assert result.usages[1].status == "succeeded"
+    assert [usage.attempt_number for usage in result.usages] == [1, 2]
+    assert result.usages[0].request_id == result.usages[1].request_id
+    assert result.usages[0].call_id != result.usages[1].call_id
+    assert sum(u.estimated_cost_usd for u in result.usages) > 0
 
 
 @pytest.mark.asyncio

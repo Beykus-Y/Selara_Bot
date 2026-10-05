@@ -5,6 +5,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -14,9 +15,17 @@ from redis.asyncio import Redis
 from sqlalchemy import case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.application.selara_ai_status import checkout_ready
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
 from selara.domain.entities import UserSnapshot
+from selara.infrastructure.db.ai_accounting import AiAccountingService
+from selara.infrastructure.db.ai_analytics import (
+    AdminAiAnalyticsRepository,
+    PaymentFilters,
+    as_utc,
+)
 from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
@@ -25,9 +34,13 @@ from selara.infrastructure.db.models import (
     ChatModel,
     OperationalAlertModel,
     UserChatMessageEventModel,
+    SelaraAiPaymentModel,
     UserFeatureRequestModel,
     UserModel,
 )
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
+from selara.infrastructure.llm.features import AiFeature
+from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.security.redaction import redact_sensitive_text
 
 UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
@@ -37,6 +50,8 @@ BroadcastStatus = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
 TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
 _PERIODS = {1, 7, 30, 90}
 _GROUP_TYPES = ("group", "supergroup")
+_PAYMENT_STATES = {"all", "applied", "rejected"}
+_REFUND_FILTERS = {"all", "none", "pending", "refunded", "failed"}
 _health_last_success: dict[str, str] = {}
 
 
@@ -45,6 +60,20 @@ def _utc_now() -> datetime:
 
 
 _PROCESS_STARTED_AT = _utc_now()
+
+
+def _decimal_str(value: Decimal) -> str:
+    """Serialize money without binary-float rounding or exponent notation."""
+    return format(value, "f")
+
+
+def _iso(value: datetime | None) -> str | None:
+    return as_utc(value).isoformat() if value is not None else None
+
+
+def _validate_period(period_days: int) -> None:
+    if period_days not in _PERIODS:
+        raise HTTPException(status_code=422, detail="Допустимые периоды: 1, 7, 30 или 90 дней.")
 
 
 def _percent_change(current: int, previous: int) -> float | None:
@@ -644,6 +673,241 @@ def build_miniapp_admin_router(
             "process_started_at": _PROCESS_STARTED_AT.isoformat(),
             "process_uptime_seconds": max(0, int((now - _PROCESS_STARTED_AT).total_seconds())),
             "components": components,
+        }
+
+    # ----- Selara AI accounting and Stars monetization (owner only) ------------
+
+    def _payment_json(item: dict[str, Any]) -> dict[str, Any]:
+        refund = item.get("refund")
+        result = {**item, "payment_at": _iso(item["payment_at"])}
+        if refund is not None:
+            result["refund"] = {
+                **refund,
+                "requested_at": _iso(refund["requested_at"]),
+                "completed_at": _iso(refund["completed_at"]),
+            }
+        return result
+
+    @router.get("/ai/summary")
+    async def ai_summary(period_days: int = Query(default=30), session: AsyncSession = AdminSession):
+        _validate_period(period_days)
+        window_to = _utc_now()
+        window_from = window_to - timedelta(days=period_days)
+        aggregate = await AiAccountingService(session_factory).aggregate_window(
+            window_from=window_from, window_to=window_to
+        )
+        series = await AdminAiAnalyticsRepository(session).daily_ai_series(
+            window_from=window_from, window_to=window_to, timezone_name=settings.bot_timezone
+        )
+        average = aggregate.average_known_cost_component_per_started_invocation_usd
+        return {
+            "ok": True,
+            "period_days": period_days,
+            "window_from": window_from.isoformat(),
+            "window_to": window_to.isoformat(),
+            "invocations": aggregate.invocations,
+            "provider_calls": aggregate.provider_calls,
+            "unsuccessful_invocations": aggregate.failed_invocations,
+            "unknown_cost_calls": aggregate.unknown_cost_calls,
+            "known_cost_usd": _decimal_str(aggregate.known_cost_usd),
+            "average_known_cost_per_invocation_usd": _decimal_str(average) if average is not None else None,
+            "daily": [
+                {**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in series
+            ],
+        }
+
+    @router.get("/ai/breakdown")
+    async def ai_breakdown(period_days: int = Query(default=30), session: AsyncSession = AdminSession):
+        _validate_period(period_days)
+        window_to = _utc_now()
+        window_from = window_to - timedelta(days=period_days)
+        repository = AdminAiAnalyticsRepository(session)
+        features = await repository.feature_breakdown(window_from=window_from, window_to=window_to)
+        models, marker_only_calls = await repository.model_breakdown(window_from=window_from, window_to=window_to)
+        stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
+        return {
+            "ok": True,
+            "period_days": period_days,
+            "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
+            "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
+            "unattributed_provider_calls": marker_only_calls,
+            "stages": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in stages],
+        }
+
+    @router.get("/monetization/summary")
+    async def monetization_summary(period_days: int = Query(default=30), session: AsyncSession = AdminSession):
+        _validate_period(period_days)
+        now = _utc_now()
+        window_from = now - timedelta(days=period_days)
+        repository = AdminAiAnalyticsRepository(session)
+        summary = await repository.payment_summary(window_from=window_from, window_to=now + timedelta(seconds=1))
+        counts = await repository.entitlement_counts(now=now)
+        series = await repository.daily_stars_series(
+            window_from=window_from, window_to=now + timedelta(seconds=1), timezone_name=settings.bot_timezone
+        )
+        return {
+            "ok": True,
+            "period_days": period_days,
+            "currency": "XTR",
+            **summary,
+            **counts,
+            "daily": series,
+            "checkout": {
+                "configured": checkout_ready(settings),
+                "price_stars": settings.selara_ai_price_stars,
+            },
+        }
+
+    @router.get("/monetization/payments")
+    async def monetization_payments(
+        state: str = Query(default="all"),
+        refund: str = Query(default="all"),
+        chat_id: int | None = Query(default=None),
+        buyer_id: int | None = Query(default=None),
+        period_days: int | None = Query(default=None),
+        cursor: str | None = Query(default=None, max_length=80),
+        limit: int = Query(default=20, ge=1, le=50),
+        session: AsyncSession = AdminSession,
+    ):
+        if state not in _PAYMENT_STATES:
+            raise HTTPException(status_code=422, detail="Допустимые статусы: all, applied, rejected.")
+        if refund not in _REFUND_FILTERS:
+            raise HTTPException(status_code=422, detail="Допустимые состояния возврата: all, none, pending, refunded, failed.")
+        if period_days is not None:
+            _validate_period(period_days)
+        parsed_cursor: tuple[datetime, int] | None = None
+        if cursor:
+            try:
+                raw_at, raw_id = cursor.rsplit("|", 1)
+                parsed_cursor = (as_utc(datetime.fromisoformat(raw_at)), int(raw_id))
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=422, detail="Некорректный cursor.") from None
+        filters = PaymentFilters(
+            state=state,
+            refund=refund,
+            chat_id=chat_id,
+            buyer_user_id=buyer_id,
+            since=_utc_now() - timedelta(days=period_days) if period_days else None,
+        )
+        items, next_cursor = await AdminAiAnalyticsRepository(session).list_payments(
+            filters=filters, cursor=parsed_cursor, limit=limit
+        )
+        return {
+            "ok": True,
+            "items": [_payment_json(item) for item in items],
+            "next_cursor": f"{next_cursor[0].isoformat()}|{next_cursor[1]}" if next_cursor else None,
+        }
+
+    @router.get("/monetization/payments/{payment_id}")
+    async def monetization_payment_detail(payment_id: int, session: AsyncSession = AdminSession):
+        item = await AdminAiAnalyticsRepository(session).payment_detail(payment_id=payment_id, now=_utc_now())
+        if item is None:
+            raise HTTPException(status_code=404, detail="Платёж не найден.")
+        entitlement = item.get("entitlement")
+        if entitlement is not None:
+            entitlement = {
+                **entitlement,
+                "valid_from": _iso(entitlement["valid_from"]),
+                "valid_until": _iso(entitlement["valid_until"]),
+            }
+        intent = item.get("intent")
+        if intent is not None:
+            intent = {
+                **intent,
+                "created_at": _iso(intent["created_at"]),
+                "expires_at": _iso(intent["expires_at"]),
+                "terms_accepted_at": _iso(intent["terms_accepted_at"]),
+            }
+        refund_hint = (
+            f"/stars_refund {item['id']}"
+            if item["state"] == "rejected" and item["refund"] is None
+            else None
+        )
+        return {
+            "ok": True,
+            **_payment_json(item),
+            "entitlement": entitlement,
+            "intent": intent,
+            "refund_command": refund_hint,
+        }
+
+    @router.get("/monetization/entitlements")
+    async def monetization_entitlements(session: AsyncSession = AdminSession):
+        now = _utc_now()
+        repository = AdminAiAnalyticsRepository(session)
+        counts = await repository.entitlement_counts(now=now)
+        rows = await repository.active_entitlements(now=now)
+        return {
+            "ok": True,
+            **counts,
+            "items": [
+                {
+                    **row,
+                    "valid_until": _iso(row["valid_until"]),
+                    "last_purchase_at": _iso(row["last_purchase_at"]),
+                }
+                for row in rows
+            ],
+        }
+
+    @router.get("/ai/readiness")
+    async def ai_readiness(session: AsyncSession = AdminSession):
+        """Informational diagnostics only; never creates a purchase or calls the provider."""
+        now = _utc_now()
+        checks: list[dict[str, str]] = []
+
+        def add(key: str, label: str, status: str, detail: str | None = None) -> None:
+            checks.append({"key": key, "label": label, "status": status, "detail": detail or ""})
+
+        # Same validation as the bot process and /premium (llm_runtime_problem).
+        _config, provider_problem = llm_runtime_problem(settings)
+        if provider_problem is None:
+            add("llm_provider", "AI-провайдер", "ok", "Настроен.")
+        else:
+            add("llm_provider", "AI-провайдер", "unavailable", provider_problem)
+
+        if settings.selara_ai_price_stars is not None:
+            add("stars_price", "Цена Stars", "ok", f"Цена задана: {settings.selara_ai_price_stars} ⭐.")
+        else:
+            add("stars_price", "Цена Stars", "missing", "SELARA_AI_PRICE_STARS не настроен.")
+
+        if checkout_ready(settings):
+            add("checkout", "Checkout", "ok", "Покупка Selara AI доступна.")
+        elif settings.selara_ai_price_stars is None:
+            add("checkout", "Checkout", "missing", "Checkout выключен: SELARA_AI_PRICE_STARS не настроен.")
+        else:
+            add("checkout", "Checkout", "unavailable", "Checkout выключен: AI-провайдер не настроен.")
+
+        try:
+            await session.scalar(select(SelaraAiPaymentModel.id).limit(1))
+            add("payment_schema", "Схема платежей в БД", "ok")
+        except Exception:
+            add("payment_schema", "Схема платежей в БД", "unavailable", "Запрос к таблице платежей не удался.")
+
+        try:
+            await SqlAlchemyChatEntitlementResolver(session_factory).resolve(
+                chat_id=0, feature=AiFeature.LLM_ADMIN, trigger="telegram_message"
+            )
+            add("entitlement_resolver", "Проверка доступа Selara AI", "ok")
+        except Exception:
+            add("entitlement_resolver", "Проверка доступа Selara AI", "unavailable", "Resolver не отвечает.")
+
+        try:
+            await AiAccountingService(session_factory).aggregate_window(
+                window_from=now - timedelta(hours=1), window_to=now
+            )
+            add("accounting", "Учёт стоимости AI", "ok")
+        except Exception:
+            add("accounting", "Учёт стоимости AI", "unavailable", "Агрегация учёта не удалась.")
+
+        return {
+            "ok": True,
+            "checkout": {
+                "configured": checkout_ready(settings),
+                "price_stars": settings.selara_ai_price_stars,
+                "product_key": SELARA_AI_PRODUCT_KEY,
+            },
+            "checks": checks,
         }
 
     return router

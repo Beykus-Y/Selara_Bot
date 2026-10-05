@@ -439,7 +439,7 @@ SETTING_META: dict[str, SettingMeta] = {
     "daily_summary_enabled": SettingMeta(
         title_ru="Итоги дня (бета)",
         short_ru="Итоги дня",
-        description_ru="Присылать ежедневную AI-сводку жизни чата за последние сутки. Требует включённый save_message.",
+        description_ru="Включить автоматическую AI-сводку чата по расписанию. Автоматические итоги доступны с Selara AI; настройку можно сохранить заранее. Ручная команда /summary работает отдельно. Требует включённый save_message.",
         value_hint_ru="true/false.",
     ),
     "daily_summary_hour": SettingMeta(

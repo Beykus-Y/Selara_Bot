@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -55,6 +56,108 @@ class ChatModel(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class ChatEntitlementModel(Base):
+    """Current time-bounded product access for one logical Telegram chat."""
+
+    __tablename__ = "chat_entitlements"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "product_key", name="uq_chat_entitlements_chat_product"),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_chat_entitlements_status"),
+        CheckConstraint("valid_from < valid_until", name="ck_chat_entitlements_validity"),
+        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_chat_entitlements_product"),
+        Index("idx_chat_entitlements_active_until", "product_key", "status", "valid_until"),
+    )
+
+
+class SelaraAiPurchaseIntentModel(Base):
+    """Server-side invoice context; the payload itself contains only its UUID."""
+
+    __tablename__ = "selara_ai_purchase_intents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    invoice_payload: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="open", server_default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    invoice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pre_checkout_query_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pre_checkout_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_selara_ai_purchase_intents_product"),
+        CheckConstraint("amount_stars > 0", name="ck_selara_ai_purchase_intents_amount"),
+        CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
+        CheckConstraint("status IN ('open', 'checkout_accepted', 'consumed')", name="ck_selara_ai_purchase_intents_status"),
+        CheckConstraint("currency = 'XTR'", name="ck_selara_ai_purchase_intents_currency"),
+        CheckConstraint(
+            "(terms_version IS NULL AND terms_accepted_at IS NULL) OR "
+            "(terms_version IS NOT NULL AND terms_accepted_at IS NOT NULL)",
+            name="ck_selara_ai_purchase_intents_terms_acceptance",
+        ),
+        Index("idx_selara_ai_purchase_intents_buyer_created", "buyer_user_id", "created_at"),
+        Index("idx_selara_ai_purchase_intents_chat", "chat_id", "status"),
+    )
+
+
+class SelaraAiPaymentModel(Base):
+    """Immutable Telegram payment audit, including rejected/mismatched updates."""
+
+    __tablename__ = "selara_ai_payments"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    telegram_payment_charge_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    invoice_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    purchase_intent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("selara_ai_purchase_intents.id", ondelete="SET NULL"), nullable=True
+    )
+    buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    product_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    payment_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processing_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    processing_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("amount_stars >= 0", name="ck_selara_ai_payments_nonnegative_amount"),
+        CheckConstraint("processing_state IN ('applied', 'rejected')", name="ck_selara_ai_payments_state"),
+        CheckConstraint(
+            "product_key IS NULL OR product_key IN ('selara_ai_monthly')",
+            name="ck_selara_ai_payments_product",
+        ),
+        Index("idx_selara_ai_payments_target_time", "target_chat_id", "payment_at"),
+        Index("idx_selara_ai_payments_buyer_time", "buyer_user_id", "payment_at"),
+        Index("idx_selara_ai_payments_state_time", "processing_state", "payment_at"),
     )
 
 
@@ -126,7 +229,7 @@ class UserChatProfileModel(Base):
 class UserChatAwardModel(Base):
     __tablename__ = "user_chat_awards"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -890,7 +993,7 @@ class ChatSettingsModel(Base):
 class ChatTriggerModel(Base):
     __tablename__ = "chat_triggers"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -2218,7 +2321,8 @@ class DailySummaryRunModel(Base):
     # application/daily_summary/pipeline.py's DailySummaryDiagnostics and
     # docs/DAILY_SUMMARY_TODO.md's beta observability wishlist.
     diagnostics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
-    pipeline_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 9), nullable=False, default=0, server_default="0")
+    pipeline_has_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     context_stt_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -2234,39 +2338,133 @@ class DailySummaryRunModel(Base):
     )
 
 
-class LlmUsageLogModel(Base):
-    """Per-call cost accounting for the daily summary feature (docs/DAILY_SUMMARY_TODO.md).
+class AiFeatureInvocationModel(Base):
+    """One logical Selara AI feature run; provider calls are recorded separately."""
 
-    Exactly one of `summary_run_id` / `message_archive_id` is set, never both: an LLM
-    pipeline stage (segment_topics/merge/analyst/writer) belongs to one run, while an
-    STT transcription happens asynchronously against one archived message, long before
-    any run for that day exists. A run's cost is attributed by joining back on
-    whichever of these two is populated -- see `pipeline_cost_usd`/`context_stt_cost_usd`
-    on `DailySummaryRunModel`.
-    """
+    __tablename__ = "ai_feature_invocations"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(24), nullable=False, default="chat", server_default="chat")
+    scope_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="running", server_default="running")
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    provider_attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    summary_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    error_category: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed', 'partial')",
+            name="ck_ai_feature_invocations_status",
+        ),
+        Index("idx_ai_feature_invocations_feature_started", "feature", "started_at"),
+        Index("idx_ai_feature_invocations_chat_started", "chat_id", "started_at"),
+        Index("idx_ai_feature_invocations_summary_run", "summary_run_id"),
+    )
+
+
+class AiFeatureQuotaUsageModel(Base):
+    """One logical feature quota reservation, separate from provider-call cost."""
+
+    __tablename__ = "ai_feature_quota_usage"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    invocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Immutable Telegram identity at reservation time. `chat_id` tracks the
+    # current commercial scope and may change on group -> supergroup migration.
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    policy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    quota_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    access_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="consumed", server_default="consumed")
+    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
+        CheckConstraint("quota_limit > 0", name="ck_ai_feature_quota_positive_limit"),
+        CheckConstraint("status IN ('consumed', 'released')", name="ck_ai_feature_quota_status"),
+        UniqueConstraint("idempotency_key", name="uq_ai_feature_quota_idempotency"),
+        UniqueConstraint("invocation_id", name="uq_ai_feature_quota_invocation"),
+        Index("idx_ai_feature_quota_period_usage", "feature", "chat_id", "period_start", "status"),
+    )
+
+
+class LlmUsageLogModel(Base):
+    """One provider inference or STT attempt, optionally linked to legacy rows."""
 
     __tablename__ = "llm_usage_log"
 
     id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    call_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    invocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_feature_invocations.id", ondelete="SET NULL"), nullable=True
+    )
     summary_run_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="CASCADE"), nullable=True
+        BigInteger, ForeignKey("daily_summary_runs.id", ondelete="SET NULL"), nullable=True
     )
     message_archive_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=True
+        BigInteger, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
     )
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
     feature: Mapped[str] = mapped_column(String(32), nullable=False)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audio_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    estimated_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 9), nullable=True)
+    pricing_status: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="succeeded", server_default="succeeded")
+    attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
         Index("idx_llm_usage_log_summary_run", "summary_run_id"),
         Index("idx_llm_usage_log_message_archive", "message_archive_id"),
+        Index("idx_llm_usage_log_call_id", "call_id", unique=True),
+        Index("idx_llm_usage_log_request_id", "request_id"),
+        Index("idx_llm_usage_log_invocation", "invocation_id"),
+        Index("idx_llm_usage_log_feature_created", "feature", "created_at"),
+        CheckConstraint("pricing_status IN ('known', 'unknown', 'legacy')", name="ck_llm_usage_log_pricing_status"),
+        CheckConstraint(
+            "status IN ('succeeded', 'failed', 'validation_failed')",
+            name="ck_llm_usage_log_status",
+        ),
     )
 
 

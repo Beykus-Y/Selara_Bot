@@ -65,6 +65,50 @@ def build_user_snapshot(
     )
 
 
+def is_telegram_chat_admin(member: object) -> bool:
+    """Use Telegram's live membership status as the admin/creator authority."""
+    return getattr(member, "status", None) in {"administrator", "creator"}
+
+
+async def lookup_owner_admin_status(
+    *,
+    bot: Bot | None,
+    chat_id: int,
+    admin_user_id: int | None,
+) -> bool | None:
+    """Return the owner's live admin status, or None when it could not be verified."""
+    if bot is None or admin_user_id is None:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=admin_user_id)
+    except Exception:
+        logger.warning(
+            "Could not verify owner-admin exemption; applying normal feature access policy",
+            extra={
+                "chat_id": chat_id,
+                "owner_user_id": admin_user_id,
+                "access_reason": "owner_exemption_unverified",
+            },
+            exc_info=True,
+        )
+        return None
+    return is_telegram_chat_admin(member)
+
+
+async def resolve_owner_admin_exemption(
+    *,
+    bot: Bot | None,
+    chat_id: int,
+    admin_user_id: int | None,
+) -> bool:
+    """Confirm the configured Selara owner is a Telegram admin in this chat.
+
+    Verification failures are logged and treated as unconfirmed, leaving the
+    regular commercial access policy in force.
+    """
+    return bool(await lookup_owner_admin_status(bot=bot, chat_id=chat_id, admin_user_id=admin_user_id))
+
+
 async def _resolve_owner_bootstrap_user(*, bot: Bot | None, chat: ChatSnapshot, fallback_user: UserSnapshot) -> UserSnapshot:
     if bot is None or chat.chat_type not in {"group", "supergroup"}:
         return fallback_user

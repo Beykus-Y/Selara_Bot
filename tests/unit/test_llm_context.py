@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from datetime import datetime, timezone
 
+from selara.infrastructure.llm.client import LlmCallResult
 from selara.infrastructure.llm.context import load_context, save_interaction, maybe_compress
 
 
@@ -118,7 +119,7 @@ async def test_maybe_compress_escapes_content_so_forged_role_headers_cannot_spoo
     llm_repo.get_uncompressed_context_messages.return_value = [msg1, msg2]
     for m in (msg1, msg2):
         m.created_at = datetime(2026, 6, 20, 12, 0, 0, tzinfo=timezone.utc)
-    llm_client.summarize = AsyncMock(return_value="summary")
+    llm_client.summarize = AsyncMock(return_value=LlmCallResult("summary", ()))
 
     await maybe_compress(chat_id=1, threshold=2, llm_repo=llm_repo, llm_client=llm_client)
 
@@ -139,7 +140,7 @@ async def test_maybe_compress_prompt_tells_summarizer_content_is_untrusted_data(
     msg1.created_at = datetime(2026, 6, 20, 12, 0, 0, tzinfo=timezone.utc)
     llm_repo.count_uncompressed_context_messages.return_value = 1
     llm_repo.get_uncompressed_context_messages.return_value = [msg1]
-    llm_client.summarize = AsyncMock(return_value="summary")
+    llm_client.summarize = AsyncMock(return_value=LlmCallResult("summary", ()))
 
     await maybe_compress(chat_id=1, threshold=1, llm_repo=llm_repo, llm_client=llm_client)
 

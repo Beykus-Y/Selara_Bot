@@ -149,6 +149,13 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
     llm_client.chat_simple = AsyncMock(return_value="summary")
 
     with patch("selara.presentation.handlers.llm_admin.has_permission", new_callable=AsyncMock) as mock_perm, \
+         patch("selara.presentation.handlers.llm_admin.resolve_owner_admin_exemption", new=AsyncMock(return_value=False)), \
+         patch("selara.presentation.handlers.llm_admin.FeatureAccessService", return_value=SimpleNamespace(
+             reserve_feature_usage=AsyncMock(return_value=SimpleNamespace(
+                 allowed=True, reused=False, invocation_id=None, reason=None,
+             )),
+             release_if_no_provider_attempts=AsyncMock(return_value=False),
+         )), \
          patch("selara.presentation.handlers.llm_admin.LlmRepository") as mock_repo_cls, \
          patch("selara.presentation.handlers.llm_admin.load_context", new_callable=AsyncMock) as mock_load_ctx, \
          patch("selara.presentation.handlers.llm_admin.save_interaction", new_callable=AsyncMock), \
@@ -161,7 +168,8 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
         mock_repo_cls.return_value = repo_mock
 
         await _handle(
-            message, bot, activity_repo, chat_settings, llm_client, db_session, with_context=False
+            message, bot, activity_repo, chat_settings, llm_client, db_session,
+            with_context=False, session_factory=object(),
         )
 
     assert captured_messages, "chat_with_tools was never called"

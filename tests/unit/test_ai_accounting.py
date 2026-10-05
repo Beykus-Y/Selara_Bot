@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from selara.infrastructure.db.ai_accounting import AiAccountingService
+from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.models import AiFeatureInvocationModel
+from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallUsage
+
+
+@pytest.mark.asyncio
+async def test_invocation_aggregate_keeps_unknown_cost_separate_from_known_total():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="llm_admin", trigger="telegram_message", chat_id=-100, actor_user_id=5, mode="context"
+        )
+        context = LlmAccountingContext(invocation_id, "llm_admin", "assistant_round", -100, actor_user_id=5)
+        await service.record_provider_call(
+            context,
+            LlmCallUsage(str(uuid4()), "gpt-4o-mini", 100, 20, 120, Decimal("0.000027"), "known", 1, "succeeded"),
+        )
+        await service.record_provider_call(
+            context,
+            LlmCallUsage(str(uuid4()), "new-provider-model", 70, 10, 80, None, "unknown", 1, "succeeded"),
+        )
+
+        aggregate = await service.aggregate_invocation(invocation_id=invocation_id)
+
+        assert aggregate.provider_calls == 2
+        assert aggregate.prompt_tokens == 170
+        assert aggregate.completion_tokens == 30
+        assert aggregate.known_cost_usd == Decimal("0.000027000")
+        assert aggregate.has_unknown_cost is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_structured_validation_update_reuses_one_provider_call_record():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="daily_summary", trigger="manual", chat_id=-101
+        )
+        context = LlmAccountingContext(invocation_id, "daily_summary", "merge", -101)
+        call_id = str(uuid4())
+        received = LlmCallUsage(call_id, "gpt-4o-mini", 100, 20, 120, Decimal("0.000027"), "known", 1, "succeeded")
+        invalid = LlmCallUsage(call_id, "gpt-4o-mini", 100, 20, 120, Decimal("0.000027"), "known", 1, "validation_failed")
+        await service.record_provider_call(context, received)
+        await service.record_provider_call(context, invalid)
+
+        aggregate = await service.aggregate_invocation(invocation_id=invocation_id)
+
+        assert aggregate.provider_calls == 1
+        assert aggregate.known_cost_usd == Decimal("0.000027000")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_invocation_with_persisted_provider_call_finishes_partial():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="llm_admin", trigger="telegram_message", chat_id=-100,
+        )
+        await service.record_provider_call(
+            LlmAccountingContext(invocation_id, "llm_admin", "assistant_round", -100),
+            LlmCallUsage(str(uuid4()), "gpt-4o-mini", 20, 3, 23, Decimal("0.00001"), "known", 1, "succeeded"),
+        )
+
+        await service.finish_invocation_outcome(
+            invocation_id=invocation_id, status="failed", error_category="handler_error",
+        )
+
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, invocation_id)
+            assert invocation.status == "partial"
+            assert invocation.error_category == "handler_error"
+            assert invocation.completed_at is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_start_marker_without_usage_is_unknown_cost_not_zero_usage():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = AiAccountingService(factory)
+    try:
+        invocation_id = await service.create_invocation(
+            feature="daily_summary",
+            trigger="scheduled",
+            chat_id=None,
+            summary_run_id=42,
+        )
+        await service.mark_provider_attempt_started(invocation_id=invocation_id)
+
+        aggregate = await service.aggregate_invocation(invocation_id=invocation_id)
+        run_aggregate = await service.aggregate_summary_run(summary_run_id=42)
+        await service.finish_invocation_outcome(
+            invocation_id=invocation_id,
+            status="failed",
+            error_category="cancelled_after_provider_start",
+        )
+        window = await service.aggregate_window(
+            window_from=datetime.now(timezone.utc) - timedelta(minutes=1),
+            window_to=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+        assert aggregate.provider_calls == 1
+        assert aggregate.known_cost_usd == Decimal("0")
+        assert aggregate.has_unknown_cost
+        assert run_aggregate.provider_calls == 1
+        assert run_aggregate.has_unknown_cost
+        assert window.provider_calls == 1
+        assert window.unknown_cost_calls == 1
+        assert window.known_cost_usd == Decimal("0")
+        assert window.failed_invocations == 1
+        async with factory() as session:
+            invocation = await session.get(AiFeatureInvocationModel, invocation_id)
+            assert invocation.status == "partial"
+    finally:
+        await engine.dispose()

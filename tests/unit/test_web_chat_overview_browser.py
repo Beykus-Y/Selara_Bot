@@ -201,7 +201,11 @@ async def test_chat_settings_toggle_marks_card_dirty_and_saves_via_fetch() -> No
             await card.locator(".setting-form button[type=submit]").click()
 
             current = card.locator("[data-setting-current]")
-            await page.wait_for_timeout(120)
+            await page.wait_for_function(
+                """() => document.querySelector(
+                    '[data-setting-key="economy_enabled"] [data-setting-current]'
+                )?.textContent?.toLowerCase().includes('выключено')"""
+            )
             assert "выключено" in (await current.inner_text()).lower()
             assert "is-dirty" not in (await card.get_attribute("class") or "")
         finally:

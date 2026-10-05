@@ -24,6 +24,7 @@ export const routes = {
   admin: '/admin',
   adminFeedback: '/admin/feedback',
   adminMonitoring: '/admin/monitoring',
+  adminAi: '/admin/ai',
   adminMore: '/admin/more',
   adminBroadcast: '/admin/broadcast',
 
