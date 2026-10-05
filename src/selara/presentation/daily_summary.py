@@ -268,16 +268,10 @@ async def _send_and_mark(
             return None
 
         async def delivery_claim_is_current() -> bool:
-            async with session_factory() as ownership_session:
-                current_run = await SqlAlchemyActivityRepository(ownership_session).get_daily_summary_run_by_id(
-                    run_id=run_id
-                )
-            return bool(
-                current_run is not None
-                and current_run.claimed_at == delivery_claimed_at
-                and current_run.chat_id == chat_id
-                and current_run.status in ("generated", "send_failed")
-                and current_run.lease_until > datetime.now(timezone.utc)
+            return await repo.is_daily_summary_delivery_claim_current(
+                run_id=run_id,
+                chat_id=chat_id,
+                claimed_at=delivery_claimed_at,
             )
 
         try:
