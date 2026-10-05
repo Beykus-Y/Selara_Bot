@@ -33,7 +33,7 @@ from selara.domain.entities import ChatSnapshot, ChatTrigger, CustomSocialAction
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission, is_telegram_chat_admin
-from selara.presentation.targeting import resolve_chat_target_user
+from selara.presentation.targeting import NOT_CHAT_MEMBER_TEXT, is_target_active_chat_member, resolve_chat_target_user
 from selara.presentation.family_tree import build_family_tree_image
 from selara.presentation.handlers.settings_common import settings_to_dict
 
@@ -1301,6 +1301,12 @@ async def _send_family_request(
         return
     if target.telegram_user_id == message.from_user.id:
         await message.answer("Нельзя отправить запрос самому себе.")
+        return
+    if target.is_bot:
+        await message.answer("Нельзя отправить запрос боту.")
+        return
+    if not await is_target_active_chat_member(message, activity_repo, target=target):
+        await message.answer(NOT_CHAT_MEMBER_TEXT)
         return
 
     request_id = secrets.token_hex(8)

@@ -28,6 +28,7 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "auction",
         "bid",
         "growth",
+        "growth_action",
         "title",
         # Отношения
         "pair",
@@ -44,7 +45,12 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "divorce",
         # Семья
         "adopt",
+        "adoptdaughter",
         "pet",
+        "escape_family",
+        "escape_pet",
+        "escapefamily",
+        "escapepet",
         # Игры
         "game",
         # Прочие активности
@@ -94,6 +100,16 @@ _LOCKED_CALLBACK_PREFIXES: tuple[str, ...] = (
 )
 
 
+CHAT_WRITE_LOCK_ANSWER = "🔒 Чат заблокирован администратором. Команда недоступна."
+
+
+def is_write_locked_command(command_key: str | None) -> bool:
+    """Ключ команды блокируется при chat_write_locked (включая все соцдействия)."""
+    if command_key is None:
+        return False
+    return command_key in _LOCKED_COMMANDS or command_key.startswith("social_")
+
+
 class ChatWriteLockMiddleware(BaseMiddleware):
     """Блокирует пользовательские команды когда chat_write_locked=True."""
 
@@ -124,10 +140,10 @@ class ChatWriteLockMiddleware(BaseMiddleware):
             match = match_builtin_command(raw_text)
             command_key = match.command_key if match is not None else None
 
-        if command_key not in _LOCKED_COMMANDS:
+        if not is_write_locked_command(command_key):
             return await handler(event, data)
 
-        await event.answer("🔒 Чат заблокирован администратором. Команда недоступна.")
+        await event.answer(CHAT_WRITE_LOCK_ANSWER)
         return None
 
     async def _handle_callback(

@@ -6,7 +6,7 @@ import re
 import hashlib
 import time
 from os.path import basename
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import BytesIO
@@ -72,6 +72,7 @@ from selara.presentation.commands.resolver import TextCommandResolutionError, re
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 from selara.presentation.middlewares.error_handler import notify_operational_error
+from selara.presentation.middlewares.chat_write_lock import CHAT_WRITE_LOCK_ANSWER, is_write_locked_command
 from selara.presentation.handlers.economy import (
     auction_command as economy_auction_command,
     bid_command as economy_bid_command,
@@ -5655,9 +5656,6 @@ async def photo_commands_handler(message: Message, bot: Bot, settings: Settings,
     if not chat_settings.text_commands_enabled:
         return
 
-    if chat_settings.text_commands_locale.lower() != "ru":
-        return
-
     if message.chat.type not in settings.supported_chat_types:
         return
 
@@ -5787,7 +5785,7 @@ async def text_commands_handler(
         )
         return
 
-    if message.chat.type in {"group", "supergroup"} and chat_settings.text_commands_locale.lower() == "ru":
+    if message.chat.type in {"group", "supergroup"}:
         try:
             alias_mode = await activity_repo.get_chat_alias_mode(chat_id=message.chat.id)
             aliases = await activity_repo.list_chat_aliases(chat_id=message.chat.id)
@@ -5800,6 +5798,10 @@ async def text_commands_handler(
         if rewritten is None:
             return
         text = rewritten
+
+    write_locked = bool(chat_settings.chat_write_locked) and message.chat.type in {"group", "supergroup"}
+    if write_locked and chat_settings.custom_rp_enabled:
+        chat_settings = replace(chat_settings, custom_rp_enabled=False)
 
     if _is_reply_profile_lookup(message, text):
         if not await _enforce_command_access(message, activity_repo, command_key="me"):
@@ -5865,19 +5867,6 @@ async def text_commands_handler(
         return
 
     if not chat_settings.text_commands_enabled:
-        if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
-                custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
-                if custom_social_action is not None:
-                    await send_custom_social_action(message, activity_repo, custom_social_action)
-                    return
-            if chat_settings.smart_triggers_enabled and not text.strip().startswith("/"):
-                trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
-                if trigger is not None:
-                    await send_chat_trigger(message, activity_repo, trigger)
-        return
-
-    if chat_settings.text_commands_locale.lower() != "ru":
         if message.chat.type in {"group", "supergroup"}:
             if chat_settings.custom_rp_enabled:
                 custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
@@ -5957,6 +5946,9 @@ async def text_commands_handler(
 
     social_action = _extract_social_action(text)
     if social_action is not None:
+        if write_locked:
+            await message.answer(CHAT_WRITE_LOCK_ANSWER)
+            return
         if not await _enforce_command_access(message, activity_repo, command_key=f"social_{social_action}"):
             return
         await _send_social_action(message, activity_repo, chat_settings, action_key=social_action)
@@ -6073,6 +6065,10 @@ async def text_commands_handler(
 
     if intent.name == "rp_list":
         await _manage_rp_action_list(message, activity_repo, settings)
+        return
+
+    if write_locked and is_write_locked_command(intent.name):
+        await message.answer(CHAT_WRITE_LOCK_ANSWER)
         return
 
     if not await _enforce_command_access(message, activity_repo, command_key=intent.name):
