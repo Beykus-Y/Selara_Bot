@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -19,6 +19,7 @@ from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
     AiFeatureQuotaUsageModel,
     ChatModel,
+    DailySummaryRunModel,
     LlmUsageLogModel,
 )
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
@@ -437,5 +438,134 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
         async with factory() as session:
             total_usage_rows = await session.scalar(select(func.count(AiFeatureQuotaUsageModel.id)))
         assert total_usage_rows == 3  # migrated duplicate replay did not add another reservation
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_summary_quota_recovery_follows_run_id_after_migration_collision():
+    engine, factory = await _database()
+    try:
+        old_chat_id, new_chat_id = -100_700_009, -100_700_010
+        await _seed_chats(factory, old_chat_id, new_chat_id)
+        old_run_key = "daily_summary:run:100"
+        summary_date = _NOW.date()
+        async with factory() as session:
+            old_run = DailySummaryRunModel(
+                id=100,
+                chat_id=old_chat_id,
+                summary_date=summary_date,
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="manual",
+                status="claimed",
+                claimed_at=_NOW - timedelta(hours=1),
+                lease_until=_NOW - timedelta(minutes=1),
+            )
+            new_run = DailySummaryRunModel(
+                id=200,
+                chat_id=new_chat_id,
+                summary_date=summary_date,
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="manual",
+                status="claimed",
+                claimed_at=_NOW - timedelta(hours=1),
+                lease_until=_NOW - timedelta(minutes=1),
+            )
+            session.add_all([old_run, new_run])
+            await session.flush()
+            invocation = AiFeatureInvocationModel(
+                feature=AiFeature.DAILY_SUMMARY.value,
+                trigger="manual",
+                chat_id=old_chat_id,
+                scope_type="chat",
+                scope_id=str(old_chat_id),
+                summary_run_id=old_run.id,
+                status="failed",
+                error_category="cancelled",
+            )
+            session.add(invocation)
+            await session.flush()
+            session.add(AiFeatureQuotaUsageModel(
+                feature=AiFeature.DAILY_SUMMARY.value,
+                chat_id=old_chat_id,
+                actor_user_id=None,
+                invocation_id=invocation.id,
+                trigger="manual",
+                source_chat_id=old_chat_id,
+                source_message_id=4242,
+                idempotency_key=old_run_key,
+                period_start=datetime(2026, 9, 30, 17, 0, tzinfo=timezone.utc),
+                period_end=datetime(2026, 10, 31, 17, 0, tzinfo=timezone.utc),
+                policy_key="daily_summary_manual_free_monthly_v1",
+                quota_limit=10,
+                access_tier="free",
+                owner_exempt=False,
+                status="released",
+                release_reason="cancelled",
+                released_at=_NOW - timedelta(minutes=30),
+            ))
+            await session.commit()
+
+        async with factory() as session:
+            migration = await migrate_chat_id(
+                session, old_chat_id=old_chat_id, new_chat_id=new_chat_id,
+            )
+            await session.commit()
+        assert migration.migrated
+
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        canonical_key = "daily_summary:run:200"
+        recovered = await _reserve(
+            service,
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=new_chat_id,
+            key=canonical_key,
+            trigger="manual",
+            now=_NOW,
+            summary_run_id=200,
+        )
+        replay = await _reserve(
+            service,
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=new_chat_id,
+            key=canonical_key,
+            trigger="manual",
+            now=_NOW,
+            summary_run_id=200,
+        )
+
+        assert recovered.allowed and recovered.reused
+        assert recovered.invocation_id is not None
+        assert replay.allowed and replay.reused
+        assert replay.invocation_id == recovered.invocation_id
+        async with factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+            usage_rows = (await session.execute(
+                select(AiFeatureQuotaUsageModel).where(
+                    AiFeatureQuotaUsageModel.feature == AiFeature.DAILY_SUMMARY.value,
+                )
+            )).scalars().all()
+            invocation = await session.get(AiFeatureInvocationModel, recovered.invocation_id)
+            used_summary = await service.get_usage_summary(
+                feature=AiFeature.DAILY_SUMMARY,
+                chat_id=new_chat_id,
+                trigger="manual",
+                timezone_name="Asia/Barnaul",
+                now=_NOW,
+            )
+        assert len(runs) == 1 and runs[0].id == 200
+        assert len(usage_rows) == 1
+        assert usage_rows[0].chat_id == new_chat_id
+        assert usage_rows[0].idempotency_key == old_run_key
+        assert usage_rows[0].status == "consumed"
+        assert usage_rows[0].source_chat_id == old_chat_id
+        assert usage_rows[0].source_message_id == 4242
+        assert invocation.summary_run_id == 200
+        assert invocation.chat_id == new_chat_id
+        assert invocation.status == "running"
+        assert used_summary.quota_used == 1
     finally:
         await engine.dispose()

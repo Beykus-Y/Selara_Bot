@@ -84,6 +84,43 @@ class SqlAlchemyFeatureQuotaRepository:
                         AiFeatureQuotaUsageModel.idempotency_key == idempotency_key,
                     ).with_for_update()
                 )
+                if (
+                    existing is None
+                    and policy.feature == AiFeature.DAILY_SUMMARY
+                    and trigger == "manual"
+                    and summary_run_id is not None
+                ):
+                    recovered_rows = (
+                        await session.scalars(
+                            select(AiFeatureQuotaUsageModel)
+                            .join(
+                                AiFeatureInvocationModel,
+                                AiFeatureInvocationModel.id == AiFeatureQuotaUsageModel.invocation_id,
+                            )
+                            .where(
+                                AiFeatureQuotaUsageModel.feature == policy.feature.value,
+                                AiFeatureQuotaUsageModel.trigger == "manual",
+                                AiFeatureInvocationModel.summary_run_id == summary_run_id,
+                            )
+                            .order_by(AiFeatureQuotaUsageModel.id)
+                            .limit(2)
+                            .with_for_update(of=AiFeatureQuotaUsageModel)
+                        )
+                    ).all()
+                    if len(recovered_rows) > 1:
+                        logger.error(
+                            "Multiple quota reservations match manual Daily Summary run chat_id=%s summary_run_id=%s",
+                            chat_id, summary_run_id,
+                        )
+                        raise RuntimeError(
+                            "Multiple quota reservations match one manual Daily Summary run"
+                        )
+                    if recovered_rows:
+                        existing = recovered_rows[0]
+                        logger.info(
+                            "Manual Daily Summary reservation recovered by run identity chat_id=%s summary_run_id=%s usage_id=%s",
+                            chat_id, summary_run_id, existing.id,
+                        )
                 if existing is not None:
                     if existing.feature != policy.feature.value:
                         raise RuntimeError("Feature quota idempotency key was reused across features")
