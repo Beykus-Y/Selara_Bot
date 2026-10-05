@@ -175,6 +175,84 @@ async def test_paid_manual_quota_is_supplied_as_policy_without_a_product_default
 
 
 @pytest.mark.asyncio
+async def test_paid_tier_keeps_existing_free_manual_limit_until_a_paid_policy_is_defined():
+    decision_from_repository = FeatureAccessDecision(
+        allowed=True,
+        feature=AiFeature.DAILY_SUMMARY,
+        scope_type="chat",
+        scope_id="-100500",
+        access_tier=AccessTier.FREE,
+        quota_limit=10,
+        quota_used=1,
+        quota_remaining=9,
+        period_start=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        period_end=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        policy_key="daily_summary_manual_free_monthly_v1",
+    )
+    repository = SimpleNamespace(reserve=AsyncMock(return_value=decision_from_repository))
+    resolver = SimpleNamespace(resolve=AsyncMock(return_value=FeatureEntitlement(
+        access_tier=AccessTier.PAID,
+        valid_until=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        source="telegram_stars",
+    )))
+    service = FeatureAccessService(repository, entitlement_resolver=resolver)
+
+    decision = await service.reserve_feature_usage(
+        feature=AiFeature.DAILY_SUMMARY,
+        chat_id=-100500,
+        actor_user_id=None,
+        trigger="manual",
+        timezone_name="UTC",
+        idempotency_key="daily_summary:run:paid-free-policy",
+        now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert repository.reserve.await_args.kwargs["policy"].limit == 10
+    assert repository.reserve.await_args.kwargs["access_tier"] == AccessTier.PAID
+    assert decision.access_tier == AccessTier.PAID
+    assert decision.quota_limit == 10
+    assert decision.entitlement_source == "telegram_stars"
+
+
+@pytest.mark.asyncio
+async def test_paid_llm_admin_keeps_daily_free_quota_but_resolves_paid_tier():
+    decision_from_repository = FeatureAccessDecision(
+        allowed=True,
+        feature=AiFeature.LLM_ADMIN,
+        scope_type="chat",
+        scope_id="-100500",
+        access_tier=AccessTier.FREE,
+        quota_limit=10,
+        quota_used=1,
+        quota_remaining=9,
+        period_start=datetime(2026, 10, 5, tzinfo=timezone.utc),
+        period_end=datetime(2026, 10, 6, tzinfo=timezone.utc),
+        policy_key="llm_admin_free_daily_v1",
+    )
+    repository = SimpleNamespace(reserve=AsyncMock(return_value=decision_from_repository))
+    resolver = SimpleNamespace(resolve=AsyncMock(return_value=FeatureEntitlement(
+        access_tier=AccessTier.PAID,
+        valid_until=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        source="telegram_stars",
+    )))
+    service = FeatureAccessService(repository, entitlement_resolver=resolver)
+
+    decision = await service.reserve_feature_usage(
+        feature=AiFeature.LLM_ADMIN,
+        chat_id=-100500,
+        actor_user_id=None,
+        trigger="telegram_message",
+        timezone_name="UTC",
+        idempotency_key="llm_admin:paid-free-policy",
+        now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert repository.reserve.await_args.kwargs["policy"].limit == 10
+    assert repository.reserve.await_args.kwargs["access_tier"] == AccessTier.PAID
+    assert decision.access_tier == AccessTier.PAID
+
+
+@pytest.mark.asyncio
 async def test_expired_paid_entitlement_and_resolver_errors_fail_closed():
     resolver = SimpleNamespace(
         resolve=AsyncMock(return_value=FeatureEntitlement(

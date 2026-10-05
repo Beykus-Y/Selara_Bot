@@ -59,6 +59,108 @@ class ChatModel(Base):
     )
 
 
+class ChatEntitlementModel(Base):
+    """Current time-bounded product access for one logical Telegram chat."""
+
+    __tablename__ = "chat_entitlements"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "product_key", name="uq_chat_entitlements_chat_product"),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_chat_entitlements_status"),
+        CheckConstraint("valid_from < valid_until", name="ck_chat_entitlements_validity"),
+        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_chat_entitlements_product"),
+        Index("idx_chat_entitlements_active_until", "product_key", "status", "valid_until"),
+    )
+
+
+class SelaraAiPurchaseIntentModel(Base):
+    """Server-side invoice context; the payload itself contains only its UUID."""
+
+    __tablename__ = "selara_ai_purchase_intents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    invoice_payload: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="open", server_default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    invoice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pre_checkout_query_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pre_checkout_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_selara_ai_purchase_intents_product"),
+        CheckConstraint("amount_stars > 0", name="ck_selara_ai_purchase_intents_amount"),
+        CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
+        CheckConstraint("status IN ('open', 'checkout_accepted', 'consumed')", name="ck_selara_ai_purchase_intents_status"),
+        CheckConstraint("currency = 'XTR'", name="ck_selara_ai_purchase_intents_currency"),
+        CheckConstraint(
+            "(terms_version IS NULL AND terms_accepted_at IS NULL) OR "
+            "(terms_version IS NOT NULL AND terms_accepted_at IS NOT NULL)",
+            name="ck_selara_ai_purchase_intents_terms_acceptance",
+        ),
+        Index("idx_selara_ai_purchase_intents_buyer_created", "buyer_user_id", "created_at"),
+        Index("idx_selara_ai_purchase_intents_chat", "chat_id", "status"),
+    )
+
+
+class SelaraAiPaymentModel(Base):
+    """Immutable Telegram payment audit, including rejected/mismatched updates."""
+
+    __tablename__ = "selara_ai_payments"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    telegram_payment_charge_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    invoice_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    purchase_intent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("selara_ai_purchase_intents.id", ondelete="SET NULL"), nullable=True
+    )
+    buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    product_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    payment_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processing_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    processing_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("amount_stars >= 0", name="ck_selara_ai_payments_nonnegative_amount"),
+        CheckConstraint("processing_state IN ('applied', 'rejected')", name="ck_selara_ai_payments_state"),
+        CheckConstraint(
+            "product_key IS NULL OR product_key IN ('selara_ai_monthly')",
+            name="ck_selara_ai_payments_product",
+        ),
+        Index("idx_selara_ai_payments_target_time", "target_chat_id", "payment_at"),
+        Index("idx_selara_ai_payments_buyer_time", "buyer_user_id", "payment_at"),
+        Index("idx_selara_ai_payments_state_time", "processing_state", "payment_at"),
+    )
+
+
 class UserChatActivityModel(Base):
     __tablename__ = "user_chat_activity"
 
@@ -127,7 +229,7 @@ class UserChatProfileModel(Base):
 class UserChatAwardModel(Base):
     __tablename__ = "user_chat_awards"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
@@ -891,7 +993,7 @@ class ChatSettingsModel(Base):
 class ChatTriggerModel(Base):
     __tablename__ = "chat_triggers"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),

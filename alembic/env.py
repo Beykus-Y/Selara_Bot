@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db import models  # noqa: F401
+from selara.infrastructure.db import selara_ai_payment_refund  # noqa: F401
 
 config = context.config
 

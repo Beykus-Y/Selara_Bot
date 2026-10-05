@@ -295,6 +295,10 @@ async def test_migrate_chat_id_moves_error_alert_destination(monkeypatch):
                 )
                 self.runtime_settings.error_alert_chat_id = destination
 
+        async def scalars(self, statement):
+            # This test has no purchase intents or entitlements to merge.
+            return []
+
         async def flush(self):
             return None
 
