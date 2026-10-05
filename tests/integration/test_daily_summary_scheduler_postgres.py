@@ -1692,3 +1692,36 @@ async def test_manual_retry_after_failed_run_explains_the_failure() -> None:
         assert again.reason == "already_failed_today"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failed_owner_lookup_is_not_cached_as_a_denial() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        bot = _fake_bot(owner_status="administrator")
+        bot.get_chat_member = AsyncMock(side_effect=RuntimeError("telegram timeout"))
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        cache: dict[int, datetime] = {}
+        kwargs = {
+            "bot": bot,
+            "session_factory": session_factory,
+            "llm_client": client,
+            "chat": ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat"),
+            "trigger": "scheduled",
+            "window_to": _NOW,
+            "summary_date": _NOW.date(),
+            "settings": _test_settings(admin_user_id=_USER_ID),
+            "owner_denial_cache": cache,
+        }
+
+        failed = await attempt_daily_summary_run(now_utc=_NOW, **kwargs)
+        assert failed.reason == "access_required"
+        assert cache == {}
+
+        bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="administrator"))
+        recovered = await attempt_daily_summary_run(now_utc=_NOW + timedelta(minutes=15), **kwargs)
+        assert recovered.sent
+    finally:
+        await engine.dispose()

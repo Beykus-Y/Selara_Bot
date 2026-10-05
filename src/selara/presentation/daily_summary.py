@@ -34,7 +34,7 @@ from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementRes
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
 from selara.infrastructure.llm.features import AiFeature
-from selara.presentation.auth import resolve_owner_admin_exemption
+from selara.presentation.auth import lookup_owner_admin_status, resolve_owner_admin_exemption
 from selara.presentation.feature_access_messages import quota_exhausted_message
 
 logger = logging.getLogger(__name__)
@@ -363,17 +363,18 @@ async def attempt_daily_summary_run(
         cached_until = owner_denial_cache.get(chat.telegram_chat_id) if owner_denial_cache is not None else None
         if cached_until is not None and now_utc < cached_until:
             return False
-        owner_exempt = await resolve_owner_admin_exemption(
+        owner_status = await lookup_owner_admin_status(
             bot=bot,
             chat_id=chat.telegram_chat_id,
             admin_user_id=settings.admin_user_id,
         )
         if owner_denial_cache is not None:
-            if owner_exempt:
-                owner_denial_cache.pop(chat.telegram_chat_id, None)
-            else:
+            if owner_status is False:
                 owner_denial_cache[chat.telegram_chat_id] = now_utc + _OWNER_DENIAL_CACHE_TTL
-        return owner_exempt
+            else:
+                # Confirmed admin or an unverified lookup: never remember it, retry next tick.
+                owner_denial_cache.pop(chat.telegram_chat_id, None)
+        return bool(owner_status)
 
     async def _resolve_scheduled_access() -> FeatureAccessDecision:
         try:
