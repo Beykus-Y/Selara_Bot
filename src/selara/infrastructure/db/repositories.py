@@ -3094,6 +3094,34 @@ class SqlAlchemyActivityRepository:
         )
         return delivery_claimed_at if result.rowcount == 1 else None
 
+    async def is_daily_summary_delivery_claim_current(
+        self,
+        *,
+        run_id: int,
+        chat_id: int,
+        claimed_at: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        check_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        row = (
+            await self._session.execute(
+                select(
+                    DailySummaryRunModel.chat_id,
+                    DailySummaryRunModel.claimed_at,
+                    DailySummaryRunModel.status,
+                    DailySummaryRunModel.lease_until,
+                ).where(DailySummaryRunModel.id == run_id)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        return bool(
+            row[0] == chat_id
+            and _coerce_utc_datetime(row[1]) == _coerce_utc_datetime(claimed_at)
+            and row[2] in ("generated", "send_failed")
+            and _coerce_utc_datetime(row[3]) > check_at
+        )
+
     async def mark_daily_summary_run_sent(self, *, run_id: int, claimed_at: datetime, sent_at: datetime) -> bool:
         result = await self._session.execute(
             update(DailySummaryRunModel)
