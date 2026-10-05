@@ -51,7 +51,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.feature_access import FeatureAccessService
-from selara.application.selara_ai_status import build_chat_ai_access_status
+from selara.application.selara_ai_status import build_chat_ai_access_status, checkout_ready
 from selara.application.admin_broadcasts import (
     BroadcastFormatError,
     ParsedBroadcast,
@@ -124,7 +124,7 @@ from selara.infrastructure.db.repositories import (
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.presentation import game_state as game_state_module
 from selara.presentation.audit import log_chat_action
-from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.auth import has_permission, is_telegram_chat_admin, resolve_owner_admin_exemption
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.game_state import (
@@ -5077,7 +5077,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 await session.commit()
                 return _json_result(ok=False, message="Группа недоступна.", status_code=403)
             current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
-            can_manage = await _can_manage_chat_settings(activity_repo, chat=chat, user=user)
             await session.commit()
 
         owner_exempt = False
@@ -5095,6 +5094,18 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 logger.warning("Owner exemption check failed for AI status chat_id=%s", chat_id, exc_info=True)
                 owner_exempt = False
 
+        # Checkout authorizes the buyer by live Telegram admin status, so mirror that here.
+        can_manage = False
+        if not owner_exempt:
+            try:
+                member = await asyncio.wait_for(
+                    (await _get_game_bot()).get_chat_member(chat_id=chat_id, user_id=user.telegram_user_id),
+                    timeout=4,
+                )
+                can_manage = is_telegram_chat_admin(member)
+            except Exception:
+                logger.warning("Telegram admin check failed for AI purchase CTA chat_id=%s", chat_id, exc_info=True)
+
         access_service = FeatureAccessService(
             SqlAlchemyFeatureQuotaRepository(session_factory),
             entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
@@ -5105,8 +5116,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             automatic_enabled=bool(current_settings.daily_summary_enabled),
             owner_exempt=owner_exempt,
             timezone_name=settings.bot_timezone,
-            can_manage_purchase=can_manage and not owner_exempt,
-            checkout_configured=settings.selara_ai_price_stars is not None,
+            can_manage_purchase=can_manage,
+            checkout_configured=checkout_ready(settings),
             bot_dm_url=f"https://t.me/{bot_username}",
             display_timezone=settings.bot_timezone,
         )

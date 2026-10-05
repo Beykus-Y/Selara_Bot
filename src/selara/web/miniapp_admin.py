@@ -16,6 +16,7 @@ from sqlalchemy import case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.application.selara_ai_status import checkout_ready
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
 from selara.domain.entities import UserSnapshot
@@ -751,7 +752,7 @@ def build_miniapp_admin_router(
             **counts,
             "daily": series,
             "checkout": {
-                "configured": settings.selara_ai_price_stars is not None,
+                "configured": checkout_ready(settings),
                 "price_stars": settings.selara_ai_price_stars,
             },
         }
@@ -894,7 +895,7 @@ def build_miniapp_admin_router(
         return {
             "ok": True,
             "checkout": {
-                "configured": settings.selara_ai_price_stars is not None,
+                "configured": checkout_ready(settings),
                 "price_stars": settings.selara_ai_price_stars,
                 "product_key": SELARA_AI_PRODUCT_KEY,
             },

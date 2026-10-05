@@ -189,7 +189,7 @@ class _AiResolver:
         return self._entitlement
 
 
-def _patch_ai_access(monkeypatch, *, entitlement, owner_exempt: bool = False) -> None:
+def _patch_ai_access(monkeypatch, *, entitlement, owner_exempt: bool = False, telegram_admin: bool = True) -> None:
     async def fake_owner_exemption(**kwargs):
         return owner_exempt
 
@@ -199,9 +199,25 @@ def _patch_ai_access(monkeypatch, *, entitlement, owner_exempt: bool = False) ->
     )
     monkeypatch.setattr(web_app_module, "resolve_owner_admin_exemption", fake_owner_exemption)
 
+    class _FakeBot:
+        def __init__(self, *args, **kwargs) -> None:
+            class _Session:
+                async def close(self) -> None:
+                    return None
 
-def _ai_state(*, summary_enabled: bool = False, admin_user_id: int | None = None):
-    settings = hub_test._settings().model_copy(update={"admin_user_id": admin_user_id})
+            self.session = _Session()
+
+        async def get_chat_member(self, *, chat_id, user_id):
+            return object()
+
+    monkeypatch.setattr(web_app_module, "Bot", _FakeBot)
+    monkeypatch.setattr(web_app_module, "is_telegram_chat_admin", lambda member: telegram_admin)
+
+
+def _ai_state(*, summary_enabled: bool = False, admin_user_id: int | None = None, **overrides):
+    settings = hub_test._settings().model_copy(
+        update={"admin_user_id": admin_user_id, "llm_enabled": True, "llm_api_key": "key", "selara_ai_price_stars": 100, **overrides}
+    )
     return hub_test.ChatHubState(
         settings=settings,
         user=UserSnapshot(telegram_user_id=77, username="viewer", first_name="View", last_name="Er", is_bot=False),
@@ -257,3 +273,19 @@ async def test_miniapp_ai_access_api_follows_chat_visibility(monkeypatch) -> Non
     async with _hub_client(monkeypatch, _ai_state()) as client:
         hidden = await client.get("/api/miniapp/chat/-2002/ai-access")
     assert hidden.status_code == 403 and hidden.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_miniapp_ai_access_cta_follows_live_telegram_admin_and_provider_readiness(monkeypatch) -> None:
+    from selara.application.feature_access import AccessTier, FeatureEntitlement
+
+    free = FeatureEntitlement(access_tier=AccessTier.FREE)
+    _patch_ai_access(monkeypatch, entitlement=free, telegram_admin=False)
+    async with _hub_client(monkeypatch, _ai_state()) as client:
+        member = (await client.get("/api/miniapp/chat/-1001/ai-access")).json()
+    assert member["can_manage_purchase"] is False and member["checkout_configured"] is True
+
+    _patch_ai_access(monkeypatch, entitlement=free)
+    async with _hub_client(monkeypatch, _ai_state(llm_enabled=False)) as client:
+        no_provider = (await client.get("/api/miniapp/chat/-1001/ai-access")).json()
+    assert no_provider["can_manage_purchase"] is True and no_provider["checkout_configured"] is False

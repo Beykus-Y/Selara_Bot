@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 EXPIRING_SOON = timedelta(days=7)
 
 
+def checkout_ready(settings: Any) -> bool:
+    """Same prerequisites as the /premium checkout handler: provider and price."""
+    return bool(
+        settings.llm_enabled
+        and (settings.llm_api_key or "").strip()
+        and settings.selara_ai_price_stars is not None
+    )
+
+
 def _iso(value: datetime | None) -> str | None:
     if value is None:
         return None

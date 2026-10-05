@@ -257,7 +257,9 @@ function StarsSection({ periodDays }: { periodDays: number }) {
           <p className="admin-footnote">
             {data.checkout.configured
               ? `Цена Selara AI: ${formatStars(data.checkout.price_stars ?? 0)}.`
-              : 'Checkout выключен: SELARA_AI_PRICE_STARS не настроен.'}
+              : data.checkout.price_stars === null
+                ? 'Checkout выключен: SELARA_AI_PRICE_STARS не настроен.'
+                : 'Checkout выключен: AI-провайдер не настроен.'}
             {' '}Выручка в Stars и расходы AI в USD — разные валюты, прибыль по ним не считается.
           </p>
           {data.daily.length > 1 && (
