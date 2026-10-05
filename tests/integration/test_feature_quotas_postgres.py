@@ -392,6 +392,10 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
             service, feature=AiFeature.LLM_ADMIN, chat_id=old_chat_id,
             key=f"llm_admin:{old_chat_id}:10", source_message_id=10,
         )
+        async with factory() as session:
+            await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+            await session.commit()
+
         same_message_id_new_origin = await _reserve(
             service, feature=AiFeature.LLM_ADMIN, chat_id=new_chat_id,
             key=f"llm_admin:{new_chat_id}:10", source_message_id=10,
@@ -400,9 +404,6 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
             service, feature=AiFeature.LLM_ADMIN, chat_id=new_chat_id,
             key=f"llm_admin:{new_chat_id}:11", source_message_id=11,
         )
-        async with factory() as session:
-            await migrate_chat_id(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
-            await session.commit()
 
         summary = await service.get_usage_summary(
             feature=AiFeature.LLM_ADMIN,
@@ -427,6 +428,7 @@ async def test_chat_migration_keeps_old_and_new_chat_usage_without_reset_or_dupl
                 select(AiFeatureInvocationModel).where(AiFeatureInvocationModel.chat_id == new_chat_id)
             )).scalars().all()
         assert old_use.invocation_id != same_message_id_new_origin.invocation_id
+        assert not same_message_id_new_origin.reused
         assert old_use.invocation_id != distinct_new_use.invocation_id
         assert len(usage_rows) == 3  # keep the audit history for both source rows
         assert all(row.scope_type == "chat" and row.scope_id == str(new_chat_id) for row in invocations)
