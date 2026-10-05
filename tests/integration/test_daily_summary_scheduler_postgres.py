@@ -498,6 +498,89 @@ async def test_manual_summary_reclaims_same_run_and_quota_after_worker_dies(monk
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_manual_recovery_after_marker_only_attempt_preserves_unknown_cost(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        settings = _test_settings()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+
+        async def cancel_after_provider_start(**kwargs):
+            await client.accounting_service.mark_provider_attempt_started(
+                invocation_id=kwargs["invocation_id"],
+            )
+            raise asyncio.CancelledError
+
+        real_pipeline = daily_summary_module.run_daily_summary_pipeline
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", cancel_after_provider_start)
+        with pytest.raises(asyncio.CancelledError):
+            await attempt_daily_summary_run(
+                bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+                trigger="manual", window_to=_NOW, summary_date=_NOW.date(), now_utc=_NOW,
+                actor_user_id=_USER_ID, source_message_id=4242, settings=settings,
+            )
+
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            quota = (await session.execute(select(AiFeatureQuotaUsageModel))).scalar_one()
+            original_invocation = await session.get(AiFeatureInvocationModel, quota.invocation_id)
+            original_run_id = run.id
+            original_invocation_id = original_invocation.id
+            assert run.status == "claimed"
+            run.lease_until = _NOW - timedelta(seconds=1)
+            await session.commit()
+            assert await session.scalar(select(func.count(LlmUsageLogModel.id))) == 0
+        assert quota.status == "consumed"
+        assert original_invocation.provider_attempt_started_at is not None
+        assert original_invocation.status == "partial"
+
+        monkeypatch.setattr(daily_summary_module, "run_daily_summary_pipeline", real_pipeline)
+        recovered = await attempt_daily_summary_run(
+            bot=_fake_bot(), session_factory=session_factory, llm_client=client, chat=chat,
+            trigger="manual", window_to=_NOW + timedelta(minutes=40), summary_date=_NOW.date(),
+            now_utc=_NOW + timedelta(minutes=40), actor_user_id=_USER_ID,
+            source_message_id=9999, settings=settings,
+        )
+
+        assert recovered.sent
+        aggregate = await client.accounting_service.aggregate_summary_run(summary_run_id=original_run_id)
+        async with session_factory() as session:
+            run = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=original_run_id)
+            quota_rows = (await session.execute(select(AiFeatureQuotaUsageModel))).scalars().all()
+            invocations = (await session.execute(
+                select(AiFeatureInvocationModel).where(
+                    AiFeatureInvocationModel.summary_run_id == original_run_id,
+                ).order_by(AiFeatureInvocationModel.id)
+            )).scalars().all()
+            usage_rows = (await session.execute(
+                select(LlmUsageLogModel).where(LlmUsageLogModel.invocation_id != original_invocation_id)
+            )).scalars().all()
+
+        assert run.status == "sent"
+        assert run.pipeline_has_unknown_cost is True
+        assert aggregate.has_unknown_cost is True
+        assert aggregate.provider_calls == len(usage_rows) + 1
+        assert len(quota_rows) == 1 and quota_rows[0].status == "consumed"
+        assert quota_rows[0].invocation_id == original_invocation_id
+        assert len(invocations) == 2
+        assert invocations[0].status == "partial" and invocations[0].provider_attempt_started_at is not None
+        assert invocations[1].status == "succeeded" and invocations[1].id != original_invocation_id
+        assert usage_rows
+        usage_summary = await FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory)).get_usage_summary(
+            feature=AiFeature.DAILY_SUMMARY,
+            chat_id=_CHAT_ID,
+            trigger="manual",
+            timezone_name="UTC",
+            now=_NOW + timedelta(minutes=40),
+        )
+        assert usage_summary.quota_used == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_scheduled_trigger_is_blocked_when_automation_is_disabled() -> None:
     engine, session_factory = await _database()
     try:
@@ -924,6 +1007,61 @@ async def test_scheduled_entitlement_revoked_after_initial_check_releases_claim_
             invocation = (await session.execute(select(AiFeatureInvocationModel))).scalar_one()
         assert len(runs) == 1 and runs[0].id == run.id and runs[0].status == "sent"
         assert invocation.trigger == "scheduled" and invocation.summary_run_id == run.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_toggle_disabled_during_access_recheck_stops_pipeline():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=60, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+
+        class DisableToggleDuringRecheckResolver:
+            calls = 0
+
+            async def resolve(self, *, chat_id, feature, trigger):
+                self.calls += 1
+                if self.calls == 2:
+                    async with session_factory() as session:
+                        repo = SqlAlchemyActivityRepository(session)
+                        await repo.upsert_chat_settings(
+                            chat=chat,
+                            values={"daily_summary_enabled": False},
+                        )
+                        await session.commit()
+                return FeatureEntitlement(access_tier=AccessTier.PAID, source="test_only")
+
+        resolver = DisableToggleDuringRecheckResolver()
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=chat,
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+            feature_access_service=_paid_access(session_factory, resolver=resolver),
+        )
+
+        assert outcome.reason == "not_eligible:disabled"
+        assert resolver.calls == 2
+        assert client._structured_calls == 0
+        bot.send_message.assert_not_awaited()
+        async with session_factory() as session:
+            run = (await session.execute(select(DailySummaryRunModel))).scalar_one()
+            invocations = (await session.execute(select(AiFeatureInvocationModel))).scalars().all()
+            chat_settings = await SqlAlchemyActivityRepository(session).get_chat_settings(chat_id=_CHAT_ID)
+            assert await session.scalar(select(func.count(LlmUsageLogModel.id))) == 0
+        assert chat_settings.daily_summary_enabled is False
+        assert run.status == "claimed" and run.lease_until < run.claimed_at
+        assert invocations == []
     finally:
         await engine.dispose()
 

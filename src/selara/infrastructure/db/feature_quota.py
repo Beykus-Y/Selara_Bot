@@ -51,6 +51,7 @@ class SqlAlchemyFeatureQuotaRepository:
         self,
         *,
         policy: FeatureQuotaPolicy,
+        access_tier: AccessTier,
         chat_id: int,
         chat_type: str,
         chat_title: str | None,
@@ -133,6 +134,7 @@ class SqlAlchemyFeatureQuotaRepository:
                             allowed=False,
                             policy=policy,
                             chat_id=chat_id,
+                            access_tier=access_tier,
                             owner_exempt=False,
                             used=None,
                             period_start=period_start,
@@ -181,6 +183,7 @@ class SqlAlchemyFeatureQuotaRepository:
                                 allowed=False,
                                 policy=policy,
                                 chat_id=chat_id,
+                                access_tier=AccessTier(existing.access_tier),
                                 owner_exempt=False,
                                 used=None,
                                 period_start=period_start,
@@ -206,6 +209,7 @@ class SqlAlchemyFeatureQuotaRepository:
                                 allowed=False,
                                 policy=policy,
                                 chat_id=chat_id,
+                                access_tier=access_tier,
                                 owner_exempt=False,
                                 used=used,
                                 period_start=period_start,
@@ -222,9 +226,7 @@ class SqlAlchemyFeatureQuotaRepository:
                         existing.policy_key = policy.policy_key
                         existing.quota_limit = policy.limit
                         existing.created_at = func.now()
-                        existing.access_tier = (
-                            AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-                        ).value
+                        existing.access_tier = access_tier.value
                         existing.owner_exempt = owner_exempt
                         existing.status = "consumed"
                         existing.release_reason = None
@@ -241,6 +243,7 @@ class SqlAlchemyFeatureQuotaRepository:
                             allowed=True,
                             policy=policy,
                             chat_id=chat_id,
+                            access_tier=access_tier,
                             owner_exempt=owner_exempt,
                             used=current_used,
                             period_start=period_start,
@@ -270,6 +273,7 @@ class SqlAlchemyFeatureQuotaRepository:
                         allowed=allowed,
                         policy=existing_policy,
                         chat_id=existing.chat_id or chat_id,
+                        access_tier=AccessTier(existing.access_tier),
                         owner_exempt=existing.owner_exempt,
                         used=used,
                         period_start=existing.period_start,
@@ -293,6 +297,7 @@ class SqlAlchemyFeatureQuotaRepository:
                         allowed=False,
                         policy=policy,
                         chat_id=chat_id,
+                        access_tier=access_tier,
                         owner_exempt=False,
                         used=used,
                         period_start=period_start,
@@ -347,7 +352,7 @@ class SqlAlchemyFeatureQuotaRepository:
                     period_end=period_end,
                     policy_key=policy.policy_key,
                     quota_limit=policy.limit,
-                    access_tier=(AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE).value,
+                    access_tier=access_tier.value,
                     owner_exempt=owner_exempt,
                     status="consumed",
                 )
@@ -358,6 +363,7 @@ class SqlAlchemyFeatureQuotaRepository:
                     allowed=True,
                     policy=policy,
                     chat_id=chat_id,
+                    access_tier=access_tier,
                     owner_exempt=owner_exempt,
                     used=current_used,
                     period_start=period_start,
@@ -511,6 +517,7 @@ class SqlAlchemyFeatureQuotaRepository:
         allowed: bool,
         policy: FeatureQuotaPolicy,
         chat_id: int,
+        access_tier: AccessTier,
         owner_exempt: bool,
         used: int | None,
         period_start,
@@ -525,7 +532,7 @@ class SqlAlchemyFeatureQuotaRepository:
             feature=policy.feature,
             scope_type="chat",
             scope_id=str(chat_id),
-            access_tier=AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE,
+            access_tier=access_tier,
             quota_limit=None if owner_exempt else policy.limit,
             quota_used=None if owner_exempt else used,
             quota_remaining=None if owner_exempt else max(0, policy.limit - (used or 0)),

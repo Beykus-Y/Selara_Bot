@@ -70,6 +70,91 @@ class AiAccountingService:
             await session.commit()
             return invocation_id
 
+    async def create_recovery_invocation_if_provider_started(self, *, invocation_id: int) -> int:
+        """Keep an unreported attempt visible when a summary run is reclaimed.
+
+        A provider-start marker is sticky for the lifetime of an invocation. If
+        recovery reused that same invocation, later usage rows could hide an
+        earlier marker-only attempt in run-level aggregation. Retain the old
+        invocation for audit and give the recovered pipeline a fresh one.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                quota_usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel).where(
+                        AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                    )
+                )
+                if quota_usage is not None:
+                    if session.bind is None or session.bind.dialect.name != "postgresql":
+                        raise RuntimeError("Quota-backed recovery requires PostgreSQL advisory locks")
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": feature_quota_idempotency_lock_key(
+                            idempotency_key=quota_usage.idempotency_key,
+                        )},
+                    )
+                    quota_usage = await session.scalar(
+                        select(AiFeatureQuotaUsageModel).where(
+                            AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                        )
+                    )
+                    if quota_usage is not None:
+                        await session.execute(
+                            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                            {"lock_key": feature_quota_lock_key(
+                                feature=quota_usage.feature,
+                                chat_id=quota_usage.chat_id or 0,
+                                period_start=quota_usage.period_start,
+                            )},
+                        )
+                        quota_usage = await session.scalar(
+                            select(AiFeatureQuotaUsageModel).where(
+                                AiFeatureQuotaUsageModel.invocation_id == invocation_id,
+                            ).with_for_update()
+                        )
+
+                previous = await session.scalar(
+                    select(AiFeatureInvocationModel).where(
+                        AiFeatureInvocationModel.id == invocation_id,
+                    ).with_for_update()
+                )
+                if previous is None:
+                    raise RuntimeError(f"AI invocation {invocation_id} does not exist")
+                if (
+                    previous.provider_attempt_started_at is None
+                    or previous.summary_run_id is None
+                    or (quota_usage is not None and quota_usage.status != "consumed")
+                ):
+                    return invocation_id
+
+                summary_run_id = previous.summary_run_id
+                recovery = AiFeatureInvocationModel(
+                    feature=previous.feature,
+                    scope_type=previous.scope_type,
+                    scope_id=previous.scope_id,
+                    chat_id=previous.chat_id,
+                    actor_user_id=previous.actor_user_id,
+                    trigger=previous.trigger,
+                    mode=previous.mode,
+                    status="running",
+                    source_message_id=previous.source_message_id,
+                    summary_run_id=previous.summary_run_id,
+                )
+                session.add(recovery)
+                await session.flush()
+                recovery_invocation_id = recovery.id
+
+        logger.info(
+            "AI recovery invocation created after provider start",
+            extra={
+                "summary_run_id": summary_run_id,
+                "previous_invocation_id": invocation_id,
+                "recovery_invocation_id": recovery_invocation_id,
+            },
+        )
+        return recovery_invocation_id
+
     async def mark_provider_attempt_started(self, *, invocation_id: int) -> None:
         """Durably mark an attempt before the network call begins.
 

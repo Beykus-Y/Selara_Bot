@@ -129,6 +129,7 @@ async def _generate_and_finalize(
     window_from: datetime,
     window_to: datetime,
     invocation_id: int | None = None,
+    quota_invocation_id: int | None = None,
     quota_access_service: FeatureAccessService | None = None,
 ) -> bool:
     accounting = getattr(llm_client, "accounting_service", None)
@@ -203,7 +204,7 @@ async def _generate_and_finalize(
             if quota_access_service is not None and outcome["status"] != "succeeded":
                 try:
                     await quota_access_service.release_if_no_provider_attempts(
-                        invocation_id=invocation_id,
+                        invocation_id=(quota_invocation_id if quota_invocation_id is not None else invocation_id),
                         reason=outcome["error_category"] or "pre_provider_failure",
                     )
                 except Exception:
@@ -484,22 +485,22 @@ async def attempt_daily_summary_run(
                 )
                 return False, False
             changed = current_run.chat_id != chat.telegram_chat_id
+            chat_row = await session.get(ChatModel, current_run.chat_id)
+            current_settings = await repo.get_chat_settings(chat_id=current_run.chat_id)
+            if chat_row is None or current_settings is None:
+                logger.warning(
+                    "Daily Summary claimed run has no canonical chat settings",
+                    extra={"chat_id": current_run.chat_id, "run_id": current_run.id, "trigger": trigger},
+                )
+                return False, False
             if changed:
-                chat_row = await session.get(ChatModel, current_run.chat_id)
-                migrated_settings = await repo.get_chat_settings(chat_id=current_run.chat_id)
-                if chat_row is None or migrated_settings is None:
-                    logger.warning(
-                        "Daily Summary migrated run has no canonical chat settings",
-                        extra={"chat_id": current_run.chat_id, "run_id": current_run.id, "trigger": trigger},
-                    )
-                    return False, False
                 chat = replace(
                     chat,
                     telegram_chat_id=current_run.chat_id,
                     chat_type=chat_row.type,
                     title=chat_row.title,
                 )
-                chat_settings = migrated_settings
+            chat_settings = current_settings
             run = current_run
             return True, changed
 
@@ -507,9 +508,25 @@ async def attempt_daily_summary_run(
     if not active:
         await _release_unstarted_claim()
         return DailySummaryOutcome(False, "claim_lost", access_decision)
+    post_claim_settings = (
+        chat_settings if trigger == "scheduled" else replace(chat_settings, daily_summary_enabled=True)
+    )
+    post_claim_eligibility = evaluate_daily_summary_eligibility(
+        settings=post_claim_settings,
+        message_count_in_window=message_count,
+        already_run_today=False,
+    )
+    if not post_claim_eligibility.eligible:
+        await _release_unstarted_claim()
+        return DailySummaryOutcome(
+            False,
+            f"not_eligible:{post_claim_eligibility.reason}",
+            access_decision,
+        )
 
     quota_access_service = None
-    reserved_invocation_id = None
+    quota_invocation_id = None
+    pipeline_invocation_id = None
     if trigger == "manual":
         settings = settings or get_settings()
         owner_exempt = await resolve_owner_admin_exemption(
@@ -560,7 +577,31 @@ async def attempt_daily_summary_run(
             await _release_unstarted_claim()
             reason = access_decision.reason.value if access_decision.reason is not None else "duplicate_request"
             return DailySummaryOutcome(False, reason, access_decision)
-        reserved_invocation_id = access_decision.invocation_id
+        quota_invocation_id = access_decision.invocation_id
+        pipeline_invocation_id = quota_invocation_id
+        if access_decision.reused and quota_invocation_id is not None:
+            recovery_accounting = AiAccountingService(session_factory)
+            try:
+                pipeline_invocation_id = await recovery_accounting.create_recovery_invocation_if_provider_started(
+                    invocation_id=quota_invocation_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Daily Summary recovery accounting setup failed",
+                    extra={"chat_id": chat.telegram_chat_id, "run_id": run.id},
+                )
+                try:
+                    await quota_access_service.release_if_no_provider_attempts(
+                        invocation_id=quota_invocation_id,
+                        reason="recovery_accounting_setup_failed",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not release unused quota after recovery accounting setup failure",
+                        extra={"chat_id": chat.telegram_chat_id, "run_id": run.id},
+                    )
+                await _release_unstarted_claim()
+                return DailySummaryOutcome(False, "access_unavailable", access_decision)
     else:
         # Revalidate after the claim, immediately before creating the logical
         # invocation. If Telegram migrated the group while resolving access,
@@ -579,6 +620,18 @@ async def attempt_daily_summary_run(
             if not active:
                 await _release_unstarted_claim()
                 return DailySummaryOutcome(False, "claim_lost", access_decision)
+            current_eligibility = evaluate_daily_summary_eligibility(
+                settings=chat_settings,
+                message_count_in_window=message_count,
+                already_run_today=False,
+            )
+            if not current_eligibility.eligible:
+                await _release_unstarted_claim()
+                return DailySummaryOutcome(
+                    False,
+                    f"not_eligible:{current_eligibility.reason}",
+                    access_decision,
+                )
             if chat.telegram_chat_id == previous_chat_id:
                 break
         else:
@@ -600,7 +653,8 @@ async def attempt_daily_summary_run(
         actor_user_id=actor_user_id,
         window_from=window_from,
         window_to=window_to,
-        invocation_id=reserved_invocation_id,
+        invocation_id=pipeline_invocation_id,
+        quota_invocation_id=quota_invocation_id,
         quota_access_service=quota_access_service,
     )
     if not generated:

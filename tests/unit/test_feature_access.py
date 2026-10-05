@@ -166,6 +166,7 @@ async def test_paid_manual_quota_is_supplied_as_policy_without_a_product_default
     )
 
     assert repository.reserve.await_args.kwargs["policy"] == paid_policy
+    assert repository.reserve.await_args.kwargs["access_tier"] == AccessTier.PAID
     assert repository.usage_summary.await_args.kwargs["policy"] == paid_policy
     assert decision.access_tier == AccessTier.PAID
     assert decision.entitlement_source == "test_only"

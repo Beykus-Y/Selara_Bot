@@ -141,6 +141,7 @@ class FeatureQuotaRepository(Protocol):
         self,
         *,
         policy: FeatureQuotaPolicy,
+        access_tier: AccessTier,
         chat_id: int,
         chat_type: str,
         chat_title: str | None,
@@ -426,6 +427,7 @@ class FeatureAccessService:
         )
         decision = await self._repository.reserve(
             policy=policy,
+            access_tier=tier,
             chat_id=chat_id,
             chat_type=chat_type,
             chat_title=chat_title,
