@@ -111,7 +111,7 @@ class AiAccountingService:
                         quota_usage = await session.scalar(
                             select(AiFeatureQuotaUsageModel).where(
                                 AiFeatureQuotaUsageModel.invocation_id == invocation_id,
-                            ).with_for_update()
+                            ).execution_options(populate_existing=True).with_for_update()
                         )
 
                 previous = await session.scalar(
