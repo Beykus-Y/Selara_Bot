@@ -3049,6 +3049,7 @@ class SqlAlchemyActivityRepository:
             )
             .values(
                 status="generated",
+                lease_until=datetime.now(timezone.utc) - timedelta(microseconds=1),
                 generated_text=generated_text,
                 topics_json=topics_json,
                 diagnostics_json=diagnostics_json,
@@ -3058,6 +3059,40 @@ class SqlAlchemyActivityRepository:
             )
         )
         return result.rowcount == 1
+
+    async def claim_daily_summary_delivery(
+        self,
+        *,
+        run_id: int,
+        claimed_at: datetime,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> datetime | None:
+        """Atomically reserve the right to send a generated run.
+
+        Finalization expires the generation lease; this compare-and-set refreshes
+        claimed_at before Telegram I/O. A crashed sender can be retried when its
+        delivery lease expires.
+        """
+        expected_claimed_at = _coerce_utc_datetime(claimed_at)
+        delivery_claimed_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
+        if delivery_claimed_at <= expected_claimed_at:
+            delivery_claimed_at = expected_claimed_at + timedelta(microseconds=1)
+
+        result = await self._session.execute(
+            update(DailySummaryRunModel)
+            .where(
+                DailySummaryRunModel.id == run_id,
+                DailySummaryRunModel.claimed_at == expected_claimed_at,
+                DailySummaryRunModel.status.in_(("generated", "send_failed")),
+                DailySummaryRunModel.lease_until <= delivery_claimed_at,
+            )
+            .values(
+                claimed_at=delivery_claimed_at,
+                lease_until=delivery_claimed_at + timedelta(seconds=lease_seconds),
+            )
+        )
+        return delivery_claimed_at if result.rowcount == 1 else None
 
     async def mark_daily_summary_run_sent(self, *, run_id: int, claimed_at: datetime, sent_at: datetime) -> bool:
         result = await self._session.execute(
@@ -3081,7 +3116,11 @@ class SqlAlchemyActivityRepository:
                 DailySummaryRunModel.claimed_at == _coerce_utc_datetime(claimed_at),
                 DailySummaryRunModel.status.in_(("generated", "send_failed")),
             )
-            .values(status="send_failed", error=error)
+            .values(
+                status="send_failed",
+                error=error,
+                lease_until=datetime.now(timezone.utc) - timedelta(microseconds=1),
+            )
         )
         return result.rowcount == 1
 
