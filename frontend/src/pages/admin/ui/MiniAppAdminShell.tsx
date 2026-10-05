@@ -9,6 +9,7 @@ const sections = [
   { to: routes.admin, label: 'Главная', icon: '⌂', end: true },
   { to: routes.adminFeedback, label: 'Feedback', icon: '◷', end: false },
   { to: routes.adminMonitoring, label: 'Мониторинг', icon: '⌁', end: false },
+  { to: routes.adminAi, label: 'AI', icon: '✦', end: false },
   { to: routes.adminMore, label: 'Ещё', icon: '···', end: false },
 ]
 

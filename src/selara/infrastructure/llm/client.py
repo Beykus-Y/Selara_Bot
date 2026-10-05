@@ -46,6 +46,8 @@ class LlmConfig:
             raise ValueError("LLM_API_KEY не задан.")
         if not self.model.strip():
             raise ValueError("LLM_MODEL не задан.")
+        if not self.summary_model.strip():
+            raise ValueError("LLM_SUMMARY_MODEL не задан.")
         if self.timeout_seconds <= 0:
             raise ValueError("LLM_TIMEOUT_SECONDS должен быть > 0.")
 
