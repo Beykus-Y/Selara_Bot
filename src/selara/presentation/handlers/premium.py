@@ -684,7 +684,6 @@ async def _notify_owner_of_rejected_payment(*, bot: Bot, settings: Settings, res
     )
 
 
-@router.message(Command("stars_refund"))
 async def refund_rejected_stars_payment(
     message: Message,
     bot: Bot,
@@ -703,10 +702,16 @@ async def refund_rejected_stars_payment(
 
     payment_id = int(parts[1])
     repository = SqlAlchemyTelegramStarsRepository(session_factory)
-    claim = await repository.claim_rejected_payment_refund(
-        payment_id=payment_id,
-        requested_by_user_id=message.from_user.id,
-    )
+    try:
+        claim = await repository.claim_rejected_payment_refund(
+            payment_id=payment_id,
+            requested_by_user_id=message.from_user.id,
+        )
+    except Exception as exc:
+        # The payment router has no ErrorHandlerMiddleware, so answer explicitly.
+        logger.error("Telegram Stars refund claim failed payment_id=%s exception_type=%s", payment_id, type(exc).__name__)
+        await message.answer("Не удалось записать попытку возврата. Повторите команду позже.")
+        return
     if claim.state == "not_found":
         await message.answer("Платёж с таким номером не найден.")
         return
@@ -738,6 +743,16 @@ async def refund_rejected_stars_payment(
                 telegram_payment_charge_id=claim.telegram_payment_charge_id,
             )
     except TelegramBadRequest as exc:
+        if "CHARGE_ALREADY_REFUNDED" in (exc.message or ""):
+            # Telegram already returned these Stars: the canonical state is refunded.
+            await repository.finish_rejected_payment_refund(
+                payment_id=payment_id,
+                succeeded=True,
+                result_code="already_refunded",
+            )
+            logger.info("Telegram Stars charge was already refunded payment_id=%s", payment_id)
+            await message.answer("Возврат по этому платежу уже был выполнен.")
+            return
         await repository.finish_rejected_payment_refund(
             payment_id=payment_id,
             succeeded=False,

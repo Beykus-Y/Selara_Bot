@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram import Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 
 from selara.application.selara_ai_product import (
     SELARA_AI_CURRENCY,
@@ -189,6 +190,75 @@ async def test_owner_can_refund_a_durably_claimed_rejected_payment(monkeypatch):
         succeeded=True,
         result_code="refunded",
     )
+
+
+@pytest.mark.asyncio
+async def test_already_refunded_charge_is_recorded_as_refunded(monkeypatch):
+    repository = SimpleNamespace(
+        claim_rejected_payment_refund=AsyncMock(
+            return_value=PaymentRefundClaim(
+                "claimed",
+                buyer_user_id=456,
+                telegram_payment_charge_id="charge-refund",
+                amount_stars=137,
+            )
+        ),
+        finish_rejected_payment_refund=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    bot = SimpleNamespace(
+        refund_star_payment=AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=SimpleNamespace(),
+                message="Bad Request: CHARGE_ALREADY_REFUNDED",
+            )
+        )
+    )
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        text="/stars_refund 17",
+        answer=AsyncMock(),
+    )
+
+    await premium.refund_rejected_stars_payment(
+        message,
+        bot=bot,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=123),
+    )
+
+    repository.finish_rejected_payment_refund.assert_awaited_once_with(
+        payment_id=17,
+        succeeded=True,
+        result_code="already_refunded",
+    )
+    assert "уже был выполнен" in message.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_refund_claim_database_error_answers_owner(monkeypatch):
+    repository = SimpleNamespace(
+        claim_rejected_payment_refund=AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    bot = SimpleNamespace(refund_star_payment=AsyncMock())
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=123),
+        text="/stars_refund 17",
+        answer=AsyncMock(),
+    )
+
+    await premium.refund_rejected_stars_payment(
+        message,
+        bot=bot,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=123),
+    )
+
+    bot.refund_star_payment.assert_not_awaited()
+    message.answer.assert_awaited_once()
 
 
 @pytest.mark.asyncio
