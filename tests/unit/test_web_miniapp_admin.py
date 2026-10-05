@@ -712,3 +712,20 @@ async def test_ai_readiness_separates_price_from_checkout_and_normalizes_provide
     body, rows = await checks(SELARA_AI_PRICE_STARS=100, LLM_ENABLED="true", LLM_API_KEY="key")
     assert rows["llm_provider"]["status"] == "ok" and rows["checkout"]["status"] == "ok"
     assert body["checkout"]["configured"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [{"LLM_MODEL": ""}, {"LLM_SUMMARY_MODEL": ""}, {"LLM_TIMEOUT_SECONDS": "0"}, {"LLM_API_KEY": " "}],
+)
+async def test_ai_readiness_and_checkout_agree_on_invalid_llm_config(monkeypatch, extra) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(
+        monkeypatch, current_user=admin, SELARA_AI_PRICE_STARS=100, LLM_ENABLED="true",
+        **{"LLM_API_KEY": "key", **extra},
+    ) as (client, _session_factory):
+        body = (await client.get("/api/miniapp/admin/ai/readiness")).json()
+    rows = {item["key"]: item for item in body["checks"]}
+    assert rows["llm_provider"]["status"] == "unavailable"
+    assert rows["checkout"]["status"] == "unavailable" and body["checkout"]["configured"] is False

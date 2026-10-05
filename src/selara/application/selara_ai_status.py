@@ -21,6 +21,7 @@ from selara.application.feature_access import (
     FeatureUsageSummary,
 )
 from selara.infrastructure.llm.features import AiFeature
+from selara.infrastructure.llm.runtime import llm_runtime_config
 
 logger = logging.getLogger(__name__)
 EXPIRING_SOON = timedelta(days=7)
@@ -28,11 +29,7 @@ EXPIRING_SOON = timedelta(days=7)
 
 def checkout_ready(settings: Any) -> bool:
     """Same prerequisites as the /premium checkout handler: provider and price."""
-    return bool(
-        settings.llm_enabled
-        and (settings.llm_api_key or "").strip()
-        and settings.selara_ai_price_stars is not None
-    )
+    return llm_runtime_config(settings) is not None and settings.selara_ai_price_stars is not None
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -66,11 +63,13 @@ def _quota_payload(summary: FeatureUsageSummary | None) -> dict[str, Any]:
     }
 
 
-def _automatic_state(*, enabled: bool, allowed: bool, available: bool) -> str:
+def _automatic_state(*, enabled: bool, allowed: bool, available: bool, provider_available: bool = True) -> str:
     if not available:
         return "unknown"
     if allowed:
-        return "active" if enabled else "available_disabled"
+        if not enabled:
+            return "available_disabled"
+        return "active" if provider_available else "provider_unavailable"
     return "requires_access_enabled" if enabled else "requires_access"
 
 
@@ -84,6 +83,7 @@ async def build_chat_ai_access_status(
     can_manage_purchase: bool,
     checkout_configured: bool,
     bot_dm_url: str,
+    provider_available: bool = True,
     display_timezone: str = "UTC",
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -94,6 +94,7 @@ async def build_chat_ai_access_status(
         "timezone": display_timezone,
         "can_manage_purchase": can_manage_purchase,
         "checkout_configured": checkout_configured,
+        "provider_available": provider_available,
         "purchase": {"command": "/premium", "bot_dm_url": bot_dm_url},
     }
     try:
@@ -173,7 +174,12 @@ async def build_chat_ai_access_status(
         "automatic_summary": {
             "enabled": automatic_enabled,
             "access_allowed": automatic.allowed,
-            "state": _automatic_state(enabled=automatic_enabled, allowed=automatic.allowed, available=True),
+            "state": _automatic_state(
+                enabled=automatic_enabled,
+                allowed=automatic.allowed,
+                available=True,
+                provider_available=provider_available,
+            ),
         },
     }
 

@@ -223,3 +223,55 @@ async def test_owner_exempt_chat_hides_purchase_and_owner_viewer_needs_one_looku
     owner_bot = _Bot({900})
     assert await _flags(owner_bot, TelegramFlagCache(), user_id=900) == (True, False)
     assert owner_bot.calls == [900]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_exempt,tier", [(False, AccessTier.PAID), (True, AccessTier.FREE)])
+async def test_provider_unavailable_replaces_active_state(owner_exempt, tier):
+    service = FeatureAccessService(
+        _Repository(), entitlement_resolver=_Resolver(FeatureEntitlement(access_tier=tier, valid_until=_NOW + timedelta(days=30)))
+    )
+    kwargs = dict(
+        access_service=service, chat_id=-1001, automatic_enabled=True, owner_exempt=owner_exempt,
+        timezone_name="UTC", can_manage_purchase=True, checkout_configured=True,
+        bot_dm_url="https://t.me/x", display_timezone="UTC", now=_NOW,
+    )
+    down = await build_chat_ai_access_status(**kwargs, provider_available=False)
+    assert down["provider_available"] is False
+    assert down["automatic_summary"]["state"] == "provider_unavailable"
+    up = await build_chat_ai_access_status(**kwargs, provider_available=True)
+    assert up["automatic_summary"]["state"] == "active"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"llm_model": ""},
+        {"llm_summary_model": ""},
+        {"llm_summary_model": "  "},
+        {"llm_timeout_seconds": 0},
+        {"llm_timeout_seconds": -1},
+        {"llm_api_key": "   "},
+        {"llm_enabled": False},
+    ],
+)
+def test_llm_runtime_config_rejects_unusable_settings_consistently(overrides):
+    from types import SimpleNamespace
+
+    from selara.application.selara_ai_status import checkout_ready
+    from selara.infrastructure.llm.runtime import llm_runtime_config
+    from selara.presentation.handlers.premium import SelaraAiProductUnavailable, _product_for_settings
+
+    good = dict(
+        llm_enabled=True, llm_api_key="key", llm_model="m", llm_base_url="", llm_timeout_seconds=30.0,
+        llm_summary_model="s", llm_supports_structured_output=False, selara_ai_price_stars=100,
+    )
+    assert llm_runtime_config(SimpleNamespace(**good)) is not None
+    assert checkout_ready(SimpleNamespace(**good)) is True
+    _product_for_settings(SimpleNamespace(**good))
+
+    bad = SimpleNamespace(**{**good, **overrides})
+    assert llm_runtime_config(bad) is None
+    assert checkout_ready(bad) is False
+    with pytest.raises(SelaraAiProductUnavailable):
+        _product_for_settings(bad)

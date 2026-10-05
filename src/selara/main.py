@@ -15,7 +15,8 @@ from selara.infrastructure.db.activity_event_sync import run_message_event_backf
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
-from selara.infrastructure.llm import LlmClient, LlmConfig
+from selara.infrastructure.llm import LlmClient
+from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -82,25 +83,13 @@ def _build_stt_client(settings) -> SttClient | None:
 
 
 def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
-    if not settings.llm_enabled:
+    config, problem = llm_runtime_problem(settings)
+    if config is None:
+        if settings.llm_enabled:
+            logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", problem)
         return None
-    if not settings.llm_api_key.strip():
-        logger.warning("LLM включён (LLM_ENABLED=true), но LLM_API_KEY не задан — AI-ассистент отключён.")
-        return None
-    try:
-        config = LlmConfig(
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            base_url=settings.llm_base_url or None,
-            timeout_seconds=settings.llm_timeout_seconds,
-            summary_model=settings.llm_summary_model,
-            supports_structured_output=settings.llm_supports_structured_output,
-        )
-        accounting = AiAccountingService(session_factory) if session_factory is not None else None
-        return LlmClient(config, accounting_service=accounting)
-    except ValueError as exc:
-        logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", exc)
-        return None
+    accounting = AiAccountingService(session_factory) if session_factory is not None else None
+    return LlmClient(config, accounting_service=accounting)
 
 
 async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:

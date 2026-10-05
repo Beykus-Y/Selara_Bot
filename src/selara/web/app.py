@@ -51,6 +51,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.feature_access import FeatureAccessService
+from selara.infrastructure.llm.runtime import llm_runtime_config
 from selara.application.selara_ai_status import (
     TelegramFlagCache,
     build_chat_ai_access_status,
@@ -5108,6 +5109,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             timezone_name=settings.bot_timezone,
             can_manage_purchase=can_manage,
             checkout_configured=checkout_ready(settings),
+            provider_available=llm_runtime_config(settings) is not None,
             bot_dm_url=f"https://t.me/{bot_username}",
             display_timezone=settings.bot_timezone,
         )

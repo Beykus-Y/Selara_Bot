@@ -58,6 +58,7 @@ export const automaticSummaryLabels: Record<AiAutomaticSummaryState, string> = {
   available_disabled: 'Доступны, но выключены в настройках',
   requires_access_enabled: 'Включены в настройках, но требуют Selara AI',
   requires_access: 'Недоступны',
+  provider_unavailable: 'Включены, но AI-провайдер сейчас недоступен',
   unknown: 'Статус временно не удалось проверить',
 }
 

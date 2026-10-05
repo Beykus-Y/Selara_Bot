@@ -29,6 +29,7 @@ from selara.infrastructure.db.telegram_stars import (
     PurchaseIntentRateLimited,
     SqlAlchemyTelegramStarsRepository,
 )
+from selara.infrastructure.llm.runtime import llm_runtime_config
 from selara.presentation.auth import is_telegram_chat_admin, resolve_owner_admin_exemption
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ def _terms_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 
 def _product_for_settings(settings: Settings):
-    if not settings.llm_enabled or not settings.llm_api_key.strip():
+    if llm_runtime_config(settings) is None:
         raise SelaraAiProductUnavailable("AI provider is not enabled")
     return get_selara_ai_product(
         product_key=SELARA_AI_PRODUCT_KEY,

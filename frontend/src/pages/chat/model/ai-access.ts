@@ -14,6 +14,7 @@ export type AiAutomaticSummaryState =
   | 'available_disabled'
   | 'requires_access_enabled'
   | 'requires_access'
+  | 'provider_unavailable'
   | 'unknown'
 
 export type ChatAiAccessData = {
@@ -24,6 +25,7 @@ export type ChatAiAccessData = {
   timezone: string
   can_manage_purchase: boolean
   checkout_configured: boolean
+  provider_available?: boolean
   purchase: { command: string; bot_dm_url: string }
   entitlement: {
     active: boolean

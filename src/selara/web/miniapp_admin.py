@@ -40,6 +40,7 @@ from selara.infrastructure.db.models import (
 )
 from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.llm.features import AiFeature
+from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.security.redaction import redact_sensitive_text
 
 UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
@@ -858,13 +859,12 @@ def build_miniapp_admin_router(
         def add(key: str, label: str, status: str, detail: str | None = None) -> None:
             checks.append({"key": key, "label": label, "status": status, "detail": detail or ""})
 
-        # Same normalization as checkout_ready / premium._product_for_settings.
-        if settings.llm_enabled and (settings.llm_api_key or "").strip():
+        # Same validation as the bot process and /premium (llm_runtime_problem).
+        _config, provider_problem = llm_runtime_problem(settings)
+        if provider_problem is None:
             add("llm_provider", "AI-провайдер", "ok", "Настроен.")
-        elif not settings.llm_enabled:
-            add("llm_provider", "AI-провайдер", "unavailable", "LLM_ENABLED выключен.")
         else:
-            add("llm_provider", "AI-провайдер", "unavailable", "LLM_API_KEY не задан.")
+            add("llm_provider", "AI-провайдер", "unavailable", provider_problem)
 
         if settings.selara_ai_price_stars is not None:
             add("stars_price", "Цена Stars", "ok", f"Цена задана: {settings.selara_ai_price_stars} ⭐.")

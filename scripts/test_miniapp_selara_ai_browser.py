@@ -165,6 +165,8 @@ async def _run_chat_scenarios(browser) -> None:
              ["Бесплатный доступ", "Осталось 7 из 10", "Включены в настройках, но требуют Selara AI", "Получить Selara AI"]),
             ("paid", _ai_access("paid", auto_state="available_disabled"),
              ["Активна до 04.11.2026", "Доступны, но выключены в настройках", "Продлить"]),
+            ("paid-provider-down", _ai_access("paid", enabled=True, auto_state="provider_unavailable", provider_available=False),
+             ["Включены, но AI-провайдер сейчас недоступен"]),
             ("paid-active", _ai_access("paid", enabled=True, auto_state="active"), ["Активны"]),
             ("owner", _ai_access("owner_internal", auto_state="active", llm=UNLIMITED, manual=UNLIMITED),
              ["Внутренний доступ", "Без коммерческого лимита"]),
