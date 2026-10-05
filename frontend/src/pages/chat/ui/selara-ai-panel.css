@@ -1,0 +1,120 @@
+.selara-ai {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.selara-ai__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.selara-ai__badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.selara-ai__badge.is-ok::before { content: '✓ '; }
+.selara-ai__badge.is-warn::before { content: '! '; }
+
+.selara-ai__badge.is-ok { border-color: #36b37e; }
+.selara-ai__badge.is-warn { border-color: #e0a526; }
+
+.selara-ai__note {
+  margin: 0;
+  color: var(--text-muted, #98a3ad);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.selara-ai__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.selara-ai__row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.selara-ai__row dt {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.selara-ai__row dd {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+}
+
+.selara-ai__row strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.selara-ai__row.is-warn strong::before { content: '! '; }
+
+.selara-ai__row small {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.selara-ai__bar {
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(128, 140, 150, 0.22);
+}
+
+.selara-ai__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #36b37e;
+}
+
+.selara-ai__row.is-warn .selara-ai__bar i { background: #e0a526; }
+
+.selara-ai__cta {
+  display: grid;
+  gap: 6px;
+}
+
+.selara-ai__cta small {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.selara-ai__skeleton {
+  display: grid;
+  gap: 8px;
+  min-height: 132px;
+}
+
+.selara-ai__skeleton i {
+  display: block;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(128, 140, 150, 0.18);
+}
+
+.selara-ai__error {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+}

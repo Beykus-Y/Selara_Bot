@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -23,15 +24,21 @@ from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
     AdminBroadcastReplyModel,
+    AiFeatureInvocationModel,
+    ChatEntitlementModel,
     ChatMemberCountSnapshotModel,
     ChatMetricsModel,
     ChatModel,
+    LlmUsageLogModel,
     OperationalAlertModel,
+    SelaraAiPaymentModel,
+    SelaraAiPurchaseIntentModel,
     UserFeatureRequestModel,
     UserChatMessageEventModel,
     UserChatActivityModel,
     UserModel,
 )
+from selara.infrastructure.db.selara_ai_payment_refund import SelaraAiPaymentRefundModel
 from selara.web import app as web_app_module
 
 
@@ -137,6 +144,12 @@ async def _client(monkeypatch, *, admin_user_id: int | None = 77, current_user: 
             AdminBroadcastDeliveryModel.__table__,
             AdminBroadcastReplyModel.__table__,
             UserChatActivityModel.__table__,
+            AiFeatureInvocationModel.__table__,
+            LlmUsageLogModel.__table__,
+            ChatEntitlementModel.__table__,
+            SelaraAiPurchaseIntentModel.__table__,
+            SelaraAiPaymentModel.__table__,
+            SelaraAiPaymentRefundModel.__table__,
         ],
     )
     session_factory = _SessionFactory(engine)
@@ -580,3 +593,92 @@ async def test_miniapp_session_uses_verified_telegram_id_for_admin_permission(mo
     assert response.json()["permissions"] == {"admin": True}
     assert tampered.status_code == 401
     assert created_user_ids == [77, 77]
+
+
+_AI_ADMIN_ROUTES = (
+    "/api/miniapp/admin/ai/summary",
+    "/api/miniapp/admin/ai/breakdown",
+    "/api/miniapp/admin/ai/readiness",
+    "/api/miniapp/admin/monetization/summary",
+    "/api/miniapp/admin/monetization/payments",
+    "/api/miniapp/admin/monetization/payments/1",
+    "/api/miniapp/admin/monetization/entitlements",
+)
+
+
+@pytest.mark.asyncio
+async def test_ai_and_monetization_routes_are_owner_only(monkeypatch) -> None:
+    group_admin = UserSnapshot(telegram_user_id=80, username="gadmin", first_name="Group", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=None) as (client, _session_factory):
+        for route in _AI_ADMIN_ROUTES:
+            assert (await client.get(route)).status_code == 401, route
+
+    async with _client(monkeypatch, current_user=group_admin) as (client, session_factory):
+        with Session(session_factory._engine) as session:
+            session.add(
+                ChatEntitlementModel(
+                    chat_id=-1001, product_key="selara_ai_monthly", status="active",
+                    valid_from=datetime.now(timezone.utc), valid_until=datetime.now(timezone.utc) + timedelta(days=3),
+                )
+            )
+            session.commit()
+        for route in _AI_ADMIN_ROUTES:
+            assert (await client.get(route)).status_code == 403, route
+
+    async with _client(monkeypatch, admin_user_id=None, current_user=group_admin) as (client, _session_factory):
+        for route in _AI_ADMIN_ROUTES:
+            assert (await client.get(route)).status_code == 403, route
+
+
+@pytest.mark.asyncio
+async def test_ai_and_monetization_routes_validate_inputs(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=admin) as (client, _session_factory):
+        for route in (
+            "/api/miniapp/admin/ai/summary",
+            "/api/miniapp/admin/ai/breakdown",
+            "/api/miniapp/admin/monetization/summary",
+        ):
+            assert (await client.get(route, params={"period_days": 14})).status_code == 422, route
+        base = "/api/miniapp/admin/monetization/payments"
+        assert (await client.get(base, params={"state": "bogus"})).status_code == 422
+        assert (await client.get(base, params={"refund": "bogus"})).status_code == 422
+        assert (await client.get(base, params={"period_days": 5})).status_code == 422
+        assert (await client.get(base, params={"cursor": "garbage"})).status_code == 422
+        assert (await client.get(base, params={"limit": 500})).status_code == 422
+        assert (await client.get(f"{base}/999")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ai_summary_empty_period_is_not_an_error_and_cost_is_a_decimal_string(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=admin) as (client, _session_factory):
+        summary = (await client.get("/api/miniapp/admin/ai/summary", params={"period_days": 30})).json()
+        breakdown = (await client.get("/api/miniapp/admin/ai/breakdown")).json()
+        monetization = (await client.get("/api/miniapp/admin/monetization/summary")).json()
+        payments = (await client.get("/api/miniapp/admin/monetization/payments")).json()
+        entitlements = (await client.get("/api/miniapp/admin/monetization/entitlements")).json()
+
+    assert summary["invocations"] == 0 and summary["provider_calls"] == 0
+    assert summary["unknown_cost_calls"] == 0 and Decimal(summary["known_cost_usd"]) == 0
+    assert summary["average_known_cost_per_invocation_usd"] is None
+    assert breakdown["features"] == [] and breakdown["models"] == []
+    assert monetization["stars_revenue"] == 0 and monetization["active_paid_chats"] == 0
+    assert monetization["refunds"] == {"pending": 0, "refunded": 0, "failed": 0}
+    assert payments["items"] == [] and payments["next_cursor"] is None
+    assert entitlements["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_ai_readiness_reports_missing_price_without_exposing_secrets(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=admin) as (client, _session_factory):
+        response = await client.get("/api/miniapp/admin/ai/readiness")
+
+    body = response.json()
+    checks = {item["key"]: item for item in body["checks"]}
+    assert body["checkout"]["configured"] is False
+    assert checks["stars_price"]["status"] == "missing"
+    assert "SELARA_AI_PRICE_STARS" in checks["stars_price"]["detail"]
+    assert checks["llm_provider"]["status"] == "unavailable"
+    assert "123456:TEST" not in response.text and "test-secret" not in response.text

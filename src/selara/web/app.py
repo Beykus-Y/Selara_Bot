@@ -50,6 +50,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from selara.application.achievements import get_achievement_catalog_from_settings
+from selara.application.feature_access import FeatureAccessService
+from selara.application.selara_ai_status import build_chat_ai_access_status
 from selara.application.admin_broadcasts import (
     BroadcastFormatError,
     ParsedBroadcast,
@@ -81,6 +83,8 @@ from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.bot_runtime import get_bot_polling_runtime_state
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.core.text_aliases import ALIAS_MODE_DEFAULT, ALIAS_MODE_VALUES
 from selara.core.web_auth import (
     digest_admin_session_token,
@@ -120,7 +124,7 @@ from selara.infrastructure.db.repositories import (
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
 from selara.presentation import game_state as game_state_module
 from selara.presentation.audit import log_chat_action
-from selara.presentation.auth import has_permission
+from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
 from selara.presentation.commands.catalog import resolve_builtin_command_key
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.game_state import (
@@ -5060,6 +5064,53 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             },
             status_code=200,
         )
+
+    @app.get("/api/miniapp/chat/{chat_id}/ai-access")
+    async def miniapp_chat_ai_access_api(chat_id: int, request: Request):
+        """Selara AI status for one chat; loaded separately from the heavy overview."""
+        async with session_factory() as session:
+            user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=False)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+            current_settings = await _chat_settings_or_defaults(activity_repo, chat_id=chat_id)
+            can_manage = await _can_manage_chat_settings(activity_repo, chat=chat, user=user)
+            await session.commit()
+
+        owner_exempt = False
+        if settings.admin_user_id is not None:
+            try:
+                owner_exempt = await asyncio.wait_for(
+                    resolve_owner_admin_exemption(
+                        bot=await _get_game_bot(),
+                        chat_id=chat_id,
+                        admin_user_id=settings.admin_user_id,
+                    ),
+                    timeout=4,
+                )
+            except Exception:
+                logger.warning("Owner exemption check failed for AI status chat_id=%s", chat_id, exc_info=True)
+                owner_exempt = False
+
+        access_service = FeatureAccessService(
+            SqlAlchemyFeatureQuotaRepository(session_factory),
+            entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
+        )
+        payload = await build_chat_ai_access_status(
+            access_service=access_service,
+            chat_id=chat_id,
+            automatic_enabled=bool(current_settings.daily_summary_enabled),
+            owner_exempt=owner_exempt,
+            timezone_name=settings.bot_timezone,
+            can_manage_purchase=can_manage and not owner_exempt,
+            checkout_configured=settings.selara_ai_price_stars is not None,
+            bot_dm_url=f"https://t.me/{bot_username}",
+            display_timezone=settings.bot_timezone,
+        )
+        return JSONResponse(content={"ok": True, **payload}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/miniapp/chat/{chat_id}/leaderboard")
     async def miniapp_chat_leaderboard_api(chat_id: int, request: Request):

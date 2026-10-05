@@ -35,6 +35,13 @@ export const miniAppAdminRoute: RouteObject = {
           },
         },
         {
+          path: 'ai',
+          lazy: async () => {
+            const { AdminAiPage } = await import('@/pages/admin/ui/AdminAiPage')
+            return { Component: AdminAiPage }
+          },
+        },
+        {
           path: 'more',
           lazy: async () => {
             const { AdminMorePage } = await import('@/pages/admin/ui/AdminMorePage')

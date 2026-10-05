@@ -9,6 +9,9 @@ import { getMiniAppData, getMiniAppPage } from '@/shared/miniapp/api'
 import type { MiniAppChatPageData } from '@/shared/miniapp/model'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
+import { useChatAiAccess } from './lib/use-chat-ai-access'
+import { SelaraAiPanel } from './ui/SelaraAiPanel'
+
 function modeLabel(mode: ChatLeaderboardMode) {
   if (mode === 'activity') {
     return 'Activity'
@@ -48,6 +51,9 @@ export function ChatPage() {
       }),
     enabled: Boolean(chatId),
   })
+
+  // Starts loading the Selara AI status in parallel; it never gates the rest of the page.
+  useChatAiAccess(chatId)
 
   usePageTitle(overviewQuery.data?.chat_title || 'Group')
 
@@ -102,6 +108,8 @@ export function ChatPage() {
           </a>
         </div>
       </section>
+
+      <SelaraAiPanel chatId={chatId} />
 
       <section className="miniapp-stat-strip">
         {summaryItems.map((item) => (

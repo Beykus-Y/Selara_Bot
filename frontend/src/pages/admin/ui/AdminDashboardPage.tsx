@@ -5,6 +5,8 @@ import { Link } from 'react-router-dom'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 
+import { getAdminAiSummary, getAdminMonetizationSummary } from '../api/get-admin-ai'
+import { formatStars, formatUsd } from '../lib/format'
 import { getAdminAudience } from '../api/get-admin-audience'
 import { getAdminHealth } from '../api/get-admin-health'
 import { getAdminSummary } from '../api/get-admin-summary'
@@ -111,6 +113,19 @@ export function AdminDashboardPage() {
   const summary = useQuery({
     queryKey: ['miniapp-admin-summary'],
     queryFn: ({ signal }) => getAdminSummary({ signal }),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  })
+
+  const aiSummary = useQuery({
+    queryKey: ['miniapp-admin-ai-summary', 30],
+    queryFn: ({ signal }) => getAdminAiSummary(30, { signal }),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  })
+  const monetization = useQuery({
+    queryKey: ['miniapp-admin-monetization-summary', 30],
+    queryFn: ({ signal }) => getAdminMonetizationSummary(30, { signal }),
     staleTime: 30_000,
     refetchInterval: 60_000,
   })
@@ -261,6 +276,39 @@ export function AdminDashboardPage() {
             {summary.isError && <p className="admin-footnote">Не удалось обновить. Показаны последние данные.</p>}
           </>
         ) : null}
+      </section>
+      <section className="admin-section" aria-labelledby="admin-ai-title">
+        <div className="admin-section__title-row">
+          <h2 id="admin-ai-title">AI и Selara AI · 30 дней</h2>
+          <SectionRetry
+            onRetry={() => { void aiSummary.refetch(); void monetization.refetch() }}
+            busy={aiSummary.isFetching || monetization.isFetching}
+          />
+        </div>
+        <div className="admin-metric-grid">
+          {aiSummary.data ? (
+            <>
+              <article className="admin-metric"><strong>{formatCount(aiSummary.data.invocations)}</strong><span>AI-запросов</span></article>
+              <article className="admin-metric"><strong>{formatCount(aiSummary.data.provider_calls)}</strong><span>вызовов провайдера</span></article>
+              <article className={aiSummary.data.unknown_cost_calls > 0 ? 'admin-metric is-warn' : 'admin-metric'}>
+                <strong>{formatUsd(aiSummary.data.known_cost_usd)}</strong>
+                <span>{aiSummary.data.unknown_cost_calls > 0 ? 'известная стоимость' : 'стоимость'}</span>
+                {aiSummary.data.unknown_cost_calls > 0 && <small>без цены: {formatCount(aiSummary.data.unknown_cost_calls)} вызовов</small>}
+              </article>
+            </>
+          ) : aiSummary.isError ? (
+            <div className="admin-inline-error" role="alert"><span>AI-аналитика недоступна.</span></div>
+          ) : <SectionSkeleton rows={2} />}
+          {monetization.data ? (
+            <>
+              <article className="admin-metric"><strong>{formatCount(monetization.data.active_paid_chats)}</strong><span>активных чатов Selara AI</span></article>
+              <article className="admin-metric"><strong>{formatStars(monetization.data.stars_revenue)}</strong><span>выручка Stars</span></article>
+            </>
+          ) : monetization.isError ? (
+            <div className="admin-inline-error" role="alert"><span>Аналитика Stars недоступна.</span></div>
+          ) : null}
+        </div>
+        <Link className="admin-dashboard-action" to={routes.adminAi}>Открыть аналитику <span aria-hidden="true">›</span></Link>
       </section>
       <Link className="admin-dashboard-action" to={routes.adminBroadcast}>Создать рассылку <span aria-hidden="true">›</span></Link>
     </div>
