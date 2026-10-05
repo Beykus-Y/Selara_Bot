@@ -259,25 +259,46 @@ async def test_two_concurrent_real_payments_for_one_chat_add_sixty_days():
         await _seed_chats(factory, chat_id)
         repository = SqlAlchemyTelegramStarsRepository(factory)
         first_intent = await _intent(factory, chat_id=chat_id)
-        second_intent = await _intent(factory, chat_id=chat_id)
+        # A buyer is rate-limited to one new invoice per chat per minute. Create
+        # the second legitimate invoice after that cooldown, then let both
+        # successful payments race at the same time.
+        second_intent = await _intent(
+            factory,
+            chat_id=chat_id,
+            now=_NOW + timedelta(minutes=2),
+        )
+        payment_time = _NOW + timedelta(minutes=2)
 
         first, second = await asyncio.gather(
-            _payment(repository, first_intent, charge_id="stars-distinct-one"),
-            _payment(repository, second_intent, charge_id="stars-distinct-two"),
+            _payment(
+                repository,
+                first_intent,
+                charge_id="stars-distinct-one",
+                payment_at=payment_time,
+            ),
+            _payment(
+                repository,
+                second_intent,
+                charge_id="stars-distinct-two",
+                payment_at=payment_time,
+            ),
         )
 
         assert first.state == second.state == "applied"
         assert {
             first.valid_until,
             second.valid_until,
-        } == {_NOW + timedelta(days=30), _NOW + timedelta(days=60)}
+        } == {
+            payment_time + timedelta(days=30),
+            payment_time + timedelta(days=60),
+        }
         async with factory() as session:
             final_entitlement = await session.scalar(
                 select(ChatEntitlementModel).where(ChatEntitlementModel.chat_id == chat_id)
             )
             payment_count = await session.scalar(select(func.count(SelaraAiPaymentModel.id)))
         assert final_entitlement is not None
-        assert final_entitlement.valid_until == _NOW + timedelta(days=60)
+        assert final_entitlement.valid_until == payment_time + timedelta(days=60)
         assert payment_count == 2
         assert (await repository.payment_totals()).stars_revenue == 274
     finally:
@@ -442,10 +463,15 @@ async def test_pre_checkout_checks_buyer_amount_currency_expiry_and_consumption(
         )
         assert not wrong_buyer.accepted and wrong_buyer.reason == "wrong_buyer"
 
-        wrong_amount_intent = await _intent(factory, chat_id=chat_id)
+        wrong_amount_buyer = _BUYER + 2
+        wrong_amount_intent = await _intent(
+            factory,
+            chat_id=chat_id,
+            buyer_user_id=wrong_amount_buyer,
+        )
         wrong_amount = await repository.accept_pre_checkout(
             invoice_payload=wrong_amount_intent.invoice_payload,
-            buyer_user_id=_BUYER,
+            buyer_user_id=wrong_amount_buyer,
             amount_stars=136,
             currency="XTR",
             query_id="checkout-wrong-amount",
@@ -454,10 +480,15 @@ async def test_pre_checkout_checks_buyer_amount_currency_expiry_and_consumption(
         )
         assert not wrong_amount.accepted and wrong_amount.reason == "wrong_amount"
 
-        wrong_currency_intent = await _intent(factory, chat_id=chat_id)
+        wrong_currency_buyer = _BUYER + 3
+        wrong_currency_intent = await _intent(
+            factory,
+            chat_id=chat_id,
+            buyer_user_id=wrong_currency_buyer,
+        )
         wrong_currency = await repository.accept_pre_checkout(
             invoice_payload=wrong_currency_intent.invoice_payload,
-            buyer_user_id=_BUYER,
+            buyer_user_id=wrong_currency_buyer,
             amount_stars=137,
             currency="USD",
             query_id="checkout-wrong-currency",
@@ -466,10 +497,16 @@ async def test_pre_checkout_checks_buyer_amount_currency_expiry_and_consumption(
         )
         assert not wrong_currency.accepted and wrong_currency.reason == "wrong_currency"
 
-        expired_intent = await _intent(factory, chat_id=chat_id, now=_NOW - timedelta(hours=1))
+        expired_buyer = _BUYER + 4
+        expired_intent = await _intent(
+            factory,
+            chat_id=chat_id,
+            buyer_user_id=expired_buyer,
+            now=_NOW - timedelta(hours=1),
+        )
         expired = await repository.accept_pre_checkout(
             invoice_payload=expired_intent.invoice_payload,
-            buyer_user_id=_BUYER,
+            buyer_user_id=expired_buyer,
             amount_stars=137,
             currency="XTR",
             query_id="checkout-expired",
