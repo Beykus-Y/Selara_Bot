@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Awaitable, Callable
 import hashlib
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -188,7 +189,8 @@ async def send_artifact(call: ToolCall, *, artifact_context: ArtifactRequestCont
 
 
 async def deliver_artifact(*, call: ToolCall, ctx: ArtifactRequestContext, bot, caption: str,
-                           caption_is_html: bool = False, fallback_to_text: bool = False) -> ToolResult:
+                           caption_is_html: bool = False, fallback_to_text: bool = False,
+                           claim_check: Callable[[], Awaitable[bool]] | None = None) -> ToolResult:
     """Internal delivery shared by the agent and daily summary; format flags are
     trusted server parameters and never appear in model tool arguments."""
     limit = 16000 if caption_is_html else 12000
@@ -218,7 +220,19 @@ async def deliver_artifact(*, call: ToolCall, ctx: ArtifactRequestContext, bot, 
     renderer = split_telegram_html if caption_is_html else render_llm_html
     state = state or {"caption_hash": signature, "next": 0, "message_ids": []}
     token = str(uuid4())
+
+    async def claim_is_lost() -> bool:
+        if claim_check is None or await claim_check():
+            return False
+        if state.get("pending") == token:
+            state.pop("pending", None)
+            row.delivery = dict(state)
+            await ctx.repository.session.commit()
+        return True
+
     while True:
+        if await claim_is_lost():
+            return _err(call.call_id, call.name, "Доставка остановлена: право отправки сводки перешло другому процессу.")
         items = ([("text", value) for value in renderer(caption)] if state.get("text_only")
                  else [("photo", value) for value in captions] + [("text", value) for value in texts])
         index = state["next"]
@@ -227,6 +241,8 @@ async def deliver_artifact(*, call: ToolCall, ctx: ArtifactRequestContext, bot, 
         state["pending"] = token
         row.delivery = dict(state)
         await ctx.repository.session.commit()
+        if await claim_is_lost():
+            return _err(call.call_id, call.name, "Доставка остановлена: право отправки сводки перешло другому процессу.")
         kind, content = items[index]
         kwargs = {"chat_id": ctx.chat_id, "message_thread_id": ctx.thread_id}
         if ctx.message_id is not None:
@@ -241,6 +257,8 @@ async def deliver_artifact(*, call: ToolCall, ctx: ArtifactRequestContext, bot, 
             except TelegramBadRequest as exc:
                 if "parse" not in exc.message.lower() and "entit" not in exc.message.lower():
                     raise
+                if await claim_is_lost():
+                    return _err(call.call_id, call.name, "Доставка остановлена: право отправки сводки перешло другому процессу.")
                 plain_content = html_to_plain_text(content) if content else None
                 if kind == "photo":
                     sent = await bot.send_photo(**kwargs, photo=BufferedInputFile(base64.b64decode(row.pages[index]),
