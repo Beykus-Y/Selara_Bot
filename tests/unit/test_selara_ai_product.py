@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -69,33 +70,37 @@ def test_invoice_payload_contains_only_versioned_uuid_intent_reference():
 @pytest.mark.asyncio
 async def test_purchase_authority_requires_admin_bot_membership_and_fails_closed():
     bot = SimpleNamespace(
+        id=900,
         get_chat_member=AsyncMock(side_effect=[
             SimpleNamespace(status="administrator"),
             SimpleNamespace(status="member"),
         ]),
-        get_me=AsyncMock(return_value=SimpleNamespace(id=900)),
+        get_me=AsyncMock(),
     )
     authorized = await premium._is_purchase_authorized(bot=bot, buyer_user_id=123, chat_id=-100)
     assert authorized == (True, None)
+    bot.get_me.assert_not_awaited()
 
     member_bot = SimpleNamespace(
+        id=900,
         get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")),
-        get_me=AsyncMock(return_value=SimpleNamespace(id=900)),
+        get_me=AsyncMock(),
     )
     denied = await premium._is_purchase_authorized(bot=member_bot, buyer_user_id=123, chat_id=-100)
     assert denied == (False, "buyer_not_admin")
-    assert member_bot.get_me.await_count == 0
+    member_bot.get_me.assert_not_awaited()
 
     failing_bot = SimpleNamespace(get_chat_member=AsyncMock(side_effect=RuntimeError("Telegram offline")))
     failed = await premium._is_purchase_authorized(bot=failing_bot, buyer_user_id=123, chat_id=-100)
     assert failed == (False, "telegram_unavailable")
 
     creator_bot = SimpleNamespace(
+        id=900,
         get_chat_member=AsyncMock(side_effect=[
             SimpleNamespace(status="creator"),
             SimpleNamespace(status="administrator"),
         ]),
-        get_me=AsyncMock(return_value=SimpleNamespace(id=900)),
+        get_me=AsyncMock(),
     )
     creator_authorized = await premium._is_purchase_authorized(
         bot=creator_bot,
@@ -133,6 +138,8 @@ async def test_pre_checkout_answers_exactly_once_after_persisting_acceptance(mon
         pre_checkout_query_id=None,
         pre_checkout_accepted_at=None,
         consumed_at=None,
+        terms_version="v1",
+        terms_accepted_at=datetime.now(timezone.utc),
     )
     repository = SimpleNamespace(
         get_purchase_intent=AsyncMock(return_value=intent),
@@ -215,6 +222,95 @@ async def test_pre_checkout_rejects_unknown_payload_and_answers_once(monkeypatch
 
     query.answer.assert_awaited_once()
     assert query.answer.await_args.kwargs["ok"] is False
+
+
+
+@pytest.mark.asyncio
+async def test_pre_checkout_retry_with_new_query_id_survives_lost_answer(monkeypatch):
+    state = {"accepted": False}
+    intent = SimpleNamespace(
+        id="5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        buyer_user_id=123,
+        source_chat_id=-100,
+        chat_id=-100,
+        product_key=SELARA_AI_PRODUCT_KEY,
+        amount_stars=137,
+        currency="XTR",
+        status="open",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        terms_version="v1",
+        terms_accepted_at=datetime.now(timezone.utc),
+    )
+
+    async def get_intent(*, invoice_payload):
+        assert invoice_payload == "selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e"
+        intent.status = "checkout_accepted" if state["accepted"] else "open"
+        return intent
+
+    async def accept(**kwargs):
+        state["accepted"] = True
+        return PreCheckoutResult(True, chat_id=-100)
+
+    repository = SimpleNamespace(
+        get_purchase_intent=AsyncMock(side_effect=get_intent),
+        accept_pre_checkout=AsyncMock(side_effect=accept),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium, "_is_purchase_authorized", AsyncMock(return_value=(True, None)))
+    answer = AsyncMock(side_effect=[TimeoutError("network failure"), None])
+
+    def make_query(query_id):
+        return SimpleNamespace(
+            id=query_id,
+            invoice_payload=intent.invoice_payload,
+            from_user=SimpleNamespace(id=123),
+            total_amount=137,
+            currency="XTR",
+            answer=answer,
+        )
+
+    await premium.selara_ai_pre_checkout(make_query("query-1"), bot=object(), session_factory=object())
+    await premium.selara_ai_pre_checkout(make_query("query-2"), bot=object(), session_factory=object())
+
+    assert repository.accept_pre_checkout.await_count == 2
+    assert answer.await_count == 2
+    assert answer.await_args_list[0].kwargs["ok"] is True
+    assert answer.await_args_list[1].kwargs == {"ok": True, "error_message": None}
+
+
+@pytest.mark.asyncio
+async def test_pre_checkout_validation_has_a_bounded_deadline_and_answers_once(monkeypatch):
+    monkeypatch.setattr(premium, "_PRECHECKOUT_VALIDATION_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(premium, "_PRECHECKOUT_ANSWER_DEADLINE_SECONDS", 1.0)
+
+    async def slow_lookup(**_kwargs):
+        await asyncio.sleep(0.05)
+
+    repository = SimpleNamespace(get_purchase_intent=AsyncMock(side_effect=slow_lookup))
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    query = SimpleNamespace(
+        id="query-slow",
+        invoice_payload="selara_ai:v1:ffffffff-ffff-4fff-8fff-ffffffffffff",
+        from_user=SimpleNamespace(id=123),
+        total_amount=137,
+        currency="XTR",
+        answer=AsyncMock(),
+    )
+
+    await premium.selara_ai_pre_checkout(query, bot=object(), session_factory=object())
+
+    query.answer.assert_awaited_once()
+    assert query.answer.await_args.kwargs["ok"] is False
+
+
+def test_purchase_keyboard_requires_explicit_terms_acceptance():
+    keyboard = premium._purchase_keyboard(chat_id=-100, price_stars=137)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+
+    assert buttons[0].callback_data == "premium:accept:-100"
+    assert "принимаю условия" in buttons[0].text.lower()
+    assert buttons[1].callback_data == "premium:terms:-100"
+    assert "/paysupport" in premium._terms_text()
 
 
 @pytest.mark.asyncio

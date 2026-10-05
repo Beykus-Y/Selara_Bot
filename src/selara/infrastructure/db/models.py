@@ -103,6 +103,8 @@ class SelaraAiPurchaseIntentModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     invoice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terms_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pre_checkout_query_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     pre_checkout_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -113,6 +115,11 @@ class SelaraAiPurchaseIntentModel(Base):
         CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
         CheckConstraint("status IN ('open', 'checkout_accepted', 'consumed')", name="ck_selara_ai_purchase_intents_status"),
         CheckConstraint("currency = 'XTR'", name="ck_selara_ai_purchase_intents_currency"),
+        CheckConstraint(
+            "(terms_version IS NULL AND terms_accepted_at IS NULL) OR "
+            "(terms_version IS NOT NULL AND terms_accepted_at IS NOT NULL)",
+            name="ck_selara_ai_purchase_intents_terms_acceptance",
+        ),
         Index("idx_selara_ai_purchase_intents_buyer_created", "buyer_user_id", "created_at"),
         Index("idx_selara_ai_purchase_intents_chat", "chat_id", "status"),
     )

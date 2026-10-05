@@ -13,6 +13,11 @@
   10 запросов LLM в день и 10 ручных `/summary` за календарный месяц. Resolver
   может передать отдельную paid quota policy; её лимит оставлен незаданным до
   продуктового решения.
+- Перед выставлением счёта пользователь открывает `/terms` (условия также доступны
+  кнопкой из экрана покупки) и явно подтверждает их. Purchase intent хранит
+  принятую версию условий и время согласия.
+- Команды `/terms` и `/paysupport` доступны пользователю; `/paysupport` направляет
+  запрос через существующую очередь `/feedback поддержка: ...`.
 - Owner exemption проверяется отдельно и не создаёт фиктивные entitlement или
   payment rows. Обычная STT-транскрипция остаётся бесплатной и вне access gate.
 
@@ -38,8 +43,11 @@
 3. Purchase intent хранит buyer, исходный и текущий chat id, product, сумму,
    валюту `XTR`, duration и expiry. Versioned payload содержит только UUID этого
    intent: `selara_ai:v1:<uuid>`.
-4. `pre_checkout_query` проверяет intent, buyer, валюту, сумму, expiry и live
-   authority. Intent фиксирует принятый checkout до ответа Telegram.
+4. `pre_checkout_query` проверяет intent, buyer, валюту, сумму, expiry, сохранённое
+   согласие с условиями и live authority. Проверки ограничены 6 секундами, ответ
+   Telegram — 2 секундами (всего меньше 10 секунд). Если ответ потерялся в сети,
+   новый query id может повторно пройти тот же неиспользованный intent; только
+   `successful_payment` завершает покупку и изменяет срок entitlement.
 5. Только `successful_payment` создаёт payment audit и entitlement. В одной
    PostgreSQL-транзакции записываются платёж, срок доступа и consumed state.
    Повтор с тем же `telegram_payment_charge_id` не продлевает срок второй раз.
@@ -57,7 +65,9 @@
 Group → supergroup migration переносит current chat id у purchase intents. Для
 collision двух entitlements система складывает оставшееся активное время обоих
 чата, сохраняя полную оплаченную длительность. Исторические payment rows остаются
-неизменными и хранят source/target chat ids на момент обработки.
+неизменными и хранят source/target chat ids на момент обработки. Запрос истории
+по canonical chat включает такие старые платежи через текущий chat id их purchase
+intent.
 
 ## Refunds и observability
 

@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.selara_ai_product import (
     SELARA_AI_PRODUCT_KEY,
+    SELARA_AI_TERMS_VERSION,
     SelaraAiProductUnavailable,
     get_selara_ai_product,
 )
@@ -33,6 +34,30 @@ router = Router(name="premium")
 
 _CHECKOUT_ACCESS_ERROR = "Для оплаты нужно быть администратором выбранного чата, а Selara должна оставаться в нём."
 _CHECKOUT_RETRY_ERROR = "Не удалось проверить чат. Попробуйте открыть /premium и повторить оплату позже."
+_PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
+_PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
+
+
+def _terms_text() -> str:
+    return (
+        "<b>Условия покупки Selara AI</b>\n\n"
+        "1. Доступ приобретается для выбранной Telegram-группы и действует 30 дней с момента оплаты.\n"
+        "2. В стоимость входят автоматические итоги дня и доступ к AI-функциям чата по действующим лимитам.\n"
+        "3. Подписка не продлевается автоматически. Каждая новая успешная покупка "
+        "добавляет 30 дней к активному сроку; после окончания доступ отключается.\n"
+        "4. Оплата проходит в Telegram Stars. Покупатель подтверждает, что вправе "
+        "оформить доступ для выбранного чата. Доступ после оплаты принадлежит чату "
+        "и сохраняется до окончания срока, даже если покупатель перестанет быть "
+        "администратором.\n"
+        "5. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
+        "Нажимая кнопку принятия условий перед счётом, вы подтверждаете, что прочитали и принимаете эти условия."
+    )
+
+
+def _terms_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Вернуться к покупке", callback_data=f"premium:select:{chat_id}")
+    return builder.as_markup()
 
 
 def _product_for_settings(settings: Settings):
@@ -75,9 +100,10 @@ def _selection_keyboard(chats) -> InlineKeyboardMarkup:
 def _purchase_keyboard(*, chat_id: int, price_stars: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text=f"Купить за {price_stars} ⭐",
-        callback_data=f"premium:buy:{chat_id}",
+        text=f"Продолжить и оплатить — принимаю условия · {price_stars} ⭐",
+        callback_data=f"premium:accept:{chat_id}",
     )
+    builder.button(text="Условия покупки", callback_data=f"premium:terms:{chat_id}")
     builder.button(text="Отмена", callback_data="premium:cancel")
     builder.adjust(1)
     return builder.as_markup()
@@ -101,8 +127,7 @@ async def _is_purchase_authorized(*, bot: Bot, buyer_user_id: int, chat_id: int)
         buyer_member = await bot.get_chat_member(chat_id=chat_id, user_id=buyer_user_id)
         if not is_telegram_chat_admin(buyer_member):
             return False, "buyer_not_admin"
-        bot_user = await bot.get_me()
-        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_user.id)
+        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
     except Exception:
         logger.warning(
             "Selara AI purchase authority check failed chat_id=%s",
@@ -177,11 +202,44 @@ async def premium_command(
         f"<b>{escape(product.title)}</b>\n"
         f"Цена: <b>{product.price_stars} ⭐</b>.\n"
         "Доступ оформляется для чата и включает автоматические итоги дня. "
-        f"Каждая повторная покупка добавляет ещё {product.duration_label}.\n\n"
+        f"Каждая повторная покупка добавляет ещё {product.duration_label}.\n"
+        "Перед счётом можно прочитать /terms; продление не автоматическое.\n\n"
         "Выберите чат:",
         parse_mode="HTML",
         reply_markup=_selection_keyboard(chats),
     )
+
+
+@router.message(Command("terms"))
+async def selara_ai_terms(message: Message) -> None:
+    await message.answer(_terms_text(), parse_mode="HTML")
+
+
+@router.message(Command("paysupport"))
+async def selara_ai_payment_support(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("По вопросам оплаты напишите боту в личку и отправьте /paysupport.")
+        return
+    await message.answer(
+        "Поддержка по покупкам Selara AI: отправьте обращение командой "
+        "<code>/feedback поддержка: описание вопроса по платежу</code>. "
+        "Укажите дату оплаты, сумму в Stars и название чата. Обращение попадёт команде Selara. "
+        "Не отправляйте коды входа или данные Telegram-аккаунта. "
+        "Поддержка Telegram не видит платежи, сделанные у ботов.",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("premium:terms:"))
+async def show_selara_ai_terms(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message is None or query.message.chat.type != "private":
+        return
+    chat_id = _callback_chat_id(query.data, "terms")
+    if chat_id is None:
+        await _edit_callback_message(query, _terms_text(), reply_markup=None)
+        return
+    await _edit_callback_message(query, _terms_text(), reply_markup=_terms_keyboard(chat_id))
 
 
 @router.callback_query(F.data.startswith("premium:select:"))
@@ -238,13 +296,16 @@ async def select_premium_chat(
         text = (
             f"<b>{label}</b>\n"
             f"Selara AI уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>."
+            f"Новая покупка продлит срок ещё на {product.duration_label} — "
+            f"<b>{product.price_stars} ⭐</b>.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
         )
     else:
         text = (
             f"<b>{label}</b>\n"
             f"Selara AI будет доступна чату {product.duration_label} после оплаты.\n"
-            f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое."
+            f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
         )
     await _edit_callback_message(
         query,
@@ -253,8 +314,8 @@ async def select_premium_chat(
     )
 
 
-@router.callback_query(F.data.startswith("premium:buy:"))
-async def buy_selara_ai(
+@router.callback_query(F.data.startswith("premium:accept:"))
+async def accept_terms_and_buy_selara_ai(
     query: CallbackQuery,
     bot: Bot,
     session_factory,
@@ -263,7 +324,7 @@ async def buy_selara_ai(
     await query.answer()
     if query.message is None or query.message.chat.type != "private" or query.from_user is None:
         return
-    chat_id = _callback_chat_id(query.data, "buy")
+    chat_id = _callback_chat_id(query.data, "accept")
     if chat_id is None:
         await _edit_callback_message(query, "Не удалось распознать чат. Отправьте /premium заново.")
         return
@@ -302,6 +363,8 @@ async def buy_selara_ai(
             chat_id=chat_id,
             chat_title=chat_title,
             product=product,
+            terms_version=SELARA_AI_TERMS_VERSION,
+            terms_accepted_at=datetime.now(timezone.utc),
         )
     except Exception:
         logger.exception("Selara AI purchase intent creation failed chat_id=%s", chat_id)
@@ -339,6 +402,93 @@ async def cancel_premium_purchase(query: CallbackQuery) -> None:
     await _edit_callback_message(query, "Покупка отменена. Чтобы начать заново, отправьте /premium.")
 
 
+async def _validate_pre_checkout(
+    query: PreCheckoutQuery,
+    *,
+    bot: Bot,
+    repository: SqlAlchemyTelegramStarsRepository,
+) -> tuple[bool, str]:
+    intent = await repository.get_purchase_intent(invoice_payload=query.invoice_payload)
+    if intent is None:
+        logger.warning("Telegram Stars pre-checkout rejected reason=unknown_intent")
+        return False, "Счёт недействителен. Отправьте /premium и создайте новый."
+    if intent.buyer_user_id != query.from_user.id:
+        logger.warning("Telegram Stars pre-checkout rejected reason=wrong_buyer")
+        return False, "Этот счёт предназначен другому пользователю."
+    if intent.product_key != SELARA_AI_PRODUCT_KEY:
+        logger.warning("Telegram Stars pre-checkout rejected reason=unsupported_product")
+        return False, "Этот продукт больше недоступен. Отправьте /premium."
+    if intent.amount_stars != query.total_amount:
+        logger.warning("Telegram Stars pre-checkout rejected reason=wrong_amount")
+        return False, "Сумма счёта не совпадает. Запустите /premium заново."
+    if intent.currency != query.currency or intent.currency != "XTR":
+        logger.warning("Telegram Stars pre-checkout rejected reason=wrong_currency")
+        return False, "Валюта счёта не совпадает. Запустите /premium заново."
+    if intent.expires_at <= datetime.now(timezone.utc):
+        logger.warning("Telegram Stars pre-checkout rejected reason=expired_intent")
+        return False, "Срок действия счёта истёк. Отправьте /premium для нового счёта."
+    if intent.status == "consumed":
+        logger.warning("Telegram Stars pre-checkout rejected reason=intent_already_used")
+        return False, "Этот счёт уже оплачен. Отправьте /premium для новой покупки."
+    if not intent.terms_version or intent.terms_accepted_at is None:
+        logger.warning("Telegram Stars pre-checkout rejected reason=terms_not_accepted")
+        return False, "Перед оплатой нужно прочитать и принять условия через /premium."
+
+    authorized, reason = await _is_purchase_authorized(
+        bot=bot,
+        buyer_user_id=query.from_user.id,
+        chat_id=intent.chat_id,
+    )
+    if not authorized:
+        logger.info("Telegram Stars pre-checkout authority denied chat_id=%s reason=%s", intent.chat_id, reason)
+        return False, (
+            _CHECKOUT_ACCESS_ERROR
+            if reason in {"buyer_not_admin", "bot_unavailable"}
+            else _CHECKOUT_RETRY_ERROR
+        )
+
+    result = await repository.accept_pre_checkout(
+        invoice_payload=query.invoice_payload,
+        buyer_user_id=query.from_user.id,
+        amount_stars=query.total_amount,
+        currency=query.currency,
+        query_id=query.id,
+        checked_chat_id=intent.chat_id,
+    )
+    if result.reason == "target_changed" and result.chat_id is not None:
+        target_authorized, target_reason = await _is_purchase_authorized(
+            bot=bot,
+            buyer_user_id=query.from_user.id,
+            chat_id=result.chat_id,
+        )
+        if target_authorized:
+            result = await repository.accept_pre_checkout(
+                invoice_payload=query.invoice_payload,
+                buyer_user_id=query.from_user.id,
+                amount_stars=query.total_amount,
+                currency=query.currency,
+                query_id=query.id,
+                checked_chat_id=result.chat_id,
+            )
+        else:
+            logger.info(
+                "Telegram Stars pre-checkout authority denied chat_id=%s reason=%s",
+                result.chat_id,
+                target_reason,
+            )
+            return False, _CHECKOUT_ACCESS_ERROR
+
+    if result.reason == "target_unavailable":
+        return False, _CHECKOUT_ACCESS_ERROR
+    if result.accepted:
+        return True, ""
+    if result.reason in {"wrong_buyer", "wrong_amount", "wrong_currency", "expired_intent"}:
+        return False, "Счёт больше не действителен. Отправьте /premium и создайте новый."
+    if result.reason == "intent_already_used":
+        return False, "Этот счёт уже оплачен. Отправьте /premium для новой покупки."
+    return False, _CHECKOUT_RETRY_ERROR
+
+
 @router.pre_checkout_query()
 async def selara_ai_pre_checkout(
     query: PreCheckoutQuery,
@@ -349,78 +499,17 @@ async def selara_ai_pre_checkout(
     accepted = False
     error_message = "Счёт недействителен. Отправьте /premium и создайте новый."
     try:
-        intent = await repository.get_purchase_intent(invoice_payload=query.invoice_payload)
-        if intent is None:
-            logger.warning("Telegram Stars pre-checkout rejected reason=unknown_intent")
-        elif (
-            intent.pre_checkout_query_id == query.id
-            and intent.pre_checkout_accepted_at is not None
-        ):
-            result = await repository.accept_pre_checkout(
-                invoice_payload=query.invoice_payload,
-                buyer_user_id=query.from_user.id,
-                amount_stars=query.total_amount,
-                currency=query.currency,
-                query_id=query.id,
-                checked_chat_id=intent.chat_id,
-            )
-            accepted = result.accepted
-        elif intent.buyer_user_id != query.from_user.id:
-            logger.warning("Telegram Stars pre-checkout rejected reason=wrong_buyer")
-            error_message = "Этот счёт предназначен другому пользователю."
-        elif intent.amount_stars != query.total_amount or intent.currency != query.currency:
-            reason = "wrong_amount" if intent.amount_stars != query.total_amount else "wrong_currency"
-            logger.warning("Telegram Stars pre-checkout rejected reason=%s", reason)
-            error_message = "Сумма счёта не совпадает. Запустите /premium заново."
-        elif intent.status != "open" or intent.pre_checkout_accepted_at is not None:
-            logger.warning("Telegram Stars pre-checkout rejected reason=intent_already_used")
-            error_message = "Этот счёт уже использован. Отправьте /premium для новой покупки."
-        elif intent.expires_at <= datetime.now(timezone.utc):
-            logger.warning("Telegram Stars pre-checkout rejected reason=expired_intent")
-            error_message = "Срок действия счёта истёк. Отправьте /premium для нового счёта."
-        else:
-            authorized, reason = await _is_purchase_authorized(
+        async with asyncio.timeout(_PRECHECKOUT_VALIDATION_DEADLINE_SECONDS):
+            accepted, error_message = await _validate_pre_checkout(
+                query,
                 bot=bot,
-                buyer_user_id=query.from_user.id,
-                chat_id=intent.chat_id,
+                repository=repository,
             )
-            if not authorized:
-                error_message = _CHECKOUT_ACCESS_ERROR if reason in {"buyer_not_admin", "bot_unavailable"} else _CHECKOUT_RETRY_ERROR
-                logger.info("Telegram Stars pre-checkout authority denied chat_id=%s reason=%s", intent.chat_id, reason)
-            else:
-                result = await repository.accept_pre_checkout(
-                    invoice_payload=query.invoice_payload,
-                    buyer_user_id=query.from_user.id,
-                    amount_stars=query.total_amount,
-                    currency=query.currency,
-                    query_id=query.id,
-                    checked_chat_id=intent.chat_id,
-                )
-                if result.reason == "target_changed" and result.chat_id is not None:
-                    target_authorized, target_reason = await _is_purchase_authorized(
-                        bot=bot,
-                        buyer_user_id=query.from_user.id,
-                        chat_id=result.chat_id,
-                    )
-                    if target_authorized:
-                        result = await repository.accept_pre_checkout(
-                            invoice_payload=query.invoice_payload,
-                            buyer_user_id=query.from_user.id,
-                            amount_stars=query.total_amount,
-                            currency=query.currency,
-                            query_id=query.id,
-                            checked_chat_id=result.chat_id,
-                        )
-                    else:
-                        error_message = _CHECKOUT_ACCESS_ERROR
-                        logger.info(
-                            "Telegram Stars pre-checkout authority denied chat_id=%s reason=%s",
-                            result.chat_id,
-                            target_reason,
-                        )
-                accepted = result.accepted
-                if not accepted and result.reason == "target_unavailable":
-                    error_message = _CHECKOUT_ACCESS_ERROR
+    except TimeoutError:
+        logger.warning("Telegram Stars pre-checkout validation timed out")
+        error_message = _CHECKOUT_RETRY_ERROR
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         logger.error(
             "Telegram Stars pre-checkout validation unavailable exception_type=%s",
@@ -429,9 +518,13 @@ async def selara_ai_pre_checkout(
         error_message = _CHECKOUT_RETRY_ERROR
 
     try:
-        await query.answer(ok=accepted, error_message=None if accepted else error_message)
-    except TelegramAPIError:
-        logger.exception("Telegram Stars pre-checkout answer failed")
+        async with asyncio.timeout(_PRECHECKOUT_ANSWER_DEADLINE_SECONDS):
+            await query.answer(ok=accepted, error_message=None if accepted else error_message)
+    except (TelegramAPIError, TimeoutError) as exc:
+        logger.warning(
+            "Telegram Stars pre-checkout answer failed exception_type=%s",
+            type(exc).__name__,
+        )
 
 
 @router.message(F.chat.type == "private", F.successful_payment)

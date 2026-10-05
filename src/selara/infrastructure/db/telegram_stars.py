@@ -48,6 +48,8 @@ class PurchaseIntent:
     pre_checkout_query_id: str | None
     pre_checkout_accepted_at: datetime | None
     consumed_at: datetime | None
+    terms_version: str | None = None
+    terms_accepted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,8 @@ def _snapshot(row: SelaraAiPurchaseIntentModel) -> PurchaseIntent:
         pre_checkout_query_id=row.pre_checkout_query_id,
         pre_checkout_accepted_at=row.pre_checkout_accepted_at,
         consumed_at=row.consumed_at,
+        terms_version=row.terms_version,
+        terms_accepted_at=row.terms_accepted_at,
     )
 
 
@@ -193,9 +197,14 @@ class SqlAlchemyTelegramStarsRepository:
         chat_id: int,
         chat_title: str | None,
         product: SelaraAiProduct,
+        terms_version: str,
+        terms_accepted_at: datetime,
         now: datetime | None = None,
     ) -> PurchaseIntent:
+        if not terms_version.strip():
+            raise ValueError("Terms acceptance version is required")
         current = _as_utc(now or datetime.now(timezone.utc))
+        accepted_at = _as_utc(terms_accepted_at)
         intent_id = str(uuid4())
         payload = invoice_payload_for_intent(intent_id)
         async with self._session_factory() as session:
@@ -221,6 +230,8 @@ class SqlAlchemyTelegramStarsRepository:
                     currency=product.currency,
                     duration_seconds=int(product.duration.total_seconds()),
                     invoice_payload=payload,
+                    terms_version=terms_version,
+                    terms_accepted_at=accepted_at,
                     status="open",
                     created_at=current,
                     expires_at=current + PURCHASE_INTENT_TTL,
@@ -285,12 +296,6 @@ class SqlAlchemyTelegramStarsRepository:
                 )
                 if row is None or row.invoice_payload != invoice_payload:
                     result = PreCheckoutResult(False, "unknown_intent")
-                elif (
-                    row.pre_checkout_query_id == query_id
-                    and row.pre_checkout_accepted_at is not None
-                    and row.status in {"checkout_accepted", "consumed"}
-                ):
-                    result = PreCheckoutResult(True, chat_id=row.chat_id)
                 elif row.buyer_user_id != buyer_user_id:
                     result = PreCheckoutResult(False, "wrong_buyer")
                 elif row.product_key != SELARA_AI_PRODUCT_KEY:
@@ -301,8 +306,10 @@ class SqlAlchemyTelegramStarsRepository:
                     result = PreCheckoutResult(False, "wrong_currency")
                 elif row.expires_at <= current:
                     result = PreCheckoutResult(False, "expired_intent")
-                elif row.status == "consumed" or row.pre_checkout_accepted_at is not None:
+                elif row.status == "consumed":
                     result = PreCheckoutResult(False, "intent_already_used")
+                elif row.terms_version is None or row.terms_accepted_at is None:
+                    result = PreCheckoutResult(False, "terms_not_accepted")
                 elif row.chat_id != checked_chat_id:
                     result = PreCheckoutResult(False, "target_changed", chat_id=row.chat_id)
                 else:
@@ -312,6 +319,9 @@ class SqlAlchemyTelegramStarsRepository:
                     if chat is None or chat.type not in {"group", "supergroup"} or not chat.is_bot_member:
                         result = PreCheckoutResult(False, "target_unavailable", chat_id=row.chat_id)
                     else:
+                        # Telegram may retry with a new pre_checkout_query id if its
+                        # previous answer was lost. Replacing this audit marker is safe:
+                        # only successful_payment consumes the intent economically.
                         row.pre_checkout_query_id = query_id
                         row.pre_checkout_accepted_at = current
                         row.status = "checkout_accepted"
@@ -530,9 +540,16 @@ class SqlAlchemyTelegramStarsRepository:
     ) -> list[SelaraAiPaymentModel]:
         statement = select(SelaraAiPaymentModel)
         if chat_id is not None:
-            statement = statement.where(
-                (SelaraAiPaymentModel.target_chat_id == chat_id)
-                | (SelaraAiPaymentModel.source_chat_id == chat_id)
+            statement = (
+                statement.outerjoin(
+                    SelaraAiPurchaseIntentModel,
+                    SelaraAiPurchaseIntentModel.id == SelaraAiPaymentModel.purchase_intent_id,
+                )
+                .where(
+                    (SelaraAiPaymentModel.target_chat_id == chat_id)
+                    | (SelaraAiPaymentModel.source_chat_id == chat_id)
+                    | (SelaraAiPurchaseIntentModel.chat_id == chat_id)
+                )
             )
         if buyer_user_id is not None:
             statement = statement.where(SelaraAiPaymentModel.buyer_user_id == buyer_user_id)

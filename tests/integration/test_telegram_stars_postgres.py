@@ -63,6 +63,8 @@ async def _intent(factory, *, chat_id: int, buyer_user_id: int = _BUYER, now: da
         chat_id=chat_id,
         chat_title=f"Chat {chat_id}",
         product=_product(),
+        terms_version="v1",
+        terms_accepted_at=now,
         now=now,
     )
 
@@ -98,6 +100,8 @@ async def test_successful_payment_and_duplicate_update_apply_one_thirty_day_enti
         await _seed_chats(factory, chat_id)
         repository = SqlAlchemyTelegramStarsRepository(factory)
         intent = await _intent(factory, chat_id=chat_id)
+        assert intent.terms_version == "v1"
+        assert intent.terms_accepted_at == _NOW
 
         first = await _payment(repository, intent, charge_id="stars-charge-one")
         duplicate = await _payment(repository, intent, charge_id="stars-charge-one")
@@ -368,7 +372,7 @@ async def test_pre_checkout_checks_buyer_amount_currency_expiry_and_consumption(
         )
         assert not expired.accepted and expired.reason == "expired_intent"
 
-        reused = await repository.accept_pre_checkout(
+        retried = await repository.accept_pre_checkout(
             invoice_payload=valid_intent.invoice_payload,
             buyer_user_id=_BUYER,
             amount_stars=137,
@@ -377,7 +381,19 @@ async def test_pre_checkout_checks_buyer_amount_currency_expiry_and_consumption(
             checked_chat_id=chat_id,
             now=_NOW,
         )
-        assert not reused.accepted and reused.reason == "intent_already_used"
+        assert retried == PreCheckoutResult(True, chat_id=chat_id)
+
+        await _payment(repository, valid_intent, charge_id="checkout-consumed-charge")
+        consumed_retry = await repository.accept_pre_checkout(
+            invoice_payload=valid_intent.invoice_payload,
+            buyer_user_id=_BUYER,
+            amount_stars=137,
+            currency="XTR",
+            query_id="checkout-after-payment",
+            checked_chat_id=chat_id,
+            now=_NOW,
+        )
+        assert not consumed_retry.accepted and consumed_retry.reason == "intent_already_used"
     finally:
         await engine.dispose()
 
@@ -514,6 +530,40 @@ async def test_migrated_purchase_intent_grants_entitlement_to_canonical_supergro
         assert payment.target_chat_id == new_chat_id
         assert old_entitlement is None
         assert new_entitlement is not None
+    finally:
+        await engine.dispose()
+
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_payment_history_for_canonical_chat_includes_pre_migration_payment():
+    engine, factory = await _database()
+    try:
+        old_chat_id, new_chat_id = -700_751_014, -100_751_014
+        await _seed_chats(factory, old_chat_id)
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        intent = await _intent(factory, chat_id=old_chat_id)
+        payment_result = await _payment(repository, intent, charge_id="stars-before-migration")
+        assert payment_result.state == "applied"
+
+        async with factory() as session:
+            await migrate_chat_id(
+                session,
+                old_chat_id=old_chat_id,
+                new_chat_id=new_chat_id,
+                new_chat_type="supergroup",
+                new_chat_title="Migrated chat",
+            )
+            await session.commit()
+
+        history = await repository.list_payment_history(chat_id=new_chat_id)
+
+        assert len(history) == 1
+        assert history[0].telegram_payment_charge_id == "stars-before-migration"
+        assert history[0].source_chat_id == old_chat_id
+        assert history[0].target_chat_id == old_chat_id
     finally:
         await engine.dispose()
 
