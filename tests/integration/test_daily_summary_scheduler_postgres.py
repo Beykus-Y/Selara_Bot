@@ -1279,3 +1279,80 @@ async def test_second_manual_run_same_day_is_a_no_op_after_first_sends() -> None
         bot.send_message.assert_awaited_once()  # still just the one send from `first`
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_daily_summary_resends_claim_delivery_and_send_once(monkeypatch):
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=_NOW.date(),
+                window_from=_NOW - timedelta(hours=24),
+                window_to=_NOW,
+                trigger="manual",
+                lease_seconds=1800,
+                now=_NOW,
+            )
+            assert run is not None
+            assert await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                claimed_at=run.claimed_at,
+                generated_text="Одна сохранённая сводка.",
+                topics_json=[],
+                pipeline_cost_usd=0,
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+
+        # Force both resenders to read the same old token before either can
+        # perform the atomic delivery claim.
+        read_barrier = asyncio.Barrier(2)
+        initial_reads = 0
+        real_repository = daily_summary_module.SqlAlchemyActivityRepository
+
+        class _ReadBarrierRepository(real_repository):
+            async def get_daily_summary_run_by_id(self, *, run_id):
+                nonlocal initial_reads
+                row = await super().get_daily_summary_run_by_id(run_id=run_id)
+                if initial_reads < 2:
+                    initial_reads += 1
+                    await read_barrier.wait()
+                return row
+
+        monkeypatch.setattr(daily_summary_module, "SqlAlchemyActivityRepository", _ReadBarrierRepository)
+        bot = _fake_bot()
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def _blocked_send(**kwargs):
+            send_started.set()
+            await release_send.wait()
+            return SimpleNamespace(message_id=123)
+
+        bot.send_message.side_effect = _blocked_send
+        attempts = [
+            asyncio.create_task(daily_summary_module._send_and_mark(
+                bot=bot, session_factory=session_factory, chat_id=_CHAT_ID, run_id=run.id,
+                claimed_at=run.claimed_at,
+            ))
+            for _ in range(2)
+        ]
+        await asyncio.wait_for(send_started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert bot.send_message.await_count == 1
+        release_send.set()
+        results = await asyncio.gather(*attempts)
+
+        assert sorted(results, key=lambda value: str(value)) == [None, True]
+        assert bot.send_message.await_count == 1
+        async with session_factory() as session:
+            stored = await SqlAlchemyActivityRepository(session).get_daily_summary_run_by_id(run_id=run.id)
+        assert stored.status == "sent"
+    finally:
+        await engine.dispose()
