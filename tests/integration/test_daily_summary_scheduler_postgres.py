@@ -1356,3 +1356,64 @@ async def test_concurrent_daily_summary_resends_claim_delivery_and_send_once(mon
         assert stored.status == "sent"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_crashed_daily_summary_delivery_lease_can_be_reclaimed():
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=50)
+        now = datetime.now(timezone.utc)
+        chat = ChatSnapshot(telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat")
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            run = await repo.claim_daily_summary_run(
+                chat=chat,
+                summary_date=now.date(),
+                window_from=now - timedelta(hours=24),
+                window_to=now,
+                trigger="manual",
+                lease_seconds=1800,
+                now=now,
+            )
+            assert run is not None
+            assert await repo.finalize_daily_summary_run_generated(
+                run_id=run.id,
+                claimed_at=run.claimed_at,
+                generated_text="Сводка для проверки lease.",
+                topics_json=[],
+                pipeline_cost_usd=0,
+                context_stt_cost_usd=0,
+            )
+            await session.commit()
+
+        delivery_start = datetime.now(timezone.utc) + timedelta(seconds=1)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            first_token = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=run.claimed_at, lease_seconds=1800, now=delivery_start,
+            )
+            await session.commit()
+        assert first_token is not None
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            premature = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=first_token, lease_seconds=1800,
+                now=delivery_start + timedelta(minutes=15),
+            )
+            await session.commit()
+        assert premature is None
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            recovered_token = await repo.claim_daily_summary_delivery(
+                run_id=run.id, claimed_at=first_token, lease_seconds=1800,
+                now=delivery_start + timedelta(minutes=31),
+            )
+            await session.commit()
+        assert recovered_token is not None
+        assert recovered_token != first_token
+    finally:
+        await engine.dispose()
