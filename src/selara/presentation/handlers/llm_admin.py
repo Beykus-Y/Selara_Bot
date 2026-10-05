@@ -23,6 +23,7 @@ from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.llm.client import LlmCallResult, LlmClient, LlmClientError
 from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.context import (
@@ -225,7 +226,10 @@ async def _handle(
         await thinking_msg.edit_text("⚠️ Проверка доступа временно недоступна. Попробуйте позже.")
         return
 
-    access_service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(session_factory))
+    access_service = FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(session_factory),
+        entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
+    )
     owner_exempt = await resolve_owner_admin_exemption(
         bot=bot,
         chat_id=message.chat.id,

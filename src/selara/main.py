@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 from selara.application.achievements import get_achievement_catalog_from_settings
@@ -29,6 +29,7 @@ from selara.presentation.middlewares.error_alert_config import load_error_alert_
 from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
 from selara.presentation.routers import build_router
+from selara.presentation.payment_safe_dispatcher import PaymentSafeDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
+        BotCommand(command="premium", description="Купить Selara AI для чата"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
         BotCommand(command="game", description="Выбрать и запустить игру в чате"),
@@ -149,7 +151,7 @@ async def _run_bot(settings, session_factory) -> None:
     stt_client = _build_stt_client(settings)
     llm_client = _build_llm_client(settings, session_factory)
     logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
-    dispatcher = Dispatcher()
+    dispatcher = PaymentSafeDispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
     await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)

@@ -30,6 +30,7 @@ from selara.infrastructure.llm.tools import ToolCall
 from selara.presentation.llm_formatting import split_telegram_html
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.llm.client import LlmClient
 from selara.infrastructure.llm.features import AiFeature
@@ -347,7 +348,8 @@ async def attempt_daily_summary_run(
     if trigger == "scheduled":
         settings = settings or get_settings()
     feature_access_service = feature_access_service or FeatureAccessService(
-        SqlAlchemyFeatureQuotaRepository(session_factory)
+        SqlAlchemyFeatureQuotaRepository(session_factory),
+        entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
     )
     window_from = window_to - timedelta(hours=24)
     existing: DailySummaryRun | None = None
@@ -800,7 +802,8 @@ class DailySummaryScheduler:
         self._llm_client = llm_client
         self._settings = settings
         self._feature_access_service = feature_access_service or FeatureAccessService(
-            SqlAlchemyFeatureQuotaRepository(session_factory)
+            SqlAlchemyFeatureQuotaRepository(session_factory),
+            entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory),
         )
 
     async def run_once(self, *, now: datetime | None = None) -> int:

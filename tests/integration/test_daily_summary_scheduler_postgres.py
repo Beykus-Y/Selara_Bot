@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.schemas import MergedTheme, MergedThemeList, SegmentTopicCard, SegmentTopicCardList
+from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.feature_access import AccessTier, FeatureEntitlement, FeatureAccessService
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
@@ -27,6 +28,7 @@ from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
     AiFeatureQuotaUsageModel,
+    ChatEntitlementModel,
     DailySummaryRunModel,
     LlmUsageLogModel,
     MessageArchiveModel,
@@ -661,6 +663,82 @@ async def test_scheduled_free_chat_is_denied_before_count_claim_quota_or_provide
         assert invocations == []
         assert quota_rows == []
         assert provider_rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_persistent_paid_entitlement_runs_scheduled_summary_and_expired_tier_stays_free():
+    engine, session_factory = await _database()
+    try:
+        paid_chat_id = _CHAT_ID - 1
+        expired_chat_id = _CHAT_ID - 2
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=paid_chat_id)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=expired_chat_id)
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    ChatEntitlementModel(
+                        chat_id=paid_chat_id,
+                        product_key=SELARA_AI_PRODUCT_KEY,
+                        status="active",
+                        valid_from=_NOW - timedelta(days=1),
+                        valid_until=_NOW + timedelta(days=29),
+                    ),
+                    ChatEntitlementModel(
+                        chat_id=expired_chat_id,
+                        product_key=SELARA_AI_PRODUCT_KEY,
+                        status="active",
+                        valid_from=_NOW - timedelta(days=31),
+                        valid_until=_NOW - timedelta(days=1),
+                    ),
+                ]
+            )
+            await session.commit()
+
+        bot = _fake_bot()
+        client = _FakeLlmClient(accounting_service=AiAccountingService(session_factory))
+        paid_outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=paid_chat_id, chat_type="supergroup", title="Paid Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+        )
+        assert paid_outcome.sent
+        assert paid_outcome.access_decision.access_tier == AccessTier.PAID
+        assert paid_outcome.access_decision.entitlement_source == "telegram_stars"
+        assert paid_outcome.access_decision.entitlement_product == SELARA_AI_PRODUCT_KEY
+        paid_provider_calls = client._structured_calls
+        assert paid_provider_calls > 0
+
+        expired_outcome = await attempt_daily_summary_run(
+            bot=bot,
+            session_factory=session_factory,
+            llm_client=client,
+            chat=ChatSnapshot(telegram_chat_id=expired_chat_id, chat_type="supergroup", title="Expired Chat"),
+            trigger="scheduled",
+            window_to=_NOW,
+            summary_date=_NOW.date(),
+            now_utc=_NOW,
+            settings=_test_settings(),
+        )
+        assert not expired_outcome.sent and expired_outcome.reason == "access_required"
+        assert client._structured_calls == paid_provider_calls
+        assert bot.send_message.await_count == 1
+        async with session_factory() as session:
+            run_count = await session.scalar(select(func.count(DailySummaryRunModel.id)))
+            invocation_count = await session.scalar(select(func.count(AiFeatureInvocationModel.id)))
+            provider_count = await session.scalar(select(func.count(LlmUsageLogModel.id)))
+        assert run_count == 1
+        assert invocation_count > 0
+        assert provider_count > 0
     finally:
         await engine.dispose()
 

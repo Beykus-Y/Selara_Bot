@@ -21,6 +21,7 @@ from selara.presentation.handlers.message_archive import (
 )
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
+from selara.presentation.handlers.premium import router as premium_router
 from selara.presentation.handlers.relationships import router as relationships_router
 from selara.presentation.handlers.settings import router as settings_router
 from selara.presentation.handlers.stats import router as stats_router
@@ -67,6 +68,9 @@ def build_router(
     root.callback_query.outer_middleware(ChatSettingsMiddleware())
     root.callback_query.outer_middleware(ChatWriteLockMiddleware())
 
+    root.pre_checkout_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
+    root.pre_checkout_query.outer_middleware(DBSessionMiddleware(session_factory))
+
     root.message_reaction.outer_middleware(ErrorHandlerMiddleware(session_factory))
     root.message_reaction.outer_middleware(DBSessionMiddleware(session_factory))
 
@@ -98,6 +102,7 @@ def build_router(
     root.include_router(engagement_router)
     root.include_router(feedback_router)
     root.include_router(private_panel_router)
+    root.include_router(premium_router)
     if llm_client is not None:
         root.include_router(llm_admin_router)
         root.include_router(daily_summary_router)
