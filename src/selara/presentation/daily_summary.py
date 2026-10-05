@@ -156,6 +156,7 @@ async def _generate_and_finalize(
                     and current_run.claimed_at == claimed_at
                     and current_run.chat_id == chat.telegram_chat_id
                     and current_run.status in ("claimed", "generating")
+                    and current_run.lease_until > datetime.now(timezone.utc)
                 )
 
             try:
