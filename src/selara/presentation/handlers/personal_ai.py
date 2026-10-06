@@ -192,11 +192,26 @@ def chat_turn_cost_usd(usages) -> Decimal | None:
     return sum((Decimal(usage.estimated_cost_usd) for usage in succeeded), Decimal(0))
 
 
-async def _settle_chat_turn(access_service, *, config, invocation_id, usages, user_id: int) -> None:
+def failed_turn_cost_usd(usages) -> Decimal | None:
+    """Cost of a turn that produced no answer: what its priced responses cost, zero if the provider only failed.
+
+    Timeouts and dropped connections count as zero too (the provider rarely bills them), so a failure never keeps
+    the whole reservation; it settles at the 0.01 AIL minimum. ``None`` (reservation stays) only when a
+    response came back without any price.
+    """
+    answered = [usage for usage in usages if usage.status != "failed"]
+    if any(usage.estimated_cost_usd is None for usage in answered):
+        return None
+    return sum((Decimal(usage.estimated_cost_usd) for usage in answered), Decimal(0))
+
+
+async def _settle_chat_turn(
+    access_service, *, config, invocation_id, usages, user_id: int, failed: bool = False
+) -> None:
     """Replace the multiplier reservation by the request's actual cost; never fails the answer."""
     if invocation_id is None:
         return
-    cost = chat_turn_cost_usd(usages)
+    cost = failed_turn_cost_usd(usages) if failed else chat_turn_cost_usd(usages)
     if cost is None:
         # No provider cost and no catalog price: the reservation (profile multiplier) stays as the charge.
         log.warning("personal_ai: chat turn cost unknown, keeping reservation invocation_id=%s", invocation_id)
@@ -790,6 +805,12 @@ async def _handle_personal_chat(
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
+            # A provider error is not charged the full reservation; with no attempt at all the release below runs.
+            if exc.usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+                await _settle_chat_turn(
+                    access_service, config=config, invocation_id=invocation_id,
+                    usages=exc.usages, user_id=user.id, failed=True,
+                )
             await thinking.edit_text("⚠️ Не удалось получить ответ от AI. Попробуйте позже.")
             return
         except Exception:
@@ -800,6 +821,11 @@ async def _handle_personal_chat(
 
         if not answer:
             outcome["error_category"] = "empty_answer"
+            if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+                await _settle_chat_turn(
+                    access_service, config=config, invocation_id=invocation_id,
+                    usages=turn_usages, user_id=user.id, failed=True,
+                )
             await thinking.edit_text("⚠️ AI не дал ответа. Попробуйте переформулировать.")
             return
 

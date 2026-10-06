@@ -95,6 +95,10 @@ def ail_units_from_cost_usd(cost_usd: Decimal, usd_per_ail: Decimal) -> Decimal:
     if not isinstance(usd_per_ail, Decimal) or not usd_per_ail.is_finite() or usd_per_ail <= 0:
         raise ValueError("The USD value of one AIL must be a positive finite Decimal")
     units = (cost_usd / usd_per_ail).quantize(AIL_UNITS_QUANTUM, rounding=ROUND_CEILING)
+    if units > MAX_AIL_REQUEST_UNITS:
+        logger.warning(
+            "AIL request cost capped at %s AIL (real cost %s USD = %s AIL)", MAX_AIL_REQUEST_UNITS, cost_usd, units
+        )
     return min(max(units, AIL_UNITS_QUANTUM), MAX_AIL_REQUEST_UNITS)
 
 

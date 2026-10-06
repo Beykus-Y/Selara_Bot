@@ -19,7 +19,7 @@ from selara.application.feature_access import PersonalQuotaLimits
 from selara.core.config import Settings
 from selara.infrastructure.llm.client import LlmCallUsage, LlmClient, LlmConfig, _provider_reported_cost
 from selara.infrastructure.llm.runtime import llm_runtime_problem
-from selara.presentation.handlers.personal_ai import _settle_chat_turn, chat_turn_cost_usd
+from selara.presentation.handlers.personal_ai import _settle_chat_turn, chat_turn_cost_usd, failed_turn_cost_usd
 
 PER_AIL = Decimal("0.0005")
 
@@ -189,3 +189,31 @@ async def test_no_invocation_means_nothing_to_settle():
     access = SimpleNamespace(adjust=AsyncMock())
     await _settle_chat_turn(access, config=_config(), invocation_id=None, usages=[_usage(cost="0.001")], user_id=1)
     access.adjust.assert_not_awaited()
+
+
+def test_failed_turn_cost_is_zero_for_provider_errors_and_the_price_of_priced_answers():
+    assert failed_turn_cost_usd([_usage(cost=None, status="failed")]) == Decimal(0)
+    assert failed_turn_cost_usd([_usage(cost=None, status="failed"), _usage(cost="0.002")]) == Decimal("0.002")
+    assert failed_turn_cost_usd([_usage(cost=None, status="validation_failed")]) is None
+
+
+async def test_a_failed_turn_settles_at_the_minimum_unit():
+    access = SimpleNamespace(adjust=AsyncMock())
+    await _settle_chat_turn(
+        access, config=_config(), invocation_id=7, usages=[_usage(cost=None, status="failed")], user_id=1, failed=True
+    )
+    access.adjust.assert_awaited_once_with(invocation_id=7, actual_units=Decimal("0.01"))
+
+
+def test_a_cost_above_the_request_cap_is_logged(caplog):
+    with caplog.at_level(logging.WARNING):
+        ail_units_from_cost_usd(Decimal("100000"), PER_AIL)
+    assert "capped" in caplog.text
+
+
+def test_provider_preferences_only_route_the_personal_chat_turn():
+    client = _client(include_usage_cost=True, provider_preferences={"max_price": {"prompt": 1}})
+    plain = {"model": "m"}
+    assert "provider" in client._with_provider_options(plain)["extra_body"]
+    other = client._with_provider_options(plain, route=False)["extra_body"]
+    assert other == {"usage": {"include": True}}

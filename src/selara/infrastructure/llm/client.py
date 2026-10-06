@@ -370,7 +370,12 @@ class LlmClient:
                 # happen after a response and can fail independently.
                 await marker(invocation_id=accounting_context.invocation_id)
             try:
-                response = await self._client.chat.completions.create(**self._with_provider_options(request_kwargs))
+                response = await self._client.chat.completions.create(
+                    **self._with_provider_options(
+                        request_kwargs,
+                        route=accounting_context is not None and accounting_context.feature == "personal_chat",
+                    )
+                )
             except asyncio.CancelledError:
                 usage = self._failed_usage(
                     configured_model, attempt_number, "cancelled", request_id=request_id, model_profile=model_profile,
@@ -426,12 +431,16 @@ class LlmClient:
 
         raise AssertionError("provider retry loop always returns or raises")
 
-    def _with_provider_options(self, request_kwargs: dict) -> dict:
-        """Add the OpenRouter extras (real cost, provider preferences) without mutating the caller's kwargs."""
+    def _with_provider_options(self, request_kwargs: dict, *, route: bool = True) -> dict:
+        """Add the OpenRouter extras (real cost, provider preferences) without mutating the caller's kwargs.
+
+        Provider preferences (``max_price`` and friends) are only meant for the Personal chat turn, so ``route``
+        keeps them away from groups, ``?``/``??``, pets and the internal operations.
+        """
         extra: dict = {}
         if self._config.include_usage_cost:
             extra["usage"] = {"include": True}
-        if self._config.provider_preferences:
+        if route and self._config.provider_preferences:
             extra["provider"] = dict(self._config.provider_preferences)
         if not extra:
             return request_kwargs
