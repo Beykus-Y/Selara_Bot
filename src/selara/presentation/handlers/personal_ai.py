@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -33,6 +34,7 @@ from selara.application.feature_access import (
     AccessTier,
     FeatureAccessService,
     QuotaScope,
+    ail_units_from_cost_usd,
     message_idempotency_key,
 )
 from selara.application.model_catalog import PROFILE_EMOJI
@@ -182,6 +184,30 @@ def _access_service(session_factory, personal_config: PersonalConfigProvider) ->
     )
 
 
+def chat_turn_cost_usd(usages) -> Decimal | None:
+    """Real cost of the chat turn's successful provider calls, or ``None`` if any of them is unpriced."""
+    succeeded = [usage for usage in usages if usage.status == "succeeded"]
+    if not succeeded or any(usage.estimated_cost_usd is None for usage in succeeded):
+        return None
+    return sum((Decimal(usage.estimated_cost_usd) for usage in succeeded), Decimal(0))
+
+
+async def _settle_chat_turn(access_service, *, config, invocation_id, usages, user_id: int) -> None:
+    """Replace the multiplier reservation by the request's actual cost; never fails the answer."""
+    if invocation_id is None:
+        return
+    cost = chat_turn_cost_usd(usages)
+    if cost is None:
+        # No provider cost and no catalog price: the reservation (profile multiplier) stays as the charge.
+        log.warning("personal_ai: chat turn cost unknown, keeping reservation invocation_id=%s", invocation_id)
+        return
+    try:
+        units = ail_units_from_cost_usd(cost, config.ail_usd_value)
+        await access_service.adjust(invocation_id=invocation_id, actual_units=units)
+    except Exception:
+        log.exception("personal_ai: AIL settlement failed user_id=%s invocation_id=%s", user_id, invocation_id)
+
+
 async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | None) -> tuple[list[str], str]:
     """Model and AIL status lines for /ai, plus the label of the model button."""
     if deps is None:
@@ -204,9 +230,16 @@ async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | N
     lines = [f"Модель: {emoji} {escape(choice.display_name)}"]
     if choice.fell_back:
         lines.append("Выбранный профиль сейчас недоступен, используется Базовая модель.")
-    lines.append(f"Стоимость запроса: {format_ail(choice.ail_cost)} AIL")
+    settles_actual = config.ail_settles_actual_cost
+    if settles_actual:
+        lines.append(
+            f"Резерв на запрос: {format_ail(choice.ail_cost)} AIL (списывается по фактической стоимости ответа)"
+        )
+    else:
+        lines.append(f"Стоимость запроса: {format_ail(choice.ail_cost)} AIL")
+    access = _access_service(deps.session_factory, deps.personal_config)
     try:
-        summary = await _access_service(deps.session_factory, deps.personal_config).get_usage_summary(
+        summary = await access.get_usage_summary(
             feature=AiFeature.PERSONAL_CHAT,
             chat_id=user_id,
             trigger="telegram_message",
@@ -224,6 +257,14 @@ async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | N
             f"Осталось сегодня: {format_ail(summary.quota_remaining)} / {format_ail(summary.quota_limit)} AIL"
             f" (обновится {daily_reset_text(summary.reset_at, timezone_name=deps.settings.bot_timezone)})"
         )
+    if settles_actual:
+        try:
+            last = await access.last_ail_charge(user_id)
+        except Exception:
+            log.warning("personal_ai: last AIL charge unavailable user_id=%s", user_id, exc_info=True)
+            last = None
+        if last is not None:
+            lines.append(f"Последний запрос: {format_ail(last)} AIL")
     return lines, f"Модель: {choice.display_name}"
 
 
@@ -283,7 +324,11 @@ async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, 
     lines = ["<b>Модель ответа</b>", ""]
     builder = InlineKeyboardBuilder()
     for option in options:
-        cost = f"×{format_ail(option.ail_multiplier)} AIL"
+        cost = (
+            f"резерв {format_ail(option.ail_multiplier)} AIL"
+            if config.ail_settles_actual_cost
+            else f"×{format_ail(option.ail_multiplier)} AIL"
+        )
         state = "" if option.available else " — сейчас недоступна"
         lines.append(f"{option.emoji} <b>{escape(option.display_name)}</b> — {cost}{state}")
         lines.append(escape(option.description))
@@ -294,7 +339,12 @@ async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, 
                 text=f"{marker}{option.emoji} {option.display_name} · {cost}",
                 callback_data=_cb("model", option.profile_key, stored.revision),
             )
-    if config.ail_enabled:
+    if config.ail_settles_actual_cost:
+        lines.append(
+            "Каждый запрос списывает из суточного бюджета AI Limits столько AIL, сколько стоил на самом деле: "
+            "короткий ответ дешевле, длинный дороже. Для старта запроса на балансе нужен резерв профиля."
+        )
+    elif config.ail_enabled:
         lines.append("Каждый запрос списывает из суточного бюджета AI Limits столько AIL, сколько стоит модель.")
     else:
         lines.append(
@@ -716,6 +766,7 @@ async def _handle_personal_chat(
         )
 
     outcome = {"status": "failed", "error_category": "handler_error"}
+    turn_usages: list = []
     try:
         if ail_mode:
             # Inside the cleanup region: a cancellation here still releases the unused reservation.
@@ -735,6 +786,7 @@ async def _handle_personal_chat(
                 accounting_context=_context(AiFeature.PERSONAL_CHAT, "chat_turn"),
                 use_memory=stored.memory_enabled,
                 resolved_model=resolved_model,
+                usage_sink=turn_usages,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
@@ -751,6 +803,11 @@ async def _handle_personal_chat(
             await thinking.edit_text("⚠️ AI не дал ответа. Попробуйте переформулировать.")
             return
 
+        # Settle now, before compression and memory extraction: only the chat turn's own cost is charged.
+        if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+            await _settle_chat_turn(
+                access_service, config=config, invocation_id=invocation_id, usages=turn_usages, user_id=user.id
+            )
         await repo.add_message(
             user_id=user.id, thread=thread, role="user", content=text, telegram_message_id=message.message_id
         )

@@ -251,3 +251,102 @@ def test_migration_defaults_keep_the_old_image_working_and_downgrade_refuses_to_
         assert (result := _alembic(db_url, "upgrade", "head")).returncode == 0, result.stderr[-2000:]
     finally:
         _sql(server, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+# --- settlement at the actual cost (dynamic AIL billing) ----------------------------------------
+
+
+async def test_settlement_gives_back_what_the_answer_cost_less_than_the_reserve(env):
+    factory, _provider, store, service = env
+    await _enable_ail(store)
+    decision = await _reserve(service, user=2, message_id=200, units="5", profile="creative")
+    settlement = await service.adjust(invocation_id=decision.invocation_id, actual_units=Decimal("1.20"))
+    assert settlement.settled and settlement.reserved_units == Decimal("5") and settlement.units == Decimal("1.20")
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("1.20")
+    assert await service.last_ail_charge(2) == Decimal("1.20")
+    after = await _reserve(service, user=2, message_id=201, units="1", profile="basic")
+    assert after.allowed and after.quota_remaining == 7.8
+
+
+async def test_settlement_may_overrun_the_daily_limit_and_the_next_request_is_refused(env):
+    factory, _provider, store, service = env
+    await _enable_ail(store, free=10, paid=100)
+    decision = await _reserve(service, user=2, message_id=210, units="5", profile="creative")
+    settlement = await service.adjust(invocation_id=decision.invocation_id, actual_units=Decimal("12.50"))
+    assert settlement.settled and settlement.units == Decimal("12.50")
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("12.50")  # past the limit of 10
+    denied = await _reserve(service, user=2, message_id=211, units="0.50", profile="basic")
+    assert not denied.allowed and denied.reason == AccessReason.QUOTA_EXHAUSTED
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("12.50")  # the refusal took nothing
+
+
+async def test_a_reservation_is_settled_once_and_repeats_change_nothing(env):
+    factory, _provider, store, service = env
+    await _enable_ail(store)
+    decision = await _reserve(service, user=2, message_id=220, units="5", profile="creative")
+    first = await service.adjust(invocation_id=decision.invocation_id, actual_units=Decimal("2.00"))
+    again = await service.adjust(invocation_id=decision.invocation_id, actual_units=Decimal("9.00"))
+    assert first.settled and not again.settled and again.already_settled and again.units == Decimal("2.00")
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("2.00")
+
+
+async def test_concurrent_settlements_of_one_request_apply_exactly_one(env):
+    factory, _provider, store, service = env
+    await _enable_ail(store)
+    decision = await _reserve(service, user=2, message_id=230, units="5", profile="creative")
+    results = await asyncio.gather(
+        *(service.adjust(invocation_id=decision.invocation_id, actual_units=Decimal(value))
+          for value in ("1.00", "2.00", "3.00", "4.00", "6.00"))
+    )
+    assert [r.settled for r in results].count(True) == 1
+    winner = next(r for r in results if r.settled).units
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == winner
+    assert all(r.units == winner for r in results if r.already_settled)
+
+
+async def test_settlements_of_different_requests_add_up_under_the_pool_lock(env):
+    factory, _provider, store, service = env
+    await _enable_ail(store, free=100, paid=200)
+    decisions = [await _reserve(service, user=2, message_id=240 + i, units="2", profile="basic") for i in range(6)]
+    await asyncio.gather(
+        *(service.adjust(invocation_id=d.invocation_id, actual_units=Decimal("1.50")) for d in decisions)
+    )
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("9.00")
+
+
+async def test_nothing_to_settle_for_requests_mode_owner_released_or_unknown_invocations(env):
+    factory, _provider, store, service = env
+    requests_mode = await _reserve(service, user=1, message_id=250, units="1")
+    assert await service.adjust(invocation_id=requests_mode.invocation_id, actual_units=Decimal("3")) is None
+    assert await _consumed(factory, PERSONAL_POOL_KEY, 1) == Decimal("1")  # still one request
+
+    await _enable_ail(store)
+    owner = await _reserve(service, user=99, message_id=251, units="5", profile="creative", owner=True)
+    assert await service.adjust(invocation_id=owner.invocation_id, actual_units=Decimal("3")) is None
+    assert await service.adjust(invocation_id=987654321, actual_units=Decimal("3")) is None
+
+    released = await _reserve(service, user=2, message_id=252, units="5", profile="creative")
+    assert await service.release_if_no_provider_attempts(invocation_id=released.invocation_id, reason="test")
+    assert await service.adjust(invocation_id=released.invocation_id, actual_units=Decimal("3")) is None
+    assert await _consumed(factory, PERSONAL_AIL_POOL_KEY, 2) == Decimal("0")
+
+
+async def test_settlement_rejects_costs_the_column_cannot_store_exactly(env):
+    _factory, _provider, store, service = env
+    await _enable_ail(store)
+    decision = await _reserve(service, user=2, message_id=260, units="5", profile="creative")
+    for bad in (Decimal("0"), Decimal("-1"), Decimal("1.234"), Decimal("NaN"), Decimal("1001")):
+        with pytest.raises(ValueError):
+            await service.adjust(invocation_id=decision.invocation_id, actual_units=bad)
+    assert await service.last_ail_charge(2) is None  # nothing was settled
+
+
+async def test_the_latest_settled_request_is_the_one_reported(env):
+    _factory, _provider, store, service = env
+    await _enable_ail(store, free=100, paid=200)
+    first = await _reserve(service, user=2, message_id=270, units="2", profile="basic")
+    second = await _reserve(service, user=2, message_id=271, units="2", profile="basic")
+    await service.adjust(invocation_id=first.invocation_id, actual_units=Decimal("0.43"))
+    await service.adjust(invocation_id=second.invocation_id, actual_units=Decimal("1.17"))
+    assert await service.last_ail_charge(2) == Decimal("1.17")
+    assert await service.last_ail_charge(3) is None

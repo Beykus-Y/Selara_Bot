@@ -163,13 +163,21 @@ def build_miniapp_personal_router(
             "mode": stored.profile.mode if stored else "assistant",
         }
 
-    async def _model_payload(selected_key: str, config: PersonalConfig) -> dict[str, Any]:
+    async def _model_payload(selected_key: str, config: PersonalConfig, user_id: int) -> dict[str, Any]:
         """The /ai model selector as data: one source of truth, personal_ai_profiles.model_profile_key."""
         snapshot = await load_snapshot(catalog)
         choice = choose_from_snapshot(snapshot, selected_key=selected_key, legacy_model=settings.llm_model)
         if not config.ail_enabled:
             # Requests mode answers with the base model; the stored pick waits for AI Limits.
             choice = choose_from_snapshot(snapshot, selected_key="basic", legacy_model=settings.llm_model)
+        last_charge_ail = None
+        if config.ail_settles_actual_cost:
+            try:
+                last = await service.last_ail_charge(user_id)
+            except Exception:
+                logger.warning("miniapp personal: last AIL charge unavailable user_id=%s", user_id, exc_info=True)
+                last = None
+            last_charge_ail = format_ail(last) if last is not None else None
         return {
             "quota_mode": config.quota_mode,
             # Requests mode keeps every request at one request on the basic model: nothing to select yet.
@@ -179,6 +187,9 @@ def build_miniapp_personal_router(
             "effective_name": choice.display_name,
             "fell_back": choice.fell_back,
             "cost_ail": format_ail(choice.ail_cost),
+            # "actual": cost_ail is only the reserve a request needs to start; the charge is the real cost.
+            "billing": config.ail_billing if config.ail_enabled else None,
+            "last_charge_ail": last_charge_ail,
             "options": [
                 {
                     "profile_key": option.profile_key,
@@ -220,7 +231,9 @@ def build_miniapp_personal_router(
                 "timezone": settings.bot_timezone,
                 **status,
                 "profile": _profile_payload(stored, config, tier),
-                "model": await _model_payload(stored.model_profile_key if stored else "basic", config),
+                "model": await _model_payload(
+                    stored.model_profile_key if stored else "basic", config, user.telegram_user_id
+                ),
                 "memory": {
                     "count": len(rows),
                     "limit": memory_limit_for(tier, config),
@@ -305,7 +318,7 @@ def build_miniapp_personal_router(
             )
             if updated is None:
                 raise _ApiError(409, "Настройки уже изменились. Обновите страницу.")
-            model = await _model_payload(updated.model_profile_key, config)
+            model = await _model_payload(updated.model_profile_key, config, user.telegram_user_id)
         return JSONResponse(content={"ok": True, "model": model}, headers={"Cache-Control": "no-store"})
 
     @router.put("/settings")

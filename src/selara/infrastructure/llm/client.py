@@ -32,6 +32,27 @@ _MAX_RETRY_AFTER_SECONDS = 120.0
 # cap -- a single round could otherwise produce an unbounded-length
 # completion, limited only by the provider's model-level ceiling.
 _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS = 4000
+_COST_QUANTUM = Decimal("0.000000001")
+_MAX_PROVIDER_COST_USD = Decimal("1000000")
+
+
+def _provider_reported_cost(provider_usage: object) -> Decimal | None:
+    """OpenRouter's ``usage.cost`` in USD, or ``None`` when absent or not a sane number."""
+    if provider_usage is None:
+        return None
+    raw = getattr(provider_usage, "cost", None)
+    if raw is None:
+        extra = getattr(provider_usage, "model_extra", None)
+        raw = extra.get("cost") if isinstance(extra, dict) else None
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = Decimal(str(raw))
+    except Exception:
+        return None
+    if not value.is_finite() or value < 0 or value > _MAX_PROVIDER_COST_USD:
+        return None
+    return value.quantize(_COST_QUANTUM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +63,9 @@ class LlmConfig:
     timeout_seconds: float = _DEFAULT_TIMEOUT
     summary_model: str = "gpt-4o-mini"
     supports_structured_output: bool = False
+    # OpenRouter: ask for ``usage.cost`` and optionally pass ``provider`` routing preferences.
+    include_usage_cost: bool = False
+    provider_preferences: dict | None = None
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -89,6 +113,9 @@ class LlmCallUsage:
     recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     request_id: str | None = None
     model_profile: str | None = None
+    # The cost the provider itself reported for this call (OpenRouter ``usage.cost``);
+    # when set it is also what ``estimated_cost_usd`` holds.
+    provider_cost_usd: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +370,7 @@ class LlmClient:
                 # happen after a response and can fail independently.
                 await marker(invocation_id=accounting_context.invocation_id)
             try:
-                response = await self._client.chat.completions.create(**request_kwargs)
+                response = await self._client.chat.completions.create(**self._with_provider_options(request_kwargs))
             except asyncio.CancelledError:
                 usage = self._failed_usage(
                     configured_model, attempt_number, "cancelled", request_id=request_id, model_profile=model_profile,
@@ -399,6 +426,20 @@ class LlmClient:
 
         raise AssertionError("provider retry loop always returns or raises")
 
+    def _with_provider_options(self, request_kwargs: dict) -> dict:
+        """Add the OpenRouter extras (real cost, provider preferences) without mutating the caller's kwargs."""
+        extra: dict = {}
+        if self._config.include_usage_cost:
+            extra["usage"] = {"include": True}
+        if self._config.provider_preferences:
+            extra["provider"] = dict(self._config.provider_preferences)
+        if not extra:
+            return request_kwargs
+        merged = dict(request_kwargs.get("extra_body") or {})
+        for key, value in extra.items():
+            merged.setdefault(key, value)
+        return {**request_kwargs, "extra_body": merged}
+
     @staticmethod
     def _reported_model(response: object, configured_model: str) -> str:
         reported = getattr(response, "model", None)
@@ -411,6 +452,7 @@ class LlmClient:
     ) -> LlmCallUsage:
         _log_usage(method, response)
         provider_usage = getattr(response, "usage", None)
+        provider_cost = _provider_reported_cost(provider_usage)
         prompt = getattr(provider_usage, "prompt_tokens", None) if provider_usage is not None else None
         completion = getattr(provider_usage, "completion_tokens", None) if provider_usage is not None else None
         total = getattr(provider_usage, "total_tokens", None) if provider_usage is not None else None
@@ -422,6 +464,9 @@ class LlmClient:
         except Exception:
             log.exception("Model cost estimate unavailable model=%s", model)
             cost = None
+        if provider_cost is not None:
+            # The provider's own figure beats any estimate: routing, caching and fallbacks change prices.
+            cost = provider_cost
         status = "known" if cost is not None else "unknown"
         if provider_usage is None:
             log.warning("provider response has no token usage method=%s model=%s", method, model)
@@ -430,6 +475,7 @@ class LlmClient:
         return LlmCallUsage(
             str(uuid4()), model, prompt, completion, total, cost, status, attempt, "succeeded",
             request_id=request_id or str(uuid4()), model_profile=model_profile,
+            provider_cost_usd=provider_cost,
         )
 
     @staticmethod

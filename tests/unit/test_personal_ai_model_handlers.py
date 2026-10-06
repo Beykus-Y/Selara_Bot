@@ -178,7 +178,7 @@ async def test_ai_shows_profile_cost_and_remaining_ail(monkeypatch, session):
     await handler.ai_settings_command(message, session, **_deps(settings, ail=True))
 
     text = message.answer.await_args.args[0]
-    assert "Модель: 🧠 Аналитик" in text and "Стоимость запроса: 2 AIL" in text
+    assert "Модель: 🧠 Аналитик" in text and "Резерв на запрос: 2 AIL" in text
     assert "Осталось сегодня: 73 / 150 AIL" in text and "model-a" not in text
 
 
@@ -252,4 +252,4 @@ async def test_text_input_keeps_the_model_status(monkeypatch, session):
     await handler.ai_settings_input(message, session, **_deps(settings, ail=True))
 
     text = message.answer.await_args.args[0]
-    assert "Сохранено." in text and "Стоимость запроса: 2 AIL" in text and "73 / 150 AIL" in text
+    assert "Сохранено." in text and "Резерв на запрос: 2 AIL" in text and "73 / 150 AIL" in text

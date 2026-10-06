@@ -469,8 +469,11 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert group_character.down_revision == web_tainted.revision
     model_ail = _load_migration("0092_personal_model_ail.py")
     assert model_ail.down_revision == group_character.revision
-    assert revisions - parents == {model_ail.revision}
+    settlement = _load_migration("0093_ail_settlement.py")
+    assert settlement.down_revision == model_ail.revision
+    assert revisions - parents == {settlement.revision}
     assert len(model_ail.revision) <= 32
+    assert len(settlement.revision) <= 32
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 

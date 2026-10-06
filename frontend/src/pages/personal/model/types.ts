@@ -48,7 +48,12 @@ export type PersonalModel = {
   effective: string
   effective_name: string
   fell_back: boolean
+  /** Reserve a request needs to start; with billing "actual" the charge is the real cost of the answer. */
   cost_ail: string
+  /** "actual": AIL are settled at the real cost of each request; "fixed": the profile multiplier; null: requests mode. */
+  billing: 'actual' | 'fixed' | null
+  /** AIL the latest settled request cost ("0.43"), null before the first one. */
+  last_charge_ail: string | null
   options: PersonalModelOption[]
 }
 
