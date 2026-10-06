@@ -124,6 +124,10 @@ ACTION_ALIASES: dict[str, str] = {
     "обидеть": "hurt",
 }
 ITEM_COOLDOWNS: dict[str, timedelta] = {"food": timedelta(minutes=15), "toy": timedelta(minutes=30)}
+# Cosmetics are worn, not used: one item per slot, no effect on the pet's stats.
+COSMETIC_SLOTS: dict[str, str] = {"head": "голова", "neck": "шея", "back": "спина"}
+# How many of one food or toy a pet can keep in its bag.
+BAG_STACK_LIMIT = 20
 ITEM_EVENT_TYPES: dict[str, str] = {"food": "feed", "toy": "toy"}
 
 _EFFECT_BOUNDS: dict[str, tuple[int, int]] = {
@@ -253,6 +257,9 @@ def parse_traits(value: str) -> list[str]:
 
 def parse_item_effects(raw: object, *, kind: str) -> ItemEffects | None:
     """Validate catalog effects edited by the owner; ``None`` disables a broken item."""
+    if kind == "cosmetic":
+        # Cosmetics change nothing but looks; any effects mean a mis-edited row.
+        return ItemEffects() if isinstance(raw, Mapping) and not raw else None
     if not isinstance(raw, Mapping) or kind not in ITEM_EVENT_TYPES:
         return None
     values: dict[str, int] = {}

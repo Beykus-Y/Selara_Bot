@@ -83,6 +83,7 @@ class PetPersona:
     mood: int
     satiety: int
     energy: int
+    outfit: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +140,7 @@ def build_pet_messages(context: PetContext, *, user_text: str) -> list[dict]:
         f"Настроение: {m.mood_label(persona.mood)} ({persona.mood}/100)",
         f"Сытость: {persona.satiety}/100" + (" — голоден" if persona.satiety < m.HUNGRY_BELOW else ""),
         f"Энергия: {persona.energy}/100" + (" — устал" if persona.energy < 20 else ""),
+        *(["Наряд: " + ", ".join(_clean(title, 64) for title in persona.outfit)] if persona.outfit else []),
         f"Собеседник: {_clean(context.speaker_name, 64)}"
         + (" (твой хозяин)" if context.speaker_is_owner else "")
         + f"; ты к нему: {context.speaker_attitude}",

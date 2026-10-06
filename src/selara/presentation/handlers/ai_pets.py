@@ -38,6 +38,7 @@ PETS_DISABLED_TEXT = (
     "Ролевое «стать питомцем» теперь — <code>/bepet</code>."
 )
 _FEED_WORDS = {"покормить", "кормить", "накормить"}
+ITEM_ICONS = {"food": "🍖", "toy": "🎾", "cosmetic": "🎀"}
 _ACTION_BUTTONS: tuple[tuple[str, str], ...] = (
     ("pat", "🤚 Погладить"),
     ("play", "🎾 Поиграть"),
@@ -137,7 +138,14 @@ def pet_keyboard(pet_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
-def render_card(pet: PetView, *, owner_label: str, viewer_affinity: int | None, top: list[tuple[str, int]] | None = None) -> str:
+def render_card(
+    pet: PetView,
+    *,
+    owner_label: str,
+    viewer_affinity: int | None,
+    top: list[tuple[str, int]] | None = None,
+    outfit: list[str] | None = None,
+) -> str:
     level, into, needed = m.level_progress(pet.xp)
     lines = [
         f"{pet.emoji} <b>{escape(pet.name)}</b> — {escape(pet.species_title)}, ур. {level} ({into}/{needed} XP)",
@@ -147,6 +155,8 @@ def render_card(pet: PetView, *, owner_label: str, viewer_affinity: int | None, 
     ]
     if pet.traits:
         lines.append("Характер: " + ", ".join(escape(m.TRAITS.get(key, key)) for key in pet.traits))
+    if outfit:
+        lines.append("Наряд: " + ", ".join(escape(title) for title in outfit))
     if viewer_affinity is not None:
         lines.append(f"К вам: {m.affinity_label(viewer_affinity)}")
     if top:
@@ -199,8 +209,9 @@ async def _send_card(message: Message, pet: PetView, *, activity_repo, service: 
         for user_id, value in top_rows
         if value >= 25
     ]
+    outfit = await service.outfit(pet_id=pet.id)
     await message.answer(
-        render_card(pet, owner_label=owner_label, viewer_affinity=affinity, top=top),
+        render_card(pet, owner_label=owner_label, viewer_affinity=affinity, top=top, outfit=outfit),
         parse_mode="HTML",
         reply_markup=pet_keyboard(pet.id) if pet.status == "active" else None,
     )
@@ -437,7 +448,7 @@ async def pet_release_command(message: Message, db_session, economy_repo) -> Non
         ]
     )
     await message.answer(
-        f"Отпустить {escape(pet.name)}? Уровень, отношения и история пропадут, вернуть питомца будет нельзя.",
+        f"Отпустить {escape(pet.name)}? Уровень, отношения, история и рюкзак пропадут, вернуть питомца будет нельзя.",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -531,17 +542,85 @@ async def _send_shop(message: Message, pet: PetView, *, service: AiPetService, c
         await message.answer("Магазин питомцев пока пуст.")
         return
     rows: list[list[InlineKeyboardButton]] = []
-    lines = [f"🛍 <b>Магазин для {escape(pet.name)}</b> — покупка сразу применяется:"]
+    lines = [
+        f"🛍 <b>Магазин для {escape(pet.name)}</b>",
+        "Еда и игрушки сразу применяются; 📦 — положить в рюкзак питомца (подарок, если питомец не ваш).",
+    ]
     for item in items:
         locked = item.min_level > pet.level
-        icon = "🍖" if item.kind == "food" else "🎾"
+        icon = ITEM_ICONS.get(item.kind, "🎁")
         suffix = f" — с {item.min_level} ур." if locked else ""
-        lines.append(f"{icon} {escape(item.title)}: {item.price} монет{suffix}")
-        if not locked:
+        slot = f" ({m.COSMETIC_SLOTS[item.slot]})" if item.slot else ""
+        lines.append(f"{icon} {escape(item.title)}{slot}: {item.price} монет{suffix}")
+        if locked:
+            continue
+        to_bag = InlineKeyboardButton(
+            text="📦" if item.kind != "cosmetic" else f"{icon} {item.title} · {item.price}",
+            callback_data=f"{CALLBACK_PREFIX}bag:{pet.id}:{item.code}",
+        )
+        if item.kind == "cosmetic":
+            rows.append([to_bag])
+        else:
             rows.append(
-                [InlineKeyboardButton(text=f"{icon} {item.title} · {item.price}", callback_data=f"{CALLBACK_PREFIX}buy:{pet.id}:{item.code}")]
+                [
+                    InlineKeyboardButton(text=f"{icon} {item.title} · {item.price}", callback_data=f"{CALLBACK_PREFIX}buy:{pet.id}:{item.code}"),
+                    to_bag,
+                ]
             )
     await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+
+
+def render_bag_add(result: ActionResult, *, actor, actor_link: str) -> str:
+    pet, item = result.pet, result.item
+    gift = pet is not None and actor.id != pet.owner_user_id
+    verb = "дарит" if gift else "кладёт в рюкзак"
+    lines = [f"{actor_link} {verb} {escape(pet.name)}: {ITEM_ICONS.get(item.kind, '🎁')} {escape(item.title)}."]
+    if item.kind == "cosmetic":
+        lines.append("Хозяин может надеть это через /pet_bag.")
+    if item.price:
+        balance = f", баланс: {result.new_balance}" if result.new_balance is not None else ""
+        lines.append(f"Потрачено {item.price} монет{balance}.")
+    return "\n".join(lines)
+
+
+def bag_keyboard(pet_id: int, entries) -> InlineKeyboardMarkup | None:
+    rows: list[list[InlineKeyboardButton]] = []
+    for entry in entries:
+        item = entry.item
+        if item.kind == "cosmetic":
+            action, text = ("off", f"Снять: {item.title}") if entry.equipped else ("wear", f"Надеть: {item.title}")
+        else:
+            action, text = "use", f"{ITEM_ICONS.get(item.kind, '🎁')} {item.title} ×{entry.quantity}"
+        rows.append([InlineKeyboardButton(text=text, callback_data=f"{CALLBACK_PREFIX}{action}:{pet_id}:{item.code}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+@router.message(Command("pet_bag"))
+async def pet_bag_command(message: Message, db_session, economy_repo) -> None:
+    """The owner's view of the pet's bag: use food and toys here, put on or take off cosmetics."""
+    if message.from_user is None:
+        return
+    service = _service(db_session, economy_repo)
+    pet = await service.get_owner_pet(owner_user_id=message.from_user.id)
+    if pet is None:
+        await message.answer("У вас нет питомца.")
+        return
+    entries = await service.bag(pet_id=pet.id)
+    if not entries:
+        await message.answer(
+            f"{pet.emoji} Рюкзак {escape(pet.name)} пуст. Положить вещи можно кнопкой 📦 в /pet_shop.", parse_mode="HTML"
+        )
+        return
+    lines = [f"🎒 <b>Рюкзак {escape(pet.name)}</b>"]
+    for entry in entries:
+        item = entry.item
+        if item.kind == "cosmetic":
+            state = " — надето" if entry.equipped else ""
+            lines.append(f"{ITEM_ICONS['cosmetic']} {escape(item.title)} ({m.COSMETIC_SLOTS.get(item.slot, '')}){state}")
+        else:
+            lines.append(f"{ITEM_ICONS.get(item.kind, '🎁')} {escape(item.title)} ×{entry.quantity}")
+    lines.append("Еду и игрушки из рюкзака можно дать там, где живёт питомец.")
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=bag_keyboard(pet.id, entries))
 
 
 @router.message(Command("pet_shop"))
@@ -681,6 +760,27 @@ async def ai_pet_callback(query: CallbackQuery, activity_repo, db_session, econo
         await message.answer(f"{pet.emoji} {escape(pet.name)} ушёл(ла) на свободу. Можно завести нового: /pet_new.", parse_mode="HTML")
         return
 
+    if kind in {"wear", "off"} and len(parts) == 3:
+        pet = await service.get_pet(pet_id)
+        if pet is None or pet.owner_user_id != query.from_user.id:
+            await query.answer("Наряжать питомца может только хозяин.", show_alert=True)
+            return
+        try:
+            pet, item = await service.set_equipped(owner_user_id=query.from_user.id, item_code=parts[2], equipped=kind == "wear")
+        except PetDomainError as exc:
+            await query.answer(str(exc)[:200], show_alert=True)
+            return
+        await query.answer(f"{item.title}: {'надето' if kind == 'wear' else 'снято'}.")
+        await message.answer(
+            f"{pet.emoji} {escape(pet.name)} {'теперь в образе' if kind == 'wear' else 'снимает'}: {escape(item.title)}.",
+            parse_mode="HTML",
+        )
+        return
+
+    if kind == "use" and message.chat.type not in _GROUP_TYPES:
+        await query.answer("Дать вещь из рюкзака можно в чате, где живёт питомец: /pet_bag там.", show_alert=True)
+        return
+
     if message.chat.type not in _GROUP_TYPES or not chat_settings.pets_enabled:
         await query.answer("Питомцы в этом чате выключены.", show_alert=True)
         return
@@ -692,6 +792,51 @@ async def ai_pet_callback(query: CallbackQuery, activity_repo, db_session, econo
             return
         await query.answer()
         await _send_shop(message, pet, service=service, chat_settings=chat_settings)
+        return
+
+    if kind == "bag" and len(parts) == 3:
+        if not chat_settings.economy_enabled:
+            await query.answer("Экономика в этом чате выключена.", show_alert=True)
+            return
+        result = await service.buy_to_bag(
+            pet_id=pet_id,
+            chat_id=message.chat.id,
+            actor=_user_snapshot(query.from_user),
+            item_code=parts[2],
+            idempotency_key=f"ai_pet:cb:{query.id}",
+            economy_mode=chat_settings.economy_mode,
+            now=_now(),
+        )
+        if result.status == "duplicate":
+            await query.answer()
+            return
+        if result.status != "ok":
+            await query.answer(result.message[:200] or "Не получилось.", show_alert=True)
+            return
+        await query.answer()
+        await message.answer(render_bag_add(result, actor=query.from_user, actor_link=_actor_link(query.from_user)), parse_mode="HTML")
+        return
+
+    if kind == "use" and len(parts) == 3:
+        now = _now()
+        result = await service.use_from_bag(
+            pet_id=pet_id,
+            chat_id=message.chat.id,
+            owner_user_id=query.from_user.id,
+            item_code=parts[2],
+            idempotency_key=f"ai_pet:cb:{query.id}",
+            today=_today(settings, now),
+            now=now,
+        )
+        if result.status == "duplicate":
+            await query.answer()
+            return
+        if result.status != "ok":
+            await query.answer(result.message[:200] or "Не получилось.", show_alert=True)
+            return
+        await query.answer()
+        event_type = m.ITEM_EVENT_TYPES[result.item.kind]
+        await message.answer(render_result(result, event_type=event_type, actor_link=_actor_link(query.from_user)), parse_mode="HTML")
         return
 
     if kind == "a" and len(parts) == 3 and (parts[2] in m.ACTIONS or parts[2] == "feed"):

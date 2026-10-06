@@ -2905,7 +2905,7 @@ class AiPetEventModel(Base):
 
 
 class AiPetItemModel(Base):
-    """Owner-editable catalog of pet food and toys; prices live here, not in code."""
+    """Owner-editable catalog of pet food, toys and cosmetics; prices live here, not in code."""
 
     __tablename__ = "ai_pet_items"
 
@@ -2918,13 +2918,19 @@ class AiPetItemModel(Base):
     min_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Where a cosmetic is worn; exactly the cosmetics have a slot.
+    slot: Mapped[str | None] = mapped_column(String(16), nullable=True)
     updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
     __table_args__ = (
-        CheckConstraint("kind IN ('food', 'toy')", name="ck_ai_pet_items_kind"),
+        CheckConstraint("kind IN ('food', 'toy', 'cosmetic')", name="ck_ai_pet_items_kind"),
+        CheckConstraint(
+            "(kind = 'cosmetic' AND slot IN ('head', 'neck', 'back')) OR (kind <> 'cosmetic' AND slot IS NULL)",
+            name="ck_ai_pet_items_slot",
+        ),
         CheckConstraint("price >= 0", name="ck_ai_pet_items_price"),
         CheckConstraint("min_level >= 1", name="ck_ai_pet_items_min_level"),
     )
@@ -2983,4 +2989,27 @@ class AiPetMemoryModel(Base):
     __table_args__ = (
         CheckConstraint("source IN ('aggregate', 'dialogue')", name="ck_ai_pet_memories_source"),
         Index("idx_ai_pet_memories_pet_chat_created", "pet_id", "chat_id", "created_at"),
+    )
+
+
+class AiPetInventoryModel(Base):
+    """What a pet owns: stored food and toys, and cosmetics it can wear. Goes with the pet."""
+
+    __tablename__ = "ai_pet_inventory"
+
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), primary_key=True)
+    # RESTRICT: an owned item cannot vanish; the catalog disables items instead of deleting them.
+    item_code: Mapped[str] = mapped_column(
+        String(32), ForeignKey("ai_pet_items.code", ondelete="RESTRICT"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    equipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("quantity >= 0", name="ck_ai_pet_inventory_quantity"),
+        CheckConstraint("NOT equipped OR quantity > 0", name="ck_ai_pet_inventory_equipped_owned"),
     )
