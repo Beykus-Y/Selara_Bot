@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from selara.infrastructure.llm.features import AiFeature
 
@@ -30,10 +30,24 @@ class UsagePricer(Protocol):
     ) -> QuotaCost: ...
 
 
-class FlatUsagePricer:
-    """Every operation costs exactly one unit, which keeps today's per-request limits."""
+# A unit is defined as one plain request; weights express every other cost relative to it.
+BASELINE_REQUEST_UNITS = Decimal("1")
 
-    _ONE = QuotaCost(Decimal("1"))
+
+class ConfiguredUsagePricer:
+    """Prices from configuration: a default for every operation plus per-feature overrides.
+
+    Feature code only calls ``price``; the numbers come from settings
+    (``AI_QUOTA_DEFAULT_UNITS`` / ``AI_QUOTA_UNIT_WEIGHTS``).
+    """
+
+    def __init__(
+        self,
+        default_units: Decimal = BASELINE_REQUEST_UNITS,
+        overrides: Mapping[str, Decimal] | None = None,
+    ) -> None:
+        self._default = QuotaCost(Decimal(default_units))
+        self._overrides = {key: QuotaCost(Decimal(value)) for key, value in (overrides or {}).items()}
 
     def price(
         self,
@@ -42,4 +56,4 @@ class FlatUsagePricer:
         model_key: str | None = None,
         operation: str = "request",
     ) -> QuotaCost:
-        return self._ONE
+        return self._overrides.get(feature.value, self._default)

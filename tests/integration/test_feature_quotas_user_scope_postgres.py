@@ -15,6 +15,7 @@ from selara.application.feature_access import (
     AccessReason,
     AccessTier,
     FeatureAccessService,
+    PersonalQuotaLimits,
     QuotaScope,
 )
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
@@ -33,6 +34,7 @@ from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementRes
 from selara.infrastructure.llm.features import AiFeature
 
 _NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+_LIMITS = PersonalQuotaLimits(free_daily=5, paid_daily=150)
 
 
 async def _database():
@@ -80,7 +82,7 @@ async def _reserve(
 async def test_free_user_gets_five_requests_per_day_and_denial_creates_no_invocation():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_001
 
         granted = [await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:{i}") for i in range(5)]
@@ -117,7 +119,7 @@ async def test_free_user_gets_five_requests_per_day_and_denial_creates_no_invoca
 async def test_users_are_counted_independently_and_scopes_do_not_collide():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         for i in range(5):
             await _reserve(service, user_id=611_011, key=f"personal_chat:611011:{i}")
         exhausted = await _reserve(service, user_id=611_011, key="personal_chat:611011:x")
@@ -146,7 +148,7 @@ async def test_users_are_counted_independently_and_scopes_do_not_collide():
 async def test_concurrent_requests_at_four_of_five_allow_exactly_one_last_slot():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_021
         for i in range(4):
             await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:{i}")
@@ -167,7 +169,7 @@ async def test_concurrent_requests_at_four_of_five_allow_exactly_one_last_slot()
 async def test_replayed_message_reuses_its_reservation_and_another_scope_cannot_steal_the_key():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_031
         first = await _reserve(
             service, user_id=user_id, key=f"personal_chat:{user_id}:7", source_message_id=7
@@ -212,7 +214,8 @@ async def test_active_personal_entitlement_raises_the_limit_to_one_fifty_until_i
             await session.commit()
         service = FeatureAccessService(
             SqlAlchemyFeatureQuotaRepository(factory),
-            user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory),
+            user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, _LIMITS),
+            personal_limits=_LIMITS,
         )
 
         paid = await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:1")
@@ -252,7 +255,7 @@ async def test_unit_costs_are_summed_and_a_request_that_does_not_fit_is_denied()
     engine, factory = await _database()
     try:
         pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("2")))
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), pricer=pricer)
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), pricer=pricer, personal_limits=_LIMITS)
         user_id = 611_051
 
         one = await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:1")
@@ -276,7 +279,7 @@ async def test_unit_costs_are_summed_and_a_request_that_does_not_fit_is_denied()
 async def test_owner_exempt_dm_is_unlimited_and_does_not_consume_the_pool():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_061
 
         decisions = [
@@ -297,7 +300,7 @@ async def test_owner_exempt_dm_is_unlimited_and_does_not_consume_the_pool():
 async def test_autocfg_and_memory_extraction_in_a_dm_never_draw_from_the_personal_pool():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_071
         for i in range(5):
             await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:{i}")
@@ -331,7 +334,7 @@ async def test_autocfg_and_memory_extraction_in_a_dm_never_draw_from_the_persona
 async def test_release_before_provider_attempt_returns_the_slot_for_user_scope():
     engine, factory = await _database()
     try:
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         user_id = 611_081
         decisions = [
             await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:{i}") for i in range(5)
@@ -363,7 +366,7 @@ async def test_chat_migration_rescopes_chat_quota_but_leaves_user_scope_alone():
                 ]
             )
             await session.commit()
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=_LIMITS)
         for i in range(3):
             await _reserve(
                 service,
@@ -472,5 +475,23 @@ async def test_orphaned_legacy_rows_are_not_counted_and_scope_check_is_enforced(
             )
             with pytest.raises(IntegrityError):
                 await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_configured_limits_drive_the_free_and_paid_pool_in_the_database():
+    engine, factory = await _database()
+    try:
+        limits = PersonalQuotaLimits(free_daily=2, paid_daily=4)
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_limits=limits)
+        user_id = 611_101
+
+        results = [await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:{i}") for i in range(3)]
+
+        assert [result.allowed for result in results] == [True, True, False]
+        assert results[0].quota_limit == 2
     finally:
         await engine.dispose()

@@ -10,7 +10,6 @@ SELARA_PERSONAL_PRODUCT_KEY = "selara_personal_monthly"
 SELARA_PERSONAL_TERMS_VERSION = "personal-v1"
 SELARA_AI_CURRENCY = "XTR"
 SELARA_AI_DURATION = timedelta(days=30)
-SELARA_PERSONAL_DURATION = timedelta(days=30)
 PRODUCT_SCOPE_CHAT = "chat"
 PRODUCT_SCOPE_USER = "user"
 PURCHASE_INTENT_TTL = timedelta(minutes=15)
@@ -31,7 +30,8 @@ class ProductSpec:
 
     key: str
     scope: str
-    duration: timedelta
+    # None: the duration is owner configuration (SELARA_PERSONAL_DURATION_DAYS), not catalog.
+    duration: timedelta | None
     terms_version: str
 
 
@@ -45,7 +45,7 @@ PRODUCT_SPECS: dict[str, ProductSpec] = {
     SELARA_PERSONAL_PRODUCT_KEY: ProductSpec(
         key=SELARA_PERSONAL_PRODUCT_KEY,
         scope=PRODUCT_SCOPE_USER,
-        duration=SELARA_PERSONAL_DURATION,
+        duration=None,
         terms_version=SELARA_PERSONAL_TERMS_VERSION,
     ),
 }
@@ -71,15 +71,20 @@ class SelaraAiProduct:
         return f"{int(self.duration.total_seconds() // 86_400)} дней"
 
 
-def get_selara_ai_product(*, product_key: str, price_stars: int | None) -> SelaraAiProduct:
-    """Resolve a supported product using its one configured Stars price."""
+def get_selara_ai_product(
+    *, product_key: str, price_stars: int | None, duration: timedelta | None = None
+) -> SelaraAiProduct:
+    """Resolve a supported product using its configured Stars price (and duration, if configurable)."""
     spec = get_product_spec(product_key)
     if spec is None:
         raise UnsupportedSelaraAiProduct(product_key)
     if price_stars is None or price_stars <= 0:
         price_env = "SELARA_PERSONAL_PRICE_STARS" if spec.scope == PRODUCT_SCOPE_USER else "SELARA_AI_PRICE_STARS"
         raise SelaraAiProductUnavailable(f"{price_env} must be set to a positive integer")
-    duration_label = f"{int(spec.duration.total_seconds() // 86_400)} дней"
+    resolved_duration = spec.duration if spec.duration is not None else duration
+    if resolved_duration is None or resolved_duration <= timedelta(0):
+        raise SelaraAiProductUnavailable("SELARA_PERSONAL_DURATION_DAYS must be a positive number of days")
+    duration_label = f"{int(resolved_duration.total_seconds() // 86_400)} дней"
     if spec.scope == PRODUCT_SCOPE_USER:
         title = f"Selara Personal на {duration_label}"
         description = f"Личный доступ к Selara AI для вашего аккаунта на {duration_label}."
@@ -92,7 +97,7 @@ def get_selara_ai_product(*, product_key: str, price_stars: int | None) -> Selar
         description=description,
         price_stars=price_stars,
         currency=SELARA_AI_CURRENCY,
-        duration=spec.duration,
+        duration=resolved_duration,
         scope=spec.scope,
         terms_version=spec.terms_version,
     )

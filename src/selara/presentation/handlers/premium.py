@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -78,14 +78,16 @@ def _terms_text() -> str:
     )
 
 
-def _personal_terms_text() -> str:
+def _personal_terms_text(settings: Settings) -> str:
     return (
         "<b>Условия покупки Selara Personal</b>\n\n"
         "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом "
-        "(до 150 запросов в сутки вместо 5 бесплатных), персонализация и личная память. "
+        f"(до {settings.personal_paid_daily_limit} запросов в сутки вместо {settings.personal_free_daily_limit} бесплатных), "
+        "персонализация и личная память. "
         "Подписка принадлежит вам, а не чату.\n"
-        "2. Срок — 30 дней с момента оплаты. Продление не автоматическое: повторная покупка "
-        "добавляет ещё 30 дней к активному сроку; после окончания остаётся бесплатный лимит.\n"
+        f"2. Срок — {settings.selara_personal_duration_days} дней с момента оплаты. Продление не автоматическое: "
+        f"повторная покупка добавляет ещё {settings.selara_personal_duration_days} дней к активному сроку; "
+        "после окончания остаётся бесплатный лимит.\n"
         "3. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
         "4. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
         "удалённые данные могут оставаться в резервных копиях до их ротации.\n"
@@ -125,6 +127,7 @@ def _personal_product_for_settings(settings: Settings):
     return get_selara_ai_product(
         product_key=SELARA_PERSONAL_PRODUCT_KEY,
         price_stars=settings.selara_personal_price_stars,
+        duration=timedelta(days=settings.selara_personal_duration_days),
     )
 
 
@@ -361,7 +364,8 @@ async def show_personal_offer(query: CallbackQuery, session_factory, settings: S
         text = (
             f"<b>{escape(product.title)}</b>\n"
             f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
-            "Бесплатно в личке доступно 5 AI-запросов в сутки, с Selara Personal — 150.\n"
+            f"Бесплатно в личке доступно {settings.personal_free_daily_limit} AI-запросов в сутки, "
+            f"с Selara Personal — {settings.personal_paid_daily_limit}.\n"
             "Подписка оформляется для вашего аккаунта, а не для чата.\n"
             "Перед оплатой нужно подтвердить принятие условий покупки."
         )
@@ -371,11 +375,13 @@ async def show_personal_offer(query: CallbackQuery, session_factory, settings: S
 
 
 @router.callback_query(F.data == "premium:terms_self")
-async def show_personal_terms(query: CallbackQuery) -> None:
+async def show_personal_terms(query: CallbackQuery, settings: Settings) -> None:
     await query.answer()
     if query.message is None or query.message.chat.type != "private":
         return
-    await _edit_callback_message(query, _personal_terms_text(), reply_markup=_personal_terms_keyboard())
+    await _edit_callback_message(
+        query, _personal_terms_text(settings), reply_markup=_personal_terms_keyboard()
+    )
 
 
 @router.callback_query(F.data == "premium:self_accept")

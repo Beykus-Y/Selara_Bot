@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from selara.application.feature_access import AccessTier, FeatureEntitlement, paid_personal_policy
+from selara.application.feature_access import (
+    AccessTier,
+    FeatureEntitlement,
+    PersonalQuotaLimits,
+    paid_personal_policy,
+)
 from selara.application.selara_ai_product import (
     PRODUCT_SCOPE_CHAT,
     PRODUCT_SCOPE_USER,
@@ -162,8 +167,11 @@ def _snapshot(row: SelaraAiPurchaseIntentModel) -> PurchaseIntent:
 class SqlAlchemyUserEntitlementResolver:
     """PostgreSQL resolver for the personal (user-scoped) entitlement."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], limits: PersonalQuotaLimits
+    ) -> None:
         self._session_factory = session_factory
+        self._limits = limits
 
     async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
         if feature != AiFeature.PERSONAL_CHAT:
@@ -191,7 +199,7 @@ class SqlAlchemyUserEntitlementResolver:
             valid_until=row.valid_until,
             source="telegram_stars",
             product_key=row.product_key,
-            quota_policy=paid_personal_policy(),
+            quota_policy=paid_personal_policy(self._limits),
         )
 
 

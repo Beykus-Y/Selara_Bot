@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from selara.application.feature_access import AccessTier
+from selara.application.feature_access import AccessTier, PersonalQuotaLimits
 from selara.application.selara_ai_product import (
     SELARA_AI_PRODUCT_KEY,
     SELARA_PERSONAL_PRODUCT_KEY,
@@ -47,7 +47,9 @@ async def _database():
 
 
 def _personal(price_stars: int = 69):
-    return get_selara_ai_product(product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=price_stars)
+    return get_selara_ai_product(
+        product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=price_stars, duration=timedelta(days=30)
+    )
 
 
 async def _intent(factory, *, buyer_user_id: int = _BUYER, now: datetime = _NOW):
@@ -389,7 +391,7 @@ async def test_personal_entitlement_resolver_returns_paid_one_fifty_policy_only_
         repository = SqlAlchemyTelegramStarsRepository(factory)
         intent = await _intent(factory)
         await _payment(repository, intent, charge_id="personal-resolver")
-        resolver = SqlAlchemyUserEntitlementResolver(factory)
+        resolver = SqlAlchemyUserEntitlementResolver(factory, PersonalQuotaLimits(free_daily=5, paid_daily=150))
 
         paid = await resolver.resolve(user_id=_BUYER, feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
         stranger = await resolver.resolve(

@@ -10,8 +10,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from selara.application.feature_access import (
-    PERSONAL_FREE_DAILY_LIMIT,
-    PERSONAL_PAID_DAILY_LIMIT,
     PERSONAL_POOL_KEY,
     AccessReason,
     AccessTier,
@@ -20,6 +18,7 @@ from selara.application.feature_access import (
     FeatureEntitlement,
     FeatureQuotaPolicy,
     NoPaidUserEntitlementResolver,
+    PersonalQuotaLimits,
     QuotaPeriod,
     QuotaScope,
     paid_personal_policy,
@@ -37,7 +36,7 @@ from selara.application.selara_ai_product import (
     invoice_payload_for_intent,
     parse_invoice_payload,
 )
-from selara.application.usage_pricing import FlatUsagePricer, QuotaCost
+from selara.application.usage_pricing import ConfiguredUsagePricer, QuotaCost
 from selara.core.config import Settings
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.feature_quota import feature_quota_lock_key
@@ -52,6 +51,8 @@ from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.auth import resolve_owner_private_exemption
 
 _NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+# Test configuration; production values come from settings (PERSONAL_*_DAILY_LIMIT).
+_LIMITS = PersonalQuotaLimits(free_daily=5, paid_daily=150)
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
@@ -89,7 +90,9 @@ async def _reserve_personal(service: FeatureAccessService, *, user_id: int = 42,
 
 
 def test_personal_product_is_a_user_scoped_thirty_day_catalog_entry():
-    product = get_selara_ai_product(product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=69)
+    product = get_selara_ai_product(
+        product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=69, duration=timedelta(days=30)
+    )
 
     assert product.key == SELARA_PERSONAL_PRODUCT_KEY == "selara_personal_monthly"
     assert product.scope == "user"
@@ -111,7 +114,7 @@ def test_group_product_stays_chat_scoped():
 @pytest.mark.parametrize("price", [None, 0, -1])
 def test_personal_product_is_hidden_without_a_positive_price(price):
     with pytest.raises(SelaraAiProductUnavailable):
-        get_selara_ai_product(product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=price)
+        get_selara_ai_product(product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=price, duration=timedelta(days=30))
 
 
 def test_unknown_product_is_still_rejected():
@@ -139,20 +142,24 @@ def test_personal_price_comes_from_its_own_env_and_is_unset_by_default(monkeypat
 
 
 def test_personal_chat_policy_is_five_free_requests_per_day_in_the_personal_pool():
-    policy = resolve_feature_policy(feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
+    policy = resolve_feature_policy(
+        feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message", personal_limits=_LIMITS
+    )
 
     assert policy is not None
-    assert policy.limit == PERSONAL_FREE_DAILY_LIMIT == 5
+    assert policy.limit == 5
     assert policy.period == QuotaPeriod.DAY
     assert policy.pool == PERSONAL_POOL_KEY == "personal_daily"
     assert policy.unit == "request"
 
 
 def test_paid_personal_policy_is_one_hundred_fifty_per_day_in_the_same_pool():
-    free = resolve_feature_policy(feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
-    paid = paid_personal_policy()
+    free = resolve_feature_policy(
+        feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message", personal_limits=_LIMITS
+    )
+    paid = paid_personal_policy(_LIMITS)
 
-    assert paid.limit == PERSONAL_PAID_DAILY_LIMIT == 150
+    assert paid.limit == 150
     assert paid.feature == AiFeature.PERSONAL_CHAT
     assert paid.period == free.period
     assert paid.pool == free.pool
@@ -188,7 +195,7 @@ def test_quota_scope_helpers_and_lock_keys_do_not_collide_between_scopes():
 
 
 def test_flat_pricer_charges_one_unit_for_everything_today():
-    pricer = FlatUsagePricer()
+    pricer = ConfiguredUsagePricer()
 
     for feature in AiFeature:
         cost = pricer.price(feature=feature, model_key="any-model", operation="telegram_message")
@@ -223,7 +230,7 @@ async def test_adjust_is_an_interface_only_noop():
 async def test_user_scope_reserve_passes_scope_pool_and_unit_cost_to_repository():
     scope = QuotaScope.user(42)
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-    service = FeatureAccessService(repository)
+    service = FeatureAccessService(repository, personal_limits=_LIMITS)
 
     decision = await _reserve_personal(service)
 
@@ -241,7 +248,9 @@ async def test_user_scope_reserve_passes_scope_pool_and_unit_cost_to_repository(
 async def test_default_user_entitlement_resolver_fails_closed_to_the_free_limit():
     scope = QuotaScope.user(42)
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-    service = FeatureAccessService(repository, user_entitlement_resolver=NoPaidUserEntitlementResolver())
+    service = FeatureAccessService(
+        repository, user_entitlement_resolver=NoPaidUserEntitlementResolver(), personal_limits=_LIMITS
+    )
 
     await _reserve_personal(service)
 
@@ -260,11 +269,11 @@ async def test_active_personal_entitlement_raises_the_pool_limit_to_one_fifty():
                 valid_until=_NOW + timedelta(days=3),
                 source="telegram_stars",
                 product_key=SELARA_PERSONAL_PRODUCT_KEY,
-                quota_policy=paid_personal_policy(),
+                quota_policy=paid_personal_policy(_LIMITS),
             )
         )
     )
-    service = FeatureAccessService(repository, user_entitlement_resolver=resolver)
+    service = FeatureAccessService(repository, user_entitlement_resolver=resolver, personal_limits=_LIMITS)
 
     decision = await _reserve_personal(service)
 
@@ -285,14 +294,14 @@ async def test_expired_or_failing_personal_entitlement_falls_back_to_five():
             return_value=FeatureEntitlement(
                 access_tier=AccessTier.PAID,
                 valid_until=_NOW - timedelta(seconds=1),
-                quota_policy=paid_personal_policy(),
+                quota_policy=paid_personal_policy(_LIMITS),
             )
         )
     )
     failing = SimpleNamespace(resolve=AsyncMock(side_effect=RuntimeError("db down")))
     for resolver in (expired, failing):
         repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-        service = FeatureAccessService(repository, user_entitlement_resolver=resolver)
+        service = FeatureAccessService(repository, user_entitlement_resolver=resolver, personal_limits=_LIMITS)
 
         await _reserve_personal(service)
 
@@ -312,7 +321,7 @@ async def test_paid_policy_for_another_pool_is_rejected_and_free_limit_applies()
         )
     )
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-    service = FeatureAccessService(repository, user_entitlement_resolver=resolver)
+    service = FeatureAccessService(repository, user_entitlement_resolver=resolver, personal_limits=_LIMITS)
 
     await _reserve_personal(service)
 
@@ -340,7 +349,7 @@ async def test_owner_exempt_dm_skips_entitlement_lookup_and_is_owner_internal():
         )
     )
     resolver = SimpleNamespace(resolve=AsyncMock(side_effect=AssertionError("owner must not hit the resolver")))
-    service = FeatureAccessService(repository, user_entitlement_resolver=resolver)
+    service = FeatureAccessService(repository, user_entitlement_resolver=resolver, personal_limits=_LIMITS)
 
     decision = await _reserve_personal(service, owner_exempt=True)
 
@@ -378,7 +387,7 @@ async def test_custom_pricer_cost_is_forwarded_so_units_can_replace_request_coun
     scope = QuotaScope.user(42)
     pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("2.5")))
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-    service = FeatureAccessService(repository, pricer=pricer)
+    service = FeatureAccessService(repository, pricer=pricer, personal_limits=_LIMITS)
 
     await _reserve_personal(service)
 
@@ -622,3 +631,108 @@ async def test_successful_personal_payment_confirms_the_subscription_not_a_chat(
 
     text = message.answer.await_args.args[0]
     assert "Selara Personal" in text and "активна" in text
+
+
+# ----- nothing about prices, durations, limits or unit weights is hardcoded ----
+
+
+def _env(monkeypatch, **values: str):
+    monkeypatch.setenv("BOT_TOKEN", "123:TEST")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/selara_test")
+    for key in (
+        "SELARA_PERSONAL_PRICE_STARS",
+        "SELARA_PERSONAL_DURATION_DAYS",
+        "PERSONAL_FREE_DAILY_LIMIT",
+        "PERSONAL_PAID_DAILY_LIMIT",
+        "AI_QUOTA_DEFAULT_UNITS",
+        "AI_QUOTA_UNIT_WEIGHTS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    return Settings(_env_file=None)
+
+
+def test_settings_defaults_live_in_config_and_can_all_be_overridden(monkeypatch):
+    default = _env(monkeypatch)
+    assert default.selara_personal_price_stars is None
+    assert default.selara_personal_duration_days == 30
+    assert (default.personal_free_daily_limit, default.personal_paid_daily_limit) == (5, 150)
+    assert default.ai_quota_default_units == Decimal("1") and default.ai_quota_unit_weights == {}
+
+    custom = _env(
+        monkeypatch,
+        SELARA_PERSONAL_PRICE_STARS="99",
+        SELARA_PERSONAL_DURATION_DAYS="7",
+        PERSONAL_FREE_DAILY_LIMIT="3",
+        PERSONAL_PAID_DAILY_LIMIT="40",
+        AI_QUOTA_DEFAULT_UNITS="2",
+        AI_QUOTA_UNIT_WEIGHTS='{"personal_chat": "3.5"}',
+    )
+    assert custom.selara_personal_price_stars == 99
+    assert custom.selara_personal_duration_days == 7
+    assert PersonalQuotaLimits.from_settings(custom) == PersonalQuotaLimits(3, 40)
+    assert custom.ai_quota_unit_weights == {"personal_chat": Decimal("3.5")}
+
+
+def test_personal_product_duration_and_price_follow_configuration():
+    product = get_selara_ai_product(
+        product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=99, duration=timedelta(days=7)
+    )
+    assert product.price_stars == 99 and product.duration == timedelta(days=7)
+    assert "7 дней" in product.title
+    with pytest.raises(SelaraAiProductUnavailable):
+        get_selara_ai_product(product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=99)
+
+
+def test_premium_texts_use_configured_limits_and_duration(monkeypatch):
+    from selara.presentation.handlers import premium
+
+    settings = _env(
+        monkeypatch,
+        SELARA_PERSONAL_DURATION_DAYS="7",
+        PERSONAL_FREE_DAILY_LIMIT="3",
+        PERSONAL_PAID_DAILY_LIMIT="40",
+    )
+    text = premium._personal_terms_text(settings)
+    assert "40 запросов" in text and "3 бесплатных" in text and "7 дней" in text
+    assert "150" not in text and "30 дней" not in text
+
+
+def test_personal_limits_override_policies_and_are_validated():
+    limits = PersonalQuotaLimits(free_daily=2, paid_daily=9)
+    free = resolve_feature_policy(
+        feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message", personal_limits=limits
+    )
+    assert free.limit == 2 and paid_personal_policy(limits).limit == 9
+    for free_limit, paid_limit in ((0, 5), (5, 5), (5, 3)):
+        with pytest.raises(ValueError):
+            PersonalQuotaLimits(free_daily=free_limit, paid_daily=paid_limit)
+
+
+def test_unconfigured_personal_limits_fail_closed_instead_of_unlimited():
+    with pytest.raises(ValueError, match="not configured"):
+        resolve_feature_policy(feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
+
+
+def test_configured_pricer_uses_default_and_per_feature_weights():
+    pricer = ConfiguredUsagePricer(Decimal("2"), {"personal_chat": Decimal("0.5")})
+
+    assert pricer.price(feature=AiFeature.PERSONAL_CHAT).units == Decimal("0.5")
+    assert pricer.price(feature=AiFeature.LLM_ADMIN).units == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_service_reserves_with_the_configured_limit_and_weight():
+    scope = QuotaScope.user(42)
+    repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
+    service = FeatureAccessService(
+        repository,
+        pricer=ConfiguredUsagePricer(Decimal("1"), {"personal_chat": Decimal("4")}),
+        personal_limits=PersonalQuotaLimits(free_daily=8, paid_daily=80),
+    )
+
+    await _reserve_personal(service)
+
+    assert repository.reserve.await_args.kwargs["policy"].limit == 8
+    assert repository.reserve.await_args.kwargs["cost"].units == Decimal("4")

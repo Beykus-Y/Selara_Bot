@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from selara.application.usage_pricing import FlatUsagePricer, QuotaCost, UsagePricer
+from selara.application.usage_pricing import ConfiguredUsagePricer, QuotaCost, UsagePricer
 from selara.infrastructure.llm.features import AiFeature
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,25 @@ class QuotaScope:
 
 
 PERSONAL_POOL_KEY = "personal_daily"
-PERSONAL_FREE_DAILY_LIMIT = 5
-PERSONAL_PAID_DAILY_LIMIT = 150
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalQuotaLimits:
+    """Daily limits of the personal pool, in quota units; values come from settings."""
+
+    free_daily: int
+    paid_daily: int
+
+    def __post_init__(self) -> None:
+        if self.free_daily <= 0 or self.paid_daily <= self.free_daily:
+            raise ValueError("Personal limits must satisfy 0 < free < paid")
+
+    @classmethod
+    def from_settings(cls, settings) -> "PersonalQuotaLimits":
+        return cls(
+            free_daily=settings.personal_free_daily_limit,
+            paid_daily=settings.personal_paid_daily_limit,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +252,9 @@ class FeatureQuotaRepository(Protocol):
     async def release_if_no_provider_attempts(self, *, invocation_id: int, reason: str) -> bool: ...
 
 
-def resolve_feature_policy(*, feature: AiFeature, trigger: str) -> FeatureQuotaPolicy | None:
+def resolve_feature_policy(
+    *, feature: AiFeature, trigger: str, personal_limits: PersonalQuotaLimits | None = None
+) -> FeatureQuotaPolicy | None:
     """Return the explicit commercial policy for a user-facing feature.
 
     ``None`` means the known feature intentionally has no commercial quota in
@@ -251,10 +270,13 @@ def resolve_feature_policy(*, feature: AiFeature, trigger: str) -> FeatureQuotaP
             return None
         raise ValueError(f"Unsupported Daily Summary trigger for access policy: {trigger!r}")
     if feature == AiFeature.PERSONAL_CHAT:
+        if personal_limits is None:
+            # Fail closed: without configured limits the feature must not become unlimited.
+            raise ValueError("Personal quota limits are not configured")
         return FeatureQuotaPolicy(
             feature,
             "personal_chat_free_daily_v1",
-            PERSONAL_FREE_DAILY_LIMIT,
+            personal_limits.free_daily,
             QuotaPeriod.DAY,
             pool_key=PERSONAL_POOL_KEY,
         )
@@ -269,12 +291,12 @@ def resolve_feature_policy(*, feature: AiFeature, trigger: str) -> FeatureQuotaP
     raise ValueError(f"No explicit feature access policy for {feature!r}")
 
 
-def paid_personal_policy() -> FeatureQuotaPolicy:
-    """Selara Personal raises the same daily pool from 5 to 150 requests."""
+def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
+    """Selara Personal raises the same daily pool from the free to the paid limit."""
     return FeatureQuotaPolicy(
         AiFeature.PERSONAL_CHAT,
         "personal_chat_paid_daily_v1",
-        PERSONAL_PAID_DAILY_LIMIT,
+        limits.paid_daily,
         QuotaPeriod.DAY,
         pool_key=PERSONAL_POOL_KEY,
     )
@@ -323,11 +345,13 @@ class FeatureAccessService:
         entitlement_resolver: ChatEntitlementResolver | None = None,
         user_entitlement_resolver: UserEntitlementResolver | None = None,
         pricer: UsagePricer | None = None,
+        personal_limits: PersonalQuotaLimits | None = None,
     ) -> None:
+        self._personal_limits = personal_limits
         self._repository = repository
         self._entitlement_resolver = entitlement_resolver or NoPaidChatEntitlementResolver()
         self._user_entitlement_resolver = user_entitlement_resolver or NoPaidUserEntitlementResolver()
-        self._pricer: UsagePricer = pricer or FlatUsagePricer()
+        self._pricer: UsagePricer = pricer or ConfiguredUsagePricer()
 
     async def _resolve_entitlement(
         self,
@@ -514,7 +538,9 @@ class FeatureAccessService:
         """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened."""
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        policy = resolve_feature_policy(
+            feature=feature, trigger=trigger, personal_limits=self._personal_limits
+        )
         entitlement = None
         if policy is not None and not owner_exempt:
             policy, tier, entitlement = await self._paid_feature_policy(
@@ -598,7 +624,9 @@ class FeatureAccessService:
     ) -> FeatureUsageSummary:
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        policy = resolve_feature_policy(
+            feature=feature, trigger=trigger, personal_limits=self._personal_limits
+        )
         if policy is not None and not owner_exempt:
             policy, tier, _ = await self._paid_feature_policy(
                 policy=policy,

@@ -40,8 +40,12 @@
 ## Selara Personal (личная подписка, миграции 0078–0079)
 
 Второй продукт — `selara_personal_monthly`, **Selara Personal**: подписка на
-пользователя, а не на чат (30 дней, Stars, без автопродления). Целевая цена
-69 ⭐ задаётся владельцем через `SELARA_PERSONAL_PRICE_STARS`; без значения (или без
+пользователя, а не на чат (Stars, без автопродления). Цена, срок и лимиты не
+захардкожены и задаются конфигурацией: `SELARA_PERSONAL_PRICE_STARS` (целевая
+69 ⭐), `SELARA_PERSONAL_DURATION_DAYS` (по умолчанию 30),
+`PERSONAL_FREE_DAILY_LIMIT` / `PERSONAL_PAID_DAILY_LIMIT` (5 / 150),
+`AI_QUOTA_DEFAULT_UNITS` и `AI_QUOTA_UNIT_WEIGHTS` (JSON, вес запроса по фичам).
+Значения по умолчанию живут только в `core/config.py`. Без значения цены (или без
 рабочей LLM-конфигурации) продукт скрыт: `/premium` ведёт себя как раньше и не
 предлагает «Для себя».
 
