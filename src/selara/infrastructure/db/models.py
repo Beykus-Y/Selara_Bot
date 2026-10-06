@@ -1028,6 +1028,8 @@ class ChatSettingsModel(Base):
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # Permission for AI pets to live in this chat; not a subscription.
     pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Lets pets post rare spontaneous lines here; paid by each pet's owner, off by default.
+    pets_spontaneous_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     persona_display_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="image_name", server_default="image_name")
     save_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")

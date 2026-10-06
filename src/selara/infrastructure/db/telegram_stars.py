@@ -188,7 +188,7 @@ class SqlAlchemyUserEntitlementResolver:
         self._pet_daily_limit = pet_daily_limit
 
     async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
-        if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK):
+        if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
             return FeatureEntitlement(access_tier=AccessTier.FREE)
         limits = (await self._config.get()).limits
         try:
@@ -215,8 +215,8 @@ class SqlAlchemyUserEntitlementResolver:
             source="telegram_stars",
             product_key=row.product_key,
             quota_policy=(
-                paid_pet_policy(self._pet_daily_limit)
-                if feature == AiFeature.PET_TALK
+                paid_pet_policy(self._pet_daily_limit, feature)
+                if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT)
                 else paid_personal_policy(_snapshot_limits(limits, row.paid_daily_limit))
             ),
         )

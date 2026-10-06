@@ -60,6 +60,7 @@ from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import get_role_label_ru, has_command_access, has_permission
 from selara.presentation.commands.access import parse_command_rank_phrase, resolve_command_key_input
+from selara.presentation.handlers.ai_pet_events import maybe_schedule_spontaneous_event
 from selara.presentation.handlers.ai_pet_talk import handle_pet_talk, resolve_talk_target, talk_allowed
 from selara.presentation.handlers.ai_pets import ai_pet_text_command, parse_pet_text
 from selara.presentation.commands.catalog import (
@@ -5880,6 +5881,17 @@ async def text_commands_handler(
 
     if await _handle_command_rank_phrase(message, activity_repo, text):
         return
+
+    # Chat activity may let a pet post a rare spontaneous line; it runs in the background.
+    if not write_locked:
+        maybe_schedule_spontaneous_event(
+            message,
+            chat_settings=chat_settings,
+            settings=settings,
+            session_factory=session_factory,
+            personal_config=personal_config,
+            llm_client=llm_client,
+        )
 
     # Talking to an AI pet is plain speech, not a text command: it works even with text commands off.
     if not write_locked and parse_pet_text(text) is None and message.chat.type in {"group", "supergroup"}:

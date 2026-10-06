@@ -13,3 +13,5 @@ class AiFeature(StrEnum):
     PET_TALK = "pet_talk"
     # Internal operation of pet dialogue memory: tracked for cost, never charged to any pool.
     PET_MEMORY_EXTRACT = "pet_memory_extract"
+    # A spontaneous line a pet posts in its chat; same owner-paid pool as talking.
+    PET_EVENT_TEXT = "pet_event_text"
