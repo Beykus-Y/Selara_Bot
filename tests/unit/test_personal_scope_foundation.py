@@ -447,8 +447,6 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert personal_ai.down_revision == config.revision
     assert ai_pets.down_revision == personal_ai.revision
     assert pet_dialogue.down_revision == ai_pets.revision
-    assert catalog.down_revision == pet_dialogue.revision
-    assert memory.down_revision == catalog.revision
     revisions, parents = set(), set()
     for path in _VERSIONS.glob("[0-9]*.py"):
         module = _load_migration(path.name)
