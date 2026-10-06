@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -9,7 +10,9 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character import CharacterProfile
+from selara.application.personal_memory import MemoryItem
 from selara.infrastructure.db.models import (
+    PersonalAiMemoryModel,
     PersonalAiMessageModel,
     PersonalAiProfileModel,
     PersonalAiSummaryModel,
@@ -28,6 +31,7 @@ _PROFILE_FIELDS = frozenset(
         "emoji_enabled",
         "mode",
         "memory_enabled",
+        "auto_memory_enabled",
     }
 )
 
@@ -37,6 +41,30 @@ class StoredProfile:
     profile: CharacterProfile
     revision: int
     memory_enabled: bool
+    auto_memory_enabled: bool = False
+    memory_extract_cursor: int = 0
+
+
+class AddMemoryStatus(StrEnum):
+    ADDED = "added"
+    DUPLICATE = "duplicate"
+    LIMIT_REACHED = "limit_reached"
+
+
+@dataclass(frozen=True, slots=True)
+class AddMemoryResult:
+    status: AddMemoryStatus
+    memory: PersonalAiMemoryModel | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ForgottenData:
+    """What /forget_all removed (rows per table)."""
+
+    memories: int
+    messages: int
+    summaries: int
+    profile: bool
 
 
 def _to_stored(row: PersonalAiProfileModel) -> StoredProfile:
@@ -53,6 +81,8 @@ def _to_stored(row: PersonalAiProfileModel) -> StoredProfile:
         ),
         revision=row.revision,
         memory_enabled=row.memory_enabled,
+        auto_memory_enabled=row.auto_memory_enabled,
+        memory_extract_cursor=row.memory_extract_cursor,
     )
 
 
@@ -76,7 +106,8 @@ class PersonalAiRepository:
         )
 
     async def get_profile(self, user_id: int) -> StoredProfile | None:
-        row = await self._session.get(PersonalAiProfileModel, user_id)
+        # Several columns are changed with Core UPDATEs; never serve a stale identity-map copy.
+        row = await self._session.get(PersonalAiProfileModel, user_id, populate_existing=True)
         return _to_stored(row) if row is not None else None
 
     async def get_or_create_profile(self, user_id: int) -> StoredProfile:
@@ -244,3 +275,152 @@ class PersonalAiRepository:
             .execution_options(synchronize_session=False)
         )
         return int(removed.rowcount or 0)
+
+    async def delete_all_user_data(self, *, user_id: int) -> ForgottenData:
+        """/forget_all: profile, history, summaries and memories of this one user. The account and billing stay."""
+        counts = {}
+        for key, model in (
+            ("memories", PersonalAiMemoryModel),
+            ("messages", PersonalAiMessageModel),
+            ("summaries", PersonalAiSummaryModel),
+        ):
+            result = await self._session.execute(
+                delete(model).where(model.user_id == user_id).execution_options(synchronize_session=False)
+            )
+            counts[key] = int(result.rowcount or 0)
+        profile = await self._session.execute(
+            delete(PersonalAiProfileModel)
+            .where(PersonalAiProfileModel.user_id == user_id)
+            .execution_options(synchronize_session=False)
+        )
+        # ORM identity map must not keep serving the deleted profile to later reads in this session.
+        self._session.expire_all()
+        return ForgottenData(
+            memories=counts["memories"],
+            messages=counts["messages"],
+            summaries=counts["summaries"],
+            profile=bool(profile.rowcount),
+        )
+
+    # --- memories ------------------------------------------------------------
+
+    async def add_memory(self, *, user_id: int, content: str, source: str, limit: int) -> AddMemoryResult:
+        """Store a fact unless it is a duplicate or the user is at ``limit``. Never evicts older facts."""
+        await self.get_or_create_profile(user_id)
+        # Serialise writers of one user (the profile row is the lock) so parallel confirmations cannot overshoot.
+        await self._session.execute(
+            select(PersonalAiProfileModel.user_id)
+            .where(PersonalAiProfileModel.user_id == user_id)
+            .with_for_update()
+        )
+        existing = (
+            await self._session.scalars(
+                select(PersonalAiMemoryModel.content).where(PersonalAiMemoryModel.user_id == user_id)
+            )
+        ).all()
+        wanted = content.casefold()
+        if any(item.casefold() == wanted for item in existing):
+            return AddMemoryResult(AddMemoryStatus.DUPLICATE)
+        if len(existing) >= limit:
+            return AddMemoryResult(AddMemoryStatus.LIMIT_REACHED)
+        row = PersonalAiMemoryModel(user_id=user_id, content=content, source=source)
+        self._session.add(row)
+        await self._session.flush()
+        return AddMemoryResult(AddMemoryStatus.ADDED, row)
+
+    async def list_memories(
+        self, *, user_id: int, limit: int | None = None, offset: int = 0
+    ) -> list[PersonalAiMemoryModel]:
+        query = (
+            select(PersonalAiMemoryModel)
+            .where(PersonalAiMemoryModel.user_id == user_id)
+            .order_by(PersonalAiMemoryModel.created_at.asc(), PersonalAiMemoryModel.id.asc())
+            .offset(offset)
+            # Rows are changed with Core UPDATEs (pin, last_used_at); never serve a stale identity-map copy.
+            .execution_options(populate_existing=True)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        return list((await self._session.scalars(query)).all())
+
+    async def count_memories(self, *, user_id: int) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count()).select_from(PersonalAiMemoryModel).where(PersonalAiMemoryModel.user_id == user_id)
+            )
+            or 0
+        )
+
+    async def memory_items(self, *, user_id: int) -> list[MemoryItem]:
+        rows = await self.list_memories(user_id=user_id)
+        return [
+            MemoryItem(
+                id=row.id,
+                content=row.content,
+                pinned=row.pinned,
+                last_used_at=row.last_used_at,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def delete_memory(self, *, user_id: int, memory_id: int) -> bool:
+        result = await self._session.execute(
+            delete(PersonalAiMemoryModel)
+            .where(PersonalAiMemoryModel.user_id == user_id, PersonalAiMemoryModel.id == memory_id)
+            .execution_options(synchronize_session=False)
+        )
+        return bool(result.rowcount)
+
+    async def set_memory_pinned(self, *, user_id: int, memory_id: int, pinned: bool) -> bool:
+        result = await self._session.execute(
+            update(PersonalAiMemoryModel)
+            .where(PersonalAiMemoryModel.user_id == user_id, PersonalAiMemoryModel.id == memory_id)
+            .values(pinned=pinned)
+            .execution_options(synchronize_session=False)
+        )
+        return bool(result.rowcount)
+
+    async def touch_memories(self, *, user_id: int, memory_ids: list[int]) -> None:
+        if not memory_ids:
+            return
+        await self._session.execute(
+            update(PersonalAiMemoryModel)
+            .where(PersonalAiMemoryModel.user_id == user_id, PersonalAiMemoryModel.id.in_(memory_ids))
+            .values(last_used_at=func.now())
+            .execution_options(synchronize_session=False)
+        )
+
+    # --- extraction cursor -------------------------------------------------------
+
+    async def user_messages_after(
+        self, *, user_id: int, thread: str, after_id: int, limit: int
+    ) -> list[PersonalAiMessageModel]:
+        """The user's own messages (never the assistant's) newer than ``after_id``, oldest first."""
+        rows = (
+            await self._session.scalars(
+                select(PersonalAiMessageModel)
+                .where(
+                    PersonalAiMessageModel.user_id == user_id,
+                    PersonalAiMessageModel.thread == thread,
+                    PersonalAiMessageModel.role == "user",
+                    PersonalAiMessageModel.id > after_id,
+                )
+                .order_by(PersonalAiMessageModel.id.asc())
+                .limit(limit)
+            )
+        ).all()
+        return list(rows)
+
+    async def advance_extract_cursor(self, *, user_id: int, expected: int, new: int) -> bool:
+        """Compare-and-set: only the writer that still sees ``expected`` moves the cursor."""
+        result = await self._session.execute(
+            update(PersonalAiProfileModel)
+            .where(
+                PersonalAiProfileModel.user_id == user_id,
+                PersonalAiProfileModel.memory_extract_cursor == expected,
+            )
+            .values(memory_extract_cursor=new)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1

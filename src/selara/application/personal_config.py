@@ -22,6 +22,9 @@ DEFAULT_CACHE_TTL_SECONDS = 15.0
 MAX_PRICE_STARS = 10_000
 MAX_DURATION_DAYS = 365
 MAX_DAILY_LIMIT = 10_000
+MAX_MEMORY_LIMIT = 1_000
+MIN_EXTRACT_EVERY = 2
+MAX_EXTRACT_EVERY = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +35,11 @@ class PersonalConfigOverride:
     duration_days: int | None = None
     free_daily_limit: int | None = None
     paid_daily_limit: int | None = None
+    memory_free_limit: int | None = None
+    memory_paid_limit: int | None = None
+    # ``False`` is a real override (switch extraction off); only ``None`` falls back to settings.
+    memory_auto_extract: bool | None = None
+    memory_extract_every: int | None = None
 
     def __post_init__(self) -> None:
         for name, upper in (
@@ -39,10 +47,17 @@ class PersonalConfigOverride:
             ("duration_days", MAX_DURATION_DAYS),
             ("free_daily_limit", MAX_DAILY_LIMIT),
             ("paid_daily_limit", MAX_DAILY_LIMIT),
+            ("memory_free_limit", MAX_MEMORY_LIMIT),
+            ("memory_paid_limit", MAX_MEMORY_LIMIT),
         ):
             value = getattr(self, name)
             if value is not None and not 0 < value <= upper:
                 raise ValueError(f"{name} must be between 1 and {upper}")
+        every = self.memory_extract_every
+        if every is not None and not MIN_EXTRACT_EVERY <= every <= MAX_EXTRACT_EVERY:
+            raise ValueError(f"memory_extract_every must be between {MIN_EXTRACT_EVERY} and {MAX_EXTRACT_EVERY}")
+        if self.memory_auto_extract is not None and not isinstance(self.memory_auto_extract, bool):
+            raise ValueError("memory_auto_extract must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +67,11 @@ class PersonalConfig:
     price_stars: int | None
     duration_days: int
     limits: PersonalQuotaLimits
+    # Personal memory (facts the user asked to keep, or that extraction found).
+    memory_free_limit: int = 20
+    memory_paid_limit: int = 200
+    memory_auto_extract: bool = False
+    memory_extract_every: int = 10
 
 
 def config_from_settings(settings) -> PersonalConfig:
@@ -59,6 +79,10 @@ def config_from_settings(settings) -> PersonalConfig:
         price_stars=settings.selara_personal_price_stars,
         duration_days=settings.selara_personal_duration_days,
         limits=PersonalQuotaLimits.from_settings(settings),
+        memory_free_limit=settings.personal_memory_free_limit,
+        memory_paid_limit=settings.personal_memory_paid_limit,
+        memory_auto_extract=settings.personal_memory_auto_extract,
+        memory_extract_every=settings.personal_memory_extract_every,
     )
 
 
@@ -70,11 +94,21 @@ def merge_config(base: PersonalConfig, override: PersonalConfigOverride | None) 
         free_daily=override.free_daily_limit or base.limits.free_daily,
         paid_daily=override.paid_daily_limit or base.limits.paid_daily,
     )
+    memory_free = override.memory_free_limit or base.memory_free_limit
+    memory_paid = override.memory_paid_limit or base.memory_paid_limit
+    if memory_free > memory_paid:
+        raise ValueError("memory_free_limit must not exceed memory_paid_limit")
     return replace(
         base,
         price_stars=override.price_stars if override.price_stars is not None else base.price_stars,
         duration_days=override.duration_days or base.duration_days,
         limits=limits,
+        memory_free_limit=memory_free,
+        memory_paid_limit=memory_paid,
+        memory_auto_extract=(
+            override.memory_auto_extract if override.memory_auto_extract is not None else base.memory_auto_extract
+        ),
+        memory_extract_every=override.memory_extract_every or base.memory_extract_every,
     )
 
 

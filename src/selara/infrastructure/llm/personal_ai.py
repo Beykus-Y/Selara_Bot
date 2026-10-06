@@ -6,7 +6,13 @@ import json
 import logging
 
 from selara.application.ai_character import CharacterProfile, HistoryMessage, build_personal_messages
-from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository
+from selara.application.personal_memory import (
+    MAX_EXTRACTION_MESSAGES,
+    build_extraction_messages,
+    parse_extraction_output,
+    select_memories_for_prompt,
+)
+from selara.infrastructure.db.personal_ai_repository import AddMemoryStatus, PersonalAiRepository
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 
 log = logging.getLogger(__name__)
@@ -17,6 +23,7 @@ PERSONAL_COMPRESS_BATCH = 30
 MAX_USER_TEXT_LENGTH = 4000
 MAX_TOKENS_PERSONAL_REPLY = 1500
 MAX_TOKENS_PERSONAL_SUMMARY = 1500
+MAX_TOKENS_MEMORY_EXTRACT = 400
 
 _COMPRESSION_PROMPT = (
     "Сожми личный диалог пользователя с AI-собеседником в краткое резюме на русском языке. "
@@ -46,10 +53,19 @@ async def generate_reply(
     profile: CharacterProfile,
     user_text: str,
     accounting_context: LlmAccountingContext | None,
+    use_memory: bool = False,
 ) -> str:
     """Ask the model for one reply. No tools are offered: a private chat can never act on groups."""
     summary, recent = await load_history(repo, user_id=user_id, thread=profile.thread)
-    messages = build_personal_messages(profile=profile, summary=summary, recent=recent, user_text=user_text)
+    memories: list[str] = []
+    if use_memory:
+        # Only this user's rows (the repository is keyed by user_id); chosen by pin, word overlap and recency.
+        chosen = select_memories_for_prompt(await repo.memory_items(user_id=user_id), user_text)
+        memories = [item.content for item in chosen]
+        await repo.touch_memories(user_id=user_id, memory_ids=[item.id for item in chosen])
+    messages = build_personal_messages(
+        profile=profile, summary=summary, recent=recent, user_text=user_text, memories=memories
+    )
     # Everything the model needs is in memory: end the read transaction so no pooled connection
     # stays "idle in transaction" for the whole (slow) provider call.
     await repo.commit()
@@ -116,3 +132,63 @@ async def maybe_compress_personal(
     )
     await repo.commit()
     return True
+
+
+async def maybe_extract_memories(
+    *,
+    repo: PersonalAiRepository,
+    llm_client: LlmClient,
+    user_id: int,
+    thread: str,
+    cursor: int,
+    every: int,
+    limit: int,
+    accounting_context: LlmAccountingContext | None = None,
+) -> int:
+    """Every ``every`` new user messages let a cheap model propose a few facts. Internal: never charged to the quota.
+
+    The model only sees the user's own messages of the assistant thread (fiction from role play is never mined).
+    Its answer is parsed strictly and filtered; it can add facts but never edits or removes any, and it stops
+    at ``limit`` instead of evicting older facts. A failed run is skipped, not retried on the next message.
+    """
+    if thread != "assistant":
+        return 0
+    batch = await repo.user_messages_after(
+        user_id=user_id, thread=thread, after_id=cursor, limit=MAX_EXTRACTION_MESSAGES
+    )
+    if len(batch) < every:
+        return 0
+    if not await repo.advance_extract_cursor(user_id=user_id, expected=cursor, new=batch[-1].id):
+        await repo.rollback()
+        return 0
+    existing = [item.content for item in await repo.memory_items(user_id=user_id)]
+    texts = [row.content[:MAX_USER_TEXT_LENGTH] for row in batch]
+    # Persist the cursor and release the connection before the provider call.
+    await repo.commit()
+
+    kwargs: dict = {"max_tokens": MAX_TOKENS_MEMORY_EXTRACT}
+    if accounting_context is not None:
+        kwargs["accounting_context"] = accounting_context
+    try:
+        result = await llm_client.summarize(build_extraction_messages(texts, existing), **kwargs)
+    except LlmClientError as exc:
+        log.warning("personal AI memory extraction failed: %s", exc.message)
+        return 0
+    value = result.value if hasattr(result, "value") else result
+    facts = parse_extraction_output(value)
+    if not facts:
+        return 0
+    # The user may have switched memory off or deleted everything while the model was thinking.
+    profile = await repo.get_profile(user_id)
+    if profile is None or not profile.memory_enabled or not profile.auto_memory_enabled:
+        await repo.rollback()
+        return 0
+    added = 0
+    for fact in facts:
+        outcome = await repo.add_memory(user_id=user_id, content=fact, source="extracted", limit=limit)
+        if outcome.status == AddMemoryStatus.ADDED:
+            added += 1
+        elif outcome.status == AddMemoryStatus.LIMIT_REACHED:
+            break
+    await repo.commit()
+    return added

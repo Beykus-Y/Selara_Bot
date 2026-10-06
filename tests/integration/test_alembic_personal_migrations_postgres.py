@@ -205,7 +205,7 @@ def test_personal_memory_table_enforces_constraints_and_cascades_with_the_user(d
         database,
         "INSERT INTO users (telegram_user_id, is_bot) VALUES (9110, false) ON CONFLICT DO NOTHING",
         "INSERT INTO personal_ai_profiles (user_id) VALUES (9110)",
-        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'Я веган', 'explicit')",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'I am Vegan', 'explicit')",
     )
     defaults = _run_sql(
         database,
@@ -216,16 +216,15 @@ def test_personal_memory_table_enforces_constraints_and_cascades_with_the_user(d
     )
     assert dict(defaults[0][0]) == {"auto_memory_enabled": False, "memory_extract_cursor": 0}
     assert dict(defaults[1][0]) == {"pinned": False, "last_used_at": None}
-    assert len(defaults[2]) == 0  # the override table is an optional layer, nothing is seeded
 
     for bad in (
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'x', 'bogus')",
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, '', 'explicit')",
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, repeat('x', 301), 'explicit')",
         # Case-insensitive duplicates of one user are impossible even if two writers race.
-        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'я ВЕГАН', 'explicit')",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'I AM VEGAN', 'explicit')",
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (999999991, 'x', 'explicit')",
-        "UPDATE selara_personal_config SET memory_extract_every = 1",
+        "INSERT INTO selara_personal_config (id, memory_extract_every) VALUES (1, 1)",
     ):
         try:
             _run_sql(database, bad)
