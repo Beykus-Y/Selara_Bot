@@ -49,6 +49,8 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         # Семья
         "adopt",
         "adoptdaughter",
+        "family_pet",
+        "bepet",
         "pet",
         "escape_family",
         "escape_pet",

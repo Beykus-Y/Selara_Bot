@@ -44,7 +44,7 @@ Selara — Telegram-бот для групп и сообществ, объеди
 #### 2.4 Отношения, семья и RP-составляющая
 - `/relation`, `/pair`, `/marry`, `/breakup`, `/divorce`.
 - `/love`, `/care`, `/date`, `/gift`, `/support`, `/flirt`, `/surprise`, `/vow`.
-- `/adopt`, `/pet`, `/family`, `/title`.
+- `/adopt`, `/bepet`, `/family`, `/title`.
 
 #### 2.5 Администрирование, роли и доступы
 - Ролевой контур: `/roles`, `/roleadd`, `/roleremove`, `/roledefs`, `/roletemplates`, `/rolecreate`, `/rolesettitle`, `/rolesetrank`, `/roleperms`, `/roledelete`.
