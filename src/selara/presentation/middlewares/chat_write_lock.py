@@ -55,6 +55,8 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "pets",
         "pet_new",
         "pet_shop",
+        "pet_travel",
+        "pet_home",
         "escape_family",
         "escape_pet",
         "escapefamily",

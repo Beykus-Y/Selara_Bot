@@ -8798,6 +8798,7 @@ class SqlAlchemyActivityRepository:
             custom_rp_enabled=bool(row.custom_rp_enabled),
             family_tree_enabled=bool(row.family_tree_enabled),
             pets_enabled=bool(row.pets_enabled),
+            pets_spontaneous_enabled=bool(row.pets_spontaneous_enabled),
             persona_enabled=bool(row.persona_enabled),
             persona_display_mode=row.persona_display_mode,
             titles_enabled=bool(row.titles_enabled),

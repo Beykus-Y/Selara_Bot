@@ -9,8 +9,9 @@ row keyed by ``idempotency_key`` makes a replayed update a no-op.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import func, select
@@ -98,6 +99,27 @@ class ActionResult:
     affinity: int | None = None
     item: CatalogItem | None = None
     new_balance: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpontaneousClaim:
+    """A reserved spontaneous event: the journal row is written, the line is not posted yet."""
+
+    event_id: int
+    pet: PetView
+    person_affinity: int
+
+
+TravelStatus = Literal["ok", "no_pet", "locked", "no_personal", "asleep", "same_chat", "name_taken", "cooldown"]
+TRAVEL_COOLDOWN = timedelta(hours=1)
+
+
+@dataclass(frozen=True, slots=True)
+class TravelResult:
+    status: TravelStatus
+    pet: PetView | None = None
+    from_chat_id: int | None = None
+    retry_after: timedelta | None = None
 
 
 def _view(row: AiPetModel) -> PetView:
@@ -341,6 +363,146 @@ class AiPetService:
         row.version = int(row.version) + 1
         await self._session.flush()
         return _view(row)
+
+    async def claim_spontaneous_event(
+        self,
+        *,
+        chat_id: int,
+        person_user_id: int | None,
+        now: datetime,
+        day_start: datetime,
+        daily_limit: int,
+        chat_interval: timedelta,
+        rng: random.Random | None = None,
+    ) -> SpontaneousClaim | None:
+        """Reserve one spontaneous event in this chat, or ``None`` when nothing may happen now.
+
+        A chat-scoped advisory lock serialises concurrent checks, so the chat interval and
+        each pet's daily cap hold even when several updates arrive at once. Only pets whose
+        owner has an active Selara Personal qualify (§5.0).
+        """
+        await _lock_resources(self._session, f"ai_pet:events:{chat_id}")
+        last_in_chat = await self._session.scalar(
+            select(func.max(AiPetEventModel.created_at)).where(
+                AiPetEventModel.chat_id == chat_id, AiPetEventModel.event_type == "spontaneous"
+            )
+        )
+        if last_in_chat is not None and _as_utc(last_in_chat) + chat_interval > now:
+            return None
+
+        candidates: list[AiPetModel] = []
+        for row in await self._session.scalars(
+            select(AiPetModel).where(AiPetModel.current_chat_id == chat_id, AiPetModel.status == "active")
+        ):
+            today = await self._session.scalar(
+                select(func.count()).where(
+                    AiPetEventModel.pet_id == row.id,
+                    AiPetEventModel.event_type == "spontaneous",
+                    AiPetEventModel.created_at >= day_start,
+                )
+            )
+            if int(today or 0) >= daily_limit:
+                continue
+            if not await self.has_active_personal(user_id=int(row.owner_user_id), now=now):
+                continue
+            candidates.append(row)
+        if not candidates:
+            return None
+
+        chosen = (rng or random).choice(candidates)
+        row = await self._session.scalar(select(AiPetModel).where(AiPetModel.id == chosen.id).with_for_update())
+        await self._settle(row, now=now)
+        if row.status != "active" or row.current_chat_id != chat_id:
+            return None
+        affinity = 0
+        if person_user_id is not None:
+            affinity = await self.relation_affinity(pet_id=int(row.id), chat_id=chat_id, user_id=person_user_id)
+        event = AiPetEventModel(
+            pet_id=row.id,
+            chat_id=chat_id,
+            actor_user_id=None,
+            event_type="spontaneous",
+            effects={"status": "claimed", "person": person_user_id},
+            idempotency_key=f"ai_pet:spontaneous:{chat_id}:{row.id}:{int(now.timestamp() * 1000)}",
+            created_at=now,
+        )
+        self._session.add(event)
+        await self._session.flush()
+        return SpontaneousClaim(event_id=int(event.id), pet=_view(row), person_affinity=affinity)
+
+    async def finish_spontaneous_event(self, *, event_id: int, status: str, text: str | None = None) -> None:
+        row = await self._session.get(AiPetEventModel, event_id)
+        if row is None:
+            return
+        row.effects = {**(row.effects or {}), "status": status, **({"text": text} if text else {})}
+        await self._session.flush()
+
+    async def travel(
+        self, *, owner_user_id: int, chat: ChatSnapshot, now: datetime, make_home: bool
+    ) -> TravelResult:
+        """Move the owner's pet into ``chat`` (the caller checked membership and pets_enabled).
+
+        ``make_home`` also makes the chat the pet's home. Relationships and memory stay keyed
+        by the chat they came from.
+        """
+        # The same chat lock as pet creation, so a new pet cannot take the name meanwhile.
+        await _lock_resources(self._session, f"ai_pet:chat:{chat.telegram_chat_id}")
+        row = await self._owner_row(owner_user_id, for_update=True)
+        if row is None:
+            return TravelResult(status="no_pet")
+        await self._settle(row, now=now)
+        if row.status == "dormant" and row.dormant_reason == "admin_sleep":
+            return TravelResult(status="asleep", pet=_view(row))
+        target = chat.telegram_chat_id
+        if row.status == "active" and row.current_chat_id == target and (not make_home or row.home_chat_id == target):
+            return TravelResult(status="same_chat", pet=_view(row))
+        # Travel rights are needed only to take an awake pet into a chat that is neither where it
+        # lives now nor its home. Going home, adopting the current chat as home and settling a pet
+        # that lost its home are always allowed.
+        needs_travel_rights = row.status == "active" and target not in (row.current_chat_id, row.home_chat_id)
+        if needs_travel_rights:
+            if not row.travel_unlocked:
+                return TravelResult(status="locked", pet=_view(row))
+            if not await self.has_active_personal(user_id=owner_user_id, now=now):
+                return TravelResult(status="no_personal", pet=_view(row))
+            left = m.cooldown_left(
+                await self._last_event_at(pet_id=int(row.id), actor_user_id=owner_user_id, event_type="travel"),
+                TRAVEL_COOLDOWN,
+                now,
+            )
+            if left is not None:
+                return TravelResult(status="cooldown", pet=_view(row), retry_after=left)
+        # Any pet that becomes active here needs a free name, including a dormant one already here
+        # (e.g. put to sleep by a name clash on a group upgrade). It is not active, so never counts itself.
+        becomes_active_here = row.status != "active" or row.current_chat_id != target
+        if becomes_active_here and await self._name_taken(chat_id=target, name_norm=row.name_norm):
+            return TravelResult(status="name_taken", pet=_view(row))
+
+        await self._economy.ensure_chat_and_user(
+            chat=chat,
+            user=UserSnapshot(telegram_user_id=owner_user_id, username=None, first_name=None, last_name=None, is_bot=False),
+        )
+        from_chat_id = row.current_chat_id
+        row.current_chat_id = target
+        if make_home:
+            row.home_chat_id = target
+        row.status = "active"
+        row.dormant_reason = None
+        row.version = int(row.version) + 1
+        self._session.add(
+            AiPetEventModel(
+                pet_id=row.id,
+                chat_id=target,
+                actor_user_id=owner_user_id,
+                # A move into a foreign chat is travel whichever command did it, so it starts the cooldown.
+                event_type="travel" if needs_travel_rights else "rehome",
+                effects={"from_chat_id": from_chat_id, "home": make_home},
+                idempotency_key=f"ai_pet:move:{row.id}:{row.version}",
+                created_at=now,
+            )
+        )
+        await self._session.flush()
+        return TravelResult(status="ok", pet=_view(row), from_chat_id=from_chat_id)
 
     async def release(self, *, owner_user_id: int, chat_id: int | None) -> PetView:
         row = await self._owner_row(owner_user_id, for_update=True)
