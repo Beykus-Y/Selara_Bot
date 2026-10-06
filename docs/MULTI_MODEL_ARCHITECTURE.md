@@ -91,7 +91,7 @@ introduces none of those product behaviors or changes to payment semantics.
 
 ## Accounting storage boundaries
 
-Migration `0084_model_catalog_router` follows `0083_ai_pets` and widens cost
+Migration `0085_model_catalog_router` follows `0084_ai_pet_dialogue` and widens cost
 snapshots and daily-summary cost aggregates to NUMERIC(20,9). A maximum-rate 100,000-token call costs $100,000
 and remains persistable. Runtime overrides are validated before inference:
 model IDs are at most 255 characters and profile names at most 64; both must

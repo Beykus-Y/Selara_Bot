@@ -1,15 +1,15 @@
 """Persistent model catalog, exact identifiers and logical profiles.
 
-Revision ID: 0084_model_catalog_router
-Revises: 0083_ai_pets
+Revision ID: 0085_model_catalog_router
+Revises: 0084_ai_pet_dialogue
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0084_model_catalog_router"
-down_revision = "0083_ai_pets"
+revision = "0085_model_catalog_router"
+down_revision = "0084_ai_pet_dialogue"
 branch_labels = None
 depends_on = None
 

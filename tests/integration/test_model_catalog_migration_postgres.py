@@ -13,8 +13,8 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 ROOT = Path(__file__).resolve().parents[2]
-PREVIOUS = "0083_ai_pets"
-REVISION = "0084_model_catalog_router"
+PREVIOUS = "0084_ai_pet_dialogue"
+REVISION = "0085_model_catalog_router"
 
 
 def sql(dsn, *statements):

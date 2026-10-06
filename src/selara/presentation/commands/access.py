@@ -98,6 +98,8 @@ SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "pet_shop": "pet",
     "pet_traits": "pet",
     "pet_release": "pet",
+    "pet_character": "pet",
+    "pet_forget": "pet",
     "family": "family",
     "setrank": "setrank",
     "ranks": "ranks",
