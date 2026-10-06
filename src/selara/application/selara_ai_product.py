@@ -86,6 +86,7 @@ def get_selara_ai_product(
     price_stars: int | None,
     duration: timedelta | None = None,
     paid_daily_limit: int | None = None,
+    daily_ail: int | None = None,
 ) -> SelaraAiProduct:
     """Resolve a supported product using its configured Stars price (and duration, if configurable)."""
     spec = get_product_spec(product_key)
@@ -100,7 +101,11 @@ def get_selara_ai_product(
     duration_label = f"{int(resolved_duration.total_seconds() // 86_400)} дней"
     if spec.scope == PRODUCT_SCOPE_USER:
         title = f"Selara Personal на {duration_label}"
-        limit_note = f" До {paid_daily_limit} запросов в сутки." if paid_daily_limit else ""
+        if daily_ail:
+            # AI Limits mode: the buyer gets a budget, never a promised number of requests.
+            limit_note = f" {daily_ail} AI Limits (AIL) в сутки; расход зависит от выбранной модели."
+        else:
+            limit_note = f" До {paid_daily_limit} запросов в сутки." if paid_daily_limit else ""
         description = f"Личный доступ к Selara AI для вашего аккаунта на {duration_label}.{limit_note}"
     else:
         title = f"Selara AI на {duration_label}"

@@ -311,3 +311,60 @@ def test_profile_key_is_validated_by_the_repository_model() -> None:
 
     assert is_profile_key("creative") and not is_profile_key("gpt-4o") and not is_profile_key(None)
     assert replace(_catalog().profiles_by_key["analytics"], ail_multiplier=Decimal("3")).ail_multiplier == 3
+
+
+# --- review fixes: invoice wording, terms binding ----------------------------------------------
+
+
+def _premium_settings(monkeypatch):
+    from selara.core.config import Settings
+
+    monkeypatch.setenv("BOT_TOKEN", "123:TEST")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/selara_test")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_API_KEY", "test-provider-key")
+    monkeypatch.setenv("SELARA_PERSONAL_PRICE_STARS", "69")
+    return Settings(_env_file=None)
+
+
+def test_ail_invoice_never_promises_a_request_count(monkeypatch) -> None:
+    from selara.presentation.handlers import premium
+
+    settings = _premium_settings(monkeypatch)
+    ail = premium._personal_product_for_settings(
+        settings, PersonalConfig(69, 30, REQUESTS, quota_mode="ail", ail_limits=AIL)
+    )
+    assert "100 AI Limits" in ail.description and "запросов" not in ail.description
+    assert ail.paid_daily_limit == 150 and len(ail.description) <= 255  # still snapshotted for requests mode
+    requests = premium._personal_product_for_settings(settings, PersonalConfig(69, 30, REQUESTS))
+    assert "150 запросов" in requests.description
+
+
+@pytest.mark.parametrize(("data", "ail", "creates"), [
+    ("premium:self_accept:personal-v1", True, False),       # saw request terms, AIL got enabled since
+    ("premium:self_accept", True, False),                   # pre-release button: personal-v1
+    ("premium:self_accept:personal-v2-ail", False, False),  # saw AIL terms, switched back since
+    ("premium:self_accept:personal-v2-ail", True, True),
+    ("premium:self_accept", False, True),
+])
+async def test_acceptance_is_bound_to_the_terms_version_shown(monkeypatch, data, ail, creates) -> None:
+    from selara.presentation.handlers import premium
+
+    settings = _premium_settings(monkeypatch)
+    repository = SimpleNamespace(create_personal_purchase_intent=AsyncMock(side_effect=RuntimeError("stop here")))
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    config = PersonalConfig(69, 30, REQUESTS, quota_mode="ail", ail_limits=AIL) if ail else PersonalConfig(69, 30, REQUESTS)
+    message = SimpleNamespace(chat=SimpleNamespace(type="private"), edit_text=AsyncMock())
+    query = SimpleNamespace(data=data, message=message, from_user=SimpleNamespace(id=900), answer=AsyncMock())
+
+    await premium.accept_terms_and_buy_selara_personal(
+        query, bot=AsyncMock(), session_factory=object(), settings=settings,
+        personal_config=StaticPersonalConfigProvider(config),
+    )
+
+    assert repository.create_personal_purchase_intent.await_count == (1 if creates else 0)
+    if creates:
+        kwargs = repository.create_personal_purchase_intent.await_args.kwargs
+        assert kwargs["terms_version"] == personal_terms_version(ail_enabled=ail)
+    else:
+        assert "изменились" in message.edit_text.await_args.args[0]

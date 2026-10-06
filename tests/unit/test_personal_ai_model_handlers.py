@@ -229,3 +229,27 @@ async def test_repository_never_stores_a_physical_model_id(session):
     with pytest.raises(ValueError):
         await repo.update_profile(USER_ID, expected_revision=0, model_profile_key="provider/model-x")
     assert SimpleNamespace(key=(await repo.get_profile(USER_ID)).model_profile_key).key == "basic"
+
+
+async def test_requests_mode_shows_the_model_that_actually_answers(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    await _choose(session, "analytics")
+    message = _message("/ai")
+
+    await handler.ai_settings_command(message, session, **_deps(settings, ail=False))
+
+    text = message.answer.await_args.args[0]
+    assert "Модель: ⚪ Базовая" in text and "Сохранённый выбор «Аналитик» включится вместе с AI Limits" in text
+
+
+async def test_text_input_keeps_the_model_status(monkeypatch, session):
+    monkeypatch.setattr(handler, "FeatureAccessService", _Summary)
+    settings = _settings(monkeypatch)
+    await _choose(session, "analytics")
+    handler._set_pending_input(USER_ID, "name")
+    message = _message("Селя")
+
+    await handler.ai_settings_input(message, session, **_deps(settings, ail=True))
+
+    text = message.answer.await_args.args[0]
+    assert "Сохранено." in text and "Стоимость запроса: 2 AIL" in text and "73 / 150 AIL" in text

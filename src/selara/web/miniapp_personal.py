@@ -167,11 +167,14 @@ def build_miniapp_personal_router(
         """The /ai model selector as data: one source of truth, personal_ai_profiles.model_profile_key."""
         snapshot = await load_snapshot(catalog)
         choice = choose_from_snapshot(snapshot, selected_key=selected_key, legacy_model=settings.llm_model)
+        if not config.ail_enabled:
+            # Requests mode answers with the base model; the stored pick waits for AI Limits.
+            choice = choose_from_snapshot(snapshot, selected_key="basic", legacy_model=settings.llm_model)
         return {
             "quota_mode": config.quota_mode,
             # Requests mode keeps every request at one request on the basic model: nothing to select yet.
             "selectable": config.ail_enabled,
-            "selected": choice.selected_key,
+            "selected": selected_key,
             "effective": choice.profile_key,
             "effective_name": choice.display_name,
             "fell_back": choice.fell_back,

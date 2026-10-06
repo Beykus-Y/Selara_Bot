@@ -547,3 +547,13 @@ async def test_forged_or_unavailable_profiles_are_rejected(env, payload):
     async with env.factory() as session:
         stored = await PersonalAiRepository(session).get_profile(1)
     assert stored is None or stored.model_profile_key == "basic"
+
+
+async def test_requests_mode_reports_the_base_model_but_keeps_the_stored_choice(env):
+    async with env.factory() as session:
+        repo = PersonalAiRepository(session)
+        await repo.get_or_create_profile(1)
+        await repo.update_profile(1, expected_revision=0, model_profile_key="analytics")
+        await session.commit()
+    model = (await env.client.get("/api/miniapp/personal", headers=env.as_user(1))).json()["model"]
+    assert (model["selected"], model["effective"], model["cost_ail"]) == ("analytics", "basic", "1")

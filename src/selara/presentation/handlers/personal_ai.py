@@ -44,6 +44,7 @@ from selara.application.personal_models import (
     format_ail,
     is_profile_key,
     load_snapshot,
+    profile_display_name,
     profile_options,
 )
 from selara.core.config import Settings
@@ -186,15 +187,20 @@ async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | N
     if deps is None:
         return [], "Модель"
     config = await deps.personal_config.get()
-    choice = choose_from_snapshot(
-        await load_snapshot(deps.catalog), selected_key=stored.model_profile_key, legacy_model=deps.legacy_model
-    )
-    emoji = PROFILE_EMOJI.get(choice.profile_key, "")
+    snapshot = await load_snapshot(deps.catalog)
     if not config.ail_enabled:
-        return [
-            f"Модель: {emoji} {escape(choice.display_name)}",
-            "Выбор моделей станет доступен после включения AI Limits.",
-        ], "Модель"
+        # Requests mode answers with the base model whatever was picked earlier; the pick is kept for AIL.
+        lines = [f"Модель: {PROFILE_EMOJI['basic']} {escape(profile_display_name(snapshot, 'basic'))}"]
+        if stored.model_profile_key != "basic":
+            lines.append(
+                f"Сохранённый выбор «{escape(profile_display_name(snapshot, stored.model_profile_key))}» "
+                "включится вместе с AI Limits."
+            )
+        else:
+            lines.append("Выбор моделей станет доступен после включения AI Limits.")
+        return lines, "Модель"
+    choice = choose_from_snapshot(snapshot, selected_key=stored.model_profile_key, legacy_model=deps.legacy_model)
+    emoji = PROFILE_EMOJI.get(choice.profile_key, "")
     lines = [f"Модель: {emoji} {escape(choice.display_name)}"]
     if choice.fell_back:
         lines.append("Выбранный профиль сейчас недоступен, используется Базовая модель.")
@@ -481,7 +487,14 @@ async def _selectable(profile_key: str, deps: _ModelDeps) -> bool:
 
 
 @router.message(PendingPersonalInputFilter())
-async def ai_settings_input(message: Message, db_session: AsyncSession) -> None:
+async def ai_settings_input(
+    message: Message,
+    db_session: AsyncSession,
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    personal_config: PersonalConfigProvider | None = None,
+    llm_client: LlmClient | None = None,
+) -> None:
     user_id = message.from_user.id
     state = _get_pending_input(user_id)
     if state is None:
@@ -504,7 +517,11 @@ async def ai_settings_input(message: Message, db_session: AsyncSession) -> None:
     if updated is None:
         await message.answer("Настройки изменились одновременно. Откройте /ai и повторите.")
         return
-    await message.answer("Сохранено.\n\n" + _profile_text(updated), parse_mode="HTML", reply_markup=_main_keyboard(updated))
+    await repo.commit()
+    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client))
+    await message.answer(
+        "Сохранено.\n\n" + _profile_text(updated, lines), parse_mode="HTML", reply_markup=_main_keyboard(updated, label)
+    )
 
 
 # --- dialogue -------------------------------------------------------------------
@@ -681,8 +698,6 @@ async def _handle_personal_chat(
         return
     # Requests mode keeps the original behaviour (legacy model); AIL mode calls the priced snapshot.
     resolved_model = choice.effective if ail_mode else None
-    if ail_mode:
-        await _notify_fallback_once(message, user.id, choice)
 
     accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
     invocation_id = decision.invocation_id
@@ -702,6 +717,9 @@ async def _handle_personal_chat(
 
     outcome = {"status": "failed", "error_category": "handler_error"}
     try:
+        if ail_mode:
+            # Inside the cleanup region: a cancellation here still releases the unused reservation.
+            await _notify_fallback_once(message, user.id, choice)
         thinking = await message.answer("⏳ Думаю...")
         try:
             await message.bot.send_chat_action(message.chat.id, "typing")
