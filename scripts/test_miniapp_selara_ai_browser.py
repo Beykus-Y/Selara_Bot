@@ -325,6 +325,8 @@ async def _run_admin_scenarios(browser) -> None:
                     body, status = _ai_summary(333, unknown=2), 200
             elif path.endswith("/admin/ai/breakdown"):
                 body, status = BREAKDOWN, 200
+            elif path.endswith("/admin/ai/models") or path.endswith("/admin/ai/model-profiles"):
+                body, status = {"ok": True, "items": [], "fallback_note": "Legacy fallback"}, 200
             elif path.endswith("/admin/ai/readiness"):
                 body, status = READINESS, 200
             elif path.endswith("/admin/monetization/summary"):
@@ -415,6 +417,8 @@ async def _run_admin_empty_and_dashboard(browser) -> None:
         elif path.endswith("/admin/ai/breakdown"):
             body, status = {"ok": True, "period_days": 30, "features": [], "models": [], "stages": [],
                             "unattributed_provider_calls": 0}, 200
+        elif path.endswith("/admin/ai/models") or path.endswith("/admin/ai/model-profiles"):
+            body, status = {"ok": True, "items": [], "fallback_note": "Legacy fallback"}, 200
         elif path.endswith("/admin/ai/readiness"):
             body, status = READINESS, 200
         elif path.endswith("/admin/monetization/summary"):

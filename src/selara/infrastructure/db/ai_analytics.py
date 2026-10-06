@@ -197,6 +197,25 @@ class AdminAiAnalyticsRepository:
         )
         return models[:MAX_BREAKDOWN_ROWS], int(marker_only or 0)
 
+    async def profile_breakdown(self, *, window_from: datetime, window_to: datetime) -> list[dict]:
+        """Group historical recorded profiles, never current model assignments."""
+        result = await self._session.execute(
+            select(
+                LlmUsageLogModel.model_profile,
+                func.count(LlmUsageLogModel.id),
+                func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0),
+                func.count(case((_unknown_usage_expr(), 1))),
+            )
+            .join(AiFeatureInvocationModel, LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id)
+            .where(*self._in_window(window_from, window_to))
+            .group_by(LlmUsageLogModel.model_profile)
+        )
+        return [
+            {"profile_key": profile, "provider_calls": int(calls), "known_cost_usd": Decimal(cost),
+             "unknown_cost_calls": int(unknown)}
+            for profile, calls, cost, unknown in result.all()
+        ]
+
     async def stage_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
         result = await self._session.execute(
             select(
