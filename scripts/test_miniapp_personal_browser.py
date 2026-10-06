@@ -74,7 +74,8 @@ class Backend:
         request = route.request
         path = request.url.split("?", 1)[0]
         method = request.method
-        body = json.loads(request.post_data) if request.post_data else None
+        # The session call posts a urlencoded form; only the personal API sends JSON.
+        body = json.loads(request.post_data) if request.post_data and "/personal" in path else None
         status, payload = 200, None
         if path.endswith("/miniapp/session"):
             payload = SESSION
