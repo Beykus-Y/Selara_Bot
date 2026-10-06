@@ -1,4 +1,4 @@
-"""Alembic upgrade/downgrade of 0078-0080 on a pre-filled database from the previous release."""
+"""Alembic upgrade/downgrade of 0079-0081 on a pre-filled database from the previous release."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import asyncpg
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PREVIOUS_RELEASE = "0077_selara_ai_payment_refunds"
-_HEAD = "0080_selara_personal_config"
+_PREVIOUS_RELEASE = "0078_family_pet_command_key"
+_HEAD = "0081_selara_personal_config"
 _PERIOD = "now(), now() + interval '1 day'"
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
@@ -175,7 +175,7 @@ def test_downgrade_refuses_to_drop_personal_data_and_is_clean_without_it(databas
     )
     refused = _alembic(database, "downgrade", _PREVIOUS_RELEASE)
     assert refused.returncode != 0
-    assert "Cannot downgrade 0078_personal_entitlements" in refused.stderr
+    assert "Cannot downgrade 0079_personal_entitlements" in refused.stderr
     # The failed downgrade must leave the schema untouched.
     assert _run_sql(database, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == _HEAD
     assert _run_sql(database, "SELECT count(*) AS n FROM user_entitlements")[0][0]["n"] == 1

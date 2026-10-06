@@ -1,7 +1,7 @@
 """add user-scoped Selara Personal entitlements and a target scope for Stars purchases
 
-Revision ID: 0078_personal_entitlements
-Revises: 0077_selara_ai_payment_refunds
+Revision ID: 0079_personal_entitlements
+Revises: 0078_family_pet_command_key
 Create Date: 2026-10-06 00:00:00
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0078_personal_entitlements"
-down_revision: str | None = "0077_selara_ai_payment_refunds"
+revision: str = "0079_personal_entitlements"
+down_revision: str | None = "0078_family_pet_command_key"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
@@ -134,7 +134,7 @@ def downgrade() -> None:
         or _count(bind, "SELECT count(*) FROM user_entitlements")
     ):
         raise RuntimeError(
-            "Cannot downgrade 0078_personal_entitlements: personal purchases or entitlements exist. "
+            "Cannot downgrade 0079_personal_entitlements: personal purchases or entitlements exist. "
             "Resolve them manually first; refusing to drop paid data."
         )
 

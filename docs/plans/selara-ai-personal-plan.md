@@ -93,7 +93,7 @@ QuotaCost = UsagePricer.price(feature, model_key, operation)    # сейчас �
 
 Решено: AI-петы входят в Selara Personal, отдельного тарифа нет. Механизм продуктов позволит добавить `selara_pets_monthly` позже без переделки. Цена задаётся env `SELARA_PERSONAL_PRICE_STARS=69` (как у группового продукта: без значения покупка закрыта), не хардкодом.
 
-### 2.2 Схема (миграция `0078_personal_entitlements`)
+### 2.2 Схема (миграция `0079_personal_entitlements`)
 
 Вариант «обобщить `chat_entitlements` до subject_type» отклонён: на этой таблице держится логика group→supergroup (сложение сроков при коллизии) и advisory-lock ключи по `chat_id`. Безопаснее отдельная таблица:
 
@@ -128,7 +128,7 @@ Downgrade: возможен, пока нет строк с `target_scope='user'`
 - `/stars_refund` и админ-аналитика монетизации: добавить фильтр `target_scope`, «активные личные подписки».
 - Owner exemption в ЛС: `user_id == ADMIN_USER_ID` ⇒ `OWNER_INTERNAL` (live-проверка админства не нужна, это личность, а не чат).
 
-### 2.4 Квоты (миграция `0079_quota_user_scope`)
+### 2.4 Квоты (миграция `0080_quota_user_scope`)
 
 `ai_feature_quota_usage` сейчас считает и лочит по `chat_id`. Для личного продукта нужен счёт по пользователю, и это принципиально для петов: пет говорит **в группе**, а платит **хозяин**.
 
@@ -174,7 +174,7 @@ Downgrade: возможен, пока нет строк с `target_scope='user'`
 - Команды: `/ai_reset` (сбросить диалог, память остаётся), `/memory` (список фактов с кнопками удаления), `/forget_all` (удалить всё личное: профиль, историю, память — с подтверждением).
 - Mini App: страница «Моя Selara» (профиль, память, статус подписки) — отдельным PR после MVP.
 
-### 3.2 Схема (миграция `0080_personal_ai`)
+### 3.2 Схема (миграция `0082_personal_ai`)
 
 ```sql
 personal_ai_profiles(
@@ -239,7 +239,7 @@ personal_ai_memories(
 - Характер чата: пресет + кастомный текст до 500 символов от админа, влияет на тон обоих режимов (и `?`/`??`), но не на правила безопасности и авторизацию tools.
 - Доступно всем чатам. Подписка `selara_ai_monthly` даёт до 5 кличек и расширенный дневной лимит. При исчерпании лимита бот отвечает подсказкой без LLM не чаще раза в час на чат.
 
-### 4.2 Схема (миграция `0081_group_ai_character`)
+### 4.2 Схема (миграция `0083_group_ai_character`)
 
 ```sql
 chat_ai_characters(
@@ -448,11 +448,11 @@ ai_pet_items(                                -- каталог, редактир
 | # | PR | Миграция | Содержание | Зависит от |
 |---|---|---|---|---|
 | 0 | Этот план | — | документ | — |
-| 1 | Billing foundation | `0078_personal_entitlements`, `0079_quota_user_scope` | реестр продуктов, `user_entitlements` (buyer ≠ target в схеме, self-only в MVP), `target_scope` в intents/payments, user-scope квот, `units`, `pool_key`, scope и простой `UsagePricer` (всё = 1); `adjust()` и `ModelRouter` — только заглушки (§1.1), чтобы платёжный PR не превращался в большой рефакторинг квот; owner exemption в ЛС, `/premium` «для себя», refund/аналитика. Без пользовательских фич, продукт скрыт пока не задан `SELARA_PERSONAL_PRICE_STARS`. | — |
-| 2 | Personal AI MVP | `0080_personal_ai` | профиль, мастер `/ai`, диалог в ЛС, history+summary, пресеты, `/ai_reset`, квоты 5/150, `/autocfg` вне квоты, условия `personal-v1` | 1 |
+| 1 | Billing foundation | `0079_personal_entitlements`, `0080_quota_user_scope` | реестр продуктов, `user_entitlements` (buyer ≠ target в схеме, self-only в MVP), `target_scope` в intents/payments, user-scope квот, `units`, `pool_key`, scope и простой `UsagePricer` (всё = 1); `adjust()` и `ModelRouter` — только заглушки (§1.1), чтобы платёжный PR не превращался в большой рефакторинг квот; owner exemption в ЛС, `/premium` «для себя», refund/аналитика. Без пользовательских фич, продукт скрыт пока не задан `SELARA_PERSONAL_PRICE_STARS`. | — |
+| 2 | Personal AI MVP | `0082_personal_ai` | профиль, мастер `/ai`, диалог в ЛС, history+summary, пресеты, `/ai_reset`, квоты 5/150, `/autocfg` вне квоты, условия `personal-v1` | 1 |
 | 3 | Personal memory | (в 0080 или `0080b`) | явная память, `/memory`, `/forget_all`; авто-извлечение за флагом | 2 |
 | 4 | Mini App «Моя Selara» | — | профиль, память, подписка | 2, 3 |
-| 5 | Group character | `0081_group_ai_character` | клички (1 free / 5 paid), характер, член-режим для всех чатов с read-only tools, история только по галочке, раздельный контекст, бесплатный и платный лимиты, лимиты на участника, `is_primary`, `chat_migration` с collision policy и integration-тестами (§4.2) | 1 (per-actor политика) |
+| 5 | Group character | `0083_group_ai_character` | клички (1 free / 5 paid), характер, член-режим для всех чатов с read-only tools, история только по галочке, раздельный контекст, бесплатный и платный лимиты, лимиты на участника, `is_primary`, `chat_migration` с collision policy и integration-тестами (§4.2) | 1 (per-actor политика) |
 | 6 | Rename family pet | `0082_family_pet_command_key` (data) | `/bepet`, переходный `/pet`, перенос access rules и алиасов | — (можно параллельно с 2) |
 | 7 | AI-петы: ядро | `0083_ai_pets` | создание, параметры, ленивый тик, действия с кулдаунами, отношения, события, уровни; каталог `ai_pet_items` (еда/игрушки, немедленное применение, без инвентаря) с ценами в БД и списанием через экономику; админка каталога; FK `SET NULL` и возврат домой/`dormant` при удалении чата; реплики шаблонами без LLM; `pets_enabled`; доступ по Personal хозяина, независимо от подписки чата; поведение при истёкшей Personal (§5.0) | 1, 6 |
 | 8 | AI-петы: разговор и память | `0084_ai_pet_dialogue` | обращение по имени/reply, LLM-реплики, агрегатная + диалоговая память, квоты хозяина с подлимитами | 7 |

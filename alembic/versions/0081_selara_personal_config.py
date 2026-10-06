@@ -1,7 +1,7 @@
 """runtime overrides for Selara Personal price, duration and daily limits
 
-Revision ID: 0080_selara_personal_config
-Revises: 0079_quota_user_scope
+Revision ID: 0081_selara_personal_config
+Revises: 0080_quota_user_scope
 Create Date: 2026-10-06 00:00:02
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0080_selara_personal_config"
-down_revision: str | None = "0079_quota_user_scope"
+revision: str = "0081_selara_personal_config"
+down_revision: str | None = "0080_quota_user_scope"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

@@ -431,11 +431,11 @@ def _load_migration(filename: str):
 
 
 def test_new_migrations_extend_the_single_alembic_chain():
-    personal = _load_migration("0078_personal_entitlements.py")
-    quota = _load_migration("0079_quota_user_scope.py")
-    config = _load_migration("0080_selara_personal_config.py")
+    personal = _load_migration("0079_personal_entitlements.py")
+    quota = _load_migration("0080_quota_user_scope.py")
+    config = _load_migration("0081_selara_personal_config.py")
 
-    assert personal.down_revision == "0077_selara_ai_payment_refunds"
+    assert personal.down_revision == "0078_family_pet_command_key"
     assert quota.down_revision == personal.revision
     assert config.down_revision == quota.revision
     revisions, parents = set(), set()
