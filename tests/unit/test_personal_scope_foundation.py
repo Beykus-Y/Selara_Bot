@@ -435,11 +435,13 @@ def test_new_migrations_extend_the_single_alembic_chain():
     quota = _load_migration("0080_quota_user_scope.py")
     config = _load_migration("0081_selara_personal_config.py")
     personal_ai = _load_migration("0082_personal_ai.py")
+    ai_pets = _load_migration("0083_ai_pets.py")
 
     assert personal.down_revision == "0078_family_pet_command_key"
     assert quota.down_revision == personal.revision
     assert config.down_revision == quota.revision
     assert personal_ai.down_revision == config.revision
+    assert ai_pets.down_revision == personal_ai.revision
     revisions, parents = set(), set()
     for path in _VERSIONS.glob("[0-9]*.py"):
         module = _load_migration(path.name)
@@ -449,7 +451,7 @@ def test_new_migrations_extend_the_single_alembic_chain():
             parents.update(down)
         elif down:
             parents.add(down)
-    assert revisions - parents == {personal_ai.revision}
+    assert revisions - parents == {ai_pets.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 
