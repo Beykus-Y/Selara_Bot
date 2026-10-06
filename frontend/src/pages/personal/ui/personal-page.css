@@ -1,0 +1,200 @@
+.personal-page {
+  min-width: 0;
+}
+
+.personal-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.personal-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.personal-badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.personal-badge.is-ok::before { content: '✓ '; }
+.personal-badge.is-warn::before { content: '! '; }
+.personal-badge.is-ok { border-color: #36b37e; }
+.personal-badge.is-warn { border-color: #e0a526; }
+
+.personal-line,
+.personal-hint,
+.personal-notice,
+.personal-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.personal-hint { color: var(--text-muted, #98a3ad); }
+.personal-notice { color: #36b37e; }
+.personal-error { color: var(--red, #f87171); }
+
+.personal-cta {
+  display: grid;
+  gap: 6px;
+}
+
+.personal-cta small {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.personal-form,
+.personal-add {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.personal-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.personal-field > span {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.personal-field small {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.personal-field input[type='text'],
+.personal-field select,
+.personal-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+}
+
+.personal-field textarea {
+  resize: vertical;
+}
+
+.personal-segment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.personal-segment button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.personal-segment button.is-active {
+  border-color: #7c5cff;
+  font-weight: 650;
+}
+
+.personal-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  font-size: 14px;
+}
+
+.personal-check input {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.personal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.personal-count {
+  margin-left: 6px;
+  color: var(--text-muted, #98a3ad);
+  font-weight: 500;
+}
+
+.personal-facts {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.personal-facts li {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 12px;
+  min-width: 0;
+}
+
+.personal-facts li.is-pinned {
+  border-color: #7c5cff;
+}
+
+.personal-facts p {
+  margin: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.personal-source {
+  color: var(--text-muted, #98a3ad);
+  font-size: 12px;
+}
+
+.personal-fact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.personal-link {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #7c5cff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.personal-link--danger { color: var(--red, #f87171); }
+.personal-link:disabled { opacity: 0.5; cursor: default; }

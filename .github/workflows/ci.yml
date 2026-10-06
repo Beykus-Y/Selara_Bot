@@ -130,3 +130,6 @@ jobs:
 
       - name: Test Mini App Selara AI panel and admin analytics in mobile browser
         run: python ../scripts/test_miniapp_selara_ai_browser.py
+
+      - name: Test Mini App personal profile and memory page in mobile browser
+        run: python ../scripts/test_miniapp_personal_browser.py

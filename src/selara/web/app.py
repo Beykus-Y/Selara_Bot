@@ -152,9 +152,11 @@ from selara.presentation.handlers.settings_common import (
     setting_title_ru,
     settings_to_dict,
 )
+from selara.infrastructure.db.personal_config import build_personal_config
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.getting_started import build_getting_started_context
 from selara.web.miniapp_admin import build_miniapp_admin_router
+from selara.web.miniapp_personal import build_access_resolver, build_miniapp_personal_router
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
     AUDIT_CATEGORY_OPTIONS,
@@ -1161,7 +1163,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
+        if _is_miniapp_json_api(request.url.path):
             message = exc.detail if isinstance(exc.detail, str) and exc.detail else "Сервер отклонил запрос."
             return JSONResponse(
                 status_code=exc.status_code,
@@ -1204,7 +1206,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
+        if _is_miniapp_json_api(request.url.path):
             return JSONResponse(
                 status_code=422,
                 content={"ok": False, "status_code": 422, "message": "Проверьте параметры запроса."},
@@ -11239,7 +11241,27 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             telegram_bot_probe=_probe_miniapp_telegram_bot,
         )
     )
+    personal_config_provider, _personal_config_store = build_personal_config(session_factory, settings)
+    app.include_router(
+        build_miniapp_personal_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=_load_miniapp_admin_user,
+            personal_config=personal_config_provider,
+            resolve_access=build_access_resolver(
+                settings=settings, session_factory=session_factory, personal_config=personal_config_provider
+            ),
+            bot_url=f"https://t.me/{bot_username}",
+        )
+    )
     return app
+
+
+_MINIAPP_JSON_API_PREFIXES = ("/api/miniapp/admin/", "/api/miniapp/personal")
+
+
+def _is_miniapp_json_api(path: str) -> bool:
+    return path.startswith(_MINIAPP_JSON_API_PREFIXES)
 
 
 def _now_utc() -> datetime:

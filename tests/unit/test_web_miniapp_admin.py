@@ -765,3 +765,23 @@ async def test_personal_config_put_is_owner_only_and_rejects_bad_values_with_422
         for body in bad_bodies:
             response = await client.put(url, content=body, headers={"content-type": "application/json"})
             assert response.status_code == 422, body
+
+
+@pytest.mark.asyncio
+async def test_personal_miniapp_api_is_mounted_and_answers_in_json(monkeypatch) -> None:
+    async with _client(monkeypatch, current_user=None) as (client, _session_factory):
+        for method, route in (
+            ("GET", "/api/miniapp/personal"),
+            ("PATCH", "/api/miniapp/personal/profile"),
+            ("GET", "/api/miniapp/personal/memories"),
+            ("POST", "/api/miniapp/personal/memories"),
+            ("DELETE", "/api/miniapp/personal/memories/1"),
+        ):
+            response = await client.request(method, route, json={} if method in ("PATCH", "POST") else None)
+            assert response.status_code == 401, route
+            assert response.headers["content-type"].startswith("application/json"), route
+            assert response.json()["ok"] is False
+
+        unknown = await client.get("/api/miniapp/personal/nope")
+        assert unknown.status_code == 404
+        assert unknown.headers["content-type"].startswith("application/json")

@@ -21,6 +21,7 @@ export const routes = {
   games: '/games',
   gacha: '/gacha',
   more: '/more',
+  personal: '/personal',
   admin: '/admin',
   adminFeedback: '/admin/feedback',
   adminMonitoring: '/admin/monitoring',
