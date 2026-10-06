@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import inspect
 
 from selara.presentation.routers import build_router
 
 
 def test_personal_ai_comes_after_private_panel_and_autoconfig_and_before_text_commands():
-    # Module-level routers can be attached only once per process, so build exactly once.
-    # llm_client=None also proves the router is registered with the LLM disabled: the handler
-    # answers "unavailable" itself instead of silently ignoring private text.
-    root = build_router(MagicMock(), activity_batcher=MagicMock(), llm_client=None)
-    application = next(r for r in root.sub_routers if r.name == "application")
-    names = [r.name for r in application.sub_routers]
+    # Module-level routers attach to a parent only once per process (other tests already call
+    # build_router), so the registration order is checked from the include calls themselves.
+    # personal_ai is included unconditionally: with the LLM off it answers "unavailable" itself.
+    source = inspect.getsource(build_router)
 
-    assert names.index("autoconfig") < names.index("personal_ai")
-    assert names.index("private_panel") < names.index("personal_ai")
-    assert names.index("personal_ai") < names.index("text_commands")
+    def position(name: str) -> int:
+        return source.index(f"application.include_router({name}_router)")
+
+    assert position("autoconfig") < position("personal_ai")
+    assert position("private_panel") < position("personal_ai")
+    assert position("personal_ai") < position("text_commands")
+    assert "if llm_client is not None:\n        application.include_router(personal_ai_router)" not in source
