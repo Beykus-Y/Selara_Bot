@@ -2424,7 +2424,7 @@ class DailySummaryRunModel(Base):
     # application/daily_summary/pipeline.py's DailySummaryDiagnostics and
     # docs/DAILY_SUMMARY_TODO.md's beta observability wishlist.
     diagnostics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
-    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 9), nullable=False, default=0, server_default="0")
+    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(20, 9), nullable=False, default=0, server_default="0")
     pipeline_has_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     context_stt_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2580,12 +2580,13 @@ class LlmUsageLogModel(Base):
     )
     feature: Mapped[str] = mapped_column(String(32), nullable=False)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
-    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audio_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 9), nullable=True)
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 9), nullable=True)
     pricing_status: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="succeeded", server_default="succeeded")
     attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2597,6 +2598,7 @@ class LlmUsageLogModel(Base):
         Index("idx_llm_usage_log_message_archive", "message_archive_id"),
         Index("idx_llm_usage_log_call_id", "call_id", unique=True),
         Index("idx_llm_usage_log_request_id", "request_id"),
+        Index("idx_llm_usage_log_profile_created", "model_profile", "created_at"),
         Index("idx_llm_usage_log_invocation", "invocation_id"),
         Index("idx_llm_usage_log_feature_created", "feature", "created_at"),
         CheckConstraint("pricing_status IN ('known', 'unknown', 'legacy')", name="ck_llm_usage_log_pricing_status"),
@@ -2723,6 +2725,69 @@ class PersonalAiSummaryModel(Base):
     __table_args__ = (
         CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_summaries_thread"),
         Index("idx_personal_ai_summaries_user_thread_period", "user_id", "thread", "period_end"),
+    )
+
+
+class LlmModelCatalogModel(Base):
+    __tablename__ = "llm_model_catalog"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    prompt_price_usd_per_million: Mapped[Decimal | None] = mapped_column(Numeric(16, 9), nullable=True)
+    completion_price_usd_per_million: Mapped[Decimal | None] = mapped_column(Numeric(16, 9), nullable=True)
+    supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    supports_structured_output: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint("length(trim(key)) > 0", name="ck_llm_model_catalog_key"),
+        CheckConstraint("length(trim(model_id)) > 0", name="ck_llm_model_catalog_model_id"),
+        CheckConstraint("length(trim(display_name)) > 0", name="ck_llm_model_catalog_display_name"),
+        CheckConstraint("prompt_price_usd_per_million >= 0 AND prompt_price_usd_per_million <= 1000000",
+                        name="ck_llm_model_catalog_prompt_price"),
+        CheckConstraint("completion_price_usd_per_million >= 0 AND completion_price_usd_per_million <= 1000000",
+                        name="ck_llm_model_catalog_completion_price"),
+    )
+
+
+class LlmModelIdentifierModel(Base):
+    """Canonical IDs and aliases share a single unique namespace."""
+    __tablename__ = "llm_model_identifiers"
+
+    model_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    model_key: Mapped[str] = mapped_column(
+        String(64), ForeignKey("llm_model_catalog.key", ondelete="CASCADE"), nullable=False,
+    )
+    __table_args__ = (
+        Index("idx_llm_model_identifiers_model_key", "model_key"),
+        CheckConstraint("length(trim(model_id)) > 0", name="ck_llm_model_identifiers_model_id"),
+    )
+
+
+class LlmModelProfileModel(Base):
+    __tablename__ = "llm_model_profiles"
+
+    profile_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_key: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("llm_model_catalog.key", ondelete="SET NULL"), nullable=True,
+    )
+    ail_multiplier: Mapped[Decimal] = mapped_column(Numeric(13, 9), nullable=False, default=Decimal("1"), server_default="1")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint("profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+                        name="ck_llm_model_profiles_key"),
+        CheckConstraint("length(trim(display_name)) > 0", name="ck_llm_model_profiles_display_name"),
+        CheckConstraint("ail_multiplier > 0 AND ail_multiplier <= 1000", name="ck_llm_model_profiles_multiplier"),
+        Index("idx_llm_model_profiles_model_key", "model_key"),
     )
 
 

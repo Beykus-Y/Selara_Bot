@@ -209,11 +209,11 @@ def test_quota_cost_rejects_negative_units():
         QuotaCost(Decimal("-1"))
 
 
-def test_model_router_stub_always_returns_the_configured_model():
+async def test_model_router_default_preserves_the_configured_model():
     router = DefaultModelRouter("gpt-4o-mini")
 
-    assert router.resolve(feature=AiFeature.PERSONAL_CHAT, tier=AccessTier.PAID) == "gpt-4o-mini"
-    assert router.resolve(feature=AiFeature.LLM_ADMIN, tier=AccessTier.FREE) == "gpt-4o-mini"
+    assert (await router.resolve(feature=AiFeature.PERSONAL_CHAT, tier=AccessTier.PAID)).model_id == "gpt-4o-mini"
+    assert (await router.resolve(feature=AiFeature.LLM_ADMIN, tier=AccessTier.FREE)).model_id == "gpt-4o-mini"
 
 
 @pytest.mark.asyncio
@@ -453,7 +453,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
             parents.update(down)
         elif down:
             parents.add(down)
-    assert revisions - parents == {pet_dialogue.revision}
+    catalog = _load_migration("0085_model_catalog_router.py")
+    assert catalog.down_revision == pet_dialogue.revision
+    assert revisions - parents == {catalog.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 

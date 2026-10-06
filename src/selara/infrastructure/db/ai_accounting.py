@@ -217,6 +217,7 @@ class AiAccountingService:
                 feature=context.feature,
                 stage=context.stage,
                 model=usage.model,
+                model_profile=usage.model_profile,
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,
                 total_tokens=usage.total_tokens,
