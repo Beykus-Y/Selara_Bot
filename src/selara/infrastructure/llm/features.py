@@ -9,3 +9,7 @@ class AiFeature(StrEnum):
     PERSONAL_CHAT = "personal_chat"
     # Internal operation of Personal AI: tracked for cost, never charged to the user's pool.
     PERSONAL_MEMORY_EXTRACT = "personal_memory_extract"
+    # A pet talking in a group; always paid from its owner's Selara Personal, never from the chat.
+    PET_TALK = "pet_talk"
+    # Internal operation of pet dialogue memory: tracked for cost, never charged to any pool.
+    PET_MEMORY_EXTRACT = "pet_memory_extract"

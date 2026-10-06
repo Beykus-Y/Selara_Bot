@@ -105,6 +105,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "<b>AI-питомцы</b>\n"
         f"• {_code_join(_base_words('pets_core'))}\n"
         "• Без /: <code>пет</code>, <code>петы</code>, <code>пет погладить Мурка</code>, <code>пет покормить</code>\n"
+        "• Поговорить: <code>Мурка, как дела?</code> или ответ на реплику питомца (лимит Selara Personal хозяина)\n"
         "• Питомцы работают в чатах с <code>pets_enabled</code>; завести — с Selara Personal\n"
         "• Ролевое «стать питомцем» — <code>/bepet</code>"
     ),

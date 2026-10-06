@@ -59,6 +59,9 @@ class QuotaScope:
 
 
 PERSONAL_POOL_KEY = "personal_daily"
+# A pet's talk is paid by its owner: one pool per owner (one pet per owner today).
+PET_POOL_KEY = "pet_daily"
+DEFAULT_PET_TALK_DAILY_LIMIT = 60
 # Features the personal config may price; group features never read its weights.
 PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
 # What a personal request draws from the pool: 5/150 are requests, not weighted units.
@@ -287,12 +290,16 @@ def resolve_feature_policy(
             QuotaPeriod.DAY,
             pool_key=PERSONAL_POOL_KEY,
         )
+    if feature == AiFeature.PET_TALK:
+        # Without the owner's Selara Personal a pet cannot talk at all (its mechanics still work).
+        return FeatureQuotaPolicy(feature, "pet_talk_free_daily_v1", 0, QuotaPeriod.DAY, pool_key=PET_POOL_KEY)
     # /autocfg and internal operations (memory extraction, context compression) are
     # accounted for cost but never spend a user's or chat's commercial quota.
     if feature in (
         AiFeature.AUTOCONFIG,
         AiFeature.LLM_CONTEXT_COMPRESSION,
         AiFeature.PERSONAL_MEMORY_EXTRACT,
+        AiFeature.PET_MEMORY_EXTRACT,
     ):
         return None
     raise ValueError(f"No explicit feature access policy for {feature!r}")
@@ -306,6 +313,17 @@ def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
         limits.paid_daily,
         QuotaPeriod.DAY,
         pool_key=PERSONAL_POOL_KEY,
+    )
+
+
+def paid_pet_policy(daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT) -> FeatureQuotaPolicy:
+    """Selara Personal lets the owner's pet talk up to ``daily_limit`` times a day."""
+    return FeatureQuotaPolicy(
+        AiFeature.PET_TALK,
+        "pet_talk_paid_daily_v1",
+        daily_limit,
+        QuotaPeriod.DAY,
+        pool_key=PET_POOL_KEY,
     )
 
 

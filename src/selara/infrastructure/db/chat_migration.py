@@ -15,6 +15,8 @@ from selara.infrastructure.db.telegram_stars import entitlement_lock_key
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
     AiPetEventModel,
+    AiPetMemoryModel,
+    AiPetMessageModel,
     AiPetModel,
     AiPetRelationshipModel,
     AiFeatureInvocationModel,
@@ -334,6 +336,13 @@ async def _move_ai_pets(session: AsyncSession, *, old_chat_id: int, new_chat_id:
     )
     await session.execute(
         update(AiPetEventModel).where(AiPetEventModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+    # Dialogue history and notes have no chat-keyed uniqueness: a plain move keeps the pet's memory of this chat.
+    await session.execute(
+        update(AiPetMessageModel).where(AiPetMessageModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(AiPetMemoryModel).where(AiPetMemoryModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
     )
 
 

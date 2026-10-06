@@ -7756,6 +7756,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "ai_pets": {"title": "AI-питомцы", "group": "pets"},
         "ai_pet_relationships": {"title": "Отношения питомцев", "group": "pets"},
         "ai_pet_events": {"title": "События питомцев", "group": "pets"},
+        "ai_pet_messages": {"title": "Разговоры питомцев", "group": "pets"},
+        "ai_pet_memories": {"title": "Память питомцев", "group": "pets"},
         "chat_achievement_stats": {"title": "Статистика достижений чата", "group": "achievement"},
         "chat_activity_event_sync_state": {"title": "Синхронизация событий активности", "group": "activity"},
         "chat_auctions": {"title": "Аукционы чата", "group": "economy"},
