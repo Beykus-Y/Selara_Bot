@@ -307,7 +307,7 @@ def build_miniapp_personal_router(
                 changes["character_custom"] = None if raw in (None, "") else validate_custom_character(_as_text(raw))
             if "character_preset" in payload:
                 preset = payload["character_preset"]
-                if preset != CUSTOM_PRESET_KEY and preset not in CHARACTER_PRESETS:
+                if not isinstance(preset, str) or (preset != CUSTOM_PRESET_KEY and preset not in CHARACTER_PRESETS):
                     return _fail(422, "Такого характера нет.", code="invalid_preset")
                 changes["character_preset"] = preset
         except ProfileValidationError as exc:
