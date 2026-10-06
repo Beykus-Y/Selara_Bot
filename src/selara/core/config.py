@@ -203,6 +203,15 @@ class Settings(BaseSettings):
     pet_event_quiet_end_hour: int = Field(default=8, ge=0, le=23, validation_alias="PET_EVENT_QUIET_END_HOUR")
     pet_event_check_seconds: int = Field(default=300, ge=10, le=86_400, validation_alias="PET_EVENT_CHECK_SECONDS")
     pet_event_chance: float = Field(default=0.3, ge=0.0, le=1.0, validation_alias="PET_EVENT_CHANCE")
+    # Member mode in groups («Селя, ...»): free for every chat, raised by Selara AI. Per day, per chat and per member.
+    group_member_free_daily_limit: int = Field(default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_DAILY_LIMIT")
+    group_member_free_per_user_daily_limit: int = Field(
+        default=5, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_PER_USER_DAILY_LIMIT"
+    )
+    group_member_paid_daily_limit: int = Field(default=300, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
+    group_member_paid_per_user_daily_limit: int = Field(
+        default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_PER_USER_DAILY_LIMIT"
+    )
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
@@ -215,6 +224,15 @@ class Settings(BaseSettings):
             raise ValueError("PERSONAL_MEMORY_FREE_LIMIT must not exceed PERSONAL_MEMORY_PAID_LIMIT")
         if not self.pet_talk_guest_daily_limit <= self.pet_talk_guests_daily_limit <= self.pet_talk_daily_limit:
             raise ValueError("Pet talk limits must satisfy guest <= all guests <= daily")
+        if not (
+            self.group_member_free_per_user_daily_limit <= self.group_member_free_daily_limit
+            and self.group_member_paid_per_user_daily_limit <= self.group_member_paid_daily_limit
+            and self.group_member_free_daily_limit < self.group_member_paid_daily_limit
+            and self.group_member_free_per_user_daily_limit <= self.group_member_paid_per_user_daily_limit
+        ):
+            raise ValueError(
+                "Group member limits must satisfy per member <= per chat and free < paid (per member: free <= paid)"
+            )
         return self
 
     @property

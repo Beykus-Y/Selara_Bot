@@ -3050,6 +3050,90 @@ class AiPetMemoryModel(Base):
     )
 
 
+class ChatAiCharacterModel(Base):
+    """Selara's character in one group and the member-mode switches set by its admins."""
+
+    __tablename__ = "chat_ai_characters"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    character_preset: Mapped[str] = mapped_column(String(32), nullable=False, default="default", server_default="default")
+    character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    member_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    member_history_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "character_custom IS NULL OR length(character_custom) <= 500",
+            name="ck_chat_ai_characters_custom_len",
+        ),
+    )
+
+
+class ChatAiCallNameModel(Base):
+    """A name members use to address Selara in a group («Селя, ...»)."""
+
+    __tablename__ = "chat_ai_call_names"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    name_display: Mapped[str] = mapped_column(String(24), nullable=False)
+    name_norm: Mapped[str] = mapped_column(String(24), nullable=False)
+    # The one name that keeps working when the chat has no Selara AI (free chats get one name).
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "name_norm", name="uq_chat_ai_call_names_chat_name"),
+        Index(
+            "uq_chat_ai_call_names_primary",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+            sqlite_where=text("is_primary = 1"),
+        ),
+    )
+
+
+class ChatMemberAiMessageModel(Base):
+    """Member-mode dialogue of one group, kept apart from the admin assistant's context."""
+
+    __tablename__ = "chat_member_ai_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", server_default="ok")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_member_ai_messages_role"),
+        CheckConstraint("status IN ('pending', 'ok', 'failed')", name="ck_chat_member_ai_messages_status"),
+        UniqueConstraint("idempotency_key", name="uq_chat_member_ai_messages_idempotency_key"),
+        Index("idx_chat_member_ai_messages_chat_created", "chat_id", "created_at"),
+        Index("idx_chat_member_ai_messages_chat_telegram", "chat_id", "telegram_message_id"),
+        Index("idx_chat_member_ai_messages_author_created", "chat_id", "author_user_id", "created_at"),
+    )
+
+
 class AiPetInventoryModel(Base):
     """What a pet owns: stored food and toys, and cosmetics it can wear. Goes with the pet."""
 

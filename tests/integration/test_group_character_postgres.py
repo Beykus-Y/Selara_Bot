@@ -1,0 +1,206 @@
+"""Group character on PostgreSQL: member-mode quotas under concurrency, admission and chat migration."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from selara.application.feature_access import AccessReason, AccessTier, FeatureAccessService, GroupMemberQuotaLimits
+from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository
+from selara.infrastructure.db.chat_migration import migrate_chat_id
+from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.models import (
+    AiFeatureQuotaUsageModel,
+    ChatAiCallNameModel,
+    ChatAiCharacterModel,
+    ChatEntitlementModel,
+    ChatMemberAiMessageModel,
+    ChatModel,
+    UserModel,
+)
+from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
+from selara.infrastructure.llm.features import AiFeature
+
+pytestmark = [pytest.mark.integration]
+
+CHAT = -100900
+NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+LIMITS = GroupMemberQuotaLimits(free_daily=6, free_per_actor=2, paid_daily=20, paid_per_actor=4)
+MEMBERS = tuple(range(900, 910))
+
+
+@pytest.fixture
+async def factory():
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+    engine = create_async_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as db:
+        db.add(ChatModel(telegram_chat_id=CHAT, type="supergroup", title="Selara"))
+        db.add_all(UserModel(telegram_user_id=user_id, first_name="U") for user_id in MEMBERS)
+        await db.commit()
+    yield sessions
+    await engine.dispose()
+
+
+def _service(sessions) -> FeatureAccessService:
+    return FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(sessions),
+        entitlement_resolver=SqlAlchemyChatEntitlementResolver(sessions, group_member_limits=LIMITS),
+        group_member_limits=LIMITS,
+    )
+
+
+async def _reserve(service, *, actor: int, message_id: int, chat_id: int = CHAT):
+    return await service.reserve_feature_usage(
+        feature=AiFeature.GROUP_MEMBER,
+        chat_id=chat_id,
+        actor_user_id=actor,
+        trigger="telegram_message",
+        timezone_name="UTC",
+        idempotency_key=f"group_member:{chat_id}:{message_id}",
+        source_message_id=message_id,
+        now=NOW,
+    )
+
+
+async def test_concurrent_members_never_exceed_chat_or_member_limits(factory) -> None:
+    service = _service(factory)
+    # Every member tries four times at once: per member 2, for the chat 6 in total.
+    attempts = [(member, index) for member in MEMBERS for index in range(4)]
+    decisions = await asyncio.gather(
+        *(_reserve(service, actor=member, message_id=member * 10 + index) for member, index in attempts)
+    )
+    granted = [d for d in decisions if d.allowed]
+    assert len(granted) == LIMITS.free_daily
+    async with factory() as db:
+        per_actor = (
+            await db.execute(
+                select(AiFeatureQuotaUsageModel.actor_user_id, func.count())
+                .where(AiFeatureQuotaUsageModel.status == "consumed")
+                .group_by(AiFeatureQuotaUsageModel.actor_user_id)
+            )
+        ).all()
+    assert all(count <= LIMITS.free_per_actor for _, count in per_actor)
+    reasons = {d.reason for d in decisions if not d.allowed}
+    assert reasons <= {AccessReason.QUOTA_EXHAUSTED, AccessReason.ACTOR_QUOTA_EXHAUSTED}
+
+
+async def test_member_share_is_reported_and_selara_ai_raises_it(factory) -> None:
+    service = _service(factory)
+    member = MEMBERS[0]
+    assert (await _reserve(service, actor=member, message_id=1)).allowed
+    assert (await _reserve(service, actor=member, message_id=2)).allowed
+    denied = await _reserve(service, actor=member, message_id=3)
+    assert denied.reason == AccessReason.ACTOR_QUOTA_EXHAUSTED
+    assert (denied.quota_used, denied.quota_limit) == (2, LIMITS.free_per_actor)
+    # Another member still has room in the chat's pool.
+    assert (await _reserve(service, actor=MEMBERS[1], message_id=4)).allowed
+
+    async with factory() as db:
+        db.add(
+            ChatEntitlementModel(
+                chat_id=CHAT, product_key=SELARA_AI_PRODUCT_KEY, status="active",
+                valid_from=NOW - timedelta(days=1), valid_until=NOW + timedelta(days=29),
+            )
+        )
+        await db.commit()
+    paid = await _reserve(service, actor=member, message_id=5)
+    assert paid.allowed and paid.access_tier == AccessTier.PAID and paid.quota_limit == LIMITS.paid_daily
+
+
+async def test_admission_serializes_a_members_cooldown(factory) -> None:
+    async with factory() as db:
+        db.add(ChatAiCharacterModel(chat_id=CHAT, member_mode_enabled=True))
+        await db.commit()
+
+    async def admit(message_id: int):
+        async with factory() as db:
+            repo = ChatAiCharacterRepository(db)
+            result = await repo.admit_turn(
+                chat_id=CHAT, author_user_id=MEMBERS[0], content="?", idempotency_key=f"m:{message_id}",
+                telegram_message_id=message_id, cooldown=timedelta(seconds=30), now=datetime.now(timezone.utc),
+            )
+            await repo.commit()
+            return result.status
+
+    statuses = await asyncio.gather(*(admit(i) for i in range(5)))
+    assert statuses.count("ok") == 1 and statuses.count("cooldown") == 4
+    assert await admit(0) == "duplicate"
+
+
+async def test_one_primary_name_per_chat_is_enforced_by_the_database(factory) -> None:
+    async with factory() as db:
+        db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селя", name_norm="селя", is_primary=True))
+        await db.commit()
+        db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селара", name_norm="селара", is_primary=True))
+        with pytest.raises(IntegrityError):
+            await db.commit()
+
+
+async def test_chat_migration_collision_policy(factory) -> None:
+    old_id, new_id = CHAT, -1000100900
+    service = _service(factory)
+    async with factory() as db:
+        db.add(ChatModel(telegram_chat_id=new_id, type="supergroup", title="new"))
+        await db.flush()
+        db.add_all(
+            [
+                ChatAiCallNameModel(chat_id=old_id, name_display="Селя", name_norm="селя", is_primary=True),
+                ChatAiCallNameModel(chat_id=old_id, name_display="Селарка", name_norm="селарка"),
+                ChatAiCallNameModel(chat_id=new_id, name_display="СЕЛЯ", name_norm="селя"),
+                ChatAiCharacterModel(
+                    chat_id=old_id, character_preset="sarcastic", member_mode_enabled=True,
+                    member_history_access=False, updated_at=NOW - timedelta(hours=2),
+                ),
+                ChatAiCharacterModel(
+                    chat_id=new_id, character_preset="strict", member_mode_enabled=True,
+                    member_history_access=True, updated_at=NOW,
+                ),
+                ChatMemberAiMessageModel(chat_id=old_id, role="user", content="привет"),
+            ]
+        )
+        await db.commit()
+
+    # Usage of the old id and the new id in the current period adds up after the move.
+    assert (await _reserve(service, actor=MEMBERS[0], message_id=1, chat_id=old_id)).allowed
+    assert (await _reserve(service, actor=MEMBERS[1], message_id=2, chat_id=old_id)).allowed
+    assert (await _reserve(service, actor=MEMBERS[2], message_id=3, chat_id=new_id)).allowed
+
+    async with factory() as db:
+        await migrate_chat_id(db, old_chat_id=old_id, new_chat_id=new_id)
+        await db.commit()
+
+    async with factory() as db:
+        names = (
+            await db.execute(
+                select(ChatAiCallNameModel.name_display, ChatAiCallNameModel.is_primary)
+                .where(ChatAiCallNameModel.chat_id == new_id)
+            )
+        ).all()
+        # The new chat had no primary name, so the old primary stays primary; the duplicate keeps the new row.
+        assert set(names) == {("СЕЛЯ", True), ("Селарка", False)}
+        character = await db.get(ChatAiCharacterModel, new_id)
+        assert character.character_preset == "strict"
+        assert character.member_history_access is False
+        assert await db.get(ChatAiCharacterModel, old_id) is None
+        assert (await db.scalar(select(func.count()).select_from(ChatMemberAiMessageModel).where(
+            ChatMemberAiMessageModel.chat_id == new_id
+        ))) == 1
+
+    used = (await service.get_usage_summary(
+        feature=AiFeature.GROUP_MEMBER, chat_id=new_id, trigger="telegram_message", timezone_name="UTC", now=NOW,
+    )).quota_used
+    assert used == 3
