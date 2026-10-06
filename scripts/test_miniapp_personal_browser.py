@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
@@ -201,10 +201,9 @@ async def _run_memory_flow(browser) -> None:
 
         await page.get_by_label("Использовать память в разговоре").click()
         await page.get_by_text("Память выключена: включите её выше").wait_for()
-        assert await page.get_by_label("Новый факт о себе").is_disabled()
+        await expect(page.get_by_label("Новый факт о себе")).to_be_disabled()
         await page.get_by_label("Использовать память в разговоре").click()
-        await page.get_by_label("Новый факт о себе").wait_for()
-        assert not await page.get_by_label("Новый факт о себе").is_disabled()
+        await expect(page.get_by_label("Новый факт о себе")).to_be_enabled()
         assert any(call[0] == "PUT" and call[2] == {"memory_enabled": False} for call in backend.calls)
         await _overflow_free(page, f"memory flow@{width}")
         assert not errors, errors
@@ -216,7 +215,7 @@ async def _run_limits_and_errors(browser) -> None:
     backend = FakeBackend(_overview(facts=full, limit=3))
     context, page, errors = await _open(browser, 393, backend)
     await page.get_by_text("Лимит исчерпан. Удалите лишний факт").wait_for()
-    assert await page.get_by_label("Новый факт о себе").is_disabled()
+    await expect(page.get_by_label("Новый факт о себе")).to_be_disabled()
     await context.close()
 
     backend = FakeBackend(_overview())
@@ -233,7 +232,7 @@ async def _run_limits_and_errors(browser) -> None:
     text = await page.locator("body").inner_text()
     assert "Не удалось проверить" in text and "Осталось" not in text and "Бесплатный доступ" not in text
     assert "Оформить в Telegram" not in text
-    assert await page.get_by_label("Новый факт о себе").is_disabled()
+    await expect(page.get_by_label("Новый факт о себе")).to_be_disabled()
     assert "я веган" in text
     assert not errors, errors
     await context.close()
