@@ -16,13 +16,16 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from selara.application.ai_pets import dialogue as dialogue_rules
 from selara.application.ai_pets import mechanics as m
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.infrastructure.db.ai_pet_dialogue import AiPetDialogueRepository
 from selara.infrastructure.db.ai_pets import ActionResult, AiPetService, PetDomainError, PetView
 from selara.presentation.auth import has_command_access, has_permission
 from selara.presentation.formatters import format_user_link
+from selara.presentation.handlers.ai_pet_talk import invalidate_pet_names
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +294,7 @@ async def pet_new_command(message: Message, command: CommandObject, activity_rep
     except (m.PetValidationError, PetDomainError) as exc:
         await message.answer(escape(str(exc)), parse_mode="HTML")
         return
+    invalidate_pet_names(message.chat.id)
     await message.answer(
         f"{pet.emoji} У вас появился питомец: <b>{escape(pet.name)}</b>!\n"
         f"Выберите до {m.MAX_TRAITS} черт характера: <code>/pet_traits игривый, ласковый</code>\n"
@@ -313,6 +317,51 @@ async def pet_traits_command(message: Message, command: CommandObject, db_sessio
         return
     await message.answer(
         f"{pet.emoji} Характер {escape(pet.name)}: " + escape(", ".join(m.TRAITS[key] for key in pet.traits)) + ".",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("pet_character"))
+async def pet_character_command(message: Message, command: CommandObject, db_session, economy_repo) -> None:
+    """The owner describes the pet's character in their own words (used when it talks)."""
+    if message.from_user is None:
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Формат: <code>/pet_character ворчит по утрам, обожает рыбу и боится пылесоса</code> "
+            f"(до {dialogue_rules.CHARACTER_MAX_LEN} символов). Сбросить: <code>/pet_character -</code>.",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        character = None if raw == "-" else dialogue_rules.validate_character(raw)
+        pet = await _service(db_session, economy_repo).set_character(owner_user_id=message.from_user.id, character=character)
+    except (m.PetValidationError, PetDomainError) as exc:
+        await message.answer(escape(str(exc)), parse_mode="HTML")
+        return
+    if character is None:
+        await message.answer(f"{pet.emoji} Описание характера {escape(pet.name)} сброшено.", parse_mode="HTML")
+    else:
+        await message.answer(f"{pet.emoji} Характер {escape(pet.name)} обновлён.", parse_mode="HTML")
+
+
+@router.message(Command("pet_forget"))
+async def pet_forget_command(message: Message, db_session, economy_repo) -> None:
+    """The owner wipes what the pet remembers from conversations in this chat."""
+    if message.from_user is None:
+        return
+    if message.chat.type not in _GROUP_TYPES:
+        await message.answer("Память питомца хранится отдельно для каждого чата: вызовите /pet_forget в той группе.")
+        return
+    pet = await _service(db_session, economy_repo).get_owner_pet(owner_user_id=message.from_user.id)
+    if pet is None:
+        await message.answer("У вас нет питомца.")
+        return
+    messages, notes = await AiPetDialogueRepository(db_session).forget(pet_id=pet.id, chat_id=message.chat.id)
+    await message.answer(
+        f"{pet.emoji} {escape(pet.name)} забыл(а) разговоры в этом чате (реплик: {messages}, заметок: {notes}). "
+        "Отношения и статистика ухода сохранены.",
         parse_mode="HTML",
     )
 
@@ -379,6 +428,7 @@ async def _sleep_command(message: Message, command: CommandObject, activity_repo
     except PetDomainError as exc:
         await message.answer(escape(str(exc)), parse_mode="HTML")
         return
+    invalidate_pet_names(message.chat.id)
     text = f"💤 {escape(pet.name)} уснул(а) и не реагирует на действия." if asleep else f"☀️ {escape(pet.name)} проснулся(ась)!"
     await message.answer(text, parse_mode="HTML")
 
@@ -572,6 +622,7 @@ async def ai_pet_callback(query: CallbackQuery, activity_repo, db_session, econo
             await query.answer("Питомец уже отпущен.")
             return
         await service.release(owner_user_id=query.from_user.id, chat_id=message.chat.id if message.chat.type in _GROUP_TYPES else None)
+        invalidate_pet_names(pet.current_chat_id)
         await query.answer()
         await message.answer(f"{pet.emoji} {escape(pet.name)} ушёл(ла) на свободу. Можно завести нового: /pet_new.", parse_mode="HTML")
         return

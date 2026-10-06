@@ -187,6 +187,10 @@ class Settings(BaseSettings):
     personal_memory_paid_limit: int = Field(default=200, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_PAID_LIMIT")
     personal_memory_auto_extract: bool = Field(default=False, validation_alias="PERSONAL_MEMORY_AUTO_EXTRACT")
     personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
+    # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
+    pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
+    pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
+    pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
@@ -197,6 +201,8 @@ class Settings(BaseSettings):
             raise ValueError("PERSONAL_FREE_DAILY_LIMIT must be lower than PERSONAL_PAID_DAILY_LIMIT")
         if self.personal_memory_free_limit > self.personal_memory_paid_limit:
             raise ValueError("PERSONAL_MEMORY_FREE_LIMIT must not exceed PERSONAL_MEMORY_PAID_LIMIT")
+        if not self.pet_talk_guest_daily_limit <= self.pet_talk_guests_daily_limit <= self.pet_talk_daily_limit:
+            raise ValueError("Pet talk limits must satisfy guest <= all guests <= daily")
         return self
 
     @property
