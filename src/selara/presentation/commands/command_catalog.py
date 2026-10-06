@@ -284,7 +284,7 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         syntax=(
             "/adopt @username",
             "/adoptdaughter @username",
-            "/pet @username",
+            "/bepet @username",
             "/family",
             "/family @username",
         ),
@@ -294,7 +294,7 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
             "супруги. Создание связи подтверждается кнопками согласия."
         ),
         natural_triggers=("усыновить", "удочерить", "стать питомцем", "семья"),
-        examples=("reply + /adopt", "reply + /pet", "/family @username"),
+        examples=("reply + /adopt", "reply + /bepet", "/family @username"),
         notes=(
             "/adopt усыновляет (роль «сын»), /adoptdaughter — удочеряет (роль «дочь») — единственная "
             "разница между ними.",

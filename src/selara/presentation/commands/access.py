@@ -90,7 +90,9 @@ SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "rpdel": "rpdel",
     "title": "title",
     "adopt": "adopt",
-    "pet": "pet",
+    "bepet": "family_pet",
+    # Переходный период: /pet ещё выполняет ролевое «стать питомцем», потом отдаётся AI-петам.
+    "pet": "family_pet",
     "family": "family",
     "setrank": "setrank",
     "ranks": "ranks",

@@ -1296,7 +1296,7 @@ async def _send_family_request(
         if relation_type == "parent":
             example = f"/adopt @username ({adopt_verb})"
         else:
-            example = "/pet @username"
+            example = "/bepet @username"
         await message.answer(f"Формат: reply или <code>{example}</code>.", parse_mode="HTML")
         return
     if target.telegram_user_id == message.from_user.id:
@@ -1360,12 +1360,23 @@ async def adopt_daughter_command(message: Message, command: CommandObject, activ
     )
 
 
-@router.message(Command("pet"))
+FAMILY_PET_RENAMED_HINT = "ℹ️ Команда «стать питомцем» теперь называется <code>/bepet</code>. Старая <code>/pet</code> скоро перейдёт к AI-питомцам."
+
+
+@router.message(Command("bepet"))
 async def pet_command(message: Message, command: CommandObject, activity_repo, chat_settings: ChatSettings) -> None:
     if not chat_settings.family_tree_enabled:
         await message.answer("Семейные команды отключены в этом чате.")
         return
     await _send_family_request(message, activity_repo=activity_repo, relation_type="pet", raw_args=command.args)
+
+
+@router.message(Command("pet"))
+async def legacy_pet_command(message: Message, command: CommandObject, activity_repo, chat_settings: ChatSettings) -> None:
+    # Переходный период: подсказываем новое имя и выполняем старое действие.
+    if chat_settings.family_tree_enabled:
+        await message.answer(FAMILY_PET_RENAMED_HINT, parse_mode="HTML")
+    await pet_command(message, command, activity_repo, chat_settings)
 
 
 async def _build_family_section_labels(activity_repo, *, chat_id: int, user_ids: list[int]) -> list[str]:
