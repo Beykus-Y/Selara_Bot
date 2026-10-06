@@ -199,7 +199,7 @@ class CachedPersonalConfigProvider:
         self._expires_at = 0.0
 
     def invalidate(self) -> None:
-        self._cached = None
+        # Expire, but keep the value: if the next load fails it is still the last known good one.
         self._expires_at = 0.0
 
     async def get(self) -> PersonalConfig:

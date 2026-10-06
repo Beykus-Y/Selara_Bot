@@ -38,3 +38,32 @@ export function saveAdminModel(key: string | null, payload: unknown) {
 export function saveAdminProfile(key: string, payload: unknown) {
   return save(`/miniapp/admin/ai/model-profiles/${encodeURIComponent(key)}`, payload)
 }
+
+export type QuotaMode = {
+  quota_mode: 'requests' | 'ail'
+  free_daily_ail: number | null
+  paid_daily_ail: number | null
+  requests: { free_daily: number; paid_daily: number }
+  max_daily_ail: number
+  activation_problems: string[]
+  profiles: Array<{ profile_key: string; display_name: string; ail_multiplier: string; available: boolean }>
+  applies_within_seconds: number
+}
+export const getQuotaMode = () => getMiniAppData<QuotaMode>(
+  '/miniapp/admin/monetization/quota-mode', 'Не удалось загрузить систему лимитов.',
+)
+export class ConfirmationRequired extends Error {}
+export async function saveQuotaMode(payload: {
+  quota_mode: 'requests' | 'ail'; free_daily_ail: number | null; paid_daily_ail: number | null; confirm?: boolean
+}) {
+  try { await http.request({ url: '/miniapp/admin/monetization/quota-mode', method: 'PUT', data: payload }) }
+  catch (error) {
+    if (isAxiosError(error)) {
+      const detail = error.response?.data?.detail ?? error.response?.data?.message
+      const message = typeof detail === 'string' && detail.trim() ? detail : 'Не удалось сохранить систему лимитов.'
+      if (error.response?.status === 409) throw new ConfirmationRequired(message)
+      throw new Error(message)
+    }
+    throw error
+  }
+}

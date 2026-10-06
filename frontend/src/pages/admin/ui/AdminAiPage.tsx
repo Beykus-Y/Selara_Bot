@@ -25,6 +25,7 @@ import {
   refundLabels,
 } from '../lib/format'
 import { AdminModelsSection } from './AdminModelsSection'
+import { AdminQuotaModeSection } from './AdminQuotaModeSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
 const periods = [
@@ -195,6 +196,27 @@ function BreakdownSection({ periodDays }: { periodDays: number }) {
                   </small>
                 </li>
               ))}
+            </ul>
+          )}
+          <h3 className="admin-subheading">AI Limits по профилям</h3>
+          <p className="admin-footnote">AIL — продуктовая единица пользователя (реально зарезервированные units), USD — себестоимость провайдера. Это разные величины.</p>
+          {(data.ail_profiles ?? []).length === 0 ? <p className="admin-empty">AIL за период не расходовались.</p> : (
+            <ul className="admin-rows">
+              <li><div className="admin-rows__main"><strong>Всего</strong><span>{data.ail_consumed} AIL</span></div></li>
+              {(data.ail_profiles ?? []).map((row) => {
+                const usd = (data.profiles ?? []).find((item) => item.profile_key === row.profile_key)
+                return (
+                  <li key={row.profile_key ?? 'none'}>
+                    <div className="admin-rows__main">
+                      <strong className="admin-rows__name">{row.profile_key ?? 'без профиля'}</strong>
+                      <span>{row.ail_consumed} AIL</span>
+                    </div>
+                    <small>
+                      {formatCount(row.requests)} запросов · известная стоимость {formatUsd(usd?.known_cost_usd ?? '0')}
+                    </small>
+                  </li>
+                )
+              })}
             </ul>
           )}
           {data.unattributed_provider_calls > 0 && (
@@ -501,6 +523,7 @@ export function AdminAiPage() {
       </header>
       <ReadinessSection />
       <AdminModelsSection />
+      <AdminQuotaModeSection />
       <PeriodSwitch value={periodDays} onChange={setPeriodDays} />
       <AiSummarySection periodDays={periodDays} />
       <BreakdownSection periodDays={periodDays} />

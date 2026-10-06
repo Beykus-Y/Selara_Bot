@@ -30,7 +30,14 @@ def profile(model=None, revision=1, multiplier="2"):
 async def scenario(browser, width):
     context, page, errors = await _new_page(browser, width)
     state = {"models": [copy.deepcopy(MODEL)], "profile": profile(copy.deepcopy(MODEL)), "error": None,
-             "writes": [], "slow": False}
+             "writes": [], "slow": False, "quota": {
+                 "quota_mode": "requests", "free_daily_ail": None, "paid_daily_ail": None,
+                 "requests": {"free_daily": 5, "paid_daily": 150}, "max_daily_ail": 100000,
+                 "activation_problems": [], "applies_within_seconds": 15,
+                 "profiles": [{"profile_key": "basic", "display_name": "Базовая", "ail_multiplier": "1", "available": True},
+                              {"profile_key": "creative", "display_name": "Творческая" * 6, "ail_multiplier": "2.5",
+                               "available": False}],
+             }}
     gate = asyncio.Event()
 
     async def handle(route):
@@ -74,6 +81,17 @@ async def scenario(browser, width):
                 body = {"ok": True, "item": state["profile"]}
             else:
                 body = {"ok": True, "items": [state["profile"]], "fallback_note": "Fallback зависит от операции."}
+        elif path.endswith("/admin/monetization/quota-mode"):
+            if route.request.method == "PUT":
+                payload = route.request.post_data_json
+                state["writes"].append(payload)
+                if payload["quota_mode"] == "ail" and not payload.get("confirm"):
+                    body, status = {"detail": "Подтвердите включение."}, 409
+                else:
+                    state["quota"].update(payload)
+                    body = {"ok": True, **state["quota"]}
+            else:
+                body = {"ok": True, **state["quota"]}
         elif path.endswith("/admin/ai/readiness"):
             body = READINESS
         elif path.endswith("/admin/ai/summary"):
@@ -144,6 +162,22 @@ async def scenario(browser, width):
     assert state["writes"][-1]["confirm_disable"] is True
     assert state["writes"][-1]["prompt_price_usd_per_million"] == "0"
     await _overflow_free(page, f"models disabled {width}")
+
+    # Owner switches Personal to AI Limits: budgets are required and the switch is confirmed.
+    quota = page.locator(".admin-quota")
+    await quota.get_by_text("запросы (5/150 в сутки)").wait_for()
+    await quota.get_by_label("AI Limits", exact=True).check()
+    await quota.get_by_role("button", name="Сохранить", exact=True).click()
+    await quota.get_by_text("Сначала задайте Free/Paid AIL budget.").wait_for()
+    await quota.get_by_label("Free AIL / сутки", exact=True).fill("10")
+    await quota.get_by_label("Personal AIL / сутки", exact=True).fill("100")
+    dialogs.clear()
+    await quota.get_by_role("button", name="Сохранить", exact=True).click()
+    await quota.get_by_role("status").wait_for()
+    assert dialogs and "AI Limits" in dialogs[-1]
+    assert state["writes"][-1] == {"quota_mode": "ail", "free_daily_ail": 10, "paid_daily_ail": 100, "confirm": True}
+    assert "×2.5 AIL" in await quota.inner_text()
+    await _overflow_free(page, f"quota mode {width}")
 
     # Reload with an empty catalog, then a delayed catalog read.
     state["models"] = []

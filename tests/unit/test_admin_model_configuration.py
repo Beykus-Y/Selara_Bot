@@ -61,6 +61,9 @@ async def test_existing_owner_auth_guards_every_endpoint(api, actor_id, status):
         assert (await client.post(f"{PREFIX}/models", json=MODEL)).status_code == status
         assert (await client.put(f"{PREFIX}/models/one", json={**MODEL, "revision": 1})).status_code == status
         assert (await client.put(f"{PREFIX}/model-profiles/basic", json={})).status_code == status
+        quota_mode = "/api/miniapp/admin/monetization/quota-mode"
+        assert (await client.get(quota_mode)).status_code == status
+        assert (await client.put(quota_mode, json={"quota_mode": "ail", "confirm": True})).status_code == status
 
 
 async def test_catalog_profile_crud_conflict_and_fallback(api):

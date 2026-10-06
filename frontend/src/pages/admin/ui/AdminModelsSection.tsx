@@ -10,7 +10,7 @@ const capabilityLabels: Record<keyof Capabilities, string> = {
   supports_tools: 'Tools', supports_structured_output: 'Structured output', supports_vision: 'Vision',
 }
 const capabilityKeys = Object.keys(capabilityLabels) as Array<keyof Capabilities>
-const multiplierNote = 'Коэффициент сохранён для будущей системы AI Limits и пока не влияет на лимиты 5/150.'
+const multiplierNote = 'AIL multiplier — сколько AI Limits списывает один запрос Personal AI через этот профиль. Действует только в режиме AI Limits (см. «Система лимитов»); в режиме запросов лимиты 5/150 не зависят от него. Для AIL multiplier задаётся с точностью до 0.01.'
 
 function ModelInfo({ model }: { model: CatalogModel }) {
   return <>

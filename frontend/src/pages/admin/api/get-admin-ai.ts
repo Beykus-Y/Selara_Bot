@@ -40,6 +40,9 @@ export type AdminAiBreakdown = {
   models: AdminAiModelRow[]
   unattributed_provider_calls: number
   stages: Array<{ feature: string; stage: string; provider_calls: number; known_cost_usd: string }>
+  profiles?: Array<{ profile_key: string | null; provider_calls: number; known_cost_usd: string; unknown_cost_calls: number }>
+  ail_profiles?: Array<{ profile_key: string | null; requests: number; ail_consumed: string }>
+  ail_consumed?: string
 }
 
 export type AdminMonetizationSummary = {

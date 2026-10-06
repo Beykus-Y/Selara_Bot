@@ -145,3 +145,30 @@ async def test_admin_multiplier_edit_still_charges_one_request(api, paid):
     async with factory() as session:
         row = (await session.scalars(select(AiFeatureQuotaUsageModel))).one()
         assert row.units == Decimal("1")
+
+
+async def test_owner_switches_personal_quota_mode_only_with_budgets_basic_and_confirmation(api):
+    client, _cache, store, _factory = api
+    url = "/api/miniapp/admin/monetization/quota-mode"
+    state = (await client.get(url)).json()
+    assert state["quota_mode"] == "requests" and state["requests"] == {"free_daily": 5, "paid_daily": 150}
+    assert state["activation_problems"]  # basic has no model yet
+
+    assert (await client.put(url, json={"quota_mode": "ail"})).status_code == 422  # no budgets
+    budgets = {"free_daily_ail": 10, "paid_daily_ail": 100}
+    assert (await client.put(url, json={"quota_mode": "ail", **budgets})).status_code == 422  # no usable basic
+    assert (await client.put(url, json={"quota_mode": "ail", "free_daily_ail": 100, "paid_daily_ail": 10})).status_code == 422
+
+    model = {"key": "base", "model_id": "provider/base", "display_name": "Base", "capabilities": {}}
+    assert (await client.post(PREFIX + "/models", json=model)).status_code == 201
+    await store.save_profile(ModelProfile("basic", "Базовая", "base", Decimal("1")))
+    # Saving budgets in requests mode is allowed and changes nothing for users.
+    saved = (await client.put(url, json={"quota_mode": "requests", **budgets})).json()
+    assert saved["quota_mode"] == "requests" and saved["free_daily_ail"] == 10
+
+    unconfirmed = await client.put(url, json={"quota_mode": "ail", **budgets})
+    assert unconfirmed.status_code == 409 and "Подтвердите" in unconfirmed.json()["detail"]
+    enabled = await client.put(url, json={"quota_mode": "ail", "confirm": True, **budgets})
+    assert enabled.status_code == 200 and enabled.json()["quota_mode"] == "ail"
+    assert (await client.put(url, json={"quota_mode": "requests", **budgets})).json()["quota_mode"] == "requests"
+    assert (await client.put(url, json={"quota_mode": "ail", "unknown": 1})).status_code == 422
