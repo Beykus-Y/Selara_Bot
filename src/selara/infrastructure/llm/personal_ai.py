@@ -11,6 +11,7 @@ from selara.application.personal_memory import (
     build_extraction_messages,
     parse_extraction_output,
     select_memories_for_prompt,
+    used_memory_ids,
 )
 from selara.infrastructure.db.personal_ai_repository import AddMemoryStatus, PersonalAiRepository
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
@@ -62,7 +63,7 @@ async def generate_reply(
         # Only this user's rows (the repository is keyed by user_id); chosen by pin, word overlap and recency.
         chosen = select_memories_for_prompt(await repo.memory_items(user_id=user_id), user_text)
         memories = [item.content for item in chosen]
-        await repo.touch_memories(user_id=user_id, memory_ids=[item.id for item in chosen])
+        await repo.touch_memories(user_id=user_id, memory_ids=used_memory_ids(chosen, user_text))
     messages = build_personal_messages(
         profile=profile, summary=summary, recent=recent, user_text=user_text, memories=memories
     )

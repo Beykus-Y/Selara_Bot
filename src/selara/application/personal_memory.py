@@ -22,10 +22,20 @@ MAX_EXTRACTION_MESSAGES = 40
 MAX_EXTRACTION_CHARS = 8000
 
 _MIN_TOKEN_LENGTH = 3
+# Words that say nothing about a topic; they must not make a fact look relevant to a message.
+_STOP_WORDS = frozenset(
+    {
+        "что", "это", "как", "меня", "мне", "мой", "моя", "мои", "тебя", "тебе", "для", "при", "или", "его", "она",
+        "они", "так", "вот", "уже", "ещё", "еще", "где", "когда", "есть", "быть", "был", "была", "было", "были",
+        "the", "and", "for", "that", "this", "with", "you", "are", "was", "not", "have", "what", "when",
+    }
+)
 _STEM_LENGTH = 5
 
+# Only the explicit form "запомни, что <факт>" / "remember that <факт>" is taken for a request to store a fact;
+# any other text that merely starts with the verb ("Запомни это стихотворение…") is an ordinary message.
 _REMEMBER_RE = re.compile(
-    r"^\s*(?:запомни(?:те)?|remember)\b(?:[\s,:\-—–]+(?:что|that)(?![\w\-]))?[\s,:\-—–]*(?P<fact>.*)$",
+    r"^\s*(?:запомни(?:те)?|remember)\s*,?\s+(?:что|that)\s+(?P<fact>\S.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 _WORD_RE = re.compile(r"[\w]+", re.UNICODE)
@@ -110,7 +120,7 @@ def _stems(text: str) -> set[str]:
     return {
         word[:_STEM_LENGTH]
         for word in (w.casefold() for w in _WORD_RE.findall(text))
-        if len(word) >= _MIN_TOKEN_LENGTH
+        if len(word) >= _MIN_TOKEN_LENGTH and word not in _STOP_WORDS
     }
 
 
@@ -132,6 +142,16 @@ def select_memories_for_prompt(
         return (item.pinned, overlap, recency, item.id)
 
     return sorted(items, key=rank, reverse=True)[: max(limit, 0)]
+
+
+def used_memory_ids(chosen: Sequence[MemoryItem], query: str) -> list[int]:
+    """Ids worth marking as "used": pinned facts and facts sharing a word with the message.
+
+    Facts that were only filling free slots by recency are not touched, otherwise the same few facts would
+    keep winning the recency ranking and the rest would never get a turn.
+    """
+    query_stems = _stems(query)
+    return sorted(item.id for item in chosen if item.pinned or query_stems & _stems(item.content))
 
 
 # --- automatic extraction -------------------------------------------------------------------

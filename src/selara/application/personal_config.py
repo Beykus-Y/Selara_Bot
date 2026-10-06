@@ -24,7 +24,9 @@ MAX_DURATION_DAYS = 365
 MAX_DAILY_LIMIT = 10_000
 MAX_MEMORY_LIMIT = 1_000
 MIN_EXTRACT_EVERY = 2
-MAX_EXTRACT_EVERY = 200
+# One extraction run looks at most at this many user messages (personal_memory.MAX_EXTRACTION_MESSAGES);
+# a longer interval could never be satisfied, so it is rejected instead of silently disabling extraction.
+MAX_EXTRACT_EVERY = 40
 
 
 @dataclass(frozen=True, slots=True)

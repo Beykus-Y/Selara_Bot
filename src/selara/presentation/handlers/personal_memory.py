@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -37,6 +38,7 @@ PAGE_SIZE = 8
 _PENDING_TTL = timedelta(minutes=10)
 _MAX_PENDING_PER_USER = 5
 _EXPORT_CHUNK = 3500
+_EXPORT_COOLDOWN_SECONDS = 30.0
 _ACCESS_ERROR_TEXT = "⚠️ Проверка доступа временно недоступна. Попробуйте позже."
 
 
@@ -51,11 +53,20 @@ class _PendingMemory:
 _pending_memories: dict[int, dict[str, _PendingMemory]] = {}
 
 
+# Last export per user (monotonic seconds): a repeated tap would send up to ~18 messages each time.
+_last_export: dict[int, float] = {}
+
+
 def _store_pending(user_id: int, text: str) -> str:
     now = datetime.now(timezone.utc)
+    # Lazy global cleanup: abandoned proposals of users who never come back must not pile up.
+    for owner in list(_pending_memories):
+        owned = _pending_memories[owner]
+        for token in [t for t, p in owned.items() if p.expires_at is not None and p.expires_at <= now]:
+            owned.pop(token, None)
+        if not owned and owner != user_id:
+            _pending_memories.pop(owner, None)
     bucket = _pending_memories.setdefault(user_id, {})
-    for token in [t for t, p in bucket.items() if p.expires_at <= now]:
-        bucket.pop(token, None)
     while len(bucket) >= _MAX_PENDING_PER_USER:
         bucket.pop(next(iter(bucket)))
     token = secrets.token_urlsafe(6)
@@ -63,9 +74,11 @@ def _store_pending(user_id: int, text: str) -> str:
     return token
 
 
-def _take_pending(user_id: int, token: str) -> _PendingMemory | None:
-    pending = _pending_memories.get(user_id, {}).pop(token, None)
+def _take_pending(user_id: int, token: str, *, pop: bool = True) -> _PendingMemory | None:
+    bucket = _pending_memories.get(user_id, {})
+    pending = bucket.pop(token, None) if pop else bucket.get(token)
     if pending is None or pending.expires_at <= datetime.now(timezone.utc):
+        bucket.pop(token, None)
         return None
     return pending
 
@@ -333,16 +346,19 @@ async def memory_callback(
         return
 
     if action in ("ok", "no") and args:
-        pending = _take_pending(user_id, args[0])
+        # Keep the proposal until the decision is final, so a temporary access error can be retried.
+        pending = _take_pending(user_id, args[0], pop=False)
         if pending is None:
             await query.answer("Это предложение устарело. Отправьте факт ещё раз.", show_alert=True)
             return
         if action == "no":
+            _take_pending(user_id, args[0])
             await query.answer()
             await _edit(query, "Хорошо, не запоминаю.", html=False)
             return
         stored = await repo.get_or_create_profile(user_id)
         if not stored.memory_enabled:
+            _take_pending(user_id, args[0])
             await query.answer()
             await _edit(query, "Память выключена, ничего не сохранено. Включить её можно в /ai.", html=False)
             return
@@ -352,7 +368,10 @@ async def memory_callback(
         if limit is None:
             await query.answer(_ACCESS_ERROR_TEXT, show_alert=True)
             return
+        _take_pending(user_id, args[0])
         result = await repo.add_memory(user_id=user_id, content=pending.text, source="explicit", limit=limit)
+        # Persist before talking to Telegram: a failed edit must not roll back what the user was told is saved.
+        await db_session.commit()
         await query.answer()
         if result.status == AddMemoryStatus.ADDED:
             await _edit(query, f"Запомнила: «{escape(pending.text)}». Все факты: /memory.")
@@ -366,11 +385,16 @@ async def memory_callback(
         if user_id in personal_ai._inflight_users:
             await query.answer("Я ещё отвечаю на ваше сообщение. Повторите через пару секунд.", show_alert=True)
             return
-        removed = await repo.delete_all_user_data(user_id=user_id)
-        personal_ai._pending_inputs.pop(user_id, None)
-        _pending_memories.pop(user_id, None)
-        # Persist the deletion before any Telegram call: a failed edit must not roll the user's data back.
-        await db_session.commit()
+        # Hold the same per-user lock a reply does, so a turn cannot start from the old data mid-deletion.
+        personal_ai._inflight_users.add(user_id)
+        try:
+            removed = await repo.delete_all_user_data(user_id=user_id)
+            personal_ai._pending_inputs.pop(user_id, None)
+            _pending_memories.pop(user_id, None)
+            # Persist the deletion before any Telegram call: a failed edit must not roll the user's data back.
+            await db_session.commit()
+        finally:
+            personal_ai._inflight_users.discard(user_id)
         await query.answer("Удалено")
         await _edit(
             query,
@@ -385,6 +409,11 @@ async def memory_callback(
         return
 
     if action == "exp":
+        now = time.monotonic()
+        if now - _last_export.get(user_id, -_EXPORT_COOLDOWN_SECONDS) < _EXPORT_COOLDOWN_SECONDS:
+            await query.answer("Экспорт уже отправлен выше. Повторите чуть позже.", show_alert=True)
+            return
+        _last_export[user_id] = now
         await query.answer()
         facts = [item.content for item in await repo.memory_items(user_id=user_id)]
         if not facts:
@@ -406,11 +435,13 @@ async def memory_callback(
         memory_id, page = _int(args[0]), _int(args[1])
         if action == "del":
             done = await repo.delete_memory(user_id=user_id, memory_id=memory_id)
+            await db_session.commit()
             await query.answer("Забыла" if done else "Этого факта уже нет.")
         else:
             current = {item.id: item.pinned for item in await repo.memory_items(user_id=user_id)}
             if memory_id in current:
                 await repo.set_memory_pinned(user_id=user_id, memory_id=memory_id, pinned=not current[memory_id])
+                await db_session.commit()
                 await query.answer("Готово")
             else:
                 await query.answer("Этого факта уже нет.")

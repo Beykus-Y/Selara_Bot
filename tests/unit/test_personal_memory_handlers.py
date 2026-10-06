@@ -91,6 +91,7 @@ def _fake_access(monkeypatch):
     handler._pending_inputs.clear()
     handler._inflight_users.clear()
     memory_handler._pending_memories.clear()
+    memory_handler._last_export.clear()
     private_panel._pending_cfg_inputs.clear()
     private_panel._pending_admin_inputs.clear()
 

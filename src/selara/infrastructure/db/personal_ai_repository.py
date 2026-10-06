@@ -128,6 +128,13 @@ class PersonalAiRepository:
         if unknown:
             raise ValueError(f"Unknown personal AI profile fields: {sorted(unknown)}")
         await self.get_or_create_profile(user_id)
+        if fields.get("auto_memory_enabled") is True or fields.get("memory_enabled") is True:
+            # Switching memory on starts from "now": text written before (or while it was off) is never analysed.
+            fields["memory_extract_cursor"] = (
+                select(func.coalesce(func.max(PersonalAiMessageModel.id), 0))
+                .where(PersonalAiMessageModel.user_id == user_id)
+                .scalar_subquery()
+            )
         result = await self._session.execute(
             update(PersonalAiProfileModel)
             .where(

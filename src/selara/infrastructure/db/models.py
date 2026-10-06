@@ -2000,7 +2000,7 @@ class SelaraPersonalConfigModel(Base):
             "memory_paid_limit IS NULL OR memory_paid_limit > 0", name="ck_selara_personal_config_memory_paid"
         ),
         CheckConstraint(
-            "memory_extract_every IS NULL OR memory_extract_every >= 2",
+            "memory_extract_every IS NULL OR memory_extract_every BETWEEN 2 AND 40",
             name="ck_selara_personal_config_memory_every",
         ),
     )

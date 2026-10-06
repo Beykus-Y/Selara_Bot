@@ -146,7 +146,7 @@ def _profile_text(stored: StoredProfile) -> str:
         f"Обращение: {escape(p.address_form) if p.address_form else 'по умолчанию'}, на «{'вы' if p.formality == 'vy' else 'ты'}»",
         f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
         f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
-        f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание: {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
         "",
         "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново, /memory — что я о вас помню, "
         "/forget_all — удалить все личные данные.",
@@ -175,7 +175,7 @@ def _main_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         callback_data=_cb("set", "memory", 0 if stored.memory_enabled else 1, rev),
     )
     builder.button(
-        text=f"Авто-память: {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
         callback_data=_cb("set", "automemory", 0 if stored.auto_memory_enabled else 1, rev),
     )
     builder.button(text="Закрыть", callback_data=_cb("close"))

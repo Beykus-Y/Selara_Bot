@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     personal_memory_free_limit: int = Field(default=20, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_FREE_LIMIT")
     personal_memory_paid_limit: int = Field(default=200, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_PAID_LIMIT")
     personal_memory_auto_extract: bool = Field(default=False, validation_alias="PERSONAL_MEMORY_AUTO_EXTRACT")
-    personal_memory_extract_every: int = Field(default=10, ge=2, le=200, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
+    personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
