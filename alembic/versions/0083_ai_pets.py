@@ -8,8 +8,8 @@ There is deliberately no CHECK tying ``status='active'`` to a non-NULL
 ``current_chat_id``: with ``ON DELETE SET NULL`` such a CHECK would make chat
 deletion fail. The pet service moves an orphaned pet home or puts it to sleep.
 
-Revision ID: 0082_ai_pets
-Revises: 0081_selara_personal_config
+Revision ID: 0083_ai_pets
+Revises: 0082_personal_ai
 Create Date: 2026-10-06 00:00:00
 """
 
@@ -20,8 +20,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0082_ai_pets"
-down_revision: str | None = "0081_selara_personal_config"
+revision: str = "0083_ai_pets"
+down_revision: str | None = "0082_personal_ai"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

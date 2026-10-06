@@ -135,6 +135,11 @@ def _personal_product_for_settings(settings: Settings, config: PersonalConfig):
     )
 
 
+def personal_offer_available(settings: Settings, config: PersonalConfig) -> bool:
+    """Selara Personal is sellable only with a configured price and an enabled AI provider."""
+    return _available(lambda value: _personal_product_for_settings(value, config), settings) is not None
+
+
 def _available(factory, settings: Settings):
     try:
         return factory(settings)

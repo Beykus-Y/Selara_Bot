@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from aiogram import Bot, F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -5759,6 +5760,17 @@ async def photo_commands_handler(message: Message, bot: Bot, settings: Settings,
     )
 
 
+def _pass_private_text_on(message: Message) -> None:
+    """A private text that no text command recognised is not ours: let the later handlers (Personal AI) take it.
+
+    This is the single source of truth for "is this a text command": whatever the parsers above handle
+    (including their format-error replies) returns before reaching here, so new commands can never leak
+    into the AI dialogue.
+    """
+    if message.chat.type == "private":
+        raise SkipHandler()
+
+
 @router.message(F.text)
 async def text_commands_handler(
     message: Message,
@@ -5877,6 +5889,7 @@ async def text_commands_handler(
                 trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
                 if trigger is not None:
                     await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
         return
 
     if message.chat.type not in settings.supported_chat_types:
@@ -5890,6 +5903,7 @@ async def text_commands_handler(
                 trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
                 if trigger is not None:
                     await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
         return
 
     pet_request = parse_pet_text(text)
@@ -6056,6 +6070,7 @@ async def text_commands_handler(
             trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
             if trigger is not None:
                 await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
         return
 
     if intent.name in {"gacha_on", "gacha_off"}:
