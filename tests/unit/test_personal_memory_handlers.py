@@ -801,12 +801,16 @@ async def test_enabling_auto_memory_starts_after_the_existing_history(monkeypatc
     _FakeAccess.decision = _decision(AccessTier.PAID)
     provider = _auto_provider(settings)
 
+    def extraction_calls():
+        # 50 old messages also trigger the unrelated history compression, which shares summarize().
+        return [call for call in llm.extract_calls if "Выбери" in call[0][0]["content"]]
+
     await _chat(_message("новое одно", message_id=1), session, settings, llm, provider)
-    assert llm.extract_calls == []  # the old backlog is not analysed
+    assert extraction_calls() == []  # the old backlog is not analysed
     await _chat(_message("новое два", message_id=2), session, settings, llm, provider)
 
-    assert len(llm.extract_calls) == 1
-    prompt = llm.extract_calls[0][0][-1]["content"]
+    assert len(extraction_calls()) == 1
+    prompt = extraction_calls()[0][0][-1]["content"]
     assert "новое одно" in prompt and "новое два" in prompt and "старое" not in prompt
 
 
