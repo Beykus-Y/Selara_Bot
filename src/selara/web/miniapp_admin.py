@@ -870,9 +870,24 @@ def build_miniapp_admin_router(
             "duration_days": config.duration_days,
             "free_daily_limit": config.limits.free_daily,
             "paid_daily_limit": config.limits.paid_daily,
+            "memory_free_limit": config.memory_free_limit,
+            "memory_paid_limit": config.memory_paid_limit,
+            "memory_auto_extract": config.memory_auto_extract,
+            "memory_extract_every": config.memory_extract_every,
         }
 
-    _EDITABLE_PERSONAL_FIELDS = frozenset({"price_stars", "duration_days", "free_daily_limit", "paid_daily_limit"})
+    _EDITABLE_PERSONAL_FIELDS = frozenset(
+        {
+            "price_stars",
+            "duration_days",
+            "free_daily_limit",
+            "paid_daily_limit",
+            "memory_free_limit",
+            "memory_paid_limit",
+            "memory_auto_extract",
+            "memory_extract_every",
+        }
+    )
 
     def _parse_personal_override(payload: dict[str, Any]) -> PersonalConfigOverride:
         # Request weights (AI Limits) are deliberately not editable: Personal is 5/150 requests.
@@ -888,11 +903,19 @@ def build_miniapp_admin_router(
                 raise ValueError(f"{key} must be an integer")
             return value
 
+        auto_extract = payload.get("memory_auto_extract")
+        if auto_extract is not None and not isinstance(auto_extract, bool):
+            raise ValueError("memory_auto_extract must be true, false or null")
+
         return PersonalConfigOverride(
             price_stars=integer("price_stars"),
             duration_days=integer("duration_days"),
             free_daily_limit=integer("free_daily_limit"),
             paid_daily_limit=integer("paid_daily_limit"),
+            memory_free_limit=integer("memory_free_limit"),
+            memory_paid_limit=integer("memory_paid_limit"),
+            memory_auto_extract=auto_extract,
+            memory_extract_every=integer("memory_extract_every"),
         )
 
     @router.get("/monetization/personal-config")
@@ -910,6 +933,10 @@ def build_miniapp_admin_router(
                 "duration_days": override.duration_days,
                 "free_daily_limit": override.free_daily_limit,
                 "paid_daily_limit": override.paid_daily_limit,
+                "memory_free_limit": override.memory_free_limit,
+                "memory_paid_limit": override.memory_paid_limit,
+                "memory_auto_extract": override.memory_auto_extract,
+                "memory_extract_every": override.memory_extract_every,
             },
             "effective": _personal_config_json(effective),
             "applies_within_seconds": 15,

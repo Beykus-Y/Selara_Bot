@@ -38,6 +38,10 @@ class SqlAlchemyPersonalConfigStore:
             duration_days=row.duration_days,
             free_daily_limit=row.free_daily_limit,
             paid_daily_limit=row.paid_daily_limit,
+            memory_free_limit=row.memory_free_limit,
+            memory_paid_limit=row.memory_paid_limit,
+            memory_auto_extract=row.memory_auto_extract,
+            memory_extract_every=row.memory_extract_every,
         )
 
     async def save_override(self, override: PersonalConfigOverride, *, updated_by: int | None = None) -> PersonalConfig:
@@ -53,6 +57,10 @@ class SqlAlchemyPersonalConfigStore:
                 row.duration_days = override.duration_days
                 row.free_daily_limit = override.free_daily_limit
                 row.paid_daily_limit = override.paid_daily_limit
+                row.memory_free_limit = override.memory_free_limit
+                row.memory_paid_limit = override.memory_paid_limit
+                row.memory_auto_extract = override.memory_auto_extract
+                row.memory_extract_every = override.memory_extract_every
                 row.updated_by = updated_by
         if self._provider is not None:
             self._provider.invalidate()

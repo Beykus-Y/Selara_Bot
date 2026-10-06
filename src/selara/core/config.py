@@ -181,6 +181,12 @@ class Settings(BaseSettings):
     # Personal pool limits: one request = one unit. Fixed until a deliberate switch to AI Limits.
     personal_free_daily_limit: int = Field(default=5, gt=0, le=10_000, validation_alias="PERSONAL_FREE_DAILY_LIMIT")
     personal_paid_daily_limit: int = Field(default=150, gt=0, le=10_000, validation_alias="PERSONAL_PAID_DAILY_LIMIT")
+    # Personal memory: fact limits per tier (technical guard against prompt bloat) and optional auto-extraction.
+    # Extraction is off by default and only runs for Selara Personal users who also switched it on for themselves.
+    personal_memory_free_limit: int = Field(default=20, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_FREE_LIMIT")
+    personal_memory_paid_limit: int = Field(default=200, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_PAID_LIMIT")
+    personal_memory_auto_extract: bool = Field(default=False, validation_alias="PERSONAL_MEMORY_AUTO_EXTRACT")
+    personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
     # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
@@ -203,6 +209,8 @@ class Settings(BaseSettings):
     def _check_personal_limits(self):
         if self.personal_free_daily_limit >= self.personal_paid_daily_limit:
             raise ValueError("PERSONAL_FREE_DAILY_LIMIT must be lower than PERSONAL_PAID_DAILY_LIMIT")
+        if self.personal_memory_free_limit > self.personal_memory_paid_limit:
+            raise ValueError("PERSONAL_MEMORY_FREE_LIMIT must not exceed PERSONAL_MEMORY_PAID_LIMIT")
         if not self.pet_talk_guest_daily_limit <= self.pet_talk_guests_daily_limit <= self.pet_talk_daily_limit:
             raise ValueError("Pet talk limits must satisfy guest <= all guests <= daily")
         return self

@@ -756,6 +756,10 @@ async def test_personal_config_put_is_owner_only_and_rejects_bad_values_with_422
         b'{"duration_days": 100000}',
         b'{"free_daily_limit": 200}',
         b'{"price_stars": true}',
+        b'{"memory_free_limit": 99999999}',
+        b'{"memory_free_limit": 500}',
+        b'{"memory_auto_extract": "yes"}',
+        b'{"memory_extract_every": 1}',
     )
     async with _client(monkeypatch, current_user=admin) as (client, _factory):
         for body in bad_bodies:

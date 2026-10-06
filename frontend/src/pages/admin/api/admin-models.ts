@@ -23,8 +23,11 @@ async function save(url: string, payload: unknown, create = false) {
   try { await http.request({ url, method: create ? 'POST' : 'PUT', data: payload }) }
   catch (error) {
     if (isAxiosError(error)) {
-      const detail = error.response?.data?.detail
-      throw new Error(typeof detail === 'string' ? detail : 'Проверьте поля формы. Не удалось сохранить конфигурацию.')
+      const data = error.response?.data
+      const message = typeof data?.message === 'string' && data.message.trim()
+        ? data.message
+        : typeof data?.detail === 'string' && data.detail.trim() ? data.detail : null
+      throw new Error(message ?? 'Проверьте поля формы. Не удалось сохранить конфигурацию.')
     }
     throw error
   }

@@ -52,9 +52,9 @@ async def scenario(browser, width):
                 payload = route.request.post_data_json
                 state["writes"].append(payload)
                 if str(payload.get("prompt_price_usd_per_million", "")).startswith("-"):
-                    body, status = {"detail": "Цена должна быть числом ≥ 0."}, 422
+                    body, status = {"ok": False, "status_code": 422, "message": "Цена должна быть числом ≥ 0."}, 422
                 elif state["error"]:
-                    body, status = {"detail": state["error"]}, 409
+                    body, status = {"ok": False, "status_code": 409, "message": state["error"]}, 409
                 elif route.request.method == "POST":
                     new = {**payload, "revision": 1, "used_by_profiles": []}
                     state["models"].append(new)
@@ -129,7 +129,7 @@ async def scenario(browser, width):
     state["error"] = "Настройка уже была изменена. Обновите данные и повторите."
     await form.get_by_role("button", name="Сохранить модель", exact=True).click()
     await form.get_by_role("alert").wait_for()
-    assert "Обновите данные" in await form.inner_text()
+    assert "Обновите данные и повторите." in await form.inner_text()
     state["error"] = None
     await form.get_by_label("Input USD / 1M tokens", exact=True).fill("0")
     await form.get_by_label("Модель включена", exact=True).uncheck()
