@@ -4,8 +4,31 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.llm_repository import LlmRepository
+from selara.infrastructure.db.models import ChatModel, LlmContextMessageModel, UserModel
 from selara.infrastructure.llm.client import LlmCallResult
 from selara.infrastructure.llm.context import load_context, save_interaction, maybe_compress
+
+
+@pytest.fixture
+async def repo():
+    """Real LlmRepository over an in-memory aiosqlite DB (same pattern as
+    tests/unit/test_glossary_search.py) for the web_tainted persistence tests."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add_all([
+            ChatModel(telegram_chat_id=4242, type="supergroup", title="LLM context test"),
+            UserModel(telegram_user_id=111, is_bot=False),
+        ])
+        await session.flush()
+        yield LlmRepository(session)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -71,6 +94,7 @@ async def test_save_interaction_isolates_by_chat_id():
         is_context=False,
         admin_user_id=admin_user_id,
         tool_call_id="call_1",
+        web_tainted=False,
     )
     llm_repo.add_context_message.assert_any_call(
         chat_id=chat_id,
@@ -78,6 +102,7 @@ async def test_save_interaction_isolates_by_chat_id():
         content="assistant response",
         is_context=True,
         admin_user_id=admin_user_id,
+        web_tainted=False,
     )
 
 
@@ -147,3 +172,74 @@ async def test_maybe_compress_prompt_tells_summarizer_content_is_untrusted_data(
     sent_prompt = llm_client.summarize.await_args.args[0]
     system_text = sent_prompt[0]["content"]
     assert "инструкц" in system_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_save_interaction_marks_web_tainted_rows(repo):
+    """web_tainted=True flags the TOOL rows and the ASSISTANT row, but NOT the
+    user row: the admin's own query is trusted input, everything the model
+    produced after seeing untrusted web content is not."""
+    chat_id = 4242
+    await save_interaction(
+        chat_id=chat_id,
+        admin_user_id=111,
+        user_query_content="что нового про selara?",
+        assistant_response="вот что нашлось в сети",
+        tool_messages=[{"content": "untrusted page content", "tool_call_id": "call-1"}],
+        llm_repo=repo,
+        is_context=False,
+        web_tainted=True,
+    )
+
+    rows = (await repo._session.execute(
+        select(LlmContextMessageModel).where(LlmContextMessageModel.chat_id == chat_id)
+    )).scalars().all()
+    by_role = {row.role: row for row in rows}
+    assert set(by_role) == {"user", "tool", "assistant"}
+    assert by_role["user"].web_tainted is False
+    assert by_role["tool"].web_tainted is True
+    assert by_role["assistant"].web_tainted is True
+
+
+@pytest.mark.asyncio
+async def test_get_all_messages_in_range_excludes_web_tainted(repo):
+    """get_history's range query has no is_context filter, so web-tainted rows
+    must be excluded explicitly: a poisoned page must not re-enter a fresh
+    invocation that starts again with a full tool set."""
+    chat_id = 4242
+    await repo.add_context_message(
+        chat_id=chat_id, role="user", content="clean question",
+        is_context=True, admin_user_id=111,
+    )
+    await repo.add_context_message(
+        chat_id=chat_id, role="assistant", content="clean answer",
+        is_context=True, admin_user_id=111,
+    )
+    await repo.add_context_message(
+        chat_id=chat_id, role="tool", content="clean tool output",
+        is_context=False, admin_user_id=111, tool_call_id="call-clean",
+    )
+    await save_interaction(
+        chat_id=chat_id,
+        admin_user_id=111,
+        user_query_content="tainted question",
+        assistant_response="tainted assistant answer",
+        tool_messages=[{"content": "poisoned page content", "tool_call_id": "call-tainted"}],
+        llm_repo=repo,
+        is_context=False,
+        web_tainted=True,
+    )
+
+    rows = await repo.get_all_messages_in_range(
+        chat_id=chat_id,
+        period_start=datetime(2020, 1, 1),
+        period_end=datetime(2100, 1, 1),
+    )
+    contents = {row.content for row in rows}
+    # Tainted tool row and tainted assistant row never come back ...
+    assert "poisoned page content" not in contents
+    assert "tainted assistant answer" not in contents
+    # ... clean rows survive; the tainted invocation's USER row is not flagged
+    # (only tool/assistant rows get the flag) and therefore still appears.
+    assert contents == {"clean question", "clean answer", "clean tool output", "tainted question"}
+    assert all(row.web_tainted is False for row in rows)

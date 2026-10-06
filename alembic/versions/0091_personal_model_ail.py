@@ -1,7 +1,7 @@
 """Personal AI model profile selection and the AI Limits (AIL) quota mode
 
-Revision ID: 0090_personal_model_ail
-Revises: 0089_admin_model_config
+Revision ID: 0091_personal_model_ail
+Revises: 0090_web_tainted_history
 Create Date: 2026-10-06 00:00:06
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0090_personal_model_ail"
-down_revision: str | None = "0089_admin_model_config"
+revision: str = "0091_personal_model_ail"
+down_revision: str | None = "0090_web_tainted_history"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
@@ -79,7 +79,7 @@ def downgrade() -> None:
     for query, reason in checks:
         if bind.execute(sa.text(query)).first() is not None:
             raise RuntimeError(
-                f"Cannot downgrade 0090_personal_model_ail: {reason}. "
+                f"Cannot downgrade 0091_personal_model_ail: {reason}. "
                 "Switch Personal back to requests mode, clear the AIL budgets and resolve this data explicitly first."
             )
     op.drop_column("ai_feature_quota_usage", "model_profile")
