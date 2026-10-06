@@ -88,8 +88,10 @@ def register_tool(name: str, schema: dict, status_text: str = "") -> Callable:
     return decorator
 
 
-def get_tool_definitions() -> list[dict]:
-    return [t.schema for t in _TOOL_REGISTRY.values()]
+def get_tool_definitions(exclude: frozenset[str] | None = None) -> list[dict]:
+    """Tool schemas for the provider call; `exclude` drops tools the current
+    invocation cannot execute (e.g. web tools without a search client)."""
+    return [t.schema for t in _TOOL_REGISTRY.values() if exclude is None or t.name not in exclude]
 
 
 def get_tool_status(name: str, arguments: dict) -> str:
@@ -1841,3 +1843,6 @@ async def _exec_read_bot_doc(
 
 # Register additive skill/artifact capabilities after the base dispatcher is defined.
 from selara.infrastructure.llm import artifact_tools as _artifact_tools  # noqa: E402,F401
+
+# Register internet-access tools (web_search / fetch_page) the same way.
+from selara.infrastructure.llm import web_tools as _web_tools  # noqa: E402,F401
