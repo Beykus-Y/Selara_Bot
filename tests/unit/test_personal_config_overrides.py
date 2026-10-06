@@ -136,3 +136,92 @@ async def test_service_uses_limits_and_weights_from_the_hot_reloaded_config(monk
     await _reserve_personal(service)
     kwargs = repository.reserve.await_args.kwargs
     assert kwargs["policy"].limit == 3 and kwargs["cost"].units == Decimal("1")
+
+
+# ----- M1: hostile or out-of-range values are validation errors, not 500s or silent zero weights -----
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"default_units": Decimal("NaN")},
+        {"default_units": Decimal("Infinity")},
+        {"default_units": Decimal("1001")},
+        {"default_units": Decimal("0")},
+        {"default_units": Decimal("0.001")},  # would be stored as 0.00
+        {"unit_weights": {"personal_chat": Decimal("Infinity")}},
+        {"unit_weights": {"personal_chat": Decimal("NaN")}},
+        {"unit_weights": {"personal_chat": Decimal("0.004")}},
+        {"unit_weights": {"personal_chat": Decimal("1e20")}},
+        {"price_stars": 10_001},
+        {"duration_days": 366},
+        {"free_daily_limit": 10_001},
+        {"paid_daily_limit": 10_001},
+    ],
+)
+def test_out_of_range_or_non_finite_values_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        PersonalConfigOverride(**kwargs)
+
+
+def test_weights_are_rounded_to_the_stored_precision():
+    override = PersonalConfigOverride(default_units=Decimal("1.234"), unit_weights={"personal_chat": Decimal("0.005")})
+    assert override.default_units == Decimal("1.23")
+    assert override.unit_weights == {"personal_chat": Decimal("0.01")}
+
+
+# ----- M2: the personal config can never price group features -----
+
+
+def test_override_rejects_weights_for_non_personal_features():
+    with pytest.raises(ValueError, match="personal"):
+        PersonalConfigOverride(unit_weights={"llm_admin": Decimal("2")})
+
+
+def test_env_weights_for_non_personal_features_fail_fast(monkeypatch):
+    settings = _env(monkeypatch, AI_QUOTA_UNIT_WEIGHTS='{"daily_summary": "3"}')
+    with pytest.raises(ValueError, match="personal"):
+        config_from_settings(settings)
+
+
+@pytest.mark.asyncio
+async def test_personal_config_prices_only_personal_features():
+    from selara.application.personal_config import StaticPersonalConfigProvider
+
+    config = PersonalConfig(
+        price_stars=None,
+        duration_days=30,
+        limits=PersonalQuotaLimits(5, 150),
+        default_units=Decimal("7"),
+        unit_weights={"personal_chat": Decimal("2")},
+    )
+    scope = QuotaScope.chat(-100)
+    repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
+    service = FeatureAccessService(repository, personal_config=StaticPersonalConfigProvider(config))
+
+    await service.reserve_feature_usage(
+        feature=AiFeature.LLM_ADMIN,
+        chat_id=-100,
+        actor_user_id=1,
+        actor_is_bot=False,
+        trigger="telegram_message",
+        timezone_name="UTC",
+        idempotency_key="group:1",
+        chat_type="supergroup",
+    )
+
+    assert repository.reserve.await_args.kwargs["cost"].units == Decimal("1")  # not 7
+
+    await _reserve_personal(FeatureAccessService(
+        repository := SimpleNamespace(reserve=AsyncMock(return_value=_decision(QuotaScope.user(42)))),
+        personal_config=StaticPersonalConfigProvider(config),
+    ))
+    assert repository.reserve.await_args.kwargs["cost"].units == Decimal("2")
+
+
+# ----- L5: a bad .env combination is reported by Settings, not by a late crash -----
+
+
+def test_settings_reject_free_limit_not_below_paid(monkeypatch):
+    with pytest.raises(ValueError, match="PERSONAL_FREE_DAILY_LIMIT"):
+        _env(monkeypatch, PERSONAL_FREE_DAILY_LIMIT="200", PERSONAL_PAID_DAILY_LIMIT="150")

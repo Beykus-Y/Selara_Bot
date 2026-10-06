@@ -732,3 +732,33 @@ async def test_ai_readiness_and_checkout_agree_on_invalid_llm_config(monkeypatch
     rows = {item["key"]: item for item in body["checks"]}
     assert rows["llm_provider"]["status"] == "unavailable"
     assert rows["checkout"]["status"] == "unavailable" and body["checkout"]["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_personal_config_put_is_owner_only_and_rejects_bad_values_with_422(monkeypatch) -> None:
+    url = "/api/miniapp/admin/monetization/personal-config"
+    group_admin = UserSnapshot(telegram_user_id=80, username="gadmin", first_name="G", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=None) as (client, _factory):
+        assert (await client.put(url, json={})).status_code == 401
+    async with _client(monkeypatch, current_user=group_admin) as (client, _factory):
+        assert (await client.put(url, json={"price_stars": 10})).status_code == 403
+
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    bad_bodies = (
+        b"[]",
+        b"not json",
+        b'{"default_units": NaN}',
+        b'{"default_units": Infinity}',
+        b'{"default_units": 1e12}',
+        b'{"default_units": 0.001}',
+        b'{"unit_weights": {"personal_chat": "Infinity"}}',
+        b'{"unit_weights": {"llm_admin": 2}}',
+        b'{"price_stars": 99999999999}',
+        b'{"duration_days": 100000}',
+        b'{"free_daily_limit": 200}',
+        b'{"price_stars": true}',
+    )
+    async with _client(monkeypatch, current_user=admin) as (client, _factory):
+        for body in bad_bodies:
+            response = await client.put(url, content=body, headers={"content-type": "application/json"})
+            assert response.status_code == 422, body

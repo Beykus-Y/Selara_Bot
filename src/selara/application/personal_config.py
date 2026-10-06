@@ -10,15 +10,51 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, DecimalException
 from typing import Awaitable, Callable, Mapping, Protocol
 
-from selara.application.feature_access import PersonalQuotaLimits
+from selara.application.feature_access import PERSONAL_FEATURES, PersonalQuotaLimits
 from selara.application.usage_pricing import ConfiguredUsagePricer
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL_SECONDS = 15.0
+
+# Upper bounds shared by the API and .env validation (Telegram caps an invoice well below these).
+MAX_PRICE_STARS = 10_000
+MAX_DURATION_DAYS = 365
+MAX_DAILY_LIMIT = 10_000
+MAX_UNITS = Decimal("1000")
+_UNIT_STEP = Decimal("0.01")  # precision of ``ai_feature_quota_usage.units`` (Numeric(10, 2))
+_PERSONAL_FEATURE_KEYS = frozenset(feature.value for feature in PERSONAL_FEATURES)
+
+
+def normalize_units(value, name: str) -> Decimal:
+    """Finite, rounded to the stored 0.01 step, strictly positive and bounded; else ValueError."""
+    try:
+        parsed = Decimal(str(value))
+        if not parsed.is_finite():
+            raise ValueError(f"{name} must be a finite number")
+        rounded = parsed.quantize(_UNIT_STEP, rounding=ROUND_HALF_UP)
+    except DecimalException:
+        raise ValueError(f"{name} is not a valid number") from None
+    if rounded <= 0:
+        raise ValueError(f"{name} must be at least {_UNIT_STEP}")
+    if rounded > MAX_UNITS:
+        raise ValueError(f"{name} must not exceed {MAX_UNITS}")
+    return rounded
+
+
+def normalize_weights(weights: Mapping[str, object] | None, name: str = "unit_weights") -> dict[str, Decimal]:
+    """Weights exist only for personal features: group features are never priced from this config."""
+    result: dict[str, Decimal] = {}
+    for feature, weight in (weights or {}).items():
+        if feature not in _PERSONAL_FEATURE_KEYS:
+            raise ValueError(
+                f"{name}: {feature!r} is not a personal feature (allowed: {', '.join(sorted(_PERSONAL_FEATURE_KEYS))})"
+            )
+        result[feature] = normalize_units(weight, f"{name}.{feature}")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,15 +69,20 @@ class PersonalConfigOverride:
     unit_weights: Mapping[str, Decimal] | None = None
 
     def __post_init__(self) -> None:
-        for name in ("price_stars", "duration_days", "free_daily_limit", "paid_daily_limit"):
+        for name, upper in (
+            ("price_stars", MAX_PRICE_STARS),
+            ("duration_days", MAX_DURATION_DAYS),
+            ("free_daily_limit", MAX_DAILY_LIMIT),
+            ("paid_daily_limit", MAX_DAILY_LIMIT),
+        ):
             value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if self.default_units is not None and self.default_units < 0:
-            raise ValueError("default_units cannot be negative")
-        for feature, weight in (self.unit_weights or {}).items():
-            if Decimal(weight) < 0:
-                raise ValueError(f"unit weight for {feature} cannot be negative")
+            if value is not None and not 0 < value <= upper:
+                raise ValueError(f"{name} must be between 1 and {upper}")
+        # Frozen dataclass: store the normalized (finite, 0.01-rounded) numbers.
+        if self.default_units is not None:
+            object.__setattr__(self, "default_units", normalize_units(self.default_units, "default_units"))
+        if self.unit_weights is not None:
+            object.__setattr__(self, "unit_weights", normalize_weights(self.unit_weights) or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +104,8 @@ def config_from_settings(settings) -> PersonalConfig:
         price_stars=settings.selara_personal_price_stars,
         duration_days=settings.selara_personal_duration_days,
         limits=PersonalQuotaLimits.from_settings(settings),
-        default_units=Decimal(settings.ai_quota_default_units),
-        unit_weights=dict(settings.ai_quota_unit_weights),
+        default_units=normalize_units(settings.ai_quota_default_units, "AI_QUOTA_DEFAULT_UNITS"),
+        unit_weights=normalize_weights(settings.ai_quota_unit_weights, "AI_QUOTA_UNIT_WEIGHTS"),
     )
 
 
@@ -83,7 +124,7 @@ def merge_config(base: PersonalConfig, override: PersonalConfigOverride | None) 
         limits=limits,
         default_units=override.default_units if override.default_units is not None else base.default_units,
         # Weights merge per feature: the database adds to, or replaces, individual env entries.
-        unit_weights={**base.unit_weights, **{k: Decimal(v) for k, v in (override.unit_weights or {}).items()}},
+        unit_weights={**base.unit_weights, **(override.unit_weights or {})},
     )
 
 

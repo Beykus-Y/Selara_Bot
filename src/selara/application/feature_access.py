@@ -59,6 +59,8 @@ class QuotaScope:
 
 
 PERSONAL_POOL_KEY = "personal_daily"
+# Features the personal config may price; group features never read its weights.
+PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,11 +361,12 @@ class FeatureAccessService:
         self._user_entitlement_resolver = user_entitlement_resolver or NoPaidUserEntitlementResolver()
         self._pricer: UsagePricer = pricer or ConfiguredUsagePricer()
 
-    async def _personal_runtime(self) -> tuple[PersonalQuotaLimits | None, UsagePricer]:
+    async def _personal_runtime(self, feature: AiFeature) -> tuple[PersonalQuotaLimits | None, UsagePricer]:
+        """Limits and pricer for ``feature``; the personal config prices personal features only."""
         if self._personal_config is None:
             return self._personal_limits, self._pricer
         config = await self._personal_config.get()
-        return config.limits, config.pricer()
+        return config.limits, config.pricer() if feature in PERSONAL_FEATURES else self._pricer
 
     async def _resolve_entitlement(
         self,
@@ -550,7 +553,7 @@ class FeatureAccessService:
         """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened."""
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        personal_limits, pricer = await self._personal_runtime()
+        personal_limits, pricer = await self._personal_runtime(feature)
         policy = resolve_feature_policy(
             feature=feature, trigger=trigger, personal_limits=personal_limits
         )
@@ -637,7 +640,7 @@ class FeatureAccessService:
     ) -> FeatureUsageSummary:
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        personal_limits, pricer = await self._personal_runtime()
+        personal_limits, pricer = await self._personal_runtime(feature)
         policy = resolve_feature_policy(
             feature=feature, trigger=trigger, personal_limits=personal_limits
         )
