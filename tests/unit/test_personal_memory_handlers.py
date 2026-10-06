@@ -467,7 +467,7 @@ async def test_forget_all_only_asks_until_confirmed(monkeypatch, session):
     await _populate(session)
     message = _message("/forget_all")
 
-    await _memory_call(memory_handler.forget_all_command, message, session, settings)
+    await memory_handler.forget_all_command(message)
 
     callbacks = _callbacks(message.answer.await_args.kwargs["reply_markup"])
     assert callbacks == ["pam:fy", "pam:fn"]
