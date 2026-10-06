@@ -13,7 +13,7 @@ import { LoadingShell } from '@/shared/ui/LoadingShell'
 import '@/pages/chat/ui/selara-ai-panel.css'
 import './personal.css'
 
-function subscriptionBadge(subscription: PersonalOverview['subscription']) {
+function subscriptionBadge(subscription: PersonalOverview['subscription'], timeZone: string) {
   if (subscription.state === 'unavailable' || subscription.tier === null) {
     return { text: 'Не удалось проверить', tone: 'muted', note: 'Статус временно не удалось проверить. Это не значит, что доступ отключён.' }
   }
@@ -21,7 +21,7 @@ function subscriptionBadge(subscription: PersonalOverview['subscription']) {
     return { text: 'Внутренний доступ', tone: 'ok', note: null }
   }
   if (subscription.tier === 'paid') {
-    const until = subscription.valid_until ? `Активна до ${formatDate(subscription.valid_until, 'UTC')}` : 'Активна'
+    const until = subscription.valid_until ? `Активна до ${formatDate(subscription.valid_until, timeZone)}` : 'Активна'
     return { text: subscription.expiring_soon ? 'Скоро закончится' : 'Активна', tone: subscription.expiring_soon ? 'warn' : 'ok', note: until }
   }
   return { text: 'Бесплатный доступ', tone: 'muted', note: null }
@@ -29,8 +29,8 @@ function subscriptionBadge(subscription: PersonalOverview['subscription']) {
 
 function SubscriptionSection({ data }: { data: PersonalOverview }) {
   const { subscription, quota } = data
-  const badge = subscriptionBadge(subscription)
-  const view = quotaView(quota, 'сегодня', 'UTC')
+  const badge = subscriptionBadge(subscription, data.timezone)
+  const view = quotaView(quota, 'сегодня', data.timezone)
   const showOffer = subscription.offer_available && subscription.tier !== 'owner_internal' && subscription.state === 'available'
   return (
     <section className="miniapp-section-card selara-ai" aria-labelledby="personal-sub-title">

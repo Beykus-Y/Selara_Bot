@@ -32,6 +32,8 @@ export type PersonalProfile = {
 
 export type PersonalOverview = {
   checked_at: string
+  /** Zone of the daily quota boundary (BOT_TIMEZONE); dates on the page are shown in it. */
+  timezone: string
   subscription: PersonalSubscription
   quota: AiQuota
   profile: PersonalProfile

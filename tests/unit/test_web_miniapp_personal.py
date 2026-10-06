@@ -197,6 +197,7 @@ async def test_new_user_overview_is_read_only_and_uses_free_limits(env):
     body = response.json()
     assert response.status_code == 200 and body["ok"] is True
     assert response.headers["cache-control"] == "no-store"
+    assert body["timezone"] == "UTC"
     assert body["subscription"]["tier"] == "free"
     assert body["subscription"]["active"] is False
     assert body["subscription"]["offer_available"] is True

@@ -173,6 +173,7 @@ def build_miniapp_personal_router(
             payload = {
                 "ok": True,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
+                "timezone": settings.bot_timezone,
                 **status,
                 "profile": _profile_payload(stored, config, tier),
                 "memory": {

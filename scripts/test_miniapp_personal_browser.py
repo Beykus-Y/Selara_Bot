@@ -39,6 +39,7 @@ def _overview(*, tier="free", facts=None, limit=20, memory_enabled=True, availab
     return {
         "ok": True,
         "checked_at": "2026-10-06T12:00:00+00:00",
+        "timezone": "UTC",
         "subscription": {
             "state": "available" if available else "unavailable",
             "tier": tier if available else None,
