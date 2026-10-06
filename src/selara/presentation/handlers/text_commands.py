@@ -6454,7 +6454,7 @@ async def text_commands_handler(
         )
         return
 
-    if intent.name == "pet":
+    if intent.name == "family_pet":
         await family_pet_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]
