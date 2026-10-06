@@ -200,6 +200,20 @@ def test_personal_ai_tables_enforce_constraints_and_cascade_with_the_user(databa
     assert [row[0]["n"] for row in counts] == [0, 0, 0]
 
 
+def test_downgrade_refuses_to_drop_private_personal_ai_data(database):
+    _run_sql(
+        database,
+        "INSERT INTO users (telegram_user_id, is_bot) VALUES (9101, false) ON CONFLICT DO NOTHING",
+        "INSERT INTO personal_ai_profiles (user_id) VALUES (9101)",
+    )
+    refused = _alembic(database, "downgrade", "0081_selara_personal_config")
+    assert refused.returncode != 0
+    assert "Cannot downgrade 0082_personal_ai" in refused.stderr
+    assert _run_sql(database, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == _HEAD
+    assert _run_sql(database, "SELECT count(*) AS n FROM personal_ai_profiles")[0][0]["n"] == 1
+    _run_sql(database, "DELETE FROM users WHERE telegram_user_id = 9101")
+
+
 def test_downgrade_refuses_to_drop_personal_data_and_is_clean_without_it(database):
     _run_sql(
         database,

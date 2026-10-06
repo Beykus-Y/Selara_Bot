@@ -9,7 +9,7 @@ from html import escape
 from typing import Any
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, Filter
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -47,7 +47,6 @@ from selara.infrastructure.llm.personal_ai import (
     maybe_compress_personal,
 )
 from selara.presentation.auth import resolve_owner_private_exemption
-from selara.presentation.commands.catalog import match_builtin_command
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.handlers.premium import personal_offer_available
 from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
@@ -56,6 +55,8 @@ from selara.presentation.llm_formatting import html_to_plain_text, render_llm_ht
 log = logging.getLogger(__name__)
 
 router = Router(name="personal_ai")
+# Included after text_commands: it only receives private text that no text command recognised.
+chat_router = Router(name="personal_ai_chat")
 
 _PENDING_TTL = timedelta(minutes=10)
 _UNAVAILABLE_TEXT = "Selara AI в личных сообщениях сейчас недоступен. Попробуйте позже."
@@ -119,8 +120,9 @@ class PersonalChatFilter(Filter):
             return False
         if _get_pending_input(user_id) is not None:
             return False
-        # Built-in text commands ("баланс", "профиль", ...) keep working in private chats.
-        return match_builtin_command(text) is None
+        # Text commands are not filtered here: this router sits after text_commands, which hands over
+        # (SkipHandler) only the private text it did not recognise itself.
+        return True
 
 
 # --- settings wizard -----------------------------------------------------------
@@ -341,6 +343,10 @@ async def _send_answer(message: Message, thinking: Message, text: str) -> None:
             await message.answer(chunk, parse_mode="HTML")
         except TelegramBadRequest:
             await message.answer(html_to_plain_text(chunk), parse_mode=None)
+        except TelegramForbiddenError:
+            # The user blocked the bot while the model was answering: the turn is already stored and charged.
+            log.info("personal_ai: user blocked the bot before the answer was delivered")
+            return
 
 
 # One turn per user at a time: a second message sent while the first is still being answered would
@@ -348,7 +354,7 @@ async def _send_answer(message: Message, thinking: Message, text: str) -> None:
 _inflight_users: set[int] = set()
 
 
-@router.message(PersonalChatFilter())
+@chat_router.message(PersonalChatFilter())
 async def personal_chat_handler(
     message: Message,
     db_session: AsyncSession,
@@ -493,6 +499,8 @@ async def _handle_personal_chat(
             user_id=user.id, thread=thread, role="user", content=text, telegram_message_id=message.message_id
         )
         await repo.add_message(user_id=user.id, thread=thread, role="assistant", content=answer)
+        # Persist the turn now and give the connection back before delivery and compression.
+        await db_session.commit()
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
         await _send_answer(message, thinking, answer)

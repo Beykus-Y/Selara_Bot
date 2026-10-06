@@ -150,7 +150,6 @@ async def _run(message, session, settings, llm):
         ("расскажи анекдот", "private", True),
         ("/start", "private", False),
         ("/ai_reset", "private", False),
-        ("профиль", "private", False),  # built-in text command keeps working in DM
         ("привет", "group", False),
         ("привет", "supergroup", False),
         ("   ", "private", False),
@@ -173,6 +172,11 @@ async def test_chat_filter_yields_to_other_private_flows_pending_input():
     handler._set_pending_input(USER_ID, "name")
     assert await handler.PersonalChatFilter()(_message("Новое имя")) is False
     assert await handler.PendingPersonalInputFilter()(_message("Новое имя")) is True
+
+
+async def test_chat_handler_is_registered_on_the_router_that_follows_text_commands():
+    assert any(h.callback is handler.personal_chat_handler for h in handler.chat_router.message.handlers)
+    assert not any(h.callback is handler.personal_chat_handler for h in handler.router.message.handlers)
 
 
 # --- quota -------------------------------------------------------------------------
@@ -493,3 +497,70 @@ async def test_failed_placeholder_send_still_releases_the_reservation(monkeypatc
     assert _FakeAccess.instances[0].released and _FakeAccess.instances[0].released[0][0] == 77
     accounting.finish_invocation_outcome.assert_awaited_once()
     assert USER_ID not in handler._inflight_users
+
+
+# --- connections ----------------------------------------------------------------------------
+
+
+async def test_no_transaction_is_held_open_during_the_provider_call(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    seen: list[bool] = []
+
+    class _Llm(_FakeLlm):
+        async def chat_simple(self, messages, **kwargs):
+            seen.append(session.in_transaction())
+            return await super().chat_simple(messages, **kwargs)
+
+    await _run(_message("привет"), session, settings, _Llm())
+
+    assert seen == [False]
+
+
+async def test_no_transaction_is_held_open_during_compression_call(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    repo = PersonalAiRepository(session)
+    for i in range(llm_personal_ai.PERSONAL_CONTEXT_THRESHOLD):
+        await repo.add_message(user_id=USER_ID, thread="assistant", role="user", content=f"m{i}")
+    seen: list[bool] = []
+
+    class _Llm(_FakeLlm):
+        async def summarize(self, messages, **kwargs):
+            seen.append(session.in_transaction())
+            return await super().summarize(messages, **kwargs)
+
+    await _run(_message("новое"), session, settings, _Llm())
+
+    assert seen == [False]
+
+
+async def test_reset_during_compression_does_not_resurrect_deleted_messages(monkeypatch, session):
+    repo = PersonalAiRepository(session)
+    for i in range(llm_personal_ai.PERSONAL_CONTEXT_THRESHOLD):
+        await repo.add_message(user_id=USER_ID, thread="assistant", role="user", content=f"m{i}")
+
+    class _Llm(_FakeLlm):
+        async def summarize(self, messages, **kwargs):
+            await repo.reset_thread(user_id=USER_ID, thread="assistant")  # the user pressed /ai_reset meanwhile
+            await session.commit()
+            return await super().summarize(messages, **kwargs)
+
+    done = await llm_personal_ai.maybe_compress_personal(
+        repo=repo, llm_client=_Llm(), user_id=USER_ID, thread="assistant"
+    )
+
+    assert done is False
+    assert await repo.latest_summary(user_id=USER_ID, thread="assistant") is None
+
+
+async def test_blocked_bot_on_final_send_keeps_the_stored_turn(monkeypatch, session):
+    from aiogram.exceptions import TelegramForbiddenError
+
+    settings = _settings(monkeypatch)
+    message = _message("привет")
+    message.thinking.edit_text = AsyncMock(side_effect=RuntimeError("edit failed"))
+    message.answer = AsyncMock(side_effect=[message.thinking, TelegramForbiddenError(method=MagicMock(), message="blocked")])
+
+    await _run(message, session, settings, _FakeLlm())
+
+    rows = await PersonalAiRepository(session).recent_messages(user_id=USER_ID, thread="assistant", limit=10)
+    assert len(rows) == 2

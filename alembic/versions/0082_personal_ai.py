@@ -82,7 +82,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The tables hold users' private dialogue; dropping them deletes that data for good.
+    # The tables hold users' private dialogue; refuse to drop them silently (like 0079 does for paid data).
+    bind = op.get_bind()
+    for table in ("personal_ai_profiles", "personal_ai_messages", "personal_ai_summaries"):
+        if bind.execute(sa.text(f"SELECT 1 FROM {table} LIMIT 1")).first() is not None:
+            raise RuntimeError(
+                f"Cannot downgrade 0082_personal_ai: {table} holds users' private data; export or delete it first"
+            )
     op.drop_index("idx_personal_ai_summaries_user_thread_period", table_name="personal_ai_summaries")
     op.drop_table("personal_ai_summaries")
     op.drop_index("idx_personal_ai_messages_user_thread_created", table_name="personal_ai_messages")

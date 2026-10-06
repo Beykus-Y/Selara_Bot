@@ -171,15 +171,24 @@ class PersonalAiRepository:
         ).all()
         return list(rows)
 
-    async def mark_compressed(self, *, user_id: int, message_ids: list[int]) -> None:
+    async def commit(self) -> None:
+        """End the current transaction so its pooled connection is released (used around slow provider calls)."""
+        await self._session.commit()
+
+    async def rollback(self) -> None:
+        await self._session.rollback()
+
+    async def mark_compressed(self, *, user_id: int, message_ids: list[int]) -> int:
+        """Mark rows compressed; returns how many were actually updated."""
         if not message_ids:
-            return
-        await self._session.execute(
+            return 0
+        result = await self._session.execute(
             update(PersonalAiMessageModel)
             .where(PersonalAiMessageModel.user_id == user_id, PersonalAiMessageModel.id.in_(message_ids))
             .values(compressed=True)
             .execution_options(synchronize_session=False)
         )
+        return int(result.rowcount or 0)
 
     async def last_user_message_at(self, *, user_id: int) -> datetime | None:
         return await self._session.scalar(

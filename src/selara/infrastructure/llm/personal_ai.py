@@ -50,6 +50,9 @@ async def generate_reply(
     """Ask the model for one reply. No tools are offered: a private chat can never act on groups."""
     summary, recent = await load_history(repo, user_id=user_id, thread=profile.thread)
     messages = build_personal_messages(profile=profile, summary=summary, recent=recent, user_text=user_text)
+    # Everything the model needs is in memory: end the read transaction so no pooled connection
+    # stays "idle in transaction" for the whole (slow) provider call.
+    await repo.commit()
     kwargs: dict = {"max_tokens": MAX_TOKENS_PERSONAL_REPLY}
     if accounting_context is not None:
         kwargs["accounting_context"] = accounting_context
@@ -73,9 +76,14 @@ async def maybe_compress_personal(
     if len(batch) < PERSONAL_COMPRESS_BATCH:
         return False
     previous = await repo.latest_summary(user_id=user_id, thread=thread)
-    body = "\n".join(f"[{m.role}]: {json.dumps(m.content, ensure_ascii=False)}" for m in batch)
-    if previous is not None:
-        body = f"Предыдущее резюме: {json.dumps(previous.content, ensure_ascii=False)}\n\n{body}"
+    # Plain values only: the transaction ends before the provider call, so ORM rows must not be touched after it.
+    rows = [(m.id, m.role, m.content, m.created_at) for m in batch]
+    previous_text = previous.content if previous is not None else None
+    await repo.commit()
+
+    body = "\n".join(f"[{role}]: {json.dumps(content, ensure_ascii=False)}" for _, role, content, _ in rows)
+    if previous_text is not None:
+        body = f"Предыдущее резюме: {json.dumps(previous_text, ensure_ascii=False)}\n\n{body}"
     prompt = [
         {"role": "system", "content": _COMPRESSION_PROMPT},
         {"role": "user", "content": body},
@@ -92,13 +100,19 @@ async def maybe_compress_personal(
     content = (value or "").strip()
     if not content:
         return False
+    # If the user reset the dialogue while the model was summarising, some of these rows are gone: a summary of
+    # deleted messages must not bring them back.
+    marked = await repo.mark_compressed(user_id=user_id, message_ids=[row[0] for row in rows])
+    if marked != len(rows):
+        await repo.rollback()
+        return False
     await repo.add_summary(
         user_id=user_id,
         thread=thread,
         content=content,
-        period_start=batch[0].created_at,
-        period_end=batch[-1].created_at,
-        messages_count=len(batch),
+        period_start=rows[0][3],
+        period_end=rows[-1][3],
+        messages_count=len(rows),
     )
-    await repo.mark_compressed(user_id=user_id, message_ids=[m.id for m in batch])
+    await repo.commit()
     return True
