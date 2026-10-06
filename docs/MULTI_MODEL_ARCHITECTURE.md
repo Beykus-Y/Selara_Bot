@@ -99,3 +99,44 @@ be nonempty trimmed strings. Unknown profiles within that limit still use
 controlled legacy fallback. Downgrade locks usage writes and refuses atomically
 if any absolute call or summary cost is at least $100,000 (outside NUMERIC(14,9)), or any model
 identifier exceeds the old 64-character limit. Historical data is not truncated.
+
+## Owner administration (PR 12)
+
+In Selara Admin → **AI и монетизация → Модели AI**, the owner can create and
+edit physical models, exact aliases, capability flags and Decimal USD prices
+per 1M input/output tokens. The stable catalog key is immutable in the UI.
+An empty price is NULL (unknown); zero is a known free price. Prices and current
+profile assignments never recalculate or relabel historical usage rows.
+
+Profiles expose their assignment, enabled state, AIL multiplier and effective
+default route. Clear the assignment to return to the operation's legacy default:
+LLM_MODEL, or LLM_SUMMARY_MODEL for summary operations. Capability requirements
+may also cause an operation-specific fallback. Disabled models remain visible
+and preserve usage history; they cannot be newly assigned. Disabling a referenced
+model requires explicit confirmation. Physical deletion is deliberately omitted.
+
+Owner-only endpoints under /api/miniapp/admin:
+- GET/POST /ai/models
+- PUT /ai/models/{key}
+- GET /ai/model-profiles
+- PUT /ai/model-profiles/{profile_key}
+
+Reads use the database directly. Updates require the revision from the loaded
+record; stale edits receive HTTP 409 and should be reloaded. All catalog writers
+advance revision under the existing PostgreSQL transaction advisory lock.
+The record stores updated_by (owner Telegram ID) and updated_at. Canonical model
+IDs and exact aliases continue to share the existing unique identifier table;
+collisions roll back the entire transaction and return 409.
+
+The existing cache is invalidated only after successful commit. The web worker's
+cache invalidates immediately; other bot/web workers pick up changes at their
+existing 15-second TTL. Failed commits do not invalidate last-known-good runtime
+state. No runtime restart or provider call is required by these forms.
+
+AIL remains metadata: a request still consumes one quota unit, with existing
+free/paid limits 5/150. Stars billing and subscription terms are unchanged.
+Historical profile breakdown is grouped directly by usage.model_profile,
+including unassigned calls, without joining current profile assignments.
+Physical model statistics remain in the existing expenses breakdown. Public
+profile DTOs, user selection and real AIL consumption remain future work (PR 13
+and later).

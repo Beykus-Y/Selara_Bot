@@ -55,6 +55,16 @@ def test_model_catalog_upgrade_downgrade_keeps_historical_costs():
             "INSERT INTO llm_model_identifiers (model_id, model_key) VALUES ('provider/one', 'one'), ('snapshot', 'one')",
             "UPDATE llm_model_profiles SET model_key = 'one', ail_multiplier = 5 WHERE profile_key = 'basic'",
             "UPDATE llm_usage_log SET model_profile = 'basic'")
+        result = alembic(dsn, "upgrade", "0089_admin_model_config")
+        assert result.returncode == 0, result.stderr[-3000:]
+        assert sql(dsn, "SELECT revision, updated_by FROM llm_model_catalog")[0][0]["revision"] == 1
+        assert sql(dsn, "SELECT revision FROM llm_model_profiles WHERE profile_key = 'basic'")[0][0]["revision"] == 1
+        sql(dsn, "UPDATE llm_model_catalog SET revision = 2, updated_by = 77",
+            "UPDATE llm_model_profiles SET revision = 2, updated_by = 77 WHERE profile_key = 'basic'")
+        result = alembic(dsn, "downgrade", REVISION)
+        assert result.returncode == 0, result.stderr[-3000:]
+        assert sql(dsn, "SELECT model_key FROM llm_model_profiles WHERE profile_key = 'basic'")[0][0]["model_key"] == "one"
+        assert str(sql(dsn, "SELECT estimated_cost_usd FROM llm_usage_log")[0][0]["estimated_cost_usd"]) == "0.123000000"
         for statement in (
             "INSERT INTO llm_model_identifiers (model_id, model_key) VALUES ('snapshot', 'one')",
             "UPDATE llm_model_catalog SET prompt_price_usd_per_million = 'NaN'",

@@ -461,7 +461,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert pet_events.down_revision == catalog.revision
     assert memory.down_revision == pet_events.revision
     assert pet_inventory.down_revision == memory.revision
-    assert revisions - parents == {pet_inventory.revision}
+    admin_models = _load_migration("0089_admin_model_config.py")
+    assert admin_models.down_revision == pet_inventory.revision
+    assert revisions - parents == {admin_models.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 
