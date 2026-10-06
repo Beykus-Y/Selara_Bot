@@ -33,7 +33,7 @@ from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementRes
 from selara.infrastructure.llm.ai_pets import extract_notes, generate_pet_reply
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
-from selara.presentation.auth import has_command_access
+from selara.presentation.auth import has_command_access, resolve_owner_private_exemption
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ async def handle_pet_talk(
     user = message.from_user
     chat_id = message.chat.id
     now = datetime.now(timezone.utc)
-    service = AiPetService(db_session, economy_repo)
+    service = AiPetService(db_session, economy_repo, admin_user_id=settings.admin_user_id)
     repo = AiPetDialogueRepository(db_session)
 
     pet = await service.current_view(pet_id=pet_id, now=now)
@@ -251,6 +251,7 @@ async def handle_pet_talk(
             chat_type=message.chat.type,
             chat_title=message.chat.title,
             scope=QuotaScope.user(owner_id),
+            owner_exempt=resolve_owner_private_exemption(user_id=owner_id, admin_user_id=settings.admin_user_id),
             actor_user_id=user.id,
             actor_is_bot=False,
             trigger="telegram_message",

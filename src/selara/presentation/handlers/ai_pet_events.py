@@ -27,6 +27,7 @@ from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaReposit
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
+from selara.presentation.auth import resolve_owner_private_exemption
 from selara.infrastructure.llm.features import AiFeature
 
 log = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ async def run_spontaneous_event(
     day_start = datetime.combine(local.date(), dt_time.min, tzinfo=local.tzinfo).astimezone(timezone.utc)
     try:
         async with session_factory() as session:
-            service = AiPetService(session)
+            service = AiPetService(session, admin_user_id=settings.admin_user_id)
             claim = await service.claim_spontaneous_event(
                 chat_id=chat_id,
                 person_user_id=person_user_id,
@@ -204,6 +205,7 @@ async def _phrase(
         chat_type=chat_type,
         chat_title=chat_title,
         scope=QuotaScope.user(pet.owner_user_id),
+        owner_exempt=resolve_owner_private_exemption(user_id=pet.owner_user_id, admin_user_id=settings.admin_user_id),
         actor_user_id=None,
         trigger="spontaneous",
         timezone_name=settings.bot_timezone,

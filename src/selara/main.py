@@ -48,7 +48,7 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="memory", description="Что помнит обо мне личный AI (ЛС)"),
         BotCommand(command="forget_all", description="Удалить все личные данные AI (ЛС)"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
-        BotCommand(command="premium", description="Купить Selara AI для чата"),
+        BotCommand(command="premium", description="Selara AI: для чата и для себя"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
         BotCommand(command="game", description="Выбрать и запустить игру в чате"),

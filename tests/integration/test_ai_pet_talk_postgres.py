@@ -119,3 +119,36 @@ async def test_pet_talk_is_paid_from_the_owners_pet_pool(factory) -> None:
     # An owner without Selara Personal: the free pet pool is zero, the pet cannot talk.
     no_personal = await reserve(GUESTS[1], "pet:free")
     assert not no_personal.allowed and no_personal.access_tier == AccessTier.FREE and no_personal.quota_limit == 0
+
+
+async def test_bot_owner_pet_talks_without_personal_and_nobody_else_does(factory) -> None:
+    owner_admin = GUESTS[2]
+    other = GUESTS[3]
+    now = NOW
+
+    async with factory() as db:
+        assert await AiPetService(db, admin_user_id=owner_admin).has_active_personal(user_id=owner_admin, now=now)
+        assert not await AiPetService(db, admin_user_id=owner_admin).has_active_personal(user_id=other, now=now)
+        assert not await AiPetService(db).has_active_personal(user_id=owner_admin, now=now)
+
+    settings = Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", pet_talk_daily_limit=3,
+                        pet_talk_guests_daily_limit=2, pet_talk_guest_daily_limit=1)
+    config = StaticPersonalConfigProvider(config_from_settings(settings))
+    service = FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(factory),
+        user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, config, pet_daily_limit=3),
+        personal_config=config,
+    )
+
+    async def reserve(owner: int, exempt: bool):
+        return await service.reserve_feature_usage(
+            feature=AiFeature.PET_TALK, chat_id=CHAT, chat_type="supergroup", chat_title="Pets",
+            scope=QuotaScope.user(owner), owner_exempt=exempt, actor_user_id=GUESTS[0],
+            trigger="telegram_message", timezone_name="UTC", idempotency_key=f"owner-pet:{owner}:{exempt}",
+            source_message_id=None,
+        )
+
+    allowed = await reserve(owner_admin, True)
+    assert allowed.allowed and allowed.access_tier == AccessTier.OWNER_INTERNAL
+    denied = await reserve(other, False)
+    assert not denied.allowed and denied.access_tier == AccessTier.FREE
