@@ -4,8 +4,8 @@
 items live in ``ai_pet_inventory`` (per pet, removed with the pet). Starting
 cosmetics are seeded; prices stay editable in the admin table editor.
 
-Revision ID: 0087_ai_pet_inventory
-Revises: 0086_ai_pet_events
+Revision ID: 0088_ai_pet_inventory
+Revises: 0087_personal_ai_memory
 Create Date: 2026-10-06 00:00:00
 """
 
@@ -16,8 +16,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0087_ai_pet_inventory"
-down_revision: str | None = "0086_ai_pet_events"
+revision: str = "0088_ai_pet_inventory"
+down_revision: str | None = "0087_personal_ai_memory"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

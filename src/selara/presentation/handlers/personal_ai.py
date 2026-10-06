@@ -35,6 +35,7 @@ from selara.application.feature_access import (
     message_idempotency_key,
 )
 from selara.application.personal_config import PersonalConfigProvider
+from selara.application.personal_memory import parse_remember_request
 from selara.core.config import Settings
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
@@ -45,9 +46,11 @@ from selara.infrastructure.llm.personal_ai import (
     MAX_USER_TEXT_LENGTH,
     generate_reply,
     maybe_compress_personal,
+    maybe_extract_memories,
 )
 from selara.presentation.auth import resolve_owner_private_exemption
 from selara.presentation.feature_access_messages import quota_exhausted_message
+from selara.presentation.handlers import personal_memory
 from selara.presentation.handlers.premium import personal_offer_available
 from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
@@ -143,8 +146,10 @@ def _profile_text(stored: StoredProfile) -> str:
         f"Обращение: {escape(p.address_form) if p.address_form else 'по умолчанию'}, на «{'вы' if p.formality == 'vy' else 'ты'}»",
         f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
         f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
+        f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
         "",
-        "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново.",
+        "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново, /memory — что я о вас помню, "
+        "/forget_all — удалить все личные данные.",
     ]
     if p.mode == "roleplay":
         lines.append("В ролевой игре у диалога своя отдельная история; сцену и роли задайте в обычном сообщении.")
@@ -165,8 +170,16 @@ def _main_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
         callback_data=_cb("set", "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
     )
+    builder.button(
+        text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
+        callback_data=_cb("set", "memory", 0 if stored.memory_enabled else 1, rev),
+    )
+    builder.button(
+        text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        callback_data=_cb("set", "automemory", 0 if stored.auto_memory_enabled else 1, rev),
+    )
     builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 2, 1, 1)
+    builder.adjust(2, 2, 2, 1, 2, 1)
     return builder.as_markup()
 
 
@@ -284,6 +297,10 @@ async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -
             changes = {"emoji_enabled": value == "1"}
         elif field == "mode" and value in ("assistant", "roleplay"):
             changes = {"mode": value}
+        elif field == "memory" and value in ("0", "1"):
+            changes = {"memory_enabled": value == "1"}
+        elif field == "automemory" and value in ("0", "1"):
+            changes = {"auto_memory_enabled": value == "1"}
     if changes is None:
         await query.answer()
         return
@@ -364,6 +381,12 @@ async def personal_chat_handler(
     llm_client: LlmClient | None = None,
 ) -> None:
     user_id = message.from_user.id
+    fact = parse_remember_request(message.text)
+    if fact is not None and await personal_memory.propose_memory(
+        message, db_session, session_factory, settings, personal_config, fact, from_phrase=True
+    ):
+        # "запомни, что ..." is a local action: no model call, no quota, the fact is stored only after confirmation.
+        return
     if user_id in _inflight_users:
         await message.answer("⏳ Я ещё отвечаю на предыдущее сообщение. Подожди немного. Квота не потрачена.")
         return
@@ -479,6 +502,7 @@ async def _handle_personal_chat(
                 profile=stored.profile,
                 user_text=text,
                 accounting_context=_context(AiFeature.PERSONAL_CHAT, "chat_turn"),
+                use_memory=stored.memory_enabled,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
@@ -514,6 +538,30 @@ async def _handle_personal_chat(
             )
         except Exception:
             log.exception("personal_ai: context compression crashed user_id=%s", user.id)
+            # A failed statement leaves the session unusable; the turn itself is already committed.
+            await db_session.rollback()
+        # Internal operation: rides the same invocation for cost tracking and is never charged to the quota.
+        if (
+            config.memory_auto_extract
+            and stored.memory_enabled
+            and stored.auto_memory_enabled
+            and decision.access_tier in (AccessTier.PAID, AccessTier.OWNER_INTERNAL)
+            and thread == "assistant"
+        ):
+            try:
+                await maybe_extract_memories(
+                    repo=repo,
+                    llm_client=llm_client,
+                    user_id=user.id,
+                    thread=thread,
+                    cursor=stored.memory_extract_cursor,
+                    every=config.memory_extract_every,
+                    limit=config.memory_paid_limit,
+                    accounting_context=_context(AiFeature.PERSONAL_MEMORY_EXTRACT, "memory_extract"),
+                )
+            except Exception:
+                log.exception("personal_ai: memory extraction crashed user_id=%s", user.id)
+                await db_session.rollback()
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
