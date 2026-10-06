@@ -366,6 +366,60 @@ async def pet_forget_command(message: Message, db_session, economy_repo) -> None
     )
 
 
+_TRAVEL_REFUSALS = {
+    "no_pet": "У вас нет питомца.",
+    "locked": f"Путешествия открываются на {m.TRAVEL_UNLOCK_LEVEL} уровне питомца.",
+    "no_personal": "Путешествия доступны с активной Selara Personal: /premium в личке с ботом.",
+    "asleep": "Питомца усыпил администратор чата: сначала попросите его разбудить (/pet_wake).",
+    "same_chat": "Питомец уже здесь.",
+    "name_taken": "В этом чате уже живёт питомец с таким именем.",
+}
+
+
+async def _move_pet(message: Message, *, db_session, economy_repo, chat_settings: ChatSettings, make_home: bool) -> None:
+    if message.from_user is None or not await _pets_allowed(message, chat_settings):
+        return
+    try:
+        result = await _service(db_session, economy_repo).travel(
+            owner_user_id=message.from_user.id,
+            chat=ChatSnapshot(telegram_chat_id=message.chat.id, chat_type=message.chat.type, title=message.chat.title),
+            now=_now(),
+            make_home=make_home,
+        )
+    except PetDomainError as exc:
+        await message.answer(escape(str(exc)), parse_mode="HTML")
+        return
+    if result.status == "cooldown":
+        await message.answer(f"Питомец ещё не отдохнул с дороги. Попробуйте через {m.format_duration(result.retry_after)}.")
+        return
+    if result.status != "ok":
+        await message.answer(_TRAVEL_REFUSALS[result.status])
+        return
+    pet = result.pet
+    invalidate_pet_names(result.from_chat_id)
+    invalidate_pet_names(message.chat.id)
+    if make_home:
+        text = f"{pet.emoji} {escape(pet.name)} обживается: теперь это его дом."
+    else:
+        text = (
+            f"{pet.emoji} {escape(pet.name)} приехал(а) в гости! Отношения и воспоминания из прошлых чатов "
+            "остались там, где появились. Вернуться домой: /pet_home в родном чате."
+        )
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("pet_travel"))
+async def pet_travel_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings) -> None:
+    """The owner brings the pet into this chat (written here, so membership is proven)."""
+    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=False)
+
+
+@router.message(Command("pet_home"))
+async def pet_home_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings) -> None:
+    """The owner makes this chat the pet's home and settles it here (also wakes a pet that lost its home)."""
+    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=True)
+
+
 @router.message(Command("pet_release"))
 async def pet_release_command(message: Message, db_session, economy_repo) -> None:
     if message.from_user is None:

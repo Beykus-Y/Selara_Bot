@@ -290,9 +290,9 @@ def resolve_feature_policy(
             QuotaPeriod.DAY,
             pool_key=PERSONAL_POOL_KEY,
         )
-    if feature == AiFeature.PET_TALK:
-        # Without the owner's Selara Personal a pet cannot talk at all (its mechanics still work).
-        return FeatureQuotaPolicy(feature, "pet_talk_free_daily_v1", 0, QuotaPeriod.DAY, pool_key=PET_POOL_KEY)
+    if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
+        # Without the owner's Selara Personal a pet cannot talk or post events (its mechanics still work).
+        return FeatureQuotaPolicy(feature, f"{feature.value}_free_daily_v1", 0, QuotaPeriod.DAY, pool_key=PET_POOL_KEY)
     # /autocfg and internal operations (memory extraction, context compression) are
     # accounted for cost but never spend a user's or chat's commercial quota.
     if feature in (
@@ -316,11 +316,13 @@ def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
     )
 
 
-def paid_pet_policy(daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT) -> FeatureQuotaPolicy:
-    """Selara Personal lets the owner's pet talk up to ``daily_limit`` times a day."""
+def paid_pet_policy(
+    daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT, feature: AiFeature = AiFeature.PET_TALK
+) -> FeatureQuotaPolicy:
+    """Selara Personal gives the owner's pet ``daily_limit`` AI units a day, shared by talk and events."""
     return FeatureQuotaPolicy(
-        AiFeature.PET_TALK,
-        "pet_talk_paid_daily_v1",
+        feature,
+        f"{feature.value}_paid_daily_v1",
         daily_limit,
         QuotaPeriod.DAY,
         pool_key=PET_POOL_KEY,

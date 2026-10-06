@@ -185,6 +185,16 @@ class Settings(BaseSettings):
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
+    # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,
+    # how often an active chat is considered and the chance an eligible check produces an event.
+    pet_event_daily_limit: int = Field(default=6, ge=0, le=100, validation_alias="PET_EVENT_DAILY_LIMIT")
+    pet_event_chat_interval_minutes: int = Field(
+        default=120, ge=1, le=7 * 24 * 60, validation_alias="PET_EVENT_CHAT_INTERVAL_MINUTES"
+    )
+    pet_event_quiet_start_hour: int = Field(default=23, ge=0, le=23, validation_alias="PET_EVENT_QUIET_START_HOUR")
+    pet_event_quiet_end_hour: int = Field(default=8, ge=0, le=23, validation_alias="PET_EVENT_QUIET_END_HOUR")
+    pet_event_check_seconds: int = Field(default=300, ge=10, le=86_400, validation_alias="PET_EVENT_CHECK_SECONDS")
+    pet_event_chance: float = Field(default=0.3, ge=0.0, le=1.0, validation_alias="PET_EVENT_CHANCE")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")

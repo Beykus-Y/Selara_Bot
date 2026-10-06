@@ -14,7 +14,7 @@ def quota_exhausted_message(decision: FeatureAccessDecision, *, timezone_name: s
         label = "AI-ассистента для этого чата на сегодня"
     elif decision.feature == AiFeature.PERSONAL_CHAT:
         label = "личных AI-запросов на сегодня"
-    elif decision.feature == AiFeature.PET_TALK:
+    elif decision.feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
         label = "разговоров с питомцем на сегодня"
     else:
         label = "ручных итогов дня для этого чата в этом месяце"
