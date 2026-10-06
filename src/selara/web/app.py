@@ -32,6 +32,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -7725,6 +7726,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "achievement": "Достижения",
         "economy": "Экономика",
         "relationship": "Отношения",
+        "pets": "AI-питомцы",
         "web": "Веб и доступ",
         "other": "Прочее",
     }
@@ -7736,6 +7738,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "achievement",
         "economy",
         "relationship",
+        "pets",
         "web",
         "other",
     ]
@@ -7748,6 +7751,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "admin_broadcast_replies": {"title": "Ответы на админ-рассылки", "group": "web"},
         "admin_broadcasts": {"title": "Админ-рассылки", "group": "web"},
         "admin_sessions": {"title": "Админ-сессии", "group": "web"},
+        # The item catalog is edited here: prices and effects (JSON) are validated in code before sale.
+        "ai_pet_items": {"title": "Каталог товаров для питомцев", "group": "pets"},
+        "ai_pets": {"title": "AI-питомцы", "group": "pets"},
+        "ai_pet_relationships": {"title": "Отношения питомцев", "group": "pets"},
+        "ai_pet_events": {"title": "События питомцев", "group": "pets"},
         "chat_achievement_stats": {"title": "Статистика достижений чата", "group": "achievement"},
         "chat_activity_event_sync_state": {"title": "Синхронизация событий активности", "group": "activity"},
         "chat_auctions": {"title": "Аукционы чата", "group": "economy"},
@@ -7997,6 +8005,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return labels
 
     def _coerce_admin_form_value(column, raw_value: str):
+        if isinstance(column.type, JSON):
+            # Edited as JSON text; anything unparsable leaves the stored value untouched.
+            if not raw_value.strip():
+                return None if column.nullable else _admin_invalid_form_value
+            try:
+                return json.loads(raw_value)
+            except ValueError:
+                return _admin_invalid_form_value
         if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
             try:
                 return int(raw_value) if raw_value else None
@@ -8022,6 +8038,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             except ValueError:
                 return _admin_invalid_form_value
         return raw_value
+
+    def _admin_edit_value(column, value):
+        """Show JSON columns as JSON so they round-trip through the edit form."""
+        if isinstance(column.type, JSON) and value is not None:
+            return json.dumps(value, ensure_ascii=False)
+        return value
 
     def _admin_layout_context(
         *,
@@ -10015,7 +10037,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
             # Получаем колонки и значения
-            columns = [(col.name, getattr(row, col.name, None)) for col in model_class.__table__.columns]
+            columns = [(col.name, _admin_edit_value(col, getattr(row, col.name, None))) for col in model_class.__table__.columns]
             reference_labels = await _admin_reference_labels(session, column_values=columns)
             primary_key_columns = [column.name for column in _admin_primary_key_columns(model_class)]
             record_id = _admin_primary_key_display(pk_values)

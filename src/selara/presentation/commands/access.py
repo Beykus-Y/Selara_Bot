@@ -91,8 +91,13 @@ SLASH_COMMAND_TO_KEY: dict[str, str] = {
     "title": "title",
     "adopt": "adopt",
     "bepet": "family_pet",
-    # Переходный период: /pet ещё выполняет ролевое «стать питомцем», потом отдаётся AI-петам.
-    "pet": "family_pet",
+    # Голая /pet — AI-питомец; /pet с целью — переходный путь к ролевому «стать питомцем» (/bepet).
+    "pet": "pet",
+    "pets": "pet",
+    "pet_new": "pet",
+    "pet_shop": "pet",
+    "pet_traits": "pet",
+    "pet_release": "pet",
     "family": "family",
     "setrank": "setrank",
     "ranks": "ranks",
@@ -170,6 +175,8 @@ def resolve_command_key_input(raw: str) -> str | None:
         token = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0].strip().lower()
         if not token:
             return None
+        if token == "pet" and len(text.split(maxsplit=1)) > 1:
+            return "family_pet"
         mapped = SLASH_COMMAND_TO_KEY.get(token)
         if mapped is not None:
             return mapped

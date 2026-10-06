@@ -86,7 +86,7 @@ def database():
             _quota_insert("-3001", "legacy-orphan", "llm_admin"),
             "DELETE FROM chats WHERE telegram_chat_id = -3001",  # ON DELETE SET NULL -> chat_id IS NULL
         )
-        result = _alembic(dsn, "upgrade", "head")
+        result = _alembic(dsn, "upgrade", _HEAD)
         assert result.returncode == 0, result.stderr[-2000:]
         yield dsn
     finally:
@@ -184,5 +184,5 @@ def test_downgrade_refuses_to_drop_personal_data_and_is_clean_without_it(databas
     assert _alembic(database, "downgrade", _PREVIOUS_RELEASE).returncode == 0
     survivors = _run_sql(database, "SELECT count(*) AS n FROM ai_feature_quota_usage WHERE idempotency_key LIKE 'legacy-%'")
     assert survivors[0][0]["n"] == 3
-    result = _alembic(database, "upgrade", "head")
+    result = _alembic(database, "upgrade", _HEAD)
     assert result.returncode == 0, result.stderr[-2000:]
