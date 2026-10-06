@@ -1,4 +1,4 @@
-"""Alembic upgrade/downgrade of 0079-0082 on a pre-filled database from the previous release."""
+"""Alembic upgrade/downgrade of 0079-0087 on a pre-filled database from the previous release."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PREVIOUS_RELEASE = "0078_family_pet_command_key"
-_HEAD = "0082_personal_ai"
+_HEAD = "0087_personal_ai_memory"
 _PERIOD = "now(), now() + interval '1 day'"
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
@@ -198,6 +198,68 @@ def test_personal_ai_tables_enforce_constraints_and_cascade_with_the_user(databa
         "SELECT count(*) AS n FROM personal_ai_summaries WHERE user_id = 9100",
     )
     assert [row[0]["n"] for row in counts] == [0, 0, 0]
+
+
+def test_personal_memory_table_enforces_constraints_and_cascades_with_the_user(database):
+    _run_sql(
+        database,
+        "INSERT INTO users (telegram_user_id, is_bot) VALUES (9110, false) ON CONFLICT DO NOTHING",
+        "INSERT INTO personal_ai_profiles (user_id) VALUES (9110)",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'I am Vegan', 'explicit')",
+    )
+    defaults = _run_sql(
+        database,
+        "SELECT auto_memory_enabled, memory_extract_cursor FROM personal_ai_profiles WHERE user_id = 9110",
+        "SELECT pinned, last_used_at FROM personal_ai_memories WHERE user_id = 9110",
+        "SELECT memory_free_limit, memory_paid_limit, memory_auto_extract, memory_extract_every "
+        "FROM selara_personal_config",
+    )
+    assert dict(defaults[0][0]) == {"auto_memory_enabled": False, "memory_extract_cursor": 0}
+    assert dict(defaults[1][0]) == {"pinned": False, "last_used_at": None}
+
+    for bad in (
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'x', 'bogus')",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, '', 'explicit')",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, repeat('x', 301), 'explicit')",
+        # Case-insensitive duplicates of one user are impossible even if two writers race.
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'I AM VEGAN', 'explicit')",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (999999991, 'x', 'explicit')",
+        "INSERT INTO selara_personal_config (id, memory_extract_every) VALUES (1, 1)",
+        "INSERT INTO selara_personal_config (id, memory_extract_every) VALUES (1, 41)",
+    ):
+        try:
+            _run_sql(database, bad)
+        except asyncpg.PostgresError:
+            continue
+        pytest.fail(f"statement should have been rejected: {bad}")
+
+    _run_sql(database, "DELETE FROM users WHERE telegram_user_id = 9110")
+    left = _run_sql(database, "SELECT count(*) AS n FROM personal_ai_memories WHERE user_id = 9110")
+    assert left[0][0]["n"] == 0
+
+
+def test_downgrade_refuses_to_drop_personal_memories(database):
+    _run_sql(
+        database,
+        "INSERT INTO users (telegram_user_id, is_bot) VALUES (9111, false) ON CONFLICT DO NOTHING",
+        "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9111, 'Я веган', 'explicit')",
+    )
+    refused = _alembic(database, "downgrade", "0086_ai_pet_events")
+    assert refused.returncode != 0
+    assert "Cannot downgrade 0087_personal_ai_memory" in refused.stderr
+    assert _run_sql(database, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == _HEAD
+    assert _run_sql(database, "SELECT count(*) AS n FROM personal_ai_memories")[0][0]["n"] == 1
+    _run_sql(database, "DELETE FROM users WHERE telegram_user_id = 9111")
+
+    assert _alembic(database, "downgrade", "0086_ai_pet_events").returncode == 0
+    columns = _run_sql(
+        database,
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'personal_ai_profiles' "
+        "AND column_name IN ('auto_memory_enabled', 'memory_extract_cursor')",
+    )[0]
+    assert columns == []
+    result = _alembic(database, "upgrade", "head")
+    assert result.returncode == 0, result.stderr[-2000:]
 
 
 def test_downgrade_refuses_to_drop_private_personal_ai_data(database):

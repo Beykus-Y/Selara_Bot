@@ -156,3 +156,65 @@ def test_override_has_no_unit_weight_fields_so_ail_cannot_leak_into_personal_quo
 def test_settings_reject_free_limit_not_below_paid(monkeypatch):
     with pytest.raises(ValueError, match="PERSONAL_FREE_DAILY_LIMIT"):
         _env(monkeypatch, PERSONAL_FREE_DAILY_LIMIT="200", PERSONAL_PAID_DAILY_LIMIT="150")
+
+
+# ----- personal memory tunables: base in .env, override in the database -----
+
+
+def test_memory_base_values_come_from_env_with_safe_defaults(monkeypatch):
+    default = _base(monkeypatch)
+    assert (default.memory_free_limit, default.memory_paid_limit) == (20, 200)
+    assert default.memory_auto_extract is False and default.memory_extract_every == 10
+
+    custom = _base(
+        monkeypatch,
+        PERSONAL_MEMORY_FREE_LIMIT="7",
+        PERSONAL_MEMORY_PAID_LIMIT="70",
+        PERSONAL_MEMORY_AUTO_EXTRACT="true",
+        PERSONAL_MEMORY_EXTRACT_EVERY="4",
+    )
+    assert (custom.memory_free_limit, custom.memory_paid_limit) == (7, 70)
+    assert custom.memory_auto_extract is True and custom.memory_extract_every == 4
+
+
+def test_memory_override_wins_per_field_and_false_is_a_real_override(monkeypatch):
+    base = _base(monkeypatch, PERSONAL_MEMORY_AUTO_EXTRACT="true")
+
+    merged = merge_config(base, PersonalConfigOverride(memory_paid_limit=500, memory_auto_extract=False))
+
+    assert merged.memory_paid_limit == 500 and merged.memory_free_limit == 20
+    assert merged.memory_auto_extract is False  # False must not fall back to the .env True
+    assert merge_config(base, PersonalConfigOverride()).memory_auto_extract is True
+
+
+def test_memory_override_cannot_make_free_exceed_paid(monkeypatch):
+    base = _base(monkeypatch)  # 20 / 200
+    with pytest.raises(ValueError):
+        merge_config(base, PersonalConfigOverride(memory_free_limit=300))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"memory_free_limit": 0},
+        {"memory_paid_limit": -1},
+        {"memory_free_limit": 100_000},
+        {"memory_extract_every": 1},
+        {"memory_extract_every": 41},  # larger than one extraction batch could ever satisfy (review M2)
+        {"memory_extract_every": 100_000},
+    ],
+)
+def test_memory_override_values_are_bounded(kwargs):
+    with pytest.raises(ValueError):
+        PersonalConfigOverride(**kwargs)
+
+
+def test_settings_reject_memory_free_limit_above_paid(monkeypatch):
+    with pytest.raises(ValueError, match="PERSONAL_MEMORY_FREE_LIMIT"):
+        _env(monkeypatch, PERSONAL_MEMORY_FREE_LIMIT="300", PERSONAL_MEMORY_PAID_LIMIT="200")
+
+
+def test_settings_reject_extract_interval_above_the_batch_size(monkeypatch):
+    with pytest.raises(ValueError):
+        _env(monkeypatch, PERSONAL_MEMORY_EXTRACT_EVERY="41")
+    assert _base(monkeypatch, PERSONAL_MEMORY_EXTRACT_EVERY="40").memory_extract_every == 40

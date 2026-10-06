@@ -1997,6 +1997,16 @@ class SelaraPersonalConfigModel(Base):
         CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
         CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
         CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
+        CheckConstraint(
+            "memory_free_limit IS NULL OR memory_free_limit > 0", name="ck_selara_personal_config_memory_free"
+        ),
+        CheckConstraint(
+            "memory_paid_limit IS NULL OR memory_paid_limit > 0", name="ck_selara_personal_config_memory_paid"
+        ),
+        CheckConstraint(
+            "memory_extract_every IS NULL OR memory_extract_every BETWEEN 2 AND 40",
+            name="ck_selara_personal_config_memory_every",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -2004,6 +2014,10 @@ class SelaraPersonalConfigModel(Base):
     duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_free_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_paid_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_auto_extract: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    memory_extract_every: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -2667,6 +2681,10 @@ class PersonalAiProfileModel(Base):
     emoji_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
     memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Opt-in for automatic fact extraction (also needs Selara Personal and the global switch).
+    auto_memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Id of the last user message already looked at by extraction; the next batch starts after it.
+    memory_extract_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     # Optimistic lock for the settings wizard (and the future Mini App).
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2728,6 +2746,37 @@ class PersonalAiSummaryModel(Base):
         CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_summaries_thread"),
         Index("idx_personal_ai_summaries_user_thread_period", "user_id", "thread", "period_end"),
     )
+
+
+class PersonalAiMemoryModel(Base):
+    """A fact about the user that their private AI may use. Kept until the user deletes it."""
+
+    __tablename__ = "personal_ai_memories"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(String(300), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("source IN ('explicit', 'extracted')", name="ck_personal_ai_memories_source"),
+        CheckConstraint("length(content) BETWEEN 1 AND 300", name="ck_personal_ai_memories_content_len"),
+        Index("idx_personal_ai_memories_user_created", "user_id", "created_at"),
+    )
+
+
+# One fact once per user whatever its letter case; the repository also serialises writers per user.
+Index(
+    "uq_personal_ai_memories_user_content",
+    PersonalAiMemoryModel.user_id,
+    func.lower(PersonalAiMemoryModel.content),
+    unique=True,
+)
 
 
 class LlmModelCatalogModel(Base):
