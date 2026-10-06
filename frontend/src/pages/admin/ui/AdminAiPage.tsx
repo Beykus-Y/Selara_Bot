@@ -24,6 +24,7 @@ import {
   formatUsd,
   refundLabels,
 } from '../lib/format'
+import { AdminModelsSection } from './AdminModelsSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
 const periods = [
@@ -499,6 +500,7 @@ export function AdminAiPage() {
         <Link className="admin-back-link" to={routes.admin}>‹ Обзор системы</Link>
       </header>
       <ReadinessSection />
+      <AdminModelsSection />
       <PeriodSwitch value={periodDays} onChange={setPeriodDays} />
       <AiSummarySection periodDays={periodDays} />
       <BreakdownSection periodDays={periodDays} />

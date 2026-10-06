@@ -457,7 +457,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     catalog = _load_migration("0085_model_catalog_router.py")
     assert catalog.down_revision == pet_dialogue.revision
     assert pet_events.down_revision == catalog.revision
-    assert revisions - parents == {pet_events.revision}
+    admin_models = _load_migration("0087_admin_model_config.py")
+    assert admin_models.down_revision == pet_events.revision
+    assert revisions - parents == {admin_models.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 

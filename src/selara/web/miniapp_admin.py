@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.application.personal_config import PersonalConfig, PersonalConfigOverride, config_from_settings
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
+from selara.web.admin_models import build_admin_models_router
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
 from selara.domain.entities import UserSnapshot
@@ -728,6 +729,7 @@ def build_miniapp_admin_router(
         repository = AdminAiAnalyticsRepository(session)
         features = await repository.feature_breakdown(window_from=window_from, window_to=window_to)
         models, marker_only_calls = await repository.model_breakdown(window_from=window_from, window_to=window_to)
+        profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
@@ -735,6 +737,7 @@ def build_miniapp_admin_router(
             "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
             "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
             "unattributed_provider_calls": marker_only_calls,
+            "profiles": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in profiles],
             "stages": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in stages],
         }
 
@@ -992,4 +995,7 @@ def build_miniapp_admin_router(
             "checks": checks,
         }
 
+    router.include_router(build_admin_models_router(
+        settings=settings, session_factory=session_factory, require_admin=require_admin,
+    ))
     return router
