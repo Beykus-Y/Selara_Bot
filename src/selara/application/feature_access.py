@@ -693,6 +693,9 @@ class FeatureAccessService:
             group_member_limits=self._group_member_limits,
         )
         entitlement = None
+        if policy is not None and owner_exempt and policy.limit < 1:
+            # Free pet policies have a zero limit; the usage row needs a positive one, and an exempt owner is not capped by it.
+            policy = replace(policy, limit=1)
         if policy is not None and not owner_exempt:
             policy, tier, entitlement = await self._paid_feature_policy(
                 policy=policy,
