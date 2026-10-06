@@ -20,7 +20,7 @@ from selara.application.feature_access import (
     QuotaScope,
 )
 from selara.application.personal_config import PersonalConfig
-from selara.application.selara_ai_status import EXPIRING_SOON, _iso, _quota_payload
+from selara.application.selara_ai_status import EXPIRING_SOON, iso_utc, quota_payload
 from selara.infrastructure.llm.features import AiFeature
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ async def build_personal_status(
                 "expiring_soon": False,
                 **offer,
             },
-            "quota": _quota_payload(None),
+            "quota": quota_payload(None),
         }
 
     usage: FeatureUsageSummary | None
@@ -118,12 +118,12 @@ async def build_personal_status(
             "tier": decision.access_tier.value,
             "active": paid,
             "owner_exempt": decision.access_tier == AccessTier.OWNER_INTERNAL,
-            "valid_until": _iso(valid_until),
+            "valid_until": iso_utc(valid_until),
             "days_left": (
                 max(0, -(-int(remaining_seconds) // 86_400)) if remaining_seconds is not None else None
             ),
             "expiring_soon": remaining_seconds is not None and remaining_seconds <= EXPIRING_SOON.total_seconds(),
             **offer,
         },
-        "quota": _quota_payload(usage),
+        "quota": quota_payload(usage),
     }

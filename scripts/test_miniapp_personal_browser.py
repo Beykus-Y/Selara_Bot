@@ -57,7 +57,7 @@ def _overview(*, tier="free", facts=None, limit=20, memory_enabled=True, availab
         ),
         "profile": {
             "memory_enabled": memory_enabled, "auto_memory_enabled": False, "auto_memory_available": paid,
-            "display_name": None, "mode": "assistant",
+            "display_name": "Селара", "mode": "assistant",
         },
         "memory": {"count": len(facts), "limit": limit if available else None, "items": facts},
     }
@@ -183,10 +183,12 @@ async def _run_memory_flow(browser) -> None:
         backend = FakeBackend(_overview(facts=[_fact(1, "я веган"), _fact(2, "живу в Казани", pinned=True)]))
         context, page, errors = await _open(browser, width, backend)
         text = await page.locator("body").inner_text()
-        for fragment in ("Бесплатный доступ", "Осталось 2 из 5", "Память (2 из 20)", "я веган", "живу в Казани", "Оформить в Telegram", "69 ⭐"):
+        for fragment in ("Бесплатный доступ", "Осталось 2 из 5", "Память (2 из 20)", "я веган", "живу в Казани", "Оформить в Telegram", "69 ⭐", "Имя: Селара", "Режим: помощник"):
             assert fragment in text, f"{width}: missing {fragment!r}"
         assert await page.locator(".selara-ai__bar").count() == 1
 
+        await page.get_by_label("Автоматически запоминать факты из разговора").wait_for()
+        assert await page.get_by_text("сохраняются сразу, без подтверждения").count() == 1
         await page.get_by_label("Новый факт о себе").fill("не ем орехи")
         await page.get_by_role("button", name="Запомнить").click()
         await page.get_by_text("не ем орехи").wait_for()
@@ -245,8 +247,8 @@ async def _run_paid_and_owner(browser) -> None:
     text = await page.locator("body").inner_text()
     for fragment in ("Активна до 04.11.2026", "Осталось 147 из 150", "Память (0 из 200)", "Продлить в Telegram"):
         assert fragment in text, f"paid: missing {fragment!r}"
-    assert "Автоматическое запоминание работает только" not in text
-    await page.get_by_label("Предлагать запоминать факты автоматически").click()
+    assert "пока включено администратором бота" not in text
+    await page.get_by_label("Автоматически запоминать факты из разговора").click()
     for _ in range(50):
         if ("PUT", "/settings", {"auto_memory_enabled": True}) in backend.calls:
             break
@@ -264,17 +266,19 @@ async def _run_paid_and_owner(browser) -> None:
 async def _run_forget_all(browser) -> None:
     backend = FakeBackend(_overview(facts=[_fact(1, "я веган"), _fact(2, "живу в Казани")]))
     context, page, errors = await _open(browser, 393, backend)
-    await page.get_by_role("button", name="Удалить все мои данные").click()
-    await page.get_by_text("Удалить все личные данные Selara AI?").wait_for()
+    await page.get_by_role("button", name="Удалить данные личного AI").click()
+    await page.get_by_text("Удалить данные личного AI?").wait_for()
+    body = await page.locator("body").inner_text()
+    assert "Разговоры с питомцами" in body and "не удаляются" in body
     assert not any(call[1] == "/forget-all" for call in backend.calls), "must not delete before confirmation"
 
     await page.get_by_role("button", name="Отмена").click()
-    assert await page.get_by_text("Удалить все личные данные Selara AI?").count() == 0
+    assert await page.get_by_text("Удалить данные личного AI?").count() == 0
     assert not any(call[1] == "/forget-all" for call in backend.calls)
 
-    await page.get_by_role("button", name="Удалить все мои данные").click()
+    await page.get_by_role("button", name="Удалить данные личного AI").click()
     await page.get_by_role("button", name="Да, удалить всё").click()
-    await page.get_by_text("Всё удалено: 4 сообщ., 2 фактов.").wait_for()
+    await page.get_by_text("Данные личного AI удалены: 4 сообщ., 2 фактов.").wait_for()
     await page.get_by_text("Память (0 из 20)").wait_for()
     assert [call for call in backend.calls if call[1] == "/forget-all"] == [("POST", "/forget-all", {"confirm": True})]
     await _overflow_free(page, "forget all")

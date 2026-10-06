@@ -382,6 +382,33 @@ async def test_settings_reject_unknown_fields_wrong_types_and_empty_bodies(env):
     assert await _count(env, PersonalAiProfileModel) == 0
 
 
+async def test_auto_memory_cannot_be_enabled_while_memory_is_off(env):
+    headers = {**JSON, **env.as_user(1)}
+    await env.client.put("/api/miniapp/personal/settings", headers=headers, json={"memory_enabled": False})
+
+    alone = await env.client.put("/api/miniapp/personal/settings", headers=headers, json={"auto_memory_enabled": True})
+    both = await env.client.put(
+        "/api/miniapp/personal/settings", headers=headers, json={"memory_enabled": False, "auto_memory_enabled": True}
+    )
+    assert alone.status_code == 422 and both.status_code == 422
+    async with env.factory() as session:
+        assert (await PersonalAiRepository(session).get_profile(1)).auto_memory_enabled is False
+
+    together = await env.client.put(
+        "/api/miniapp/personal/settings", headers=headers, json={"memory_enabled": True, "auto_memory_enabled": True}
+    )
+    assert together.status_code == 200 and together.json()["profile"]["auto_memory_enabled"] is True
+
+
+async def test_oversized_body_is_refused_by_content_length_before_reading(env):
+    response = await env.client.post(
+        "/api/miniapp/personal/memory",
+        headers={**JSON, **env.as_user(1), "content-length": "999999"},
+        content=b'{"content": "x"}',
+    )
+    assert response.status_code == 413
+
+
 async def test_mutations_require_a_json_content_type(env):
     for method, url in (
         ("POST", "/api/miniapp/personal/memory"),

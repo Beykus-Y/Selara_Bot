@@ -105,13 +105,13 @@ export function MemorySection({ data }: { data: PersonalOverview }) {
           disabled={busy || !profile.memory_enabled}
           onChange={(event) => settings.mutate({ auto_memory_enabled: event.target.checked })}
         />
-        <span>Предлагать запоминать факты автоматически</span>
+        <span>Автоматически запоминать факты из разговора</span>
       </label>
-      {!profile.auto_memory_available && (
-        <p className="selara-ai__note">
-          Автоматическое запоминание работает только с активной Selara Personal и пока включено администратором бота.
-        </p>
-      )}
+      <p className="selara-ai__note">
+        Найденные факты сохраняются сразу, без подтверждения. Они помечены «(авто)», и любой из них можно забыть.
+        {!profile.auto_memory_available &&
+          ' Работает только с активной Selara Personal и пока включено администратором бота.'}
+      </p>
 
       <form className="personal-add" onSubmit={submit}>
         <label htmlFor="personal-fact">Новый факт о себе</label>

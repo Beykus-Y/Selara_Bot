@@ -72,6 +72,9 @@ def _json_errors(handler):
 async def _read_json_object(request: Request) -> dict[str, Any]:
     if not request.headers.get("content-type", "").lower().startswith("application/json"):
         raise _ApiError(415, "Ожидался JSON.")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _MAX_BODY_BYTES:
+        raise _ApiError(413, "Слишком большой запрос.")
     body = await request.body()
     if len(body) > _MAX_BODY_BYTES:
         raise _ApiError(413, "Слишком большой запрос.")
@@ -250,6 +253,8 @@ def build_miniapp_personal_router(
             user_id = user.telegram_user_id
             repo = PersonalAiRepository(session)
             current = await repo.get_or_create_profile(user_id)
+            if payload.get("auto_memory_enabled") is True and not payload.get("memory_enabled", current.memory_enabled):
+                raise _ApiError(422, "Автоматическое запоминание работает только при включённой памяти.")
             updated = await repo.update_profile(user_id, expected_revision=current.revision, **payload)
             if updated is None:
                 raise _ApiError(409, "Настройки уже изменились. Обновите страницу.")
@@ -261,7 +266,9 @@ def build_miniapp_personal_router(
     @router.post("/forget-all")
     @_json_errors
     async def forget_all(request: Request):
-        # The bot's own state (a reply in flight, half-entered inputs and proposals) lives in this process.
+        # The bot's own state (a reply in flight, half-entered inputs and proposals) lives in this process: the
+        # web panel runs in the bot's event loop (main._run_web_panel). If the web is ever moved to its own
+        # process, this lock stops blocking running turns and the deletion needs a shared (DB/Redis) lock.
         from selara.presentation.handlers import personal_ai, personal_memory  # noqa: PLC0415
 
         async with scope(request) as (session, user):

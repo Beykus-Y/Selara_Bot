@@ -285,6 +285,13 @@ class PersonalAiRepository:
 
     async def delete_all_user_data(self, *, user_id: int) -> ForgottenData:
         """/forget_all: profile, history, summaries and memories of this one user. The account and billing stay."""
+        # Queue behind a parallel add_memory (it holds this row lock): a fact inserted meanwhile would otherwise
+        # survive the deletion, because memories reference the user and not the profile.
+        await self._session.execute(
+            select(PersonalAiProfileModel.user_id)
+            .where(PersonalAiProfileModel.user_id == user_id)
+            .with_for_update()
+        )
         counts = {}
         for key, model in (
             ("memories", PersonalAiMemoryModel),

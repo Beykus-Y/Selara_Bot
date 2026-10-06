@@ -111,6 +111,10 @@ export function PersonalPage() {
           личке с ботом командой /ai. Эти данные видите только вы.
         </p>
       </div>
+      <p className="selara-ai__note personal-profile">
+        {data.profile.display_name ? `Имя: ${data.profile.display_name}` : 'Имя не задано'} ·{' '}
+        {data.profile.mode === 'roleplay' ? 'Режим: ролевая игра' : 'Режим: помощник'}
+      </p>
       <SubscriptionSection data={data} />
       <MemorySection data={data} />
       <PrivacySection />
