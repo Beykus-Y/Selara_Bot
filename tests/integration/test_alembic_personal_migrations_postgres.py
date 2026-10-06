@@ -258,7 +258,7 @@ def test_downgrade_refuses_to_drop_personal_memories(database):
         "AND column_name IN ('auto_memory_enabled', 'memory_extract_cursor')",
     )[0]
     assert columns == []
-    result = _alembic(database, "upgrade", "head")
+    result = _alembic(database, "upgrade", _HEAD)
     assert result.returncode == 0, result.stderr[-2000:]
 
 
