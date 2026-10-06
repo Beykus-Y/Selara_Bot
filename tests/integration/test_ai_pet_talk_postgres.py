@@ -131,7 +131,8 @@ async def test_bot_owner_pet_talks_without_personal_and_nobody_else_does(factory
         assert not await AiPetService(db, admin_user_id=owner_admin).has_active_personal(user_id=other, now=now)
         assert not await AiPetService(db).has_active_personal(user_id=owner_admin, now=now)
 
-    settings = Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", pet_talk_daily_limit=3)
+    settings = Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", pet_talk_daily_limit=3,
+                        pet_talk_guests_daily_limit=2, pet_talk_guest_daily_limit=1)
     config = StaticPersonalConfigProvider(config_from_settings(settings))
     service = FeatureAccessService(
         SqlAlchemyFeatureQuotaRepository(factory),
