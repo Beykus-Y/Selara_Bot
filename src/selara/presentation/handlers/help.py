@@ -126,6 +126,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('admin_aliases'))}\n"
         f"• {_code_join(_base_words('admin_smart_triggers'))}\n"
         f"• {_code_join(_base_words('admin_custom_rp_actions'))} — кастомные reply-действия с шаблонами\n"
+        "• Selara в чате: <code>/selara</code> — клички («Селя, ...»), характер и ответы участникам\n"
         "• ЛС-панель: <code>/start</code> в личке\n"
         "• Selara AI: <code>/premium</code> в личке — выбрать чат и оформить доступ\n"
         "• Условия и помощь по оплате: <code>/terms</code>, <code>/paysupport</code>\n"

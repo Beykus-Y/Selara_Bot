@@ -16,10 +16,12 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.ai_character.group import group_character_block
 from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
@@ -342,8 +344,18 @@ async def _handle(
         user_content = f"[{message.from_user.first_name or admin_tag}] {admin_tag}: {query}"
         glossary_context = await build_glossary_context(chat_id=message.chat.id, query=query, llm_repo=llm_repo)
 
+        # The chat's character only sets the tone; tool authorization stays in execute_tool().
+        character_context: list[dict] = []
+        try:
+            character = await ChatAiCharacterRepository(db_session).get_character(chat_id=message.chat.id)
+            if not character.is_default:
+                character_context.append({"role": "system", "content": group_character_block(character)})
+        except Exception:  # tone is decoration: the assistant answers in the default voice
+            log.warning("llm_admin: chat character unavailable chat_id=%s", message.chat.id, exc_info=True)
+
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
+            *character_context,
             *context_messages,
             *([glossary_context] if glossary_context else []),
             {"role": "user", "content": user_content},
