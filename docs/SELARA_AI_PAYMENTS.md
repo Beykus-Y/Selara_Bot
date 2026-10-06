@@ -37,6 +37,50 @@
 готовностью в админке; иначе бот
 не предлагает продукт, который сейчас не может обслуживать.
 
+## Selara Personal (личная подписка, миграции 0078–0079)
+
+Второй продукт — `selara_personal_monthly`, **Selara Personal**: подписка на
+пользователя, а не на чат (30 дней, Stars, без автопродления). Целевая цена
+69 ⭐ задаётся владельцем через `SELARA_PERSONAL_PRICE_STARS`; без значения (или без
+рабочей LLM-конфигурации) продукт скрыт: `/premium` ведёт себя как раньше и не
+предлагает «Для себя».
+
+- **Хранение.** Подписка лежит в отдельной таблице `user_entitlements`
+  (`ck_user_entitlements_product` допускает только личный продукт).
+  `chat_entitlements` не менялась: её CHECK по-прежнему отвергает личный продукт,
+  поэтому неверно смаршрутизированный платёж не выдаст подписку чату.
+- **Intent и платёж.** `selara_ai_purchase_intents` и `selara_ai_payments` получили
+  `target_scope` (`chat`/`user`) и `target_user_id`; `chat_id` у intent стал
+  NULL-able. Покупатель и получатель хранятся отдельно, но пока подарки выключены:
+  `ck_selara_ai_purchase_intents_personal_self_only` требует
+  `target_user_id = buyer_user_id` (будущий PR «подарки» удалит этот CHECK).
+  Дополнительные CHECK связывают `target_scope`, форму строки и продукт.
+- **Оплата.** `process_successful_payment` диспетчеризует по `target_scope`. Для
+  `user`: advisory lock по `(user_id, product)`, row lock `user_entitlements`,
+  продление от `max(now, valid_until)`; платёж, расход intent и entitlement — одна
+  транзакция, идемпотентность — по `telegram_payment_charge_id`, как у группового
+  продукта. Pre-checkout личного intent не проверяет админство в чате: проверяются
+  только intent, покупатель, сумма, валюта, срок и принятые условия `personal-v1`.
+- **Отклонённые платежи и возвраты.** Личные платежи попадают в тот же аудит и тот же
+  `/stars_refund <payment_id>` (возврат доступен только для отклонённых платежей).
+- **Owner exemption в ЛС.** `user_id == ADMIN_USER_ID` ⇒ `OWNER_INTERNAL` без живой
+  проверки админства (`resolve_owner_private_exemption`). Покупка владельцу не нужна.
+- **Квоты.** `ai_feature_quota_usage` считает по `(pool_key, quota_scope_type,
+  quota_scope_id, period)`, а использование — как сумма `units` (сейчас каждый запрос
+  = 1 unit через `UsagePricer`). Пул `personal_daily`: 5 запросов в сутки бесплатно,
+  150 — с активной Selara Personal. `/autocfg` и внутренние операции
+  (`personal_memory_extract`, сжатие контекста) квот не списывают.
+  `FeatureAccessService.adjust()` и `ModelRouter` пока только интерфейсы-заглушки.
+- **Откат.** Миграции аддитивны; `0079` ставит триггер, поэтому INSERT предыдущего
+  релиза (без новых колонок) остаётся валидным. `alembic downgrade 0078` явно
+  падает, если уже есть личные intent/платежи/entitlement.
+- **Аналитика.** Платежи в админке содержат `target_scope`/`target_user_id`
+  (фильтр `scope=all|chat|user`), сводка монетизации показывает
+  `active_personal_subscriptions`.
+
+Пользовательских функций Personal AI этот PR не добавляет: продукт нельзя включать в
+production, пока не выпущен PR «Personal AI MVP».
+
 ## Поток и восстановление
 
 1. `/premium` доступна в личке. Бот предлагает только известные чаты, где у

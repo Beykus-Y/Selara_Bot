@@ -273,6 +273,16 @@ async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, 
         .where(AiFeatureQuotaUsageModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
     )
+    # The chat-scoped bucket follows the chat; user-scoped rows (personal quotas) only
+    # record the chat as "where it happened" and keep paying from the user's bucket.
+    await session.execute(
+        update(AiFeatureQuotaUsageModel)
+        .where(
+            AiFeatureQuotaUsageModel.quota_scope_type == "chat",
+            AiFeatureQuotaUsageModel.quota_scope_id == old_chat_id,
+        )
+        .values(quota_scope_id=new_chat_id)
+    )
 
 
 async def _merge_activity_postgresql(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:

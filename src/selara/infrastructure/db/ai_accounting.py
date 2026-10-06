@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.infrastructure.db.feature_quota import (
     feature_quota_idempotency_lock_key,
-    feature_quota_lock_key,
+    quota_usage_lock_key,
 )
 from selara.infrastructure.db.models import AiFeatureInvocationModel, AiFeatureQuotaUsageModel, LlmUsageLogModel
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallUsage
@@ -102,11 +102,7 @@ class AiAccountingService:
                     if quota_usage is not None:
                         await session.execute(
                             text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                            {"lock_key": feature_quota_lock_key(
-                                feature=quota_usage.feature,
-                                chat_id=quota_usage.chat_id or 0,
-                                period_start=quota_usage.period_start,
-                            )},
+                            {"lock_key": quota_usage_lock_key(quota_usage)},
                         )
                         quota_usage = await session.scalar(
                             select(AiFeatureQuotaUsageModel).where(
@@ -185,11 +181,7 @@ class AiAccountingService:
                         raise RuntimeError(f"Quota reservation for AI invocation {invocation_id} disappeared")
                     await session.execute(
                         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                        {"lock_key": feature_quota_lock_key(
-                            feature=quota_usage.feature,
-                            chat_id=quota_usage.chat_id or 0,
-                            period_start=quota_usage.period_start,
-                        )},
+                        {"lock_key": quota_usage_lock_key(quota_usage)},
                     )
                     quota_usage = await session.scalar(
                         select(AiFeatureQuotaUsageModel)

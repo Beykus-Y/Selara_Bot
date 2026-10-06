@@ -51,6 +51,7 @@ TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
 _PERIODS = {1, 7, 30, 90}
 _GROUP_TYPES = ("group", "supergroup")
 _PAYMENT_STATES = {"all", "applied", "rejected"}
+_PAYMENT_SCOPES = {"all", "chat", "user"}
 _REFUND_FILTERS = {"all", "none", "pending", "refunded", "failed"}
 _health_last_success: dict[str, str] = {}
 
@@ -741,7 +742,10 @@ def build_miniapp_admin_router(
         window_from = now - timedelta(days=period_days)
         repository = AdminAiAnalyticsRepository(session)
         summary = await repository.payment_summary(window_from=window_from, window_to=now + timedelta(seconds=1))
-        counts = await repository.entitlement_counts(now=now)
+        counts = {
+            **await repository.entitlement_counts(now=now),
+            **await repository.personal_entitlement_counts(now=now),
+        }
         series = await repository.daily_stars_series(
             window_from=window_from, window_to=now + timedelta(seconds=1), timezone_name=settings.bot_timezone
         )
@@ -764,6 +768,7 @@ def build_miniapp_admin_router(
         refund: str = Query(default="all"),
         chat_id: int | None = Query(default=None),
         buyer_id: int | None = Query(default=None),
+        scope: str = Query(default="all"),
         period_days: int | None = Query(default=None),
         cursor: str | None = Query(default=None, max_length=80),
         limit: int = Query(default=20, ge=1, le=50),
@@ -773,6 +778,8 @@ def build_miniapp_admin_router(
             raise HTTPException(status_code=422, detail="Допустимые статусы: all, applied, rejected.")
         if refund not in _REFUND_FILTERS:
             raise HTTPException(status_code=422, detail="Допустимые состояния возврата: all, none, pending, refunded, failed.")
+        if scope not in _PAYMENT_SCOPES:
+            raise HTTPException(status_code=422, detail="Допустимые области: all, chat, user.")
         if period_days is not None:
             _validate_period(period_days)
         parsed_cursor: tuple[datetime, int] | None = None
@@ -788,6 +795,7 @@ def build_miniapp_admin_router(
             chat_id=chat_id,
             buyer_user_id=buyer_id,
             since=_utc_now() - timedelta(days=period_days) if period_days else None,
+            target_scope=None if scope == "all" else scope,
         )
         items, next_cursor = await AdminAiAnalyticsRepository(session).list_payments(
             filters=filters, cursor=parsed_cursor, limit=limit

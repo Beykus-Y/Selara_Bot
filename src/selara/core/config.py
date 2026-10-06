@@ -157,6 +157,10 @@ class Settings(BaseSettings):
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     # Checkout stays disabled until the owner selects an explicit Stars price.
     selara_ai_price_stars: int | None = Field(default=None, gt=0, validation_alias="SELARA_AI_PRICE_STARS")
+    # Selara Personal (a per-user subscription) stays hidden until its own price is set.
+    selara_personal_price_stars: int | None = Field(
+        default=None, gt=0, validation_alias="SELARA_PERSONAL_PRICE_STARS"
+    )
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")

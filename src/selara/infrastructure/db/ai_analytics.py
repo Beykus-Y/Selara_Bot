@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Date, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY, SELARA_PERSONAL_PRODUCT_KEY
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
     ChatEntitlementModel,
+    UserEntitlementModel,
     ChatModel,
     LlmUsageLogModel,
     SelaraAiPaymentModel,
@@ -69,6 +70,7 @@ class PaymentFilters:
     chat_id: int | None = None
     buyer_user_id: int | None = None
     since: datetime | None = None
+    target_scope: str | None = None  # None = both; chat | user (Selara Personal)
 
 
 class AdminAiAnalyticsRepository:
@@ -339,6 +341,26 @@ class AdminAiAnalyticsRepository:
         ).one()
         return {"active_paid_chats": int(total), "expiring_within_7_days": int(expiring)}
 
+    async def personal_entitlement_counts(self, *, now: datetime) -> dict:
+        """Active Selara Personal subscriptions (user-scoped), kept apart from chat counts."""
+        entitlement = UserEntitlementModel
+        total, expiring = (
+            await self._session.execute(
+                select(
+                    func.count(entitlement.id),
+                    func.count(case((entitlement.valid_until <= now + EXPIRING_SOON, 1))),
+                ).where(
+                    entitlement.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                    entitlement.status == "active",
+                    entitlement.valid_until > now,
+                )
+            )
+        ).one()
+        return {
+            "active_personal_subscriptions": int(total),
+            "personal_expiring_within_7_days": int(expiring),
+        }
+
     async def active_entitlements(self, *, now: datetime, limit: int = MAX_ENTITLEMENT_ROWS) -> list[dict]:
         entitlement = ChatEntitlementModel
         last_purchase = (
@@ -439,6 +461,8 @@ class AdminAiAnalyticsRepository:
             "state": payment.processing_state,
             "reason": payment.processing_reason,
             "product_key": payment.product_key,
+            "target_scope": payment.target_scope,
+            "target_user_id": payment.target_user_id,
             "refund": refund,
         }
         if detail:
@@ -467,6 +491,8 @@ class AdminAiAnalyticsRepository:
             )
         if filters.buyer_user_id is not None:
             statement = statement.where(payment.buyer_user_id == filters.buyer_user_id)
+        if filters.target_scope in {"chat", "user"}:
+            statement = statement.where(payment.target_scope == filters.target_scope)
         if filters.since is not None:
             statement = statement.where(payment.payment_at >= filters.since)
         if cursor is not None:

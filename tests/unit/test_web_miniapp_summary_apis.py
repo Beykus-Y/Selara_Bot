@@ -165,7 +165,7 @@ async def test_miniapp_family_api_returns_a_bundle_summary(monkeypatch) -> None:
 
 
 class _AiQuotaRepository:
-    async def usage_summary(self, *, policy, chat_id, owner_exempt, period_start, period_end):
+    async def usage_summary(self, *, policy, chat_id, owner_exempt, period_start, period_end, scope=None):
         from selara.application.feature_access import AccessTier, FeatureUsageSummary
 
         if owner_exempt:
