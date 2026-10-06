@@ -365,6 +365,12 @@ async def _handle(
             thread_id=message.message_thread_id,
         )
 
+        web_context = WebToolContext(
+            client=web_search_client,
+            max_calls=settings.web_search_max_calls_per_invocation,
+            max_results=settings.web_search_max_results,
+            max_page_chars=settings.web_search_max_page_chars,
+        )
         tool_ctx = dict(
             artifact_context=artifact_context,
             chat_snapshot=chat_snapshot,
@@ -372,18 +378,17 @@ async def _handle(
             activity_repo=activity_repo,
             llm_repo=llm_repo,
             bot=bot,
-            web_context=WebToolContext(
-                client=web_search_client,
-                max_calls=settings.web_search_max_calls_per_invocation,
-                max_results=settings.web_search_max_results,
-                max_page_chars=settings.web_search_max_page_chars,
-            ),
+            web_context=web_context,
         )
         # Web tools are only advertised when a search client is wired in; a
         # stray model call still gets a corrective error from the executor.
         available_tools = get_tool_definitions(
             exclude=None if web_search_client is not None else WEB_TOOL_NAMES
         )
+        # True once untrusted web content has entered the model context; the
+        # tainted assistant answer must not re-enter a later ?? invocation's
+        # trusted context (see save_interaction below).
+        web_tainted = False
 
         for _round in range(_MAX_TOOL_ROUNDS):
             try:
@@ -391,7 +396,12 @@ async def _handle(
             except Exception:
                 pass
             try:
-                request_kwargs = {"messages": messages, "tools": available_tools}
+                request_kwargs: dict[str, Any] = {"messages": messages}
+                # With the tool list withdrawn (post-web research boundary)
+                # the key is omitted entirely: an empty `tools=[]` is not
+                # accepted uniformly across OpenAI-compatible providers.
+                if available_tools:
+                    request_kwargs["tools"] = available_tools
                 if call_context is not None:
                     request_kwargs["accounting_context"] = call_context
                 response = await llm_client.chat_with_tools(**request_kwargs)
@@ -460,7 +470,24 @@ async def _handle(
                         await thinking_msg.edit_text(f"⚙️ {status}")
                     except Exception:
                         pass
-                result = await execute_tool(call, **tool_ctx)
+                # Server-side execution allowlist: a compromised model may
+                # emit a tool call that was never advertised for this round
+                # (e.g. ban_user after web content withdrew the tool list).
+                # execute_tool resolves against the global registry, so the
+                # boundary must be enforced HERE, before dispatch.
+                if call.name not in {d["function"]["name"] for d in available_tools}:
+                    result = ToolResult(
+                        call_id=call.call_id,
+                        name=call.name,
+                        result_text=json.dumps(
+                            {"error": "Инструмент недоступен в текущей фазе запроса."},
+                            ensure_ascii=False,
+                        ),
+                        action_description="",
+                        success=False,
+                    )
+                else:
+                    result = await execute_tool(call, **tool_ctx)
                 tool_results.append(result)
                 if result.success and result.db_action_id is not None:
                     # #22: commit immediately so a crash on a *later* round can
@@ -475,11 +502,13 @@ async def _handle(
                 messages.append(tool_msg)
                 tool_messages.append(tool_msg)
                 if call.name in WEB_TOOL_NAMES:
-                    # Deterministic confused-deputy guard: untrusted web content
-                    # is now in the model context, so mutating tools are
-                    # withdrawn for the rest of this invocation (web tools go
-                    # too once their budget is spent) -- see
-                    # web_tools.restrict_tools_after_web.
+                    web_tainted = True
+                    # Deterministic research boundary: untrusted web content is
+                    # now in the model context. EVERY tool is withdrawn for the
+                    # rest of the invocation -- a poisoned page must not be able
+                    # to combine private context (history, members, audit log)
+                    # with another outbound web request (exfiltration) or steer
+                    # any action. The model answers from what it already has.
                     available_tools = restrict_tools_after_web(available_tools, web_context)
                 if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
                     # The caption is the answer. Do not request another completion or
@@ -510,7 +539,10 @@ async def _handle(
             assistant_response=final_answer,
             tool_messages=tool_messages,
             llm_repo=llm_repo,
-            is_context=with_context,
+            # A web-tainted assistant answer must not re-enter a later `??`
+            # invocation as a trusted assistant turn (the tool withdrawal only
+            # lasts one invocation; the poisoned content would survive it).
+            is_context=with_context and not web_tainted,
         )
 
         if with_context:

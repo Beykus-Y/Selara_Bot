@@ -9,6 +9,16 @@ so TLS SNI, certificate hostname verification and the HTTP Host header all
 stay correct -- only the TCP connect target is substituted in the network
 backend.
 
+Connects are FAIL-CLOSED: `_PinnedBackend` refuses (httpx.LocalProtocolError)
+any host that has no pin entry. In production fetch_page pins every hop before
+sending, so a missing pin means the resolve-validate-pin invariant was violated
+and dialing ordinary DNS would silently re-open the rebinding window.
+
+Pin keys are the httpcore host representation: `httpx.URL.raw_host` decoded to
+lowercase ascii -- PUNYCODE for IDN (e.g. "пример.рф" ->
+"xn--e1afmkfd.xn--p1ai"), no brackets otherwise. httpcore builds its request
+URL from raw_host, so callers must pin by that form, not the unicode url.host.
+
 Adapted to the installed httpcore 1.0.x internals (verified against
 httpcore 1.0.9 / httpx 0.28.1):
 - there is no public `httpcore.backends.asyncio` module in this version; the
@@ -96,8 +106,14 @@ class _PinnedBackend(AnyIOBackend if typing.TYPE_CHECKING else object):
     """Network backend that substitutes validated IPs for pinned hosts.
 
     connect_tcp signature matches httpcore 1.0.x
-    (`AsyncNetworkBackend.connect_tcp`); unknown hosts pass through unchanged
-    so behavior degrades to stock httpcore.
+    (`AsyncNetworkBackend.connect_tcp`).
+
+    Fail-closed on purpose: a host without a pin entry is refused with
+    httpx.LocalProtocolError instead of being dialed via ordinary DNS.
+    fetch_page pins every hop (by the httpcore host representation: punycode
+    ascii from raw_host for IDN) before sending, so a missing pin is an
+    invariant violation, and connecting anyway would silently re-open the
+    DNS-rebinding TOCTOU window this backend exists to close.
     """
 
     def __init__(self, pins: dict[str, str]) -> None:
@@ -113,7 +129,12 @@ class _PinnedBackend(AnyIOBackend if typing.TYPE_CHECKING else object):
         local_address: str | None = None,
         socket_options: typing.Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> AsyncNetworkStream:
-        target = self._pins.get(_normalize_host(host), host)
+        target = self._pins.get(_normalize_host(host))
+        if target is None:
+            # Fail closed: no ordinary-DNS fallback for unpinned hosts.
+            raise httpx.LocalProtocolError(
+                f"DNS pin missing for host {host!r}: refusing unpinned connection"
+            )
         return await AnyIOBackend.connect_tcp(
             self,
             target,
@@ -164,6 +185,13 @@ class PinnedDnsTransport(httpx.AsyncBaseTransport):
         )
 
     def pin(self, host: str, ip: str) -> None:
+        """Record host -> validated IP (plain dict write).
+
+        `host` MUST be the httpcore host representation: httpx.URL.raw_host
+        decoded to lowercase ascii (punycode for IDN, no brackets for literal
+        IPs) -- exactly what httpcore passes to _PinnedBackend.connect_tcp.
+        WebSearchClient.fetch_page guarantees this when pinning each hop.
+        """
         self._pins[_normalize_host(host)] = ip
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

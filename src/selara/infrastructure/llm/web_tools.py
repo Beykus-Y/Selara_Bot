@@ -12,15 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from selara.infrastructure.http.web_search import WebSearchClient, WebSearchError
-from selara.infrastructure.llm.tools import (
-    MUTATING_TOOL_NAMES,
-    ToolCall,
-    ToolResult,
-    _err,
-    _ok,
-    _untrusted,
-    register_tool,
-)
+from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, _untrusted, register_tool
 
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"web_search", "fetch_page"})
 
@@ -66,20 +58,23 @@ def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
 
 
 def restrict_tools_after_web(tools: list[dict], web_context: WebToolContext) -> list[dict]:
-    """Deterministic confused-deputy guard for web results.
+    """Deterministic research boundary for web results.
 
-    Once a web_search/fetch_page result has entered the model context, page
-    text could steer the model into authorized-but-unintended actions
-    (execute_tool's auth re-checks stop privilege escalation, not this).
-    Mutating tools are therefore withdrawn for the rest of the invocation;
-    web tools are also withdrawn once their budget is spent so the model
-    stops burning LLM rounds on guaranteed 'limit exhausted' errors."""
-    return [
-        definition
-        for definition in tools
-        if (name := definition["function"]["name"]) not in MUTATING_TOOL_NAMES
-        and not (web_context.exhausted and name in WEB_TOOL_NAMES)
-    ]
+    Once a web_search/fetch_page result has entered the model context, the
+    invocation must no longer combine that untrusted content with ANY tool:
+    a poisoned page could steer mutating actions (confused deputy -- execute_tool's
+    auth re-checks stop privilege escalation, not unintended-but-authorized
+    actions) or chain read tools (history, members, audit log) into another
+    outbound web request to exfiltrate private context. So the answer: the
+    tool list is withdrawn entirely and the model finishes with a plain text
+    answer from what it already has. Parallel web calls made in the same
+    round as the first one still execute; everything after does not.
+
+    The unconditional withdraw also covers the exhausted-budget case, so the
+    model never burns LLM rounds on guaranteed 'limit exhausted' errors.
+    """
+    del tools, web_context  # the boundary is total; arguments kept for call-site stability
+    return []
 
 
 @register_tool(

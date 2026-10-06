@@ -167,7 +167,15 @@ class WebSearchClient:
                 # substituted, so TLS SNI and the Host header stay correct.
                 pinned_ip = await _resolve_pinned_host(current.host, resolve_timeout=self._timeout_seconds)
                 if hasattr(transport, "pin"):
-                    transport.pin(current.host, pinned_ip)
+                    # Pin by the exact host representation httpcore passes to
+                    # the network backend: httpcore.URL is built from
+                    # url.raw_host, which is PUNYCODE ascii for IDN
+                    # ("пример.рф" -> "xn--e1afmkfd.xn--p1ai") and lowercase
+                    # ascii otherwise. Resolving stays on the unicode form
+                    # (socket.getaddrinfo handles IDN). The backend is
+                    # fail-closed: an unpinned host aborts the fetch.
+                    pin_key = current.raw_host.decode("ascii").lower()
+                    transport.pin(pin_key, pinned_ip)
                 try:
                     response = await client.send(client.build_request("GET", current), stream=True)
                     try:
@@ -184,6 +192,11 @@ class WebSearchClient:
                     raise WebSearchError(
                         "Не удалось загрузить страницу: превышено время ожидания.", is_timeout=True
                     ) from exc
+                except httpx.LocalProtocolError as exc:
+                    # The pinned backend raises this on a pin-table miss: an
+                    # invariant violation, not "site unavailable". Must precede
+                    # the generic HTTPError handler (it is a subclass).
+                    raise WebSearchError(f"Внутренняя ошибка пиннинга DNS: {exc}") from exc
                 except httpx.HTTPError as exc:
                     raise WebSearchError("Не удалось загрузить страницу: сайт недоступен.") from exc
         raise WebSearchError("Слишком много перенаправлений: ссылка не ведёт на страницу.")

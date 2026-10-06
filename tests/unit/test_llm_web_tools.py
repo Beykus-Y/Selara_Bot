@@ -342,27 +342,26 @@ def _kept_names(tools: list[dict]) -> list[str]:
     return [definition["function"]["name"] for definition in tools]
 
 
-def test_restrict_tools_after_web_withdraws_mutating_tools_only():
+def test_restrict_tools_after_web_withdraws_everything():
+    """Research boundary: after web content enters the context NO tool may
+    combine with it (mutating actions, private-context reads, further web
+    calls) -- the model finishes with a plain text answer."""
     definitions = _tool_definitions("ban_user", "get_top", "web_search", "fetch_page", "get_user_info")
     context = WebToolContext(client=WebSearchClient(provider=_RecordingProvider()), max_calls=4, calls_used=1)
     assert context.exhausted is False
-    kept = _kept_names(restrict_tools_after_web(definitions, context))
-    assert kept == ["get_top", "web_search", "fetch_page", "get_user_info"]
+    assert restrict_tools_after_web(definitions, context) == []
 
 
-def test_restrict_tools_after_web_withdraws_spent_web_tools():
-    definitions = _tool_definitions("ban_user", "get_top", "web_search", "fetch_page", "get_user_info")
+def test_restrict_tools_after_web_withdraws_everything_when_budget_spent():
+    definitions = _tool_definitions("get_top", "web_search", "fetch_page")
     context = WebToolContext(client=WebSearchClient(provider=_RecordingProvider()), max_calls=2, calls_used=2)
-    kept = _kept_names(restrict_tools_after_web(definitions, context))
-    assert kept == ["get_top", "get_user_info"]
+    assert restrict_tools_after_web(definitions, context) == []
 
 
-def test_restrict_tools_after_web_without_client_removes_web_tools():
-    definitions = _tool_definitions("ban_user", "get_top", "web_search", "fetch_page", "get_user_info")
+def test_restrict_tools_after_web_is_total_regardless_of_client():
+    definitions = _tool_definitions("get_top", "web_search", "fetch_page")
     context = WebToolContext(client=None, max_calls=4, calls_used=0)
-    assert context.exhausted is True
-    kept = _kept_names(restrict_tools_after_web(definitions, context))
-    assert kept == ["get_top", "get_user_info"]
+    assert restrict_tools_after_web(definitions, context) == []
 
 
 def test_settings_validates_web_search_value_ranges() -> None:

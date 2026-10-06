@@ -161,9 +161,13 @@ async def test_pinned_backend_substitutes_pinned_ip(monkeypatch):
     assert isinstance(stream, _DummyStream)
     assert captured == [("1.2.3.4", 443)]
 
-    # Unknown host passes through unchanged (degrades to stock behavior).
-    await backend.connect_tcp("other.example", 80)
-    assert captured == [("1.2.3.4", 443), ("other.example", 80)]
+    # Fail closed: an unpinned host is refused (no ordinary-DNS fallback).
+    # A pin-table miss means the resolve-validate-pin invariant upstream was
+    # violated; dialing ordinary DNS here would silently re-open the
+    # DNS-rebinding TOCTOU window the pinning exists to close.
+    with pytest.raises(httpx.LocalProtocolError, match="DNS pin missing for host"):
+        await backend.connect_tcp("other.example", 80)
+    assert captured == [("1.2.3.4", 443)]
 
 
 def test_pinned_transport_pin_normalizes_host():
@@ -184,5 +188,104 @@ async def test_pinned_transport_is_usable_as_httpx_transport(monkeypatch):
     transport.pin("example.com", "1.2.3.4")
     request = httpx.Request("GET", "https://example.com/")
     with pytest.raises(httpx.ConnectError):
+        await transport.handle_async_request(request)
+    await transport.aclose()
+
+
+# ------------------------------------------- IDN pin key + fail-closed regressions
+
+
+class _PinRecordingTransport(httpx.AsyncBaseTransport):
+    """Stub PinnedDnsTransport: records pin() calls, forbids real requests."""
+
+    def __init__(self, *, resolve_timeout: float) -> None:
+        self.resolve_timeout = resolve_timeout
+        self.pins: dict[str, str] = {}
+
+    def pin(self, host: str, ip: str) -> None:
+        self.pins[host] = ip
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise AssertionError("network must not be reached in this test")
+
+
+def _install_pinning_stub(monkeypatch) -> list[_PinRecordingTransport]:
+    """Swap the client's production PinnedDnsTransport for a recording stub.
+
+    Returns the list the stub instances are appended to (fetch_page builds the
+    transport internally, so the test reads the pins off the created instance).
+    """
+    from selara.infrastructure.http.web_search import client as client_module
+
+    async def fake_resolve(host: str) -> set[str]:
+        return {"1.2.3.4"}
+
+    monkeypatch.setattr(client_module, "_resolve_addresses", fake_resolve)
+
+    created: list[_PinRecordingTransport] = []
+
+    class StubTransport(_PinRecordingTransport):
+        def __init__(self, *, resolve_timeout: float) -> None:
+            super().__init__(resolve_timeout=resolve_timeout)
+            created.append(self)
+
+    monkeypatch.setattr(client_module, "PinnedDnsTransport", StubTransport)
+    return created
+
+
+async def test_fetch_page_pins_idn_by_punycode_httpcore_key(monkeypatch):
+    """IDN URL: the pin key must be the punycode form httpcore dials.
+
+    httpx.URL("https://пример.рф").host is the unicode form while .raw_host is
+    b"xn--e1afmkfd.xn--p1ai"; httpcore builds its request URL from raw_host, so
+    pinning by the unicode current.host missed the pin table and the backend
+    (previously fail-open) fell back to ordinary DNS. This test fails against
+    the pre-fix `transport.pin(current.host, ...)` code.
+    """
+    created = _install_pinning_stub(monkeypatch)
+    client = WebSearchClient(provider=DuckDuckGoProvider())
+
+    with pytest.raises(AssertionError, match="network must not be reached"):
+        await client.fetch_page("https://пример.рф/doc", max_chars=100)
+
+    # Verified interactively: httpx.URL("https://пример.рф").raw_host
+    # == b"xn--e1afmkfd.xn--p1ai".
+    assert created[0].pins == {"xn--e1afmkfd.xn--p1ai": "1.2.3.4"}
+
+
+async def test_fetch_page_pins_literal_ip_by_raw_host_key(monkeypatch):
+    created = _install_pinning_stub(monkeypatch)
+    client = WebSearchClient(provider=DuckDuckGoProvider())
+
+    with pytest.raises(AssertionError, match="network must not be reached"):
+        await client.fetch_page("http://1.2.3.4/x", max_chars=100)
+
+    assert created[0].pins == {"1.2.3.4": "1.2.3.4"}
+
+
+async def test_pinned_backend_fails_closed_on_missing_pin(monkeypatch):
+    from selara.infrastructure.http.web_search import dns_pinning
+
+    async def no_dial(self, host, port, timeout=None, local_address=None, socket_options=None):
+        raise AssertionError("backend must not dial for an unpinned host")
+
+    monkeypatch.setattr(dns_pinning.AnyIOBackend, "connect_tcp", no_dial)
+    backend = dns_pinning._PinnedBackend({})
+
+    with pytest.raises(httpx.LocalProtocolError, match="DNS pin missing for host"):
+        await backend.connect_tcp("example.com", 443)
+
+
+async def test_pinned_transport_fails_closed_without_pins_end_to_end(monkeypatch):
+    from selara.infrastructure.http.web_search import dns_pinning
+
+    async def no_dial(self, host, port, timeout=None, local_address=None, socket_options=None):
+        raise AssertionError("backend must not dial for an unpinned host")
+
+    monkeypatch.setattr(dns_pinning.AnyIOBackend, "connect_tcp", no_dial)
+    transport = PinnedDnsTransport(resolve_timeout=1.0)
+    request = httpx.Request("GET", "https://example.com/")
+
+    with pytest.raises(httpx.LocalProtocolError, match="DNS pin missing for host"):
         await transport.handle_async_request(request)
     await transport.aclose()
