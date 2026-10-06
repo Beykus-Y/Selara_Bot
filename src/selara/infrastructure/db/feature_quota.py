@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy import case, func, select, text
@@ -350,6 +351,31 @@ class SqlAlchemyFeatureQuotaRepository:
                         policy.feature.value, chat_id, used, policy.limit, period_start.isoformat(),
                     )
                     return decision
+                if not owner_exempt and policy.per_actor_limit is not None and actor_user_id is not None:
+                    # Second count under the same bucket lock: one member cannot drain the shared pool.
+                    actor_used = await self._count_used(
+                        session, pool_key=policy.pool, scope=scope, period_start=period_start,
+                        actor_user_id=actor_user_id,
+                    )
+                    if actor_used + cost.units > policy.per_actor_limit:
+                        logger.info(
+                            "Feature quota actor share denied feature=%s chat_id=%s actor_user_id=%s used=%s limit=%s",
+                            policy.feature.value, chat_id, actor_user_id, actor_used, policy.per_actor_limit,
+                        )
+                        return self._decision(
+                            allowed=False,
+                            policy=replace(policy, limit=policy.per_actor_limit),
+                            scope=scope,
+                            access_tier=access_tier,
+                            owner_exempt=False,
+                            used=actor_used,
+                            period_start=period_start,
+                            period_end=period_end,
+                            invocation_id=None,
+                            usage_id=None,
+                            reused=False,
+                            reason=AccessReason.ACTOR_QUOTA_EXHAUSTED,
+                        )
 
                 await session.execute(
                     pg_insert(ChatModel)
@@ -529,7 +555,9 @@ class SqlAlchemyFeatureQuotaRepository:
             return True
 
     @staticmethod
-    async def _count_used(session, *, pool_key: str, scope: QuotaScope, period_start) -> Decimal:
+    async def _count_used(
+        session, *, pool_key: str, scope: QuotaScope, period_start, actor_user_id: int | None = None
+    ) -> Decimal:
         """Units already spent in the pool/scope/period; a request counted once however often it was recorded."""
         logical_request = case(
             (
@@ -555,6 +583,11 @@ class SqlAlchemyFeatureQuotaRepository:
                 AiFeatureQuotaUsageModel.period_start == period_start,
                 AiFeatureQuotaUsageModel.owner_exempt.is_(False),
                 AiFeatureQuotaUsageModel.status == "consumed",
+                *(
+                    (AiFeatureQuotaUsageModel.actor_user_id == actor_user_id,)
+                    if actor_user_id is not None
+                    else ()
+                ),
             )
             .group_by(logical_request)
             .subquery()
