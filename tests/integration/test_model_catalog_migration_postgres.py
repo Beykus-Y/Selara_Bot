@@ -13,8 +13,8 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 ROOT = Path(__file__).resolve().parents[2]
-PREVIOUS = "0082_personal_ai"
-REVISION = "0083_model_catalog_router"
+PREVIOUS = "0083_ai_pets"
+REVISION = "0084_model_catalog_router"
 
 
 def sql(dsn, *statements):
@@ -71,6 +71,26 @@ def test_model_catalog_upgrade_downgrade_keeps_historical_costs():
         assert sql(dsn, "SELECT to_regclass('llm_model_catalog') AS table_name")[0][0]["table_name"] is None
         result = alembic(dsn, "upgrade", REVISION)
         assert result.returncode == 0, result.stderr[-3000:]
+        # Valid catalog costs above the old precision are preserved; downgrade refuses atomically.
+        for cost in ("100000", "-100000", "99999999999.999999999"):
+            sql(dsn, f"UPDATE llm_usage_log SET estimated_cost_usd = {cost}")
+            result = alembic(dsn, "downgrade", PREVIOUS)
+            assert result.returncode != 0 and "costs do not fit NUMERIC(14,9)" in result.stderr
+            assert sql(dsn, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == REVISION
+            assert sql(dsn, "SELECT estimated_cost_usd::text AS cost FROM llm_usage_log")[0][0]["cost"] == (cost + ".000000000" if "." not in cost else cost)
+        sql(dsn, "UPDATE llm_usage_log SET estimated_cost_usd = 99999.999999999")
+        result = alembic(dsn, "downgrade", PREVIOUS)
+        assert result.returncode == 0, result.stderr[-3000:]
+        assert sql(dsn, "SELECT estimated_cost_usd::text AS cost FROM llm_usage_log")[0][0]["cost"] == "99999.999999999"
+        result = alembic(dsn, "upgrade", REVISION)
+        assert result.returncode == 0, result.stderr[-3000:]
+        sql(dsn, "INSERT INTO chats (telegram_chat_id, type) VALUES (-9001, 'supergroup')",
+            "INSERT INTO daily_summary_runs (chat_id, summary_date, window_from, window_to, trigger, lease_until, pipeline_cost_usd) "
+            "VALUES (-9001, current_date, now() - interval '1 day', now(), 'scheduled', now(), 200000)")
+        result = alembic(dsn, "downgrade", PREVIOUS)
+        assert result.returncode != 0 and "summary costs do not fit NUMERIC(14,9)" in result.stderr
+        assert sql(dsn, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == REVISION
+        sql(dsn, "UPDATE daily_summary_runs SET pipeline_cost_usd = 99999.999999999")
         # Longer OpenRouter identifiers are stored without truncation; unsafe downgrade refuses atomically.
         long_model = "provider/" + "x" * 80
         sql(dsn, f"UPDATE llm_usage_log SET model = '{long_model}'")

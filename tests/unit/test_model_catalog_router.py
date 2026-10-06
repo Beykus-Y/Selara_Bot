@@ -245,3 +245,26 @@ async def test_failed_attempts_keep_selected_model_profile():
         await llm.chat_simple([], model_profile="analytics")
     assert len(raised.value.usages) == 3
     assert all(u.model == MODEL.model_id and u.model_profile == "analytics" for u in raised.value.usages)
+
+
+@pytest.mark.parametrize("method", ["chat_simple", "chat_with_tools", "summarize", "chat_structured"])
+@pytest.mark.parametrize("overrides", [
+    {"model": "x" * 256}, {"model_profile": "x" * 65}, {"model_profile": ""},
+    {"model_profile": " basic "}, {"model": 123}, {"model_profile": 123},
+])
+async def test_invalid_runtime_identifiers_are_rejected_before_inference(method, overrides):
+    llm = client()
+    kwargs = {"tools": []} if method == "chat_with_tools" else {"response_model": Answer} if method == "chat_structured" else {}
+    with pytest.raises(ValueError):
+        await getattr(llm, method)([], **kwargs, **overrides)
+    llm._client.chat.completions.create.assert_not_awaited()
+
+
+async def test_runtime_identifier_exact_storage_boundaries_are_accepted():
+    llm = client()
+    llm._client.chat.completions.create.return_value = response(None)
+    model = "x" * 255
+    assert (await llm.chat_simple([], model=model)).usages[0].model == model
+    profile = "x" * 64
+    usage = (await llm.chat_simple([], model_profile=profile)).usages[0]
+    assert usage.model == "legacy" and usage.model_profile == profile

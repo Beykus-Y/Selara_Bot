@@ -60,6 +60,7 @@ from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import get_role_label_ru, has_command_access, has_permission
 from selara.presentation.commands.access import parse_command_rank_phrase, resolve_command_key_input
+from selara.presentation.handlers.ai_pets import ai_pet_text_command, parse_pet_text
 from selara.presentation.commands.catalog import (
     COMMAND_KEYS_WITH_TAIL,
     SOCIAL_ACTION_18_PLUS as _SOCIAL_ACTION_18_PLUS,
@@ -5903,6 +5904,24 @@ async def text_commands_handler(
                 if trigger is not None:
                     await send_chat_trigger(message, activity_repo, trigger)
         _pass_private_text_on(message)
+        return
+
+    pet_request = parse_pet_text(text)
+    if pet_request is not None and message.chat.type in {"group", "supergroup"}:
+        if write_locked:
+            await _answer_quiet(message, CHAT_WRITE_LOCK_ANSWER)
+            return
+        if not await _enforce_command_access(message, activity_repo, command_key="pet"):
+            return
+        await ai_pet_text_command(
+            message,
+            pet_request,
+            activity_repo=activity_repo,
+            db_session=db_session,
+            economy_repo=economy_repo,
+            chat_settings=chat_settings,
+            settings=settings,
+        )
         return
 
     announce_body, announce_error = _extract_announcement_body(text)

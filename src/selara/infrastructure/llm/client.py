@@ -16,7 +16,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import BaseModel, ValidationError
 
 from selara.infrastructure.llm.pricing import estimate_llm_cost_usd
-from selara.application.model_catalog import CatalogProvider, CatalogSnapshot, ModelCapabilities
+from selara.application.model_catalog import CatalogProvider, CatalogSnapshot, ModelCapabilities, validate_text
 from selara.application.model_router import DefaultModelRouter, ModelRouter
 
 log = logging.getLogger(__name__)
@@ -265,8 +265,10 @@ class LlmClient:
     ) -> tuple[str, CatalogSnapshot | None, bool]:
         if model is not None and profile is not None:
             raise ValueError("Pass either model or model_profile, not both")
-        if model is not None and (not model.strip() or model != model.strip()):
-            raise ValueError("model override must be nonempty and trimmed")
+        if model is not None:
+            validate_text(model, "model override", 255)
+        if profile is not None:
+            validate_text(profile, "model_profile", 64)
         selected = model or legacy_model
         native_structured = self._config.supports_structured_output
         if profile is not None:

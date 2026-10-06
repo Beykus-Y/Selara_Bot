@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
+from selara.presentation.handlers.ai_pets import router as ai_pets_router
 from selara.presentation.handlers.autoconfig import router as autoconfig_router
 from selara.presentation.handlers.aliases import router as aliases_router
 from selara.presentation.handlers.admin_broadcasts import router as admin_broadcasts_router
@@ -99,6 +100,8 @@ def build_router(
     application.include_router(message_archive_router)
     application.include_router(help_router)
     application.include_router(stats_router)
+    # Before chat_assistant: a bare /pet opens the AI pet, /pet with a target stays the role-play request.
+    application.include_router(ai_pets_router)
     application.include_router(chat_assistant_router)
     application.include_router(economy_router)
     application.include_router(game_router)

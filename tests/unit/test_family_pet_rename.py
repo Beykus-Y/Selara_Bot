@@ -17,9 +17,14 @@ from selara.presentation.handlers import chat_assistant
 from selara.presentation.middlewares.chat_write_lock import is_write_locked_command
 
 
-@pytest.mark.parametrize("raw", ["/bepet", "/bepet @user", "/bepet@selara_bot", "/pet", "/pet@selara_bot @user"])
+@pytest.mark.parametrize("raw", ["/bepet", "/bepet @user", "/bepet@selara_bot", "/pet @user", "/pet@selara_bot @user"])
 def test_slash_commands_resolve_to_family_pet_key(raw: str) -> None:
     assert resolve_command_key_input(raw) == "family_pet"
+
+
+@pytest.mark.parametrize("raw", ["/pet", "/pet@selara_bot", "/pets", "/pet_new кот Мурка", "/pet_shop"])
+def test_bare_pet_commands_belong_to_ai_pets(raw: str) -> None:
+    assert resolve_command_key_input(raw) == "pet"
 
 
 @pytest.mark.parametrize("raw", ["стать питомцем", "стать питомцем @user"])
@@ -29,9 +34,9 @@ def test_text_trigger_resolves_to_family_pet_key(raw: str) -> None:
     assert match is not None and match.command_key == "family_pet"
 
 
-def test_pet_key_is_released_for_ai_pets() -> None:
+def test_pet_key_now_belongs_to_ai_pets() -> None:
     assert "family_pet" in KNOWN_COMMAND_KEYS
-    assert "pet" not in KNOWN_COMMAND_KEYS
+    assert "pet" in KNOWN_COMMAND_KEYS
     assert COMMAND_KEY_DEFAULT_SOURCE_TRIGGER["family_pet"] == "стать питомцем"
     assert "pet" not in COMMAND_KEY_DEFAULT_SOURCE_TRIGGER
 

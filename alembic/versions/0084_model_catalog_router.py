@@ -1,15 +1,15 @@
 """Persistent model catalog, exact identifiers and logical profiles.
 
-Revision ID: 0083_model_catalog_router
-Revises: 0082_personal_ai
+Revision ID: 0084_model_catalog_router
+Revises: 0083_ai_pets
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0083_model_catalog_router"
-down_revision = "0082_personal_ai"
+revision = "0084_model_catalog_router"
+down_revision = "0083_ai_pets"
 branch_labels = None
 depends_on = None
 
@@ -65,11 +65,31 @@ def upgrade() -> None:
     op.create_index("idx_llm_usage_log_profile_created", "llm_usage_log", ["model_profile", "created_at"])
     op.alter_column("llm_usage_log", "model", existing_type=sa.String(64), type_=sa.String(255), existing_nullable=False)
 
+    op.alter_column("llm_usage_log", "estimated_cost_usd", existing_type=sa.Numeric(14, 9),
+                    type_=sa.Numeric(20, 9), existing_nullable=True)
+
+    op.alter_column("daily_summary_runs", "pipeline_cost_usd", existing_type=sa.Numeric(14, 9),
+                    type_=sa.Numeric(20, 9), existing_nullable=False)
+
 
 def downgrade() -> None:
+    # Keep guards and narrowing atomic against concurrent accounting writes.
+    op.execute("LOCK TABLE llm_usage_log, daily_summary_runs IN ACCESS EXCLUSIVE MODE")
+    if op.get_bind().scalar(sa.text(
+        "SELECT count(*) FROM llm_usage_log WHERE abs(estimated_cost_usd) >= 100000"
+    )):
+        raise RuntimeError("Cannot downgrade: usage costs do not fit NUMERIC(14,9)")
+    if op.get_bind().scalar(sa.text(
+        "SELECT count(*) FROM daily_summary_runs WHERE abs(pipeline_cost_usd) >= 100000"
+    )):
+        raise RuntimeError("Cannot downgrade: summary costs do not fit NUMERIC(14,9)")
     # Do not silently truncate actual provider identifiers introduced since upgrade.
     if op.get_bind().scalar(sa.text("SELECT count(*) FROM llm_usage_log WHERE length(model) > 64")):
         raise RuntimeError("Cannot downgrade: usage contains model identifiers longer than 64 characters")
+    op.alter_column("daily_summary_runs", "pipeline_cost_usd", existing_type=sa.Numeric(20, 9),
+                    type_=sa.Numeric(14, 9), existing_nullable=False)
+    op.alter_column("llm_usage_log", "estimated_cost_usd", existing_type=sa.Numeric(20, 9),
+                    type_=sa.Numeric(14, 9), existing_nullable=True)
     op.alter_column("llm_usage_log", "model", existing_type=sa.String(255), type_=sa.String(64), existing_nullable=False)
     op.drop_index("idx_llm_usage_log_profile_created", table_name="llm_usage_log")
     op.drop_column("llm_usage_log", "model_profile")

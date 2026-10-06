@@ -178,3 +178,29 @@ async def test_multiplier_changes_do_not_change_personal_request_quota(paid):
             assert all(row.units == Decimal("1") for row in rows)
     finally:
         await engine.dispose()
+
+
+async def test_maximum_catalog_rate_large_call_persists_usage_through_client():
+    engine, factory = await database()
+    try:
+        cache, store = build_model_catalog(factory)
+        await store.save_model(replace(MODEL, prompt_price_usd_per_million=Decimal("1000000"),
+                                       completion_price_usd_per_million=Decimal("1000000")))
+        service = AiAccountingService(factory)
+        invocation = await service.create_invocation(feature="llm_admin", trigger="test", chat_id=None)
+        llm = LlmClient(LlmConfig(api_key="test", model="legacy"), model_catalog=cache, accounting_service=service)
+        llm._client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            model=MODEL.model_id,
+            usage=SimpleNamespace(prompt_tokens=100000, completion_tokens=100000, total_tokens=200000),
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        ))
+        result = await llm.chat_simple([], model=MODEL.model_id,
+                                      accounting_context=LlmAccountingContext(invocation, "llm_admin", "test", None))
+        assert result.usages[0].estimated_cost_usd == Decimal("200000")
+        async with factory() as session:
+            row = (await session.scalars(select(LlmUsageLogModel))).one()
+            assert row.estimated_cost_usd == Decimal("200000")
+            assert row.pricing_status == "known"
+            assert row.prompt_tokens == row.completion_tokens == 100000
+    finally:
+        await engine.dispose()

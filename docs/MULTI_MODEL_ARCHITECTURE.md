@@ -88,3 +88,14 @@ PR 12 supplies owner administration UI/HTTP endpoints using these store interfac
 User model selection, auto-mode/classification, enabling actual AIL consumption,
 and multi-provider credentials/transport are separate future PRs. This change
 introduces none of those product behaviors or changes to payment semantics.
+
+## Accounting storage boundaries
+
+Migration `0084_model_catalog_router` follows `0083_ai_pets` and widens cost
+snapshots and daily-summary cost aggregates to NUMERIC(20,9). A maximum-rate 100,000-token call costs $100,000
+and remains persistable. Runtime overrides are validated before inference:
+model IDs are at most 255 characters and profile names at most 64; both must
+be nonempty trimmed strings. Unknown profiles within that limit still use
+controlled legacy fallback. Downgrade locks usage writes and refuses atomically
+if any absolute call or summary cost is at least $100,000 (outside NUMERIC(14,9)), or any model
+identifier exceeds the old 64-character limit. Historical data is not truncated.
