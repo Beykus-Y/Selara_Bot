@@ -12,6 +12,7 @@ import { GroupsPage } from '@/pages/groups/page'
 import { HomePage } from '@/pages/home/page'
 import { MorePage } from '@/pages/more/page'
 import { NotFoundPage } from '@/pages/not-found/page'
+import { PersonalPage } from '@/pages/personal/page'
 import { appBasePath } from '@/shared/config/app-base-path'
 import { MiniAppShell } from '@/widgets/miniapp-shell/MiniAppShell'
 
@@ -31,6 +32,7 @@ const router = createBrowserRouter(
         { path: 'games', element: <GamesPage /> },
         { path: 'gacha', element: <GachaCollectionPage /> },
         { path: 'more', element: <MorePage /> },
+        { path: 'personal', element: <PersonalPage /> },
         miniAppAdminRoute,
       ],
     },

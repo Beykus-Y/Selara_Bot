@@ -1,0 +1,104 @@
+.personal-page {
+  min-width: 0;
+}
+
+.personal-memory,
+.personal-privacy {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.personal-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 14px;
+}
+
+.personal-switch input {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.personal-add {
+  display: grid;
+  gap: 6px;
+}
+
+.personal-add label {
+  font-size: 12px;
+  color: var(--text-muted, #98a3ad);
+}
+
+.personal-add__row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.personal-add__row input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.personal-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.personal-facts li {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(128, 140, 150, 0.3));
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.personal-facts li.is-pinned {
+  border-color: #e0a526;
+}
+
+.personal-facts__text {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.personal-facts__actions,
+.personal-confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.personal-confirm {
+  display: grid;
+  gap: 10px;
+}
+
+.personal-notice {
+  margin: 0;
+  font-size: 13px;
+}
+
+.personal-notice.is-ok {
+  color: #36b37e;
+}
+
+.personal-notice.is-error {
+  color: var(--red, #f87171);
+}
