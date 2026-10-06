@@ -199,10 +199,10 @@ async def _run_memory_flow(browser) -> None:
         await page.get_by_text("Память (2 из 20)").wait_for()
         assert await page.get_by_text("я веган").count() == 0
 
-        await page.get_by_label("Использовать память в разговоре").uncheck()
+        await page.get_by_label("Использовать память в разговоре").click()
         await page.get_by_text("Память выключена: включите её выше").wait_for()
         assert await page.get_by_label("Новый факт о себе").is_disabled()
-        await page.get_by_label("Использовать память в разговоре").check()
+        await page.get_by_label("Использовать память в разговоре").click()
         await page.get_by_label("Новый факт о себе").wait_for()
         assert not await page.get_by_label("Новый факт о себе").is_disabled()
         assert any(call[0] == "PUT" and call[2] == {"memory_enabled": False} for call in backend.calls)
@@ -246,7 +246,7 @@ async def _run_paid_and_owner(browser) -> None:
     for fragment in ("Активна до 04.11.2026", "Осталось 147 из 150", "Память (0 из 200)", "Продлить в Telegram"):
         assert fragment in text, f"paid: missing {fragment!r}"
     assert "Автоматическое запоминание работает только" not in text
-    await page.get_by_label("Предлагать запоминать факты автоматически").check()
+    await page.get_by_label("Предлагать запоминать факты автоматически").click()
     for _ in range(50):
         if ("PUT", "/settings", {"auto_memory_enabled": True}) in backend.calls:
             break
