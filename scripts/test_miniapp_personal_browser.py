@@ -205,7 +205,7 @@ async def _run_profile(browser) -> None:
     save = page.get_by_role("button", name="Сохранить")
     assert await save.is_disabled()
     await page.get_by_label("Имя собеседника").fill("Мира")
-    await page.get_by_label("Характер", exact=True).select_option("custom")
+    await page.locator("select").select_option("custom")
     await page.get_by_label("Свой характер", exact=False).fill("Говорит как пират")
     await page.get_by_role("button", name="На «вы»").click()
     await save.click()
