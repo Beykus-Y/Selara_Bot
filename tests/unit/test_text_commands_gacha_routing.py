@@ -20,6 +20,7 @@ class _DummyMessage:
 
 
 _CHAT_SETTINGS = SimpleNamespace(
+    chat_write_locked=False,
     text_commands_enabled=True,
     text_commands_locale="ru",
     custom_rp_enabled=False,

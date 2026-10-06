@@ -5731,6 +5731,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
+            if chat_settings.chat_write_locked:
+                await session.commit()
+                redirect_path = _with_message("/app/games", key="error", text="Запись в этой группе временно заблокирована.")
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Запись в этой группе временно заблокирована.",
+                        status_code=423,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
             actor_label = await game_router_module._resolve_chat_player_label(
                 activity_repo,
                 chat_id=chat.chat_id,
@@ -5836,6 +5847,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=game.chat_id)
+            if chat_settings.chat_write_locked:
+                await session.commit()
+                redirect_path = _with_message(redirect_base_path, key="error", text="Запись в этой группе временно заблокирована.")
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Запись в этой группе временно заблокирована.",
+                        status_code=423,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
             actor_label = await game_router_module._resolve_chat_player_label(
                 activity_repo,
                 chat_id=game.chat_id,

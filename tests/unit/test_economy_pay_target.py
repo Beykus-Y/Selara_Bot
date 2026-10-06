@@ -101,3 +101,32 @@ async def test_pay_command_rejects_numeric_user_outside_chat(monkeypatch: pytest
     transfer_coins.assert_not_awaited()
     activity_repo.is_active_chat_member.assert_awaited_once_with(chat_id=-100, user_id=999999999)
     assert "участник" in message.answer.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", ["сто", None])
+async def test_pay_reply_with_invalid_amount_gets_specific_error(monkeypatch: pytest.MonkeyPatch, args: str | None) -> None:
+    message = _message()
+    message.reply_to_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=21, username="target", first_name="Target", last_name=None, is_bot=False)
+    )
+    transfer_coins = AsyncMock()
+    monkeypatch.setattr(economy_module, "transfer_coins", transfer_coins)
+
+    await economy_module.pay_command(
+        message,
+        CommandObject(prefix="/", command="pay", mention=None, args=args),
+        bot=SimpleNamespace(),
+        economy_repo=SimpleNamespace(),
+        activity_repo=SimpleNamespace(is_active_chat_member=AsyncMock(return_value=True)),
+        chat_settings=SimpleNamespace(
+            economy_enabled=True,
+            economy_mode="global",
+            economy_transfer_daily_limit=5000,
+            economy_transfer_tax_percent=5,
+            cleanup_economy_commands=False,
+        ),
+    )
+
+    transfer_coins.assert_not_awaited()
+    assert "Сумма" in message.answer.await_args.args[0]

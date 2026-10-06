@@ -1494,6 +1494,9 @@ async def pay_command(message: Message, command: CommandObject, bot: Bot, econom
         target_user_id = int(message.reply_to_message.from_user.id)
         if tokens and tokens[-1].isdigit():
             amount = int(tokens[-1])
+        else:
+            await _answer_message(message, "Сумма должна быть целым числом. Пример: reply + /pay 100")
+            return
     else:
         await _answer_message(message, "Формат: /pay @username 100 | /pay user_id 100 | reply + /pay 100")
         return

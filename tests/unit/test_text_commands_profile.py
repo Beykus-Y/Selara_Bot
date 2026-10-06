@@ -140,6 +140,7 @@ async def test_reply_profile_lookup_works_after_alias_rewrite(monkeypatch: pytes
         bot=object(),
         settings=SimpleNamespace(supported_chat_types={"group", "supergroup"}),
         chat_settings=SimpleNamespace(
+            chat_write_locked=False,
             text_commands_enabled=True,
             text_commands_locale="ru",
             custom_rp_enabled=False,

@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from selara.application.use_cases.economy.catalog import RECIPES
@@ -5,6 +6,9 @@ from selara.presentation.commands.aliases import EXACT_ALIASES
 from selara.presentation.commands.normalizer import normalize_text_command
 
 TextCommandKey = str
+
+# game_id в GameStore: uuid4().hex[:10]; /start-ссылки используют префикс game_.
+_ROLE_GAME_ID_PATTERN = re.compile(r"game_[0-9a-f]{4,32}|[0-9a-f]{10}")
 
 SOCIAL_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "шлепнуть": "social_slap",
@@ -1083,7 +1087,7 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
         return not tokens
 
     if command_key == "role":
-        return False
+        return len(tokens) == 1 and _ROLE_GAME_ID_PATTERN.fullmatch(tokens[0]) is not None
 
     return True
 
