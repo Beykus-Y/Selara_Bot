@@ -1,4 +1,4 @@
-"""Alembic upgrade/downgrade of 0079-0081 on a pre-filled database from the previous release."""
+"""Alembic upgrade/downgrade of 0079-0082 on a pre-filled database from the previous release."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PREVIOUS_RELEASE = "0078_family_pet_command_key"
-_HEAD = "0081_selara_personal_config"
+_HEAD = "0082_personal_ai"
 _PERIOD = "now(), now() + interval '1 day'"
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
@@ -164,6 +164,40 @@ def test_old_image_insert_and_group_migration_stay_scoped_after_upgrade(database
         database, "SELECT quota_scope_type, quota_scope_id FROM ai_feature_quota_usage WHERE idempotency_key = 'user-row'"
     )[0][0]
     assert (user_row["quota_scope_type"], user_row["quota_scope_id"]) == ("user", 9001)
+
+
+def test_personal_ai_tables_enforce_constraints_and_cascade_with_the_user(database):
+    _run_sql(
+        database,
+        "INSERT INTO users (telegram_user_id, is_bot) VALUES (9100, false) ON CONFLICT DO NOTHING",
+        "INSERT INTO personal_ai_profiles (user_id) VALUES (9100)",
+        "INSERT INTO personal_ai_messages (user_id, role, content) VALUES (9100, 'user', 'hi'), (9100, 'assistant', 'yo')",
+        "INSERT INTO personal_ai_summaries (user_id, content, period_start, period_end, messages_count) "
+        "VALUES (9100, 's', now(), now(), 2)",
+    )
+    profile = _run_sql(database, "SELECT display_name, mode, formality, reply_length, emoji_enabled, revision "
+                                 "FROM personal_ai_profiles WHERE user_id = 9100")[0][0]
+    assert (profile["display_name"], profile["mode"], profile["formality"]) == ("Selara", "assistant", "ty")
+    assert profile["emoji_enabled"] is True and profile["revision"] == 0
+
+    for bad in (
+        "UPDATE personal_ai_profiles SET mode = 'bogus' WHERE user_id = 9100",
+        "UPDATE personal_ai_profiles SET character_custom = repeat('x', 501) WHERE user_id = 9100",
+        "INSERT INTO personal_ai_messages (user_id, role, content) VALUES (9100, 'system', 'x')",
+        "INSERT INTO personal_ai_messages (user_id, thread, role, content) VALUES (9100, 'other', 'user', 'x')",
+    ):
+        with pytest.raises(asyncpg.PostgresError):
+            _run_sql(database, bad)
+
+    # Deleting the user removes everything private; nothing else ever deletes it.
+    _run_sql(database, "DELETE FROM users WHERE telegram_user_id = 9100")
+    counts = _run_sql(
+        database,
+        "SELECT count(*) AS n FROM personal_ai_profiles WHERE user_id = 9100",
+        "SELECT count(*) AS n FROM personal_ai_messages WHERE user_id = 9100",
+        "SELECT count(*) AS n FROM personal_ai_summaries WHERE user_id = 9100",
+    )
+    assert [row[0]["n"] for row in counts] == [0, 0, 0]
 
 
 def test_downgrade_refuses_to_drop_personal_data_and_is_clean_without_it(database):

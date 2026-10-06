@@ -2640,3 +2640,85 @@ class AutoConfigSessionModel(Base):
     lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PersonalAiProfileModel(Base):
+    """One user's private AI character; owned by the user and removed with them, never by a chat."""
+
+    __tablename__ = "personal_ai_profiles"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    display_name: Mapped[str] = mapped_column(String(32), nullable=False, default="Selara", server_default="Selara")
+    character_preset: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="assistant", server_default="assistant"
+    )
+    character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_form: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    formality: Mapped[str] = mapped_column(String(8), nullable=False, default="ty", server_default="ty")
+    reply_length: Mapped[str] = mapped_column(String(8), nullable=False, default="medium", server_default="medium")
+    emoji_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Optimistic lock for the settings wizard (and the future Mini App).
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "character_custom IS NULL OR length(character_custom) <= 500",
+            name="ck_personal_ai_profiles_custom_len",
+        ),
+        CheckConstraint("formality IN ('ty', 'vy')", name="ck_personal_ai_profiles_formality"),
+        CheckConstraint("reply_length IN ('short', 'medium', 'long')", name="ck_personal_ai_profiles_reply_length"),
+        CheckConstraint("mode IN ('assistant', 'roleplay')", name="ck_personal_ai_profiles_mode"),
+    )
+
+
+class PersonalAiMessageModel(Base):
+    """Private dialogue turn. Kept until the user deletes it; there is deliberately no retention job."""
+
+    __tablename__ = "personal_ai_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    thread: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_personal_ai_messages_role"),
+        CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_messages_thread"),
+        Index("idx_personal_ai_messages_user_thread_created", "user_id", "thread", "created_at"),
+    )
+
+
+class PersonalAiSummaryModel(Base):
+    """Compressed older part of a private dialogue; the same retention rule as the messages."""
+
+    __tablename__ = "personal_ai_summaries"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    thread: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    messages_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_summaries_thread"),
+        Index("idx_personal_ai_summaries_user_thread_period", "user_id", "thread", "period_end"),
+    )

@@ -41,6 +41,8 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="help", description="Справка"),
         BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
+        BotCommand(command="ai", description="Моя Selara: настройки личного AI-чата (ЛС)"),
+        BotCommand(command="ai_reset", description="Очистить историю личного AI-чата (ЛС)"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
         BotCommand(command="premium", description="Купить Selara AI для чата"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
