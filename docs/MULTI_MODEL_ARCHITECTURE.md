@@ -141,7 +141,7 @@ Physical model statistics remain in the existing expenses breakdown. User select
 
 ## User model selection and AI Limits (PR 13)
 
-Migration `0091_personal_model_ail` adds `personal_ai_profiles.model_profile_key`
+Migration `0092_personal_model_ail` adds `personal_ai_profiles.model_profile_key`
 (default `basic`), `selara_personal_config.quota_mode` (`NULL`/`requests`/`ail`) with
 `free_daily_ail`/`paid_daily_ail`, and `ai_feature_quota_usage.model_profile`. All
 columns are additive with defaults, so the previous image keeps working. Downgrade

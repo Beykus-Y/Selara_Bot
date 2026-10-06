@@ -15,3 +15,5 @@ class AiFeature(StrEnum):
     PET_MEMORY_EXTRACT = "pet_memory_extract"
     # A spontaneous line a pet posts in its chat; same owner-paid pool as talking.
     PET_EVENT_TEXT = "pet_event_text"
+    # A member addressing Selara by a chat call name («Селя, ...»); paid from the chat's pool.
+    GROUP_MEMBER = "group_member"

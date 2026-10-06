@@ -63,6 +63,7 @@ from selara.presentation.commands.access import parse_command_rank_phrase, resol
 from selara.presentation.handlers.ai_pet_events import maybe_schedule_spontaneous_event
 from selara.presentation.handlers.ai_pet_talk import handle_pet_talk, resolve_talk_target, talk_allowed
 from selara.presentation.handlers.ai_pets import ai_pet_text_command, parse_pet_text
+from selara.presentation.handlers.group_character import handle_group_call, resolve_group_call
 from selara.presentation.commands.catalog import (
     COMMAND_KEYS_WITH_TAIL,
     SOCIAL_ACTION_18_PLUS as _SOCIAL_ACTION_18_PLUS,
@@ -5909,6 +5910,24 @@ async def text_commands_handler(
                 settings=settings,
                 session_factory=session_factory,
                 personal_config=personal_config,
+                llm_client=llm_client,
+            )
+            return
+
+    # Calling Selara by a chat call name («Селя, ...») is plain speech too; pets keep their names first.
+    if not write_locked and message.chat.type in {"group", "supergroup"}:
+        call_text = await resolve_group_call(
+            message, db_session=db_session, session_factory=session_factory, settings=settings
+        )
+        if call_text is not None:
+            await handle_group_call(
+                message,
+                text=call_text,
+                bot=bot,
+                activity_repo=activity_repo,
+                db_session=db_session,
+                settings=settings,
+                session_factory=session_factory,
                 llm_client=llm_client,
             )
             return

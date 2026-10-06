@@ -30,6 +30,8 @@ class AccessReason(StrEnum):
     FEATURE_DISABLED = "feature_disabled"
     ACCESS_REQUIRED = "access_required"
     ACCESS_UNAVAILABLE = "access_unavailable"
+    # The pool still has room, but this actor spent their own share of it.
+    ACTOR_QUOTA_EXHAUSTED = "actor_quota_exhausted"
 
 
 class QuotaPeriod(StrEnum):
@@ -69,6 +71,8 @@ MAX_AIL_REQUEST_UNITS = Decimal("1000")
 # A pet's talk is paid by its owner: one pool per owner (one pet per owner today).
 PET_POOL_KEY = "pet_daily"
 DEFAULT_PET_TALK_DAILY_LIMIT = 60
+# Member mode in a group (calling Selara by a chat call name) is paid by the chat.
+GROUP_MEMBER_POOL_KEY = "group_member_daily"
 # Features the personal config may price; group features never read its weights.
 PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
 # What a personal request draws from the pool in requests mode: 5/150 are requests, not weighted units.
@@ -111,6 +115,33 @@ class PersonalQuotaLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupMemberQuotaLimits:
+    """Daily member-mode limits of one chat (total and per member), free and with Selara AI."""
+
+    free_daily: int
+    free_per_actor: int
+    paid_daily: int
+    paid_per_actor: int
+
+    def __post_init__(self) -> None:
+        if not 0 < self.free_per_actor <= self.free_daily:
+            raise ValueError("Group member limits must satisfy 0 < free per member <= free daily")
+        if not 0 < self.paid_per_actor <= self.paid_daily:
+            raise ValueError("Group member limits must satisfy 0 < paid per member <= paid daily")
+        if self.paid_daily <= self.free_daily or self.paid_per_actor < self.free_per_actor:
+            raise ValueError("Paid group member limits must raise the free ones")
+
+    @classmethod
+    def from_settings(cls, settings) -> "GroupMemberQuotaLimits":
+        return cls(
+            free_daily=settings.group_member_free_daily_limit,
+            free_per_actor=settings.group_member_free_per_user_daily_limit,
+            paid_daily=settings.group_member_paid_daily_limit,
+            paid_per_actor=settings.group_member_paid_per_user_daily_limit,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureQuotaPolicy:
     feature: AiFeature
     policy_key: str
@@ -121,6 +152,8 @@ class FeatureQuotaPolicy:
     pool_key: str | None = None
     # What ``limit`` counts: plain requests now, AI Limits later.
     unit: str = REQUEST_UNIT
+    # Optional share of the pool one actor may spend in a period, counted under the same lock.
+    per_actor_limit: int | None = None
 
     @property
     def pool(self) -> str:
@@ -289,7 +322,11 @@ class FeatureQuotaRepository(Protocol):
 
 
 def resolve_feature_policy(
-    *, feature: AiFeature, trigger: str, personal_limits: PersonalQuotaLimits | None = None
+    *,
+    feature: AiFeature,
+    trigger: str,
+    personal_limits: PersonalQuotaLimits | None = None,
+    group_member_limits: GroupMemberQuotaLimits | None = None,
 ) -> FeatureQuotaPolicy | None:
     """Return the explicit commercial policy for a user-facing feature.
 
@@ -317,6 +354,18 @@ def resolve_feature_policy(
             pool_key=personal_limits.pool_key,
             unit=personal_limits.unit,
         )
+    if feature == AiFeature.GROUP_MEMBER:
+        if group_member_limits is None:
+            # Fail closed: member mode is free for every chat, so it must never become unlimited.
+            raise ValueError("Group member quota limits are not configured")
+        return FeatureQuotaPolicy(
+            feature,
+            "group_member_free_daily_v1",
+            group_member_limits.free_daily,
+            QuotaPeriod.DAY,
+            pool_key=GROUP_MEMBER_POOL_KEY,
+            per_actor_limit=group_member_limits.free_per_actor,
+        )
     if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
         # Without the owner's Selara Personal a pet cannot talk or post events (its mechanics still work).
         return FeatureQuotaPolicy(feature, f"{feature.value}_free_daily_v1", 0, QuotaPeriod.DAY, pool_key=PET_POOL_KEY)
@@ -341,6 +390,18 @@ def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
         QuotaPeriod.DAY,
         pool_key=limits.pool_key,
         unit=limits.unit,
+    )
+
+
+def paid_group_member_policy(limits: GroupMemberQuotaLimits) -> FeatureQuotaPolicy:
+    """Selara AI raises the chat's member-mode pool and each member's share of it."""
+    return FeatureQuotaPolicy(
+        AiFeature.GROUP_MEMBER,
+        "group_member_paid_daily_v1",
+        limits.paid_daily,
+        QuotaPeriod.DAY,
+        pool_key=GROUP_MEMBER_POOL_KEY,
+        per_actor_limit=limits.paid_per_actor,
     )
 
 
@@ -402,7 +463,9 @@ class FeatureAccessService:
         pricer: UsagePricer | None = None,
         personal_limits: PersonalQuotaLimits | None = None,
         personal_config: PersonalConfigProvider | None = None,
+        group_member_limits: GroupMemberQuotaLimits | None = None,
     ) -> None:
+        self._group_member_limits = group_member_limits
         # ``personal_config`` (settings + DB override, hot-reloaded) wins over the static ``personal_limits``.
         self._personal_limits = personal_limits
         self._personal_config = personal_config
@@ -624,7 +687,10 @@ class FeatureAccessService:
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
         personal_limits = await self._personal_limits_now()
         policy = resolve_feature_policy(
-            feature=feature, trigger=trigger, personal_limits=personal_limits
+            feature=feature,
+            trigger=trigger,
+            personal_limits=personal_limits,
+            group_member_limits=self._group_member_limits,
         )
         entitlement = None
         if policy is not None and not owner_exempt:
@@ -716,7 +782,10 @@ class FeatureAccessService:
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
         personal_limits = await self._personal_limits_now()
         policy = resolve_feature_policy(
-            feature=feature, trigger=trigger, personal_limits=personal_limits
+            feature=feature,
+            trigger=trigger,
+            personal_limits=personal_limits,
+            group_member_limits=self._group_member_limits,
         )
         if policy is not None and not owner_exempt:
             policy, tier, _ = await self._paid_feature_policy(
@@ -790,6 +859,10 @@ class FeatureAccessService:
                 raise ValueError("Paid entitlement supplied a quota policy for another pool")
             if paid_policy.period != policy.period or paid_policy.limit <= policy.limit:
                 raise ValueError("Paid feature quota policy must raise the existing period limit")
+            if policy.per_actor_limit is not None and (
+                paid_policy.per_actor_limit is None or paid_policy.per_actor_limit < policy.per_actor_limit
+            ):
+                raise ValueError("Paid feature quota policy must not lower the per-actor limit")
             return paid_policy, AccessTier.PAID, entitlement
         except Exception:
             logger.debug(

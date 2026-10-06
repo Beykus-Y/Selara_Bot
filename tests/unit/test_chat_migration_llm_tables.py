@@ -319,6 +319,7 @@ async def test_migrate_chat_id_moves_error_alert_destination(monkeypatch):
         "_move_chat_alias_settings",
         "_move_llm_context_and_actions",
         "_merge_llm_glossary_generic",
+        "_merge_group_character",
         "_migrate_economy_scopes",
     ):
         monkeypatch.setattr(chat_migration, helper_name, AsyncMock(return_value=0))

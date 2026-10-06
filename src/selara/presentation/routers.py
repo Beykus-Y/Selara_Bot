@@ -15,6 +15,7 @@ from selara.presentation.handlers.economy import router as economy_router
 from selara.presentation.handlers.engagement import router as engagement_router
 from selara.presentation.handlers.feedback import router as feedback_router
 from selara.presentation.handlers.game import router as game_router
+from selara.presentation.handlers.group_character import router as group_character_router
 from selara.presentation.handlers.help import router as help_router
 from selara.presentation.handlers.llm_admin import router as llm_admin_router
 from selara.presentation.handlers.message_archive import (
@@ -110,6 +111,7 @@ def build_router(
     application.include_router(relationships_router)
     application.include_router(moderation_router)
     application.include_router(settings_router)
+    application.include_router(group_character_router)
     application.include_router(aliases_router)
     application.include_router(engagement_router)
     application.include_router(feedback_router)

@@ -224,8 +224,8 @@ def test_migration_defaults_keep_the_old_image_working_and_downgrade_refuses_to_
     db_dsn = server.rsplit("/", 1)[0] + "/" + name
     db_url = db_dsn.replace("postgresql://", "postgresql+asyncpg://")
     try:
-        assert _alembic(db_url, "upgrade", "0090_web_tainted_history").returncode == 0
-        assert (result := _alembic(db_url, "upgrade", "0091_personal_model_ail")).returncode == 0, result.stderr[-2000:]
+        assert _alembic(db_url, "upgrade", "0091_group_ai_character").returncode == 0
+        assert (result := _alembic(db_url, "upgrade", "0092_personal_model_ail")).returncode == 0, result.stderr[-2000:]
         # The previous image inserts without the new columns.
         _sql(
             db_dsn,
@@ -242,12 +242,12 @@ def test_migration_defaults_keep_the_old_image_working_and_downgrade_refuses_to_
             _sql(db_dsn, "UPDATE personal_ai_profiles SET model_profile_key = 'gpt-4o'")
 
         _sql(db_dsn, "UPDATE personal_ai_profiles SET model_profile_key = 'analytics'")
-        refused = _alembic(db_url, "downgrade", "0090_web_tainted_history")
-        assert refused.returncode != 0 and "Cannot downgrade 0091_personal_model_ail" in refused.stderr
+        refused = _alembic(db_url, "downgrade", "0091_group_ai_character")
+        assert refused.returncode != 0 and "Cannot downgrade 0092_personal_model_ail" in refused.stderr
         assert _sql(db_dsn, "SELECT model_profile_key FROM personal_ai_profiles")[0][0]["model_profile_key"] == "analytics"
 
         _sql(db_dsn, "UPDATE personal_ai_profiles SET model_profile_key = 'basic'")
-        assert (result := _alembic(db_url, "downgrade", "0090_web_tainted_history")).returncode == 0, result.stderr[-2000:]
+        assert (result := _alembic(db_url, "downgrade", "0091_group_ai_character")).returncode == 0, result.stderr[-2000:]
         assert (result := _alembic(db_url, "upgrade", "head")).returncode == 0, result.stderr[-2000:]
     finally:
         _sql(server, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')

@@ -16,8 +16,10 @@ from selara.application.feature_access import (
     AIL_UNIT,
     AccessTier,
     FeatureEntitlement,
+    GroupMemberQuotaLimits,
     PersonalQuotaLimits,
     DEFAULT_PET_TALK_DAILY_LIMIT,
+    paid_group_member_policy,
     paid_personal_policy,
     paid_pet_policy,
 )
@@ -229,11 +231,17 @@ class SqlAlchemyUserEntitlementResolver:
 class SqlAlchemyChatEntitlementResolver:
     """PostgreSQL resolver wired into the existing FeatureAccessService seam."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        group_member_limits: GroupMemberQuotaLimits | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._group_member_limits = group_member_limits
 
     async def resolve(self, *, chat_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
-        if feature not in {AiFeature.LLM_ADMIN, AiFeature.DAILY_SUMMARY}:
+        if feature not in {AiFeature.LLM_ADMIN, AiFeature.DAILY_SUMMARY, AiFeature.GROUP_MEMBER}:
             return FeatureEntitlement(access_tier=AccessTier.FREE)
         try:
             async with self._session_factory() as session:
@@ -254,11 +262,18 @@ class SqlAlchemyChatEntitlementResolver:
             raise
         if row is None:
             return FeatureEntitlement(access_tier=AccessTier.FREE)
+        quota_policy = None
+        if feature == AiFeature.GROUP_MEMBER:
+            if self._group_member_limits is None:
+                # Without configured limits the paid tier keeps the free policy rather than going unlimited.
+                return FeatureEntitlement(access_tier=AccessTier.FREE)
+            quota_policy = paid_group_member_policy(self._group_member_limits)
         return FeatureEntitlement(
             access_tier=AccessTier.PAID,
             valid_until=row.valid_until,
             source="telegram_stars",
             product_key=row.product_key,
+            quota_policy=quota_policy,
         )
 
 

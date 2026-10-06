@@ -22,6 +22,9 @@ from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
     AiFeatureQuotaUsageModel,
     AutoConfigSessionModel,
+    ChatAiCallNameModel,
+    ChatAiCharacterModel,
+    ChatMemberAiMessageModel,
     ChatEntitlementModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
@@ -247,6 +250,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_ai_pets(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_group_character(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -269,6 +273,7 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_ai_pets(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _merge_group_character(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -289,6 +294,92 @@ async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, 
             AiFeatureQuotaUsageModel.quota_scope_id == old_chat_id,
         )
         .values(quota_scope_id=new_chat_id)
+    )
+
+
+async def _merge_group_character(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    """Call names, character and member-mode dialogue follow the chat.
+
+    Names: a name present on both sides keeps the new chat's row (it is the fresher
+    one); the new chat's primary name wins, else the old primary name stays primary. More
+    names than the chat's tier allows are not trimmed: only the primary one triggers.
+    Character: the later ``updated_at`` wins, but history access stays on only if
+    both sides allowed it (the stricter privacy choice).
+    """
+    old_primary_norm = await session.scalar(
+        select(ChatAiCallNameModel.name_norm)
+        .where(ChatAiCallNameModel.chat_id == old_chat_id, ChatAiCallNameModel.is_primary.is_(True))
+        .limit(1)
+    )
+    target_name = aliased(ChatAiCallNameModel)
+    await session.execute(
+        delete(ChatAiCallNameModel).where(
+            ChatAiCallNameModel.chat_id == old_chat_id,
+            exists(
+                select(literal(1)).where(
+                    target_name.chat_id == new_chat_id,
+                    target_name.name_norm == ChatAiCallNameModel.name_norm,
+                )
+            ),
+        )
+    )
+    new_has_primary = await session.scalar(
+        select(ChatAiCallNameModel.id)
+        .where(ChatAiCallNameModel.chat_id == new_chat_id, ChatAiCallNameModel.is_primary.is_(True))
+        .limit(1)
+    )
+    if new_has_primary is not None:
+        await session.execute(
+            update(ChatAiCallNameModel).where(ChatAiCallNameModel.chat_id == old_chat_id).values(is_primary=False)
+        )
+    await session.execute(
+        update(ChatAiCallNameModel).where(ChatAiCallNameModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
+    )
+    await session.flush()
+    has_primary = await session.scalar(
+        select(ChatAiCallNameModel.id)
+        .where(ChatAiCallNameModel.chat_id == new_chat_id, ChatAiCallNameModel.is_primary.is_(True))
+        .limit(1)
+    )
+    if has_primary is None:
+        # The old primary may have been a duplicate kept on the new side: that same name stays primary.
+        successor = await session.scalar(
+            select(ChatAiCallNameModel)
+            .where(ChatAiCallNameModel.chat_id == new_chat_id)
+            .order_by(
+                (ChatAiCallNameModel.name_norm == (old_primary_norm or "")).desc(),
+                ChatAiCallNameModel.created_at,
+                ChatAiCallNameModel.id,
+            )
+            .limit(1)
+        )
+        if successor is not None:
+            successor.is_primary = True
+
+    old_character = await session.get(ChatAiCharacterModel, old_chat_id)
+    if old_character is not None:
+        new_character = await session.get(ChatAiCharacterModel, new_chat_id)
+        if new_character is None:
+            await session.execute(
+                update(ChatAiCharacterModel)
+                .where(ChatAiCharacterModel.chat_id == old_chat_id)
+                .values(chat_id=new_chat_id)
+            )
+            session.expire(old_character)
+        else:
+            history_access = bool(old_character.member_history_access) and bool(new_character.member_history_access)
+            epoch = datetime.min.replace(tzinfo=timezone.utc)
+            if _as_utc(old_character.updated_at or epoch) > _as_utc(new_character.updated_at or epoch):
+                for field in ("character_preset", "character_custom", "member_mode_enabled", "updated_by_user_id", "updated_at"):
+                    setattr(new_character, field, getattr(old_character, field))
+            new_character.member_history_access = history_access
+            await session.delete(old_character)
+
+    # Member dialogue has no chat-keyed uniqueness: a plain move keeps the conversation.
+    await session.execute(
+        update(ChatMemberAiMessageModel)
+        .where(ChatMemberAiMessageModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
     )
 
 

@@ -199,7 +199,9 @@ def test_gacha_notes_match_real_gating_code() -> None:
 
 
 def test_admin_syntax_matches_real_aiogram_command_registrations() -> None:
-    real_commands = _real_aiogram_commands("moderation.py", "aliases.py", "settings.py", "chat_assistant.py")
+    real_commands = _real_aiogram_commands(
+        "moderation.py", "aliases.py", "settings.py", "chat_assistant.py", "group_character.py"
+    )
     assert real_commands, "sanity check: at least one Command() registration expected"
 
     for spec in commands_for_category("admin"):
@@ -212,7 +214,7 @@ def test_admin_syntax_matches_real_aiogram_command_registrations() -> None:
             base = _base_command_word(syntax_entry)
             assert base in real_commands, (
                 f"{spec.key}: '{syntax_entry}' claims /{base}, but no matching "
-                f"@router.message(Command(\"{base}\")) found in moderation.py/aliases.py/settings.py/chat_assistant.py"
+                f"@router.message(Command(\"{base}\")) found in moderation.py/aliases.py/settings.py/chat_assistant.py/group_character.py"
             )
 
 
