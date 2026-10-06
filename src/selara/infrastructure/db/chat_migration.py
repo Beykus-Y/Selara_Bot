@@ -14,6 +14,9 @@ from selara.infrastructure.db.telegram_stars import entitlement_lock_key
 
 from selara.infrastructure.db.models import (
     AdminRuntimeSettingsModel,
+    AiPetEventModel,
+    AiPetModel,
+    AiPetRelationshipModel,
     AiFeatureInvocationModel,
     AiFeatureQuotaUsageModel,
     AutoConfigSessionModel,
@@ -241,6 +244,7 @@ async def _migrate_postgresql(session: AsyncSession, *, old_chat_id: int, new_ch
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_postgresql(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_ai_pets(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -262,6 +266,7 @@ async def _migrate_generic(session: AsyncSession, *, old_chat_id: int, new_chat_
     await _move_llm_context_and_actions(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _merge_llm_glossary_generic(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     await _move_feature_quota_usage(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+    await _move_ai_pets(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
     return await _migrate_economy_scopes(session, old_chat_id=old_chat_id, new_chat_id=new_chat_id)
 
 
@@ -282,6 +287,53 @@ async def _move_feature_quota_usage(session: AsyncSession, *, old_chat_id: int, 
             AiFeatureQuotaUsageModel.quota_scope_id == old_chat_id,
         )
         .values(quota_scope_id=new_chat_id)
+    )
+
+
+async def _move_ai_pets(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    # A pet whose name is already taken by an active pet in the target chat would
+    # break uq_ai_pets_chat_name_active; it is put to sleep instead of renamed.
+    taken_names = select(AiPetModel.name_norm).where(
+        AiPetModel.current_chat_id == new_chat_id,
+        AiPetModel.status == "active",
+    )
+    await session.execute(
+        update(AiPetModel)
+        .where(
+            AiPetModel.current_chat_id == old_chat_id,
+            AiPetModel.status == "active",
+            AiPetModel.name_norm.in_(taken_names),
+        )
+        .values(status="dormant", dormant_reason="name_conflict")
+    )
+    await session.execute(
+        update(AiPetModel).where(AiPetModel.current_chat_id == old_chat_id).values(current_chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(AiPetModel).where(AiPetModel.home_chat_id == old_chat_id).values(home_chat_id=new_chat_id)
+    )
+
+    # Relationship PK is (pet, chat, user): an existing row in the target chat wins.
+    target = aliased(AiPetRelationshipModel)
+    await session.execute(
+        delete(AiPetRelationshipModel).where(
+            AiPetRelationshipModel.chat_id == old_chat_id,
+            exists(
+                select(literal(1)).where(
+                    target.chat_id == new_chat_id,
+                    target.pet_id == AiPetRelationshipModel.pet_id,
+                    target.user_id == AiPetRelationshipModel.user_id,
+                )
+            ),
+        )
+    )
+    await session.execute(
+        update(AiPetRelationshipModel)
+        .where(AiPetRelationshipModel.chat_id == old_chat_id)
+        .values(chat_id=new_chat_id)
+    )
+    await session.execute(
+        update(AiPetEventModel).where(AiPetEventModel.chat_id == old_chat_id).values(chat_id=new_chat_id)
     )
 
 

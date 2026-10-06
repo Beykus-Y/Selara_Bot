@@ -1,7 +1,7 @@
 """Personal AI memory: user facts, auto-extraction opt-in and runtime overrides of memory limits
 
-Revision ID: 0083_personal_ai_memory
-Revises: 0082_personal_ai
+Revision ID: 0084_personal_ai_memory
+Revises: 0083_ai_pets
 Create Date: 2026-10-06 00:00:04
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0083_personal_ai_memory"
-down_revision: str | None = "0082_personal_ai"
+revision: str = "0084_personal_ai_memory"
+down_revision: str | None = "0083_ai_pets"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
@@ -78,7 +78,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.execute(sa.text("SELECT 1 FROM personal_ai_memories LIMIT 1")).first() is not None:
         raise RuntimeError(
-            "Cannot downgrade 0083_personal_ai_memory: personal_ai_memories holds users' private data; "
+            "Cannot downgrade 0084_personal_ai_memory: personal_ai_memories holds users' private data; "
             "export or delete it first"
         )
     op.drop_constraint("ck_selara_personal_config_memory_every", "selara_personal_config", type_="check")

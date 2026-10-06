@@ -1026,6 +1026,8 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Permission for AI pets to live in this chat; not a subscription.
+    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     persona_display_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="image_name", server_default="image_name")
     save_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
@@ -2771,3 +2773,140 @@ Index(
     func.lower(PersonalAiMemoryModel.content),
     unique=True,
 )
+
+
+class AiPetModel(Base):
+    """An AI pet owned by a user; it outlives any chat it lives in."""
+
+    __tablename__ = "ai_pets"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    home_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    current_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    species_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    species_custom: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    name_norm: Mapped[str] = mapped_column(String(32), nullable=False)
+    traits: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    character_custom: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    xp: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    mood: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    satiety: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    energy: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    dormant_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    travel_unlocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    last_tick_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("level >= 1", name="ck_ai_pets_level"),
+        CheckConstraint("xp >= 0", name="ck_ai_pets_xp"),
+        CheckConstraint("mood BETWEEN 0 AND 100", name="ck_ai_pets_mood"),
+        CheckConstraint("satiety BETWEEN 0 AND 100", name="ck_ai_pets_satiety"),
+        CheckConstraint("energy BETWEEN 0 AND 100", name="ck_ai_pets_energy"),
+        CheckConstraint("status IN ('active', 'dormant', 'released')", name="ck_ai_pets_status"),
+        Index(
+            "uq_ai_pets_owner_alive",
+            "owner_user_id",
+            unique=True,
+            postgresql_where=text("status <> 'released'"),
+            sqlite_where=text("status <> 'released'"),
+        ),
+        Index(
+            "uq_ai_pets_chat_name_active",
+            "current_chat_id",
+            "name_norm",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+
+class AiPetRelationshipModel(Base):
+    """Affinity between a pet and one person, kept per chat for privacy."""
+
+    __tablename__ = "ai_pet_relationships"
+
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    affinity: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default="0")
+    interactions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    affinity_gained_today: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default="0")
+    # Raw XP points this person submitted today; the award curve is applied in code.
+    xp_gained_today: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    gained_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("affinity BETWEEN -100 AND 100", name="ck_ai_pet_relationships_affinity"),
+    )
+
+
+class AiPetEventModel(Base):
+    """Journal of everything that happened to a pet; also the idempotency guard."""
+
+    __tablename__ = "ai_pet_events"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    effects: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_ai_pet_events_idempotency_key"),
+        Index("idx_ai_pet_events_pet_created", "pet_id", "created_at"),
+        Index("idx_ai_pet_events_pet_actor_type", "pet_id", "actor_user_id", "event_type", "created_at"),
+    )
+
+
+class AiPetItemModel(Base):
+    """Owner-editable catalog of pet food and toys; prices live here, not in code."""
+
+    __tablename__ = "ai_pet_items"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # {"satiety": 20, "mood": 5, "affinity": 2}; validated in code, broken rows are not sold.
+    effects: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    min_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('food', 'toy')", name="ck_ai_pet_items_kind"),
+        CheckConstraint("price >= 0", name="ck_ai_pet_items_price"),
+        CheckConstraint("min_level >= 1", name="ck_ai_pet_items_min_level"),
+    )

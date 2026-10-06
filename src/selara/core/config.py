@@ -153,6 +153,20 @@ class Settings(BaseSettings):
     # summary + compression).
     llm_cooldown_seconds: float = Field(default=5.0, validation_alias="LLM_COOLDOWN_SECONDS")
 
+    # Web search tools (web_search / fetch_page) for the ?/?? assistant. The
+    # default duckduckgo provider needs no API key; api_key/base_url are
+    # reserved for key-based providers added later.
+    web_search_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
+    web_search_provider: str = Field(default="duckduckgo", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_api_key: str = Field(default="", validation_alias="WEB_SEARCH_API_KEY")
+    web_search_base_url: str = Field(default="", validation_alias="WEB_SEARCH_BASE_URL")
+    web_search_timeout_seconds: float = Field(default=15.0, validation_alias="WEB_SEARCH_TIMEOUT_SECONDS")
+    web_search_max_results: int = Field(default=5, validation_alias="WEB_SEARCH_MAX_RESULTS")
+    web_search_max_page_chars: int = Field(default=8000, validation_alias="WEB_SEARCH_MAX_PAGE_CHARS")
+    web_search_max_calls_per_invocation: int = Field(
+        default=4, validation_alias="WEB_SEARCH_MAX_CALLS_PER_INVOCATION"
+    )
+
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     # Checkout stays disabled until the owner selects an explicit Stars price.

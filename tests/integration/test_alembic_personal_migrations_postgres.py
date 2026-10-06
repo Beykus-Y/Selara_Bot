@@ -1,4 +1,4 @@
-"""Alembic upgrade/downgrade of 0079-0083 on a pre-filled database from the previous release."""
+"""Alembic upgrade/downgrade of 0079-0084 on a pre-filled database from the previous release."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PREVIOUS_RELEASE = "0078_family_pet_command_key"
-_HEAD = "0083_personal_ai_memory"
+_HEAD = "0084_personal_ai_memory"
 _PERIOD = "now(), now() + interval '1 day'"
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
@@ -86,7 +86,7 @@ def database():
             _quota_insert("-3001", "legacy-orphan", "llm_admin"),
             "DELETE FROM chats WHERE telegram_chat_id = -3001",  # ON DELETE SET NULL -> chat_id IS NULL
         )
-        result = _alembic(dsn, "upgrade", "head")
+        result = _alembic(dsn, "upgrade", _HEAD)
         assert result.returncode == 0, result.stderr[-2000:]
         yield dsn
     finally:
@@ -244,14 +244,14 @@ def test_downgrade_refuses_to_drop_personal_memories(database):
         "INSERT INTO users (telegram_user_id, is_bot) VALUES (9111, false) ON CONFLICT DO NOTHING",
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9111, 'Я веган', 'explicit')",
     )
-    refused = _alembic(database, "downgrade", "0082_personal_ai")
+    refused = _alembic(database, "downgrade", "0083_ai_pets")
     assert refused.returncode != 0
-    assert "Cannot downgrade 0083_personal_ai_memory" in refused.stderr
+    assert "Cannot downgrade 0084_personal_ai_memory" in refused.stderr
     assert _run_sql(database, "SELECT version_num FROM alembic_version")[0][0]["version_num"] == _HEAD
     assert _run_sql(database, "SELECT count(*) AS n FROM personal_ai_memories")[0][0]["n"] == 1
     _run_sql(database, "DELETE FROM users WHERE telegram_user_id = 9111")
 
-    assert _alembic(database, "downgrade", "0082_personal_ai").returncode == 0
+    assert _alembic(database, "downgrade", "0083_ai_pets").returncode == 0
     columns = _run_sql(
         database,
         "SELECT column_name FROM information_schema.columns WHERE table_name = 'personal_ai_profiles' "
@@ -294,5 +294,5 @@ def test_downgrade_refuses_to_drop_personal_data_and_is_clean_without_it(databas
     assert _alembic(database, "downgrade", _PREVIOUS_RELEASE).returncode == 0
     survivors = _run_sql(database, "SELECT count(*) AS n FROM ai_feature_quota_usage WHERE idempotency_key LIKE 'legacy-%'")
     assert survivors[0][0]["n"] == 3
-    result = _alembic(database, "upgrade", "head")
+    result = _alembic(database, "upgrade", _HEAD)
     assert result.returncode == 0, result.stderr[-2000:]
