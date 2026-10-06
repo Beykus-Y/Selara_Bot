@@ -10,10 +10,11 @@ assistant's own context.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.domain.entities import ChatSnapshot
@@ -97,7 +98,27 @@ async def execute_member_tool(
                 action_description=f"Ошибка инструмента {call.name}",
                 success=False,
             )
-    return await execute_tool(call, chat_snapshot=chat_snapshot, **ctx)
+    return _without_identifiers(await execute_tool(call, chat_snapshot=chat_snapshot, **ctx))
+
+
+_PRIVATE_KEYS = frozenset({"user_id", "telegram_user_id"})
+
+
+def _strip_private(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _strip_private(item) for key, item in value.items() if key not in _PRIVATE_KEYS}
+    if isinstance(value, list):
+        return [_strip_private(item) for item in value]
+    return value
+
+
+def _without_identifiers(result: ToolResult) -> ToolResult:
+    """Members get names, never numeric Telegram ids; the admin tools return them for moderation."""
+    try:
+        data = json.loads(result.result_text)
+    except (TypeError, ValueError):
+        return result
+    return replace(result, result_text=json.dumps(_strip_private(data), ensure_ascii=False))
 
 
 def _bounded_int(value: Any, *, default: int, low: int, high: int) -> int:
@@ -114,27 +135,46 @@ async def _recent_chat_messages(
     hours = _bounded_int(call.arguments.get("hours"), default=3, low=1, high=MAX_HISTORY_HOURS)
     limit = _bounded_int(call.arguments.get("limit"), default=40, low=1, high=MAX_HISTORY_MESSAGES)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    # Edits are stored as extra snapshots of the same message: the newest one is what the chat shows now.
+    newest = (
+        select(
+            MessageArchiveModel.telegram_message_id.label("message_id"),
+            func.max(MessageArchiveModel.snapshot_at).label("snapshot_at"),
+        )
+        .where(
+            MessageArchiveModel.chat_id == chat_snapshot.telegram_chat_id,
+            MessageArchiveModel.sent_at >= since,
+        )
+        .group_by(MessageArchiveModel.telegram_message_id)
+        .subquery()
+    )
     rows = (
         await db_session.execute(
             select(
+                MessageArchiveModel.telegram_message_id,
                 MessageArchiveModel.text,
                 MessageArchiveModel.caption,
                 MessageArchiveModel.sent_at,
                 UserModel.first_name,
                 UserModel.username,
             )
-            .join(UserModel, UserModel.telegram_user_id == MessageArchiveModel.user_id)
-            .where(
-                MessageArchiveModel.chat_id == chat_snapshot.telegram_chat_id,
-                MessageArchiveModel.snapshot_kind == "created",
-                MessageArchiveModel.sent_at >= since,
+            .join(
+                newest,
+                (newest.c.message_id == MessageArchiveModel.telegram_message_id)
+                & (newest.c.snapshot_at == MessageArchiveModel.snapshot_at),
             )
+            .join(UserModel, UserModel.telegram_user_id == MessageArchiveModel.user_id)
+            .where(MessageArchiveModel.chat_id == chat_snapshot.telegram_chat_id)
             .order_by(MessageArchiveModel.sent_at.desc(), MessageArchiveModel.id.desc())
-            .limit(limit)
+            .limit(limit * 2)
         )
     ).all()
+    latest: dict[int, tuple] = {}
+    for message_id, *rest in rows:
+        latest.setdefault(message_id, tuple(rest))  # two snapshots with the same time: keep one
+    picked = list(latest.values())[:limit]
     messages = []
-    for text, caption, sent_at, first_name, username in reversed(rows):
+    for text, caption, sent_at, first_name, username in reversed(picked):
         body = (text or caption or "").strip()
         if not body:
             continue

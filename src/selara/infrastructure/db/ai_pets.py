@@ -18,10 +18,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from selara.application.ai_character.group import normalize_call_name
 from selara.application.ai_pets import mechanics as m
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.models import (
+    ChatAiCallNameModel,
     AiPetEventModel,
     AiPetItemModel,
     AiPetModel,
@@ -306,6 +308,8 @@ class AiPetService:
             raise PetDomainError("У вас уже есть питомец. Сначала отпустите его: /pet_release.")
         if await self._name_taken(chat_id=chat.telegram_chat_id, name_norm=name_norm):
             raise PetDomainError("В этом чате уже есть питомец с таким именем.")
+        if await self._is_call_name(chat_id=chat.telegram_chat_id, name=name):
+            raise PetDomainError("Так в этом чате зовут Selara. Выберите другое имя.")
 
         await self._economy.ensure_chat_and_user(chat=chat, user=owner)
         row = AiPetModel(
@@ -475,7 +479,10 @@ class AiPetService:
         # Any pet that becomes active here needs a free name, including a dormant one already here
         # (e.g. put to sleep by a name clash on a group upgrade). It is not active, so never counts itself.
         becomes_active_here = row.status != "active" or row.current_chat_id != target
-        if becomes_active_here and await self._name_taken(chat_id=target, name_norm=row.name_norm):
+        if becomes_active_here and (
+            await self._name_taken(chat_id=target, name_norm=row.name_norm)
+            or await self._is_call_name(chat_id=target, name=row.name)
+        ):
             return TravelResult(status="name_taken", pet=_view(row))
 
         await self._economy.ensure_chat_and_user(
@@ -786,6 +793,16 @@ class AiPetService:
                 AiPetModel.current_chat_id == chat_id,
                 AiPetModel.name_norm == name_norm,
                 AiPetModel.status == "active",
+            )
+        )
+        return found is not None
+
+    async def _is_call_name(self, *, chat_id: int, name: str) -> bool:
+        """A pet answers before Selara, so it must not take one of the chat's call names."""
+        found = await self._session.scalar(
+            select(ChatAiCallNameModel.id).where(
+                ChatAiCallNameModel.chat_id == chat_id,
+                ChatAiCallNameModel.name_norm == normalize_call_name(name),
             )
         )
         return found is not None

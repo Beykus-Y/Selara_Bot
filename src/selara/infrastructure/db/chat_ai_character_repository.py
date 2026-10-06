@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character.group import (
@@ -25,6 +26,7 @@ from selara.infrastructure.db.models import (
     ChatAiCallNameModel,
     ChatAiCharacterModel,
     ChatMemberAiMessageModel,
+    UserModel,
 )
 
 AdmitStatus = Literal["ok", "duplicate", "cooldown", "disabled"]
@@ -201,19 +203,30 @@ class ChatAiCharacterRepository:
         )
         if existing is not None:
             return MemberAdmission(status="duplicate")
+        # Every admitted turn counts, refused ones too: a member over quota still waits out the cooldown.
         if cooldown.total_seconds() > 0:
             last_at = await self._session.scalar(
                 select(func.max(ChatMemberAiMessageModel.created_at)).where(
                     ChatMemberAiMessageModel.chat_id == chat_id,
                     ChatMemberAiMessageModel.author_user_id == author_user_id,
                     ChatMemberAiMessageModel.role == "user",
-                    ChatMemberAiMessageModel.status.in_(("pending", "ok")),
                 )
             )
             if last_at is not None:
                 left = _as_utc(last_at) + cooldown - now
                 if left.total_seconds() > 0:
                     return MemberAdmission(status="cooldown", retry_after=left)
+        # The member's first tracked message may be this call: the activity tracker adds users afterwards.
+        bind = self._session.bind
+        if bind is not None and bind.dialect.name == "postgresql":
+            await self._session.execute(
+                pg_insert(UserModel)
+                .values(telegram_user_id=author_user_id, is_bot=False)
+                .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+            )
+        elif await self._session.get(UserModel, author_user_id) is None:
+            self._session.add(UserModel(telegram_user_id=author_user_id, is_bot=False))
+            await self._session.flush()
         row = ChatMemberAiMessageModel(
             chat_id=chat_id,
             author_user_id=author_user_id,

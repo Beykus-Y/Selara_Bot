@@ -506,3 +506,122 @@ async def test_exhausted_quota_hints_without_the_model_once_per_hour(member_db):
     second.reply.assert_not_awaited()
     statuses = (await member_db.scalars(select(ChatMemberAiMessageModel.status))).all()
     assert statuses == ["failed", "failed"]
+
+
+# ----- review fixes ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_member_get_top_never_returns_numeric_user_ids():
+    item = SimpleNamespace(
+        user_id=777, username="vasya", first_name="Вася", chat_display_name=None, activity_value=10, karma_value=0
+    )
+    activity_repo = SimpleNamespace(get_leaderboard=AsyncMock(return_value=[item]))
+    result = await execute_member_tool(
+        ToolCall(name="get_top", arguments={"mode": "activity", "period": "7d"}, call_id="c"),
+        history_access=False,
+        chat_snapshot=ChatSnapshot(telegram_chat_id=-1, chat_type="supergroup", title="t"),
+        db_session=None,
+        activity_repo=activity_repo,
+    )
+    assert result.success and "777" not in result.result_text and "@vasya" in result.result_text
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_messages_show_the_edited_text():
+    from datetime import timedelta
+
+    from selara.infrastructure.db.models import MessageArchiveModel, UserModel
+
+    engine, factory = await _session_factory()
+    try:
+        async with factory() as session:
+            now = _dt.now(_tz.utc)
+            session.add(ChatModel(telegram_chat_id=-20, type="supergroup", title="t"))
+            session.add(UserModel(telegram_user_id=5, first_name="Петя"))
+            await session.flush()
+
+            def snapshot(message_id, kind, text, at):
+                return MessageArchiveModel(
+                    chat_id=-20, user_id=5, telegram_message_id=message_id, snapshot_kind=kind, snapshot_at=at,
+                    sent_at=now - timedelta(minutes=10 - message_id), message_type="text", text=text,
+                    raw_message_json={}, snapshot_hash=f"{message_id}{kind}",
+                )
+
+            session.add_all([
+                snapshot(1, "created", "опечтка", now - timedelta(minutes=9)),
+                snapshot(1, "edited", "опечатка", now - timedelta(minutes=8)),
+                snapshot(2, "created", "второе", now - timedelta(minutes=7)),
+            ])
+            await session.commit()
+            result = await execute_member_tool(
+                ToolCall(name=HISTORY_TOOL_NAME, arguments={"hours": 1}, call_id="c"),
+                history_access=True,
+                chat_snapshot=ChatSnapshot(telegram_chat_id=-20, chat_type="supergroup", title="t"),
+                db_session=session,
+            )
+        texts = [m["text"] for m in _json.loads(result.result_text)["messages"]]
+        assert len(texts) == 2 and "опечатка" in texts[0] and "опечтка" not in texts[0] and "второе" in texts[1]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admission_creates_a_new_member_and_keeps_the_cooldown_after_a_refusal():
+    from datetime import timedelta
+
+    from selara.infrastructure.db.models import UserModel
+
+    engine, factory = await _session_factory()
+    try:
+        async with factory() as session:
+            session.add(ChatModel(telegram_chat_id=-30, type="supergroup", title="t"))
+            session.add(ChatAiCharacterModel(chat_id=-30, member_mode_enabled=True))
+            await session.commit()
+            repo = ChatAiCharacterRepository(session)
+            now = _dt.now(_tz.utc)
+            first = await repo.admit_turn(
+                chat_id=-30, author_user_id=4242, content="?", idempotency_key="a", telegram_message_id=1,
+                cooldown=timedelta(seconds=30), now=now,
+            )
+            assert first.status == "ok" and await session.get(UserModel, 4242) is not None
+            await repo.set_status(message_id=first.message_id, status="failed")  # e.g. refused by quota
+            again = await repo.admit_turn(
+                chat_id=-30, author_user_id=4242, content="?", idempotency_key="b", telegram_message_id=2,
+                cooldown=timedelta(seconds=30), now=now + timedelta(seconds=5),
+            )
+            assert again.status == "cooldown"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pet_cannot_take_a_call_name():
+    from datetime import timedelta
+
+    from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
+    from selara.domain.entities import UserSnapshot
+    from selara.infrastructure.db.ai_pets import AiPetService, PetDomainError
+    from selara.infrastructure.db.models import UserEntitlementModel, UserModel
+
+    engine, factory = await _session_factory()
+    try:
+        async with factory() as session:
+            now = _dt.now(_tz.utc)
+            session.add(ChatModel(telegram_chat_id=-40, type="supergroup", title="t"))
+            session.add(UserModel(telegram_user_id=9, first_name="O"))
+            await session.flush()
+            session.add(UserEntitlementModel(
+                user_id=9, product_key=SELARA_PERSONAL_PRODUCT_KEY, status="active",
+                valid_from=now - timedelta(days=1), valid_until=now + timedelta(days=29),
+            ))
+            session.add(ChatAiCallNameModel(chat_id=-40, name_display="Селя", name_norm="селя", is_primary=True))
+            await session.commit()
+            with pytest.raises(PetDomainError):
+                await AiPetService(session).create_pet(
+                    owner=UserSnapshot(telegram_user_id=9, username=None, first_name="O", last_name=None, is_bot=False),
+                    chat=ChatSnapshot(telegram_chat_id=-40, chat_type="supergroup", title="t"),
+                    species_raw="кот", name_raw="Селя", now=now,
+                )
+    finally:
+        await engine.dispose()
