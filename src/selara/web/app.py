@@ -155,6 +155,7 @@ from selara.presentation.handlers.settings_common import (
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.getting_started import build_getting_started_context
 from selara.web.miniapp_admin import build_miniapp_admin_router
+from selara.web.miniapp_personal import build_miniapp_personal_router
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
     AUDIT_CATEGORY_OPTIONS,
@@ -11238,6 +11239,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
+        )
+    )
+    app.include_router(
+        build_miniapp_personal_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=lambda session, request: _load_user_from_request(session, request, touch=True),
         )
     )
     return app

@@ -197,6 +197,32 @@ async def test_forget_all_removes_everything_of_one_user_and_nothing_else(sessio
     assert (await repo.delete_all_user_data(user_id=1)).profile is False  # idempotent
 
 
+async def test_forget_all_takes_the_profile_lock_before_deleting_anything(session):
+    """A parallel add_memory holds the profile row lock; deleting must queue behind it, not race past it."""
+    from sqlalchemy import event
+
+    repo = PersonalAiRepository(session)
+    await repo.get_or_create_profile(1)
+    await _add(repo, 1, "факт")
+    seen: list[tuple[str, str]] = []
+    engine = session.bind.sync_engine
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        words = statement.split()
+        verb = words[0].upper()
+        if verb in ("SELECT", "DELETE") and "FROM" in words:
+            seen.append((verb, words[words.index("FROM") + 1]))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await repo.delete_all_user_data(user_id=1)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert seen[0] == ("SELECT", "personal_ai_profiles"), seen
+    assert ("DELETE", "personal_ai_memories") in seen
+
+
 async def _now(session):
     from datetime import datetime, timezone
 
