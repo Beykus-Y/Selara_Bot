@@ -62,6 +62,11 @@ export function MorePage() {
       {/* Navigation section */}
       <h2 className="sec">Навигация</h2>
       <div className="card link-list" style={{ padding: '4px 14px' }}>
+        <Link className="link" to={routes.personal}>
+          <div className="ico">✨</div>
+          <b>Моя Selara</b>
+          <span>›</span>
+        </Link>
         {permissions.admin && (
           <Link className="link" to={routes.admin}>
             <div className="ico">⌘</div>
