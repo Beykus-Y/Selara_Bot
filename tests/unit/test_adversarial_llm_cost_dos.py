@@ -212,7 +212,7 @@ async def test_llm_cooldown_throttles_immediate_repeat_invocation_by_same_admin(
     async def fake_get_last_user_message_at(*, chat_id, admin_user_id):
         return last_message_at
 
-    async def fake_add_context_message(*, chat_id, role, content, is_context, admin_user_id, tool_call_id=None):
+    async def fake_add_context_message(*, chat_id, role, content, is_context, admin_user_id, tool_call_id=None, web_tainted=False):
         nonlocal last_message_at
         if role == "user":
             last_message_at = datetime.now(timezone.utc)

@@ -389,19 +389,27 @@ async def _handle(
         # tainted assistant answer must not re-enter a later ?? invocation's
         # trusted context (see save_interaction below).
         web_tainted = False
+        web_withdrawal = False
 
         for _round in range(_MAX_TOOL_ROUNDS):
+            # Allowlist snapshot for THIS round: every tool call in the batch
+            # is checked against the same set the provider was offered, so a
+            # withdrawal triggered by an earlier call in the batch cannot
+            # retroactively deny the rest of it (parallel web calls in one
+            # message keep working); the withdrawal applies from the NEXT
+            # round on. Calls are decided before any of their results are
+            # seen, so same-batch execution is never web-poisoned.
+            round_allowed = {definition["function"]["name"] for definition in available_tools}
             try:
                 await bot.send_chat_action(message.chat.id, "typing")
             except Exception:
                 pass
             try:
-                request_kwargs: dict[str, Any] = {"messages": messages}
-                # With the tool list withdrawn (post-web research boundary)
-                # the key is omitted entirely: an empty `tools=[]` is not
-                # accepted uniformly across OpenAI-compatible providers.
-                if available_tools:
-                    request_kwargs["tools"] = available_tools
+                request_kwargs: dict[str, Any] = {"messages": messages, "tools": available_tools}
+                # `tools` is always passed, [] included: LlmClient normalizes
+                # it to tools=None / tool_choice=None (a required positional
+                # -- omitting the key would raise TypeError on the real
+                # client), and empty means "no tools this round".
                 if call_context is not None:
                     request_kwargs["accounting_context"] = call_context
                 response = await llm_client.chat_with_tools(**request_kwargs)
@@ -474,8 +482,9 @@ async def _handle(
                 # emit a tool call that was never advertised for this round
                 # (e.g. ban_user after web content withdrew the tool list).
                 # execute_tool resolves against the global registry, so the
-                # boundary must be enforced HERE, before dispatch.
-                if call.name not in {d["function"]["name"] for d in available_tools}:
+                # boundary must be enforced HERE, before dispatch. The check
+                # uses this round's snapshot, not the mutable list.
+                if call.name not in round_allowed:
                     result = ToolResult(
                         call_id=call.call_id,
                         name=call.name,
@@ -502,19 +511,24 @@ async def _handle(
                 messages.append(tool_msg)
                 tool_messages.append(tool_msg)
                 if call.name in WEB_TOOL_NAMES:
-                    web_tainted = True
                     # Deterministic research boundary: untrusted web content is
-                    # now in the model context. EVERY tool is withdrawn for the
-                    # rest of the invocation -- a poisoned page must not be able
-                    # to combine private context (history, members, audit log)
+                    # now in the model context. EVERY tool is withdrawn from
+                    # the NEXT round on (flag applied after the whole batch --
+                    # see round_allowed) -- a poisoned page must not be able to
+                    # combine private context (history, members, audit log)
                     # with another outbound web request (exfiltration) or steer
-                    # any action. The model answers from what it already has.
-                    available_tools = restrict_tools_after_web(available_tools, web_context)
+                    # any action. Sequential research (search -> open pages)
+                    # goes through the web_research compound tool, which does
+                    # it server-side in a single call.
+                    web_tainted = True
+                    web_withdrawal = True
                 if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
                     # The caption is the answer. Do not request another completion or
                     # execute trailing tools after a confirmed delivered answer.
                     final_answer = str(call.arguments.get("caption", ""))
                     break
+            if web_withdrawal:
+                available_tools = restrict_tools_after_web(available_tools, web_context)
             if artifact_context.sent_artifacts and result.success and call.name == "send_artifact":
                 break
         else:
@@ -543,6 +557,10 @@ async def _handle(
             # invocation as a trusted assistant turn (the tool withdrawal only
             # lasts one invocation; the poisoned content would survive it).
             is_context=with_context and not web_tainted,
+            # and not into get_history either: the range query has no
+            # is_context filter, so tainted rows are flagged explicitly and
+            # excluded there (review 5431662759, P1: get_history leak).
+            web_tainted=web_tainted,
         )
 
         if with_context:

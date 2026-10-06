@@ -36,6 +36,7 @@ class LlmRepository:
         is_context: bool,
         admin_user_id: int | None = None,
         tool_call_id: str | None = None,
+        web_tainted: bool = False,
     ) -> LlmContextMessageModel:
         row = LlmContextMessageModel(
             chat_id=chat_id,
@@ -44,6 +45,7 @@ class LlmRepository:
             is_context=is_context,
             admin_user_id=admin_user_id,
             tool_call_id=tool_call_id,
+            web_tainted=web_tainted,
         )
         self._session.add(row)
         await self._session.flush()
@@ -133,6 +135,12 @@ class LlmRepository:
                 LlmContextMessageModel.chat_id == chat_id,
                 LlmContextMessageModel.created_at >= period_start,
                 LlmContextMessageModel.created_at <= period_end,
+                # Web-tainted rows (page-controlled content from a web-tool
+                # invocation) never re-enter the model via get_history: this
+                # query has no is_context filter, so without the exclusion a
+                # poisoned page could reach a fresh invocation that starts
+                # with a full tool set.
+                LlmContextMessageModel.web_tainted.is_(False),
             )
             .order_by(LlmContextMessageModel.created_at.asc())
             .limit(limit)

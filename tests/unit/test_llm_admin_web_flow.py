@@ -7,22 +7,28 @@ loop) and the invariants around the post-web research boundary:
 - the web executors really execute offline (httpx.MockTransport, same markup
   fixtures as tests/unit/test_llm_web_tools.py);
 - after the first web result enters the model context the tool list is
-  withdrawn: the follow-up chat_with_tools call omits the "tools" key entirely
-  (an empty tools=[] is not accepted uniformly across OpenAI-compatible
-  providers);
+  withdrawn: the follow-up chat_with_tools call is sent with tools=[] (the
+  "tools" key itself is ALWAYS present -- it is a required positional on the
+  real LlmClient, which normalizes [] to tools=None/tool_choice=None);
 - a stray un-advertised call (e.g. ban_user after withdrawal) is denied by the
   handler's server-side allowlist before execute_tool can dispatch it;
-- the web-tainted assistant answer is saved with is_context=False so it never
-  re-enters a later `??` invocation's trusted context;
+- parallel tool calls in ONE assistant message all execute against the same
+  per-round allowlist snapshot taken before the batch; the withdrawal applies
+  from the next round on;
+- the web-tainted assistant answer is saved with is_context=False and
+  web_tainted=True so it never re-enters a later `??` invocation's trusted
+  context (or get_history);
 - a plain non-web `??` invocation keeps tools advertised and is_context=True.
 """
 from __future__ import annotations
 
+import inspect
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import httpx
 from aiogram.types import Message
 
@@ -186,6 +192,21 @@ def _fetch_page_client() -> WebSearchClient:
     )
 
 
+def _search_and_page_client() -> WebSearchClient:
+    """One MockTransport routing BOTH web tools by request path: the DDG lite
+    search endpoint ("/lite/") gets the results markup, everything else (the
+    fetch_page target) gets the plain page."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/lite"):
+            return httpx.Response(200, text=DDG_LITE_HTML)
+        return httpx.Response(200, text=PAGE_OK_HTML, headers={"Content-Type": "text/html"})
+
+    return WebSearchClient(
+        provider=DuckDuckGoProvider(transport=httpx.MockTransport(handler)),
+        transport=httpx.MockTransport(handler),
+    )
+
+
 @contextmanager
 def _patched_handler_env():
     """The same patch targets the other llm_admin handler unit tests use
@@ -241,9 +262,10 @@ async def test_web_search_flow_reaches_final_answer():
     assert any(d["function"]["name"] == "web_search" for d in first_kwargs["tools"])
 
     # Research boundary: the follow-up call withdraws the tool list by
-    # omitting the key entirely (not by sending an empty list).
+    # sending an EMPTY list -- the "tools" key itself must always be present
+    # (required positional on the real LlmClient).
     second_kwargs = chat_mock.await_args_list[1].kwargs
-    assert "tools" not in second_kwargs
+    assert second_kwargs["tools"] == []
 
     # The executor REALLY ran against the mocked DDG transport: the search
     # result (unwrapped uddg link) is in the tool message fed to round 2.
@@ -253,8 +275,10 @@ async def test_web_search_flow_reaches_final_answer():
 
     assert "Готово" in _delivered_text(message)
     assert env.save_interaction.await_count == 1
-    # Web-tainted answer must not re-enter a later `??` invocation's context.
+    # Web-tainted answer must not re-enter a later `??` invocation's context
+    # and is flagged out of get_history's range query.
     assert env.save_interaction.await_args.kwargs["is_context"] is False
+    assert env.save_interaction.await_args.kwargs["web_tainted"] is True
 
 
 async def test_fetch_page_flow_reaches_final_answer():
@@ -277,7 +301,7 @@ async def test_fetch_page_flow_reaches_final_answer():
     assert "tools" in chat_mock.await_args_list[0].kwargs
 
     second_kwargs = chat_mock.await_args_list[1].kwargs
-    assert "tools" not in second_kwargs
+    assert second_kwargs["tools"] == []
 
     round_two_tool_messages = [m for m in second_kwargs["messages"] if m["role"] == "tool"]
     assert round_two_tool_messages, "fetch_page result never reached the model context"
@@ -285,6 +309,7 @@ async def test_fetch_page_flow_reaches_final_answer():
 
     assert "Готово" in _delivered_text(message)
     assert env.save_interaction.await_args.kwargs["is_context"] is False
+    assert env.save_interaction.await_args.kwargs["web_tainted"] is True
 
 
 async def test_post_web_tool_call_is_denied_by_allowlist():
@@ -310,8 +335,8 @@ async def test_post_web_tool_call_is_denied_by_allowlist():
 
     chat_mock = llm_client.chat_with_tools
     assert chat_mock.await_count == 3
-    assert "tools" not in chat_mock.await_args_list[1].kwargs
-    assert "tools" not in chat_mock.await_args_list[2].kwargs
+    assert chat_mock.await_args_list[1].kwargs["tools"] == []
+    assert chat_mock.await_args_list[2].kwargs["tools"] == []
 
     # The ban never dispatched: no moderation state change, no Telegram side
     # effect, no audit row.
@@ -327,6 +352,7 @@ async def test_post_web_tool_call_is_denied_by_allowlist():
 
     assert "Готово" in _delivered_text(message)
     assert env.save_interaction.await_args.kwargs["is_context"] is False
+    assert env.save_interaction.await_args.kwargs["web_tainted"] is True
 
 
 async def test_non_web_flow_keeps_tools_in_kwargs():
@@ -350,3 +376,94 @@ async def test_non_web_flow_keeps_tools_in_kwargs():
 
     assert "Простой ответ" in _delivered_text(message)
     assert env.save_interaction.await_args.kwargs["is_context"] is True
+    assert env.save_interaction.await_args.kwargs["web_tainted"] is False
+
+
+async def test_same_round_batch_allows_parallel_web_calls():
+    """Per-round allowlist snapshot: web_search and fetch_page emitted as
+    PARALLEL tool calls in ONE assistant message both execute against the
+    round-start allowlist (the withdrawal triggered by the first web result
+    cannot retroactively deny the rest of the batch). The next round is sent
+    tools=[], both results reach the model, and the saved interaction is
+    flagged web_tainted."""
+    message = _admin_message("?? найди и открой")
+    llm_client = _llm_client([
+        _tool_calls_response([
+            _tool_call("call-ws", "web_search", {"query": "selara"}),
+            _tool_call("call-fp", "fetch_page", {"url": PUBLIC_PAGE_URL}),
+        ]),
+        _text_response("Готово"),
+    ])
+    with _patched_handler_env() as env:
+        await llm_admin_context_handler(
+            message, AsyncMock(), MagicMock(), _chat_settings(), llm_client,
+            AsyncMock(), _settings(), object(),
+            web_search_client=_search_and_page_client(),
+        )
+
+    chat_mock = llm_client.chat_with_tools
+    assert chat_mock.await_count == 2
+    first_kwargs = chat_mock.await_args_list[0].kwargs
+    assert "tools" in first_kwargs
+    assert any(d["function"]["name"] == "web_search" for d in first_kwargs["tools"])
+    assert any(d["function"]["name"] == "fetch_page" for d in first_kwargs["tools"])
+
+    # Withdrawal applied only AFTER the batch: the next round gets [].
+    second_kwargs = chat_mock.await_args_list[1].kwargs
+    assert second_kwargs["tools"] == []
+
+    # BOTH calls executed against the real mocked transport: the round-1 tool
+    # messages contain the unwrapped search result URL AND the fetched page
+    # text, and neither was replaced by the allowlist denial.
+    round_one_tool_messages = [m for m in second_kwargs["messages"] if m["role"] == "tool"]
+    assert len(round_one_tool_messages) == 2
+    combined = "\n".join(m["content"] for m in round_one_tool_messages)
+    assert "https://example.com/article" in combined, "web_search call was denied or never executed"
+    assert "hello" in combined, "fetch_page call was denied or never executed"
+    assert "Инструмент недоступен в текущей фазе запроса." not in combined
+
+    assert "Готово" in _delivered_text(message)
+    assert env.save_interaction.await_args.kwargs["is_context"] is False
+    assert env.save_interaction.await_args.kwargs["web_tainted"] is True
+
+
+async def test_tools_kwarg_matches_real_llm_client_signature():
+    """BLOCKER regression: the handler must ALWAYS include the "tools" key in
+    chat_with_tools kwargs, even when the list is empty -- tools is a REQUIRED
+    positional on the real LlmClient, so the old omit-the-key-when-empty
+    behavior would raise TypeError against the real client. Every kwargs set
+    the handler actually sent in a full web-search flow must bind to the real
+    signature."""
+    from selara.infrastructure.llm.client import LlmClient
+
+    signature = inspect.signature(LlmClient.chat_with_tools)
+    # The function is unbound: pass a throwaway instance for `self` (never
+    # used -- signature binding only), exactly like an instance call binds it.
+    instance = object.__new__(LlmClient)
+    # The shape the handler sends binds (empty list included)...
+    signature.bind(instance, messages=[], tools=[])
+    signature.bind(instance, messages=[], tools=[], accounting_context=None)
+    # ...and the old omit-the-key shape does NOT (tools is required).
+    with pytest.raises(TypeError):
+        signature.bind(instance, messages=[])
+
+    message = _admin_message("?? что нового про selara?")
+    llm_client = _llm_client([
+        _tool_calls_response([_tool_call("call-ws", "web_search", {"query": "selara"})]),
+        _text_response("Готово"),
+    ])
+    with _patched_handler_env():
+        await llm_admin_context_handler(
+            message, AsyncMock(), MagicMock(), _chat_settings(), llm_client,
+            AsyncMock(), _settings(), object(),
+            web_search_client=_ddg_web_search_client(),
+        )
+
+    chat_mock = llm_client.chat_with_tools
+    assert chat_mock.await_count == 2
+    for recorded in chat_mock.await_args_list:
+        assert "tools" in recorded.kwargs, (
+            "handler omitted the required 'tools' kwarg in a chat_with_tools call"
+        )
+        # The exact kwargs the handler sent must be bindable to the REAL client.
+        signature.bind(instance, *recorded.args, **recorded.kwargs)

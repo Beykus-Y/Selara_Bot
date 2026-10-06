@@ -1,4 +1,4 @@
-"""Internet-access tools (web_search / fetch_page) for the ?/?? assistant.
+"""Internet-access tools (web_search / fetch_page / web_research) for the ?/?? assistant.
 
 Everything fetched from the web is wrapped with _untrusted() before it
 re-enters the model context: page content is attacker-controlled data, never
@@ -14,7 +14,7 @@ from typing import Any
 from selara.infrastructure.http.web_search import WebSearchClient, WebSearchError
 from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, _untrusted, register_tool
 
-WEB_TOOL_NAMES: frozenset[str] = frozenset({"web_search", "fetch_page"})
+WEB_TOOL_NAMES: frozenset[str] = frozenset({"web_search", "fetch_page", "web_research"})
 
 _MAX_QUERY_LENGTH = 400
 _MAX_RESULTS_LIMIT = 10
@@ -158,3 +158,71 @@ async def _exec_fetch_page(call: ToolCall, *, web_context: WebToolContext | None
         "content_type": page.content_type,
     }
     return _ok(call.call_id, call.name, payload, f"Прочитана страница: {page.final_url[:80]}")
+
+
+@register_tool(
+    "web_research",
+    _schema(
+        "Комплексное исследование: сам выполняет поиск в интернете и открывает верхние результаты, "
+        "возвращая в одном ответе и сниппеты, и тексты страниц. Используй его, когда нужны подробности, "
+        "а не только ссылки. Помни: после любого веб-инструмента остаток запроса выполняется без инструментов.",
+        {
+            "query": {"type": "string", "maxLength": _MAX_QUERY_LENGTH,
+                      "description": "Поисковый запрос"},
+            "open_top": {"type": "integer", "minimum": 1, "maximum": 3,
+                         "description": "Сколько верхних результатов открыть полным текстом (по умолчанию 2)"},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": _MAX_RESULTS_LIMIT,
+                            "description": "Сколько результатов поиска вернуть (по умолчанию 5)"},
+        },
+        ["query"],
+    ),
+    "Исследую веб: {query}...",
+)
+async def _exec_web_research(call: ToolCall, *, web_context: WebToolContext | None = None, **_: Any) -> ToolResult:
+    if web_context is None or web_context.client is None:
+        return _err(call.call_id, call.name, "Доступ к интернету отключён на этом сервере.")
+    query = str(call.arguments.get("query", "")).strip()
+    if not query:
+        return _err(call.call_id, call.name, "Укажи непустой поисковый запрос.")
+    if len(query) > _MAX_QUERY_LENGTH:
+        query = query[:_MAX_QUERY_LENGTH]
+    if not web_context.try_acquire():
+        return _err(call.call_id, call.name, web_context._limit_message())
+    # Budget semantics: a single web_research costs ONE budget slot (the search
+    # acquisition above) but performs up to 1 + pages_to_open real HTTP
+    # requests. The page fetches never consume extra slots -- instead they are
+    # bounded server-side by the same invocation cap:
+    # pages_to_open = min(open_top, max_calls - calls_used) after acquisition,
+    # so one compound call can never exceed the invocation's request budget.
+    server_max = max(1, min(_MAX_RESULTS_LIMIT, web_context.max_results))
+    max_results = _clamp_int(call.arguments.get("max_results"), server_max, 1, server_max)
+    open_top = _clamp_int(call.arguments.get("open_top"), 2, 1, 3)
+    pages_to_open = min(open_top, web_context.max_calls - web_context.calls_used)
+    try:
+        results = await web_context.client.search(query, max_results=max_results)
+    except WebSearchError as exc:
+        return _err(call.call_id, call.name, exc.message)
+    results_payload = [
+        {
+            "title": _untrusted(item.title[:_MAX_SNIPPET_LENGTH]),
+            "url": item.url,
+            "snippet": _untrusted(item.snippet[:_MAX_SNIPPET_LENGTH]),
+        }
+        for item in results
+    ]
+    pages: list[dict] = []
+    for item in results[:pages_to_open]:
+        try:
+            page = await web_context.client.fetch_page(item.url, max_chars=web_context.max_page_chars)
+        except WebSearchError as exc:
+            # One bad page must not fail the whole research call.
+            pages.append({"url": item.url, "error": exc.message})
+            continue
+        pages.append({
+            "url": page.final_url,
+            "title": _untrusted(page.title),
+            "text": _untrusted(page.text),
+            "truncated": page.truncated,
+        })
+    payload = {"query": query, "pages_opened": len(pages), "results": results_payload, "pages": pages}
+    return _ok(call.call_id, call.name, payload, f"Веб-исследование: {query[:60]}")

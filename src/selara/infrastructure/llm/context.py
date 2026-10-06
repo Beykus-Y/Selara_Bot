@@ -74,6 +74,7 @@ async def save_interaction(
     tool_messages: list[dict],
     llm_repo: LlmRepository,
     is_context: bool,
+    web_tainted: bool = False,
 ) -> None:
     await llm_repo.add_context_message(
         chat_id=chat_id,
@@ -84,6 +85,9 @@ async def save_interaction(
     )
     # Tool messages сохраняем только как лог (is_context=False) — они не валидны
     # как контекст без предшествующего assistant+tool_calls поворота.
+    # Web-tainted rows (web tool output and the answer the assistant gave after
+    # seeing it) are additionally flagged so get_history excludes them: its
+    # range query has no is_context filter.
     for tm in tool_messages:
         await llm_repo.add_context_message(
             chat_id=chat_id,
@@ -92,6 +96,7 @@ async def save_interaction(
             is_context=False,
             admin_user_id=admin_user_id,
             tool_call_id=tm.get("tool_call_id"),
+            web_tainted=web_tainted,
         )
     if assistant_response:
         await llm_repo.add_context_message(
@@ -100,6 +105,7 @@ async def save_interaction(
             content=assistant_response,
             is_context=is_context,
             admin_user_id=admin_user_id,
+            web_tainted=web_tainted,
         )
 
 
