@@ -11257,7 +11257,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     return app
 
 
-# Split literals: the cross-page link test treats a full "/api/..." string as a link to a registered route.
+# Split literals: the cross-page link test scans quoted absolute paths in this file and treats them as links.
 _MINIAPP_JSON_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "api/miniapp/personal")
 
 
