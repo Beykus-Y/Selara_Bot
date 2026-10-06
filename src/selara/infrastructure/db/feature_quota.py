@@ -94,6 +94,7 @@ class SqlAlchemyFeatureQuotaRepository:
         owner_exempt: bool,
         period_start,
         period_end,
+        model_profile: str | None = None,
     ) -> FeatureAccessDecision:
         async with self._session_factory() as session:
             async with session.begin():
@@ -257,6 +258,7 @@ class SqlAlchemyFeatureQuotaRepository:
                         existing.quota_scope_id = scope.scope_id
                         existing.pool_key = policy.pool
                         existing.units = cost.units
+                        existing.model_profile = model_profile
                         existing.period_start = period_start
                         existing.period_end = period_end
                         existing.policy_key = policy.policy_key
@@ -384,6 +386,7 @@ class SqlAlchemyFeatureQuotaRepository:
                     quota_scope_id=scope.scope_id,
                     pool_key=policy.pool,
                     units=cost.units,
+                    model_profile=model_profile,
                     actor_user_id=actor_user_id,
                     invocation_id=invocation.id,
                     trigger=trigger,

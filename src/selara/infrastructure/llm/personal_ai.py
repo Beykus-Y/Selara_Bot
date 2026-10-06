@@ -13,6 +13,7 @@ from selara.application.personal_memory import (
     select_memories_for_prompt,
     used_memory_ids,
 )
+from selara.application.model_router import ResolvedModel
 from selara.infrastructure.db.personal_ai_repository import AddMemoryStatus, PersonalAiRepository
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 
@@ -55,6 +56,7 @@ async def generate_reply(
     user_text: str,
     accounting_context: LlmAccountingContext | None,
     use_memory: bool = False,
+    resolved_model: ResolvedModel | None = None,
 ) -> str:
     """Ask the model for one reply. No tools are offered: a private chat can never act on groups."""
     summary, recent = await load_history(repo, user_id=user_id, thread=profile.thread)
@@ -73,6 +75,9 @@ async def generate_reply(
     kwargs: dict = {"max_tokens": MAX_TOKENS_PERSONAL_REPLY}
     if accounting_context is not None:
         kwargs["accounting_context"] = accounting_context
+    if resolved_model is not None:
+        # AIL mode: the model already priced by the quota reservation; never re-resolved here.
+        kwargs["resolved_model"] = resolved_model
     result = await llm_client.chat_simple(messages, **kwargs)
     value = result.value if hasattr(result, "value") else result
     return (value or "").strip()

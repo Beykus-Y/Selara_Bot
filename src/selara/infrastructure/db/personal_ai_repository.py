@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character import CharacterProfile
 from selara.application.personal_memory import MemoryItem
+from selara.application.personal_models import is_profile_key
 from selara.infrastructure.db.models import (
     PersonalAiMemoryModel,
     PersonalAiMessageModel,
@@ -23,6 +24,7 @@ from selara.infrastructure.db.models import (
 _PROFILE_FIELDS = frozenset(
     {
         "display_name",
+        "model_profile_key",
         "character_preset",
         "character_custom",
         "address_form",
@@ -43,6 +45,8 @@ class StoredProfile:
     memory_enabled: bool
     auto_memory_enabled: bool = False
     memory_extract_cursor: int = 0
+    # Logical model profile (basic/analytics/...); routing metadata only, never a privilege.
+    model_profile_key: str = "basic"
 
 
 class AddMemoryStatus(StrEnum):
@@ -83,6 +87,7 @@ def _to_stored(row: PersonalAiProfileModel) -> StoredProfile:
         memory_enabled=row.memory_enabled,
         auto_memory_enabled=row.auto_memory_enabled,
         memory_extract_cursor=row.memory_extract_cursor,
+        model_profile_key=row.model_profile_key or "basic",
     )
 
 
@@ -127,6 +132,9 @@ class PersonalAiRepository:
         unknown = set(fields) - _PROFILE_FIELDS
         if unknown:
             raise ValueError(f"Unknown personal AI profile fields: {sorted(unknown)}")
+        if "model_profile_key" in fields and not is_profile_key(fields["model_profile_key"]):
+            # Only stable profile keys are stored; a physical model id or forged value never is.
+            raise ValueError("Unknown model profile")
         await self.get_or_create_profile(user_id)
         if fields.get("auto_memory_enabled") is True or fields.get("memory_enabled") is True:
             # Switching memory on starts from "now": text written before (or while it was off) is never analysed.

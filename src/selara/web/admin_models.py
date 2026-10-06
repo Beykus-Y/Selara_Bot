@@ -1,5 +1,5 @@
 """Owner model configuration API using the existing catalog store and router."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from decimal import Decimal
 import logging
 from typing import Annotated
@@ -89,7 +89,9 @@ def build_admin_models_router(*, settings, session_factory, require_admin) -> AP
             effective = snapshot.models_by_id.get(resolved.model_id)
             data = asdict(profile)
             data["ail_multiplier"] = format(profile.ail_multiplier, "f")
-            data["effective"] = asdict(resolved)
+            # The snapshot reference is internal (pricing source), not part of the admin DTO.
+            data["effective"] = asdict(replace(resolved, catalog=None))
+            data["effective"].pop("catalog", None)
             data["effective"]["ail_multiplier"] = format(resolved.ail_multiplier, "f")
             data["assigned_model"] = _model_json(assigned, snapshot) if assigned else None
             data["effective_pricing"] = _model_json(effective, snapshot) if effective else None

@@ -16,6 +16,16 @@ PROFILE_NAMES = {
     "basic": "Базовая", "analytics": "Аналитик", "freeform": "Свободная",
     "creative": "Творческая", "fast": "Быстрая",
 }
+# Stable user-facing presentation of the profile keys; display names stay editable per profile.
+PROFILE_ORDER = ("basic", "analytics", "freeform", "creative", "fast")
+PROFILE_EMOJI = {"basic": "⚪", "analytics": "🧠", "freeform": "🎭", "creative": "🎨", "fast": "⚡"}
+PROFILE_DESCRIPTIONS = {
+    "basic": "Для обычных разговоров",
+    "analytics": "Для сложного анализа",
+    "freeform": "Для более свободного и ролевого общения",
+    "creative": "Для сложных творческих задач",
+    "fast": "Для минимальной задержки",
+}
 MAX_TOKEN_PRICE = Decimal("1000000")
 
 

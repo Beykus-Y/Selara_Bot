@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from selara.infrastructure.llm.pricing import estimate_llm_cost_usd
 from selara.application.model_catalog import CatalogProvider, CatalogSnapshot, ModelCapabilities, validate_text
-from selara.application.model_router import DefaultModelRouter, ModelRouter
+from selara.application.model_router import DefaultModelRouter, ModelRouter, ResolvedModel
 
 log = logging.getLogger(__name__)
 
@@ -142,9 +142,31 @@ class LlmClient:
         )
         return LlmCallResult(response, usages)
 
+    @property
+    def model_catalog(self) -> CatalogProvider | None:
+        """The catalog this client prices and routes with (read-only use by feature code)."""
+        return self._model_catalog
+
+    @property
+    def default_model(self) -> str:
+        return self._config.model
+
     async def chat_simple(self, messages: list[dict], *, max_tokens: int | None = None,
                           accounting_context: LlmAccountingContext | None = None,
-                          model: str | None = None, model_profile: str | None = None) -> LlmCallResult[str]:
+                          model: str | None = None, model_profile: str | None = None,
+                          resolved_model: ResolvedModel | None = None) -> LlmCallResult[str]:
+        if resolved_model is not None:
+            # Already resolved by the caller (Personal AI): use exactly that model and its pricing
+            # snapshot instead of resolving the profile a second time.
+            if model is not None or model_profile is not None:
+                raise ValueError("Pass either resolved_model or model/model_profile")
+            validate_text(resolved_model.model_id, "model override", 255)
+            response, usages = await self._request_with_retries(
+                "chat_simple", resolved_model.model_id, accounting_context,
+                catalog_snapshot=resolved_model.catalog, model_profile=resolved_model.profile_key,
+                model=resolved_model.model_id, messages=messages, max_tokens=max_tokens,
+            )
+            return LlmCallResult(response.choices[0].message.content or "", usages)
         selected, snapshot, _ = await self._prepare_model(model, model_profile, self._config.model)
         response, usages = await self._request_with_retries(
             "chat_simple", selected, accounting_context,

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from selara.application.feature_access import (
+    AIL_UNIT,
     AccessTier,
     FeatureEntitlement,
     PersonalQuotaLimits,
@@ -190,7 +191,7 @@ class SqlAlchemyUserEntitlementResolver:
     async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
         if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
             return FeatureEntitlement(access_tier=AccessTier.FREE)
-        limits = (await self._config.get()).limits
+        limits = (await self._config.get()).active_limits
         try:
             async with self._session_factory() as session:
                 row = await session.scalar(
@@ -217,7 +218,10 @@ class SqlAlchemyUserEntitlementResolver:
             quota_policy=(
                 paid_pet_policy(self._pet_daily_limit, feature)
                 if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT)
-                else paid_personal_policy(_snapshot_limits(limits, row.paid_daily_limit))
+                # The sold request limit is a requests-mode promise; AIL budgets come from the config.
+                else paid_personal_policy(
+                    limits if limits.unit == AIL_UNIT else _snapshot_limits(limits, row.paid_daily_limit)
+                )
             ),
         )
 

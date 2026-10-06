@@ -8,6 +8,8 @@ SELARA_AI_PRODUCT_KEY = "selara_ai_monthly"
 SELARA_AI_TERMS_VERSION = "v2"
 SELARA_PERSONAL_PRODUCT_KEY = "selara_personal_monthly"
 SELARA_PERSONAL_TERMS_VERSION = "personal-v1"
+# Terms shown and snapshotted on new intents while Personal is in AI Limits mode.
+SELARA_PERSONAL_AIL_TERMS_VERSION = "personal-v2-ail"
 SELARA_AI_CURRENCY = "XTR"
 SELARA_AI_DURATION = timedelta(days=30)
 PRODUCT_SCOPE_CHAT = "chat"
@@ -49,6 +51,11 @@ PRODUCT_SPECS: dict[str, ProductSpec] = {
         terms_version=SELARA_PERSONAL_TERMS_VERSION,
     ),
 }
+
+
+def personal_terms_version(*, ail_enabled: bool) -> str:
+    """The Selara Personal terms version a new purchase intent accepts in the current quota mode."""
+    return SELARA_PERSONAL_AIL_TERMS_VERSION if ail_enabled else SELARA_PERSONAL_TERMS_VERSION
 
 
 def get_product_spec(product_key: str | None) -> ProductSpec | None:

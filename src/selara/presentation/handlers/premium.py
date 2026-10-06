@@ -24,7 +24,7 @@ from selara.application.selara_ai_product import (
     SELARA_AI_PRODUCT_KEY,
     SELARA_AI_TERMS_VERSION,
     SELARA_PERSONAL_PRODUCT_KEY,
-    SELARA_PERSONAL_TERMS_VERSION,
+    personal_terms_version,
     SelaraAiProductUnavailable,
     get_product_spec,
     get_selara_ai_product,
@@ -79,7 +79,36 @@ def _terms_text() -> str:
     )
 
 
+def _personal_ail_terms_text(config: PersonalConfig) -> str:
+    limits = config.ail_limits
+    return (
+        "<b>Условия покупки Selara Personal</b>\n\n"
+        "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом, "
+        "персонализация и личная память. Подписка принадлежит вам, а не чату.\n"
+        f"2. Подписка даёт суточный бюджет AI Limits (AIL): {limits.paid_daily} AIL в сутки вместо "
+        f"{limits.free_daily} бесплатных. Это бюджет, а не гарантированное количество сообщений: "
+        "каждый запрос списывает столько AIL, сколько стоит выбранный профиль модели. Разные профили "
+        "расходуют разное количество AIL, коэффициент может отличаться и меняться; актуальная стоимость "
+        "показана в /ai перед выбором. Физическая модель за профилем может меняться владельцем бота. "
+        "Бюджет обновляется в начале календарных суток по времени бота.\n"
+        f"3. Срок — {config.duration_days} дней с момента оплаты. Продление не автоматическое: "
+        f"повторная покупка добавляет ещё {config.duration_days} дней к активному сроку; "
+        "после окончания остаётся бесплатный бюджет.\n"
+        "4. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
+        "5. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
+        "удалённые данные могут оставаться в резервных копиях до их ротации.\n"
+        "6. Доступен ролевой режим. Базовые ограничения накладывает провайдер модели; "
+        "бот не даёт ролевым сценариям менять правила работы и получать доп. возможности.\n"
+        "7. Работа AI зависит от доступности настроенного AI-провайдера и конфигурации бота. "
+        "При временной недоступности функции могут быть приостановлены до конца оплаченного срока.\n"
+        "8. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
+        "Нажимая кнопку принятия условий перед счётом, вы подтверждаете, что прочитали и принимаете эти условия."
+    )
+
+
 def _personal_terms_text(config: PersonalConfig) -> str:
+    if config.ail_enabled and config.ail_limits is not None:
+        return _personal_ail_terms_text(config)
     return (
         "<b>Условия покупки Selara Personal</b>\n\n"
         "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом "
@@ -369,7 +398,25 @@ async def show_personal_offer(
         if entitlement is not None and entitlement.status == "active" and entitlement.valid_until > now
         else None
     )
-    if active_until is not None:
+    if config.ail_enabled and config.ail_limits is not None:
+        # AI Limits mode: the budget is the config's, not a request count fixed at purchase.
+        ail = config.ail_limits
+        status = (
+            f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
+            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
+            if active_until is not None
+            else f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
+        )
+        text = (
+            f"<b>{escape(product.title)}</b>\n"
+            + status
+            + f"Free: {ail.free_daily} AIL в сутки бесплатно.\n"
+            f"Selara Personal предоставляет {ail.paid_daily} AIL в сутки.\n"
+            "Разные модели расходуют разное количество AIL за запрос — стоимость видна в /ai.\n"
+            "Подписка оформляется для вашего аккаунта, а не для чата.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
+        )
+    elif active_until is not None:
         current_limit = entitlement.paid_daily_limit or config.limits.paid_daily
         renewed_limit = max(current_limit, config.limits.paid_daily)
         text = (
@@ -433,7 +480,8 @@ async def accept_terms_and_buy_selara_personal(
         intent = await repository.create_personal_purchase_intent(
             buyer_user_id=query.from_user.id,
             product=product,
-            terms_version=SELARA_PERSONAL_TERMS_VERSION,
+            # Snapshotted on the intent: a later mode switch never rewrites what this buyer accepted.
+            terms_version=personal_terms_version(ail_enabled=config.ail_enabled),
             terms_accepted_at=datetime.now(timezone.utc),
         )
     except PurchaseIntentRateLimited:
