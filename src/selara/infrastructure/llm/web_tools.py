@@ -12,7 +12,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from selara.infrastructure.http.web_search import WebSearchClient, WebSearchError
-from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, _untrusted, register_tool
+from selara.infrastructure.llm.tools import (
+    MUTATING_TOOL_NAMES,
+    ToolCall,
+    ToolResult,
+    _err,
+    _ok,
+    _untrusted,
+    register_tool,
+)
 
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"web_search", "fetch_page"})
 
@@ -40,6 +48,10 @@ class WebToolContext:
         self.calls_used += 1
         return True
 
+    @property
+    def exhausted(self) -> bool:
+        return self.client is None or self.calls_used >= self.max_calls
+
     def _limit_message(self) -> str:
         return (f"Лимит обращений к интернету в этом запросе исчерпан ({self.max_calls}). "
                 "Используй уже полученные результаты и ответь без новых запросов.")
@@ -51,6 +63,23 @@ def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, parsed))
+
+
+def restrict_tools_after_web(tools: list[dict], web_context: WebToolContext) -> list[dict]:
+    """Deterministic confused-deputy guard for web results.
+
+    Once a web_search/fetch_page result has entered the model context, page
+    text could steer the model into authorized-but-unintended actions
+    (execute_tool's auth re-checks stop privilege escalation, not this).
+    Mutating tools are therefore withdrawn for the rest of the invocation;
+    web tools are also withdrawn once their budget is spent so the model
+    stops burning LLM rounds on guaranteed 'limit exhausted' errors."""
+    return [
+        definition
+        for definition in tools
+        if (name := definition["function"]["name"]) not in MUTATING_TOOL_NAMES
+        and not (web_context.exhausted and name in WEB_TOOL_NAMES)
+    ]
 
 
 @register_tool(
@@ -79,7 +108,11 @@ async def _exec_web_search(call: ToolCall, *, web_context: WebToolContext | None
         query = query[:_MAX_QUERY_LENGTH]
     if not web_context.try_acquire():
         return _err(call.call_id, call.name, web_context._limit_message())
-    max_results = _clamp_int(call.arguments.get("max_results"), web_context.max_results, 1, _MAX_RESULTS_LIMIT)
+    # Server-side cap: the model-provided max_results (or its absence) is always
+    # clamped into [1, min(_MAX_RESULTS_LIMIT, configured max_results)], so a bad
+    # or missing config value can never widen what reaches the provider.
+    server_max = max(1, min(_MAX_RESULTS_LIMIT, web_context.max_results))
+    max_results = _clamp_int(call.arguments.get("max_results"), server_max, 1, server_max)
     try:
         results = await web_context.client.search(query, max_results=max_results)
     except WebSearchError as exc:

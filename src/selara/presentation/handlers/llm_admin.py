@@ -46,7 +46,11 @@ from selara.infrastructure.llm.tools import (
     get_tool_definitions,
     get_tool_status,
 )
-from selara.infrastructure.llm.web_tools import WEB_TOOL_NAMES, WebToolContext
+from selara.infrastructure.llm.web_tools import (
+    WEB_TOOL_NAMES,
+    WebToolContext,
+    restrict_tools_after_web,
+)
 from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
@@ -470,6 +474,13 @@ async def _handle(
                 }
                 messages.append(tool_msg)
                 tool_messages.append(tool_msg)
+                if call.name in WEB_TOOL_NAMES:
+                    # Deterministic confused-deputy guard: untrusted web content
+                    # is now in the model context, so mutating tools are
+                    # withdrawn for the rest of this invocation (web tools go
+                    # too once their budget is spent) -- see
+                    # web_tools.restrict_tools_after_web.
+                    available_tools = restrict_tools_after_web(available_tools, web_context)
                 if call.name == "send_artifact" and result.success and artifact_context.sent_artifacts:
                     # The caption is the answer. Do not request another completion or
                     # execute trailing tools after a confirmed delivered answer.

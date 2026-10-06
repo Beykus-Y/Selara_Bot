@@ -160,11 +160,13 @@ class Settings(BaseSettings):
     web_search_provider: str = Field(default="duckduckgo", validation_alias="WEB_SEARCH_PROVIDER")
     web_search_api_key: str = Field(default="", validation_alias="WEB_SEARCH_API_KEY")
     web_search_base_url: str = Field(default="", validation_alias="WEB_SEARCH_BASE_URL")
-    web_search_timeout_seconds: float = Field(default=15.0, validation_alias="WEB_SEARCH_TIMEOUT_SECONDS")
-    web_search_max_results: int = Field(default=5, validation_alias="WEB_SEARCH_MAX_RESULTS")
-    web_search_max_page_chars: int = Field(default=8000, validation_alias="WEB_SEARCH_MAX_PAGE_CHARS")
+    web_search_timeout_seconds: float = Field(
+        default=15.0, gt=0, validation_alias="WEB_SEARCH_TIMEOUT_SECONDS"
+    )
+    web_search_max_results: int = Field(default=5, ge=1, le=10, validation_alias="WEB_SEARCH_MAX_RESULTS")
+    web_search_max_page_chars: int = Field(default=8000, ge=1, validation_alias="WEB_SEARCH_MAX_PAGE_CHARS")
     web_search_max_calls_per_invocation: int = Field(
-        default=4, validation_alias="WEB_SEARCH_MAX_CALLS_PER_INVOCATION"
+        default=4, ge=0, validation_alias="WEB_SEARCH_MAX_CALLS_PER_INVOCATION"
     )
 
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
