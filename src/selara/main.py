@@ -15,6 +15,7 @@ from selara.infrastructure.db.activity_event_sync import run_message_event_backf
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
+from selara.infrastructure.http.web_search import build_web_search_client
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.db.personal_config import build_personal_config
@@ -145,6 +146,14 @@ async def _run_bot(settings, session_factory) -> None:
     stt_client = _build_stt_client(settings)
     llm_client = _build_llm_client(settings, session_factory)
     logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
+    web_search_client = build_web_search_client(
+        enabled=settings.web_search_enabled,
+        provider=settings.web_search_provider,
+        base_url=settings.web_search_base_url,
+        timeout_seconds=settings.web_search_timeout_seconds,
+    )
+    logger.info("Web search client: %s",
+                f"OK ({web_search_client.provider_name})" if web_search_client is not None else "None (disabled)")
     dispatcher = PaymentSafeDispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
@@ -205,6 +214,8 @@ async def _run_bot(settings, session_factory) -> None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:
         polling_kwargs["llm_client"] = llm_client
+    if web_search_client is not None:
+        polling_kwargs["web_search_client"] = web_search_client
     if daily_summary_stt_queue is not None:
         polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 

@@ -84,6 +84,25 @@ LLM_COOLDOWN_SECONDS=5
 достаточно поменять `*_BASE_URL`/`*_MODEL`/`*_API_KEY` под своего
 провайдера. Полный список параметров — в `.env.example`.
 
+### 3.4 Опционально: веб-поиск для AI-ассистента
+
+Инструменты `web_search` (поиск) и `fetch_page` (чтение страницы) доступны
+ассистенту `?`/`??` во всех чатах, где он включён. По умолчанию включены
+(`WEB_SEARCH_ENABLED=true`) и работают через DuckDuckGo без API-ключа.
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=duckduckgo
+WEB_SEARCH_TIMEOUT_SECONDS=15
+WEB_SEARCH_MAX_RESULTS=5
+```
+
+Важно: DuckDuckGo неофициален и заблокирован в РФ — сервер должен иметь
+сетевой доступ к `lite.duckduckgo.com` (VPS вне РФ или исходящий прокси).
+При блокировке ассистент корректно отвечает, что поиск временно
+недоступен. Чтобы полностью отключить поиск, выставьте
+`WEB_SEARCH_ENABLED=false`.
+
 ---
 
 ## 4. Локальный запуск через Docker Compose
