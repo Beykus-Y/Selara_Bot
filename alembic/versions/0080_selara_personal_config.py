@@ -1,4 +1,4 @@
-"""runtime overrides for Selara Personal price, duration, limits and unit weights
+"""runtime overrides for Selara Personal price, duration and daily limits
 
 Revision ID: 0080_selara_personal_config
 Revises: 0079_quota_user_scope
@@ -26,8 +26,6 @@ def upgrade() -> None:
         sa.Column("duration_days", sa.Integer(), nullable=True),
         sa.Column("free_daily_limit", sa.Integer(), nullable=True),
         sa.Column("paid_daily_limit", sa.Integer(), nullable=True),
-        sa.Column("default_units", sa.Numeric(10, 2), nullable=True),
-        sa.Column("unit_weights", sa.JSON(), nullable=True),
         sa.Column("updated_by", sa.BigInteger(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.CheckConstraint("id = 1", name="ck_selara_personal_config_singleton"),
@@ -35,7 +33,6 @@ def upgrade() -> None:
         sa.CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
         sa.CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
         sa.CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
-        sa.CheckConstraint("default_units IS NULL OR default_units >= 0", name="ck_selara_personal_config_units"),
     )
 
 

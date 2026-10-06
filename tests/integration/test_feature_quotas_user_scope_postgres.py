@@ -20,7 +20,7 @@ from selara.application.feature_access import (
     QuotaScope,
 )
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
-from selara.application.usage_pricing import QuotaCost
+from selara.application.usage_pricing import ConfiguredUsagePricer, QuotaCost
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
@@ -36,7 +36,7 @@ from selara.infrastructure.llm.features import AiFeature
 
 _NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 _LIMITS = PersonalQuotaLimits(free_daily=5, paid_daily=150)
-_CONFIG = StaticPersonalConfigProvider(PersonalConfig(None, 30, _LIMITS, Decimal("1")))
+_CONFIG = StaticPersonalConfigProvider(PersonalConfig(None, 30, _LIMITS))
 
 
 async def _database():
@@ -254,23 +254,35 @@ async def test_active_personal_entitlement_raises_the_limit_to_one_fifty_until_i
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_unit_costs_are_summed_and_a_request_that_does_not_fit_is_denied():
+    """The repository counts units; the AIL foundation still prices non-personal features."""
     engine, factory = await _database()
     try:
-        pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("2")))
-        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), pricer=pricer, personal_limits=_LIMITS)
-        user_id = 611_051
+        chat_id = -611_052
+        async with factory() as session:
+            session.add(ChatModel(telegram_chat_id=chat_id, type="supergroup", title="Group"))
+            await session.commit()
+        pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("4")))
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), pricer=pricer)
 
-        one = await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:1")
-        two = await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:2")
-        denied = await _reserve(service, user_id=user_id, key=f"personal_chat:{user_id}:3")
+        async def reserve(index: int):
+            return await _reserve(
+                service,
+                user_id=1,
+                key=f"llm_admin:{index}",
+                feature=AiFeature.LLM_ADMIN,
+                chat_id=chat_id,
+                scope=QuotaScope.chat(chat_id),
+            )
 
-        assert one.allowed and one.quota_used == 2
-        assert two.allowed and two.quota_used == 4 and two.quota_remaining == 1
+        one, two, denied = await reserve(1), await reserve(2), await reserve(3)
+
+        assert one.allowed and one.quota_used == 4
+        assert two.allowed and two.quota_used == 8 and two.quota_remaining == 2
         assert not denied.allowed and denied.reason == AccessReason.QUOTA_EXHAUSTED
-        assert denied.quota_used == 4
+        assert denied.quota_used == 8
         async with factory() as session:
             total = await session.scalar(select(func.sum(AiFeatureQuotaUsageModel.units)))
-        assert total == Decimal("4")
+        assert total == Decimal("8")
     finally:
         await engine.dispose()
 
@@ -502,7 +514,7 @@ async def test_configured_limits_drive_the_free_and_paid_pool_in_the_database():
 @pytest.mark.integration
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_saved_override_changes_price_limits_and_weights_without_restart():
+async def test_saved_override_changes_price_and_limits_without_restart():
     from selara.application.personal_config import PersonalConfigOverride
     from selara.core.config import Settings
     from selara.infrastructure.db.personal_config import build_personal_config
@@ -533,5 +545,50 @@ async def test_saved_override_changes_price_limits_and_weights_without_restart()
         await store.save_override(PersonalConfigOverride())  # clear: back to .env values
         assert (await provider.get()).limits == PersonalQuotaLimits(5, 150)
         assert await store.load_override() == PersonalConfigOverride()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_a_subscriber_keeps_the_bought_limit_when_config_is_lowered_and_each_request_costs_one():
+    engine, factory = await _database()
+    try:
+        user_id = 611_301
+        async with factory() as session:
+            session.add(UserModel(telegram_user_id=user_id, is_bot=False))
+            await session.flush()
+            session.add(
+                UserEntitlementModel(
+                    user_id=user_id,
+                    product_key=SELARA_PERSONAL_PRODUCT_KEY,
+                    status="active",
+                    valid_from=_NOW - timedelta(days=1),
+                    valid_until=_NOW + timedelta(days=29),
+                    paid_daily_limit=150,
+                )
+            )
+            await session.commit()
+        lowered = StaticPersonalConfigProvider(PersonalConfig(None, 30, PersonalQuotaLimits(free_daily=5, paid_daily=7)))
+        service = FeatureAccessService(
+            SqlAlchemyFeatureQuotaRepository(factory),
+            user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, lowered),
+            # AI Limits weights must not reach Personal quota.
+            pricer=ConfiguredUsagePricer(Decimal("4"), {"personal_chat": Decimal("4")}),
+            personal_config=lowered,
+        )
+
+        results = [await _reserve(service, user_id=user_id, key=f"keep:{i}") for i in range(12)]
+
+        assert all(result.allowed for result in results)  # past the lowered 7, within the bought 150
+        assert results[0].quota_limit == 150
+        async with factory() as session:
+            used = await session.scalar(
+                select(func.sum(AiFeatureQuotaUsageModel.units)).where(
+                    AiFeatureQuotaUsageModel.quota_scope_id == user_id
+                )
+            )
+        assert used == Decimal("12")  # one unit per request
     finally:
         await engine.dispose()

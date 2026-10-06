@@ -20,6 +20,8 @@ depends_on: Sequence[str] | None = None
 _TABLE = "ai_feature_quota_usage"
 _TRIGGER_FUNCTION = "ai_feature_quota_usage_scope_defaults"
 _TRIGGER = "trg_ai_feature_quota_usage_scope_defaults"
+_UPDATE_FUNCTION = "ai_feature_quota_usage_follow_chat_id"
+_UPDATE_TRIGGER = "trg_ai_feature_quota_usage_follow_chat_id"
 
 
 def upgrade() -> None:
@@ -68,8 +70,34 @@ def upgrade() -> None:
         f"FOR EACH ROW EXECUTE FUNCTION {_TRIGGER_FUNCTION}()"
     )
 
+    # The previous release also moves a group's rows to a supergroup by updating only
+    # chat_id. Follow such a move for chat-scoped rows, so a rollback never leaves the
+    # quota bucket behind. Updates that set quota_scope_id themselves (the current
+    # release) are left alone, as are user-scoped rows.
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {_UPDATE_FUNCTION}() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.quota_scope_type = 'chat'
+               AND NEW.chat_id IS NOT NULL
+               AND NEW.chat_id IS DISTINCT FROM OLD.chat_id
+               AND NEW.quota_scope_id IS NOT DISTINCT FROM OLD.quota_scope_id THEN
+                NEW.quota_scope_id := NEW.chat_id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute(
+        f"CREATE TRIGGER {_UPDATE_TRIGGER} BEFORE UPDATE OF chat_id ON {_TABLE} "
+        f"FOR EACH ROW EXECUTE FUNCTION {_UPDATE_FUNCTION}()"
+    )
+
 
 def downgrade() -> None:
+    op.execute(f"DROP TRIGGER IF EXISTS {_UPDATE_TRIGGER} ON {_TABLE}")
+    op.execute(f"DROP FUNCTION IF EXISTS {_UPDATE_FUNCTION}()")
     op.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER} ON {_TABLE}")
     op.execute(f"DROP FUNCTION IF EXISTS {_TRIGGER_FUNCTION}()")
     op.drop_index("idx_ai_feature_quota_scope_usage", table_name=_TABLE)

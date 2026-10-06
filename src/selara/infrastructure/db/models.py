@@ -102,6 +102,8 @@ class UserEntitlementModel(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Daily limit sold with the subscription (snapshot taken at purchase); NULL = use the configured one.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -109,6 +111,7 @@ class UserEntitlementModel(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "product_key", name="uq_user_entitlements_user_product"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_user_entitlements_paid_limit"),
         CheckConstraint("status IN ('active', 'revoked')", name="ck_user_entitlements_status"),
         CheckConstraint("valid_from < valid_until", name="ck_user_entitlements_validity"),
         CheckConstraint("product_key IN ('selara_personal_monthly')", name="ck_user_entitlements_product"),
@@ -129,6 +132,8 @@ class SelaraAiPurchaseIntentModel(Base):
     # until then ``ck_..._personal_self_only`` pins the recipient to the buyer.
     target_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="chat", server_default="chat")
     target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Quota terms sold with the invoice; copied onto the user entitlement when the payment is applied.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     product_key: Mapped[str] = mapped_column(String(64), nullable=False)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -164,6 +169,9 @@ class SelaraAiPurchaseIntentModel(Base):
         CheckConstraint(
             "target_scope <> 'user' OR target_user_id = buyer_user_id",
             name="ck_selara_ai_purchase_intents_personal_self_only",
+        ),
+        CheckConstraint(
+            "paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_ai_purchase_intents_paid_limit"
         ),
         CheckConstraint("amount_stars > 0", name="ck_selara_ai_purchase_intents_amount"),
         CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
@@ -1985,7 +1993,6 @@ class SelaraPersonalConfigModel(Base):
         CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
         CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
         CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
-        CheckConstraint("default_units IS NULL OR default_units >= 0", name="ck_selara_personal_config_units"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -1993,9 +2000,6 @@ class SelaraPersonalConfigModel(Base):
     duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    default_units: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    # {"feature_key": "weight"}; strings keep Decimal precision through JSON.
-    unit_weights: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

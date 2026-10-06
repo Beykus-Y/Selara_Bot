@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.personal_config import (
@@ -40,8 +38,6 @@ class SqlAlchemyPersonalConfigStore:
             duration_days=row.duration_days,
             free_daily_limit=row.free_daily_limit,
             paid_daily_limit=row.paid_daily_limit,
-            default_units=row.default_units,
-            unit_weights={key: Decimal(str(value)) for key, value in (row.unit_weights or {}).items()} or None,
         )
 
     async def save_override(self, override: PersonalConfigOverride, *, updated_by: int | None = None) -> PersonalConfig:
@@ -57,10 +53,6 @@ class SqlAlchemyPersonalConfigStore:
                 row.duration_days = override.duration_days
                 row.free_daily_limit = override.free_daily_limit
                 row.paid_daily_limit = override.paid_daily_limit
-                row.default_units = override.default_units
-                row.unit_weights = (
-                    {key: str(value) for key, value in override.unit_weights.items()} if override.unit_weights else None
-                )
                 row.updated_by = updated_by
         if self._provider is not None:
             self._provider.invalidate()

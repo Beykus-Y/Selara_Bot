@@ -384,13 +384,31 @@ async def test_unmetered_features_in_a_dm_do_not_touch_the_repository(feature):
 
 
 @pytest.mark.asyncio
-async def test_custom_pricer_cost_is_forwarded_so_units_can_replace_request_counts_later():
+async def test_personal_requests_always_cost_one_unit_whatever_the_pricer_says():
+    """5/150 are requests: an AI Limits pricer must not change what a Personal request costs."""
     scope = QuotaScope.user(42)
-    pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("2.5")))
+    pricer = ConfiguredUsagePricer(Decimal("7"), {"personal_chat": Decimal("4"), "personal_memory_extract": Decimal("9")})
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
     service = FeatureAccessService(repository, pricer=pricer, personal_limits=_LIMITS)
 
     await _reserve_personal(service)
+
+    assert repository.reserve.await_args.kwargs["cost"] == QuotaCost(Decimal("1"))
+    # With 150 paid requests a user still gets 150 requests, not 150 // 4.
+    assert repository.reserve.await_args.kwargs["policy"].limit == 5
+
+
+@pytest.mark.asyncio
+async def test_the_pricer_foundation_still_prices_non_personal_features():
+    scope = QuotaScope.chat(-100)
+    repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
+    pricer = SimpleNamespace(price=lambda **_: QuotaCost(Decimal("2.5")))
+    service = FeatureAccessService(repository, pricer=pricer)
+
+    await service.reserve_feature_usage(
+        feature=AiFeature.LLM_ADMIN, chat_id=-100, actor_user_id=1, actor_is_bot=False,
+        trigger="telegram_message", timezone_name="UTC", idempotency_key="g:1", chat_type="supergroup",
+    )
 
     assert repository.reserve.await_args.kwargs["cost"].units == Decimal("2.5")
 
@@ -646,7 +664,7 @@ async def test_successful_personal_payment_confirms_the_subscription_not_a_chat(
     assert "Selara Personal" in text and "активна" in text
 
 
-# ----- nothing about prices, durations, limits or unit weights is hardcoded ----
+# ----- nothing about prices, durations or limits is hardcoded ----
 
 
 def _env(monkeypatch, **values: str):
@@ -657,8 +675,6 @@ def _env(monkeypatch, **values: str):
         "SELARA_PERSONAL_DURATION_DAYS",
         "PERSONAL_FREE_DAILY_LIMIT",
         "PERSONAL_PAID_DAILY_LIMIT",
-        "AI_QUOTA_DEFAULT_UNITS",
-        "AI_QUOTA_UNIT_WEIGHTS",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in values.items():
@@ -671,7 +687,6 @@ def test_settings_defaults_live_in_config_and_can_all_be_overridden(monkeypatch)
     assert default.selara_personal_price_stars is None
     assert default.selara_personal_duration_days == 30
     assert (default.personal_free_daily_limit, default.personal_paid_daily_limit) == (5, 150)
-    assert default.ai_quota_default_units == Decimal("1") and default.ai_quota_unit_weights == {}
 
     custom = _env(
         monkeypatch,
@@ -679,13 +694,10 @@ def test_settings_defaults_live_in_config_and_can_all_be_overridden(monkeypatch)
         SELARA_PERSONAL_DURATION_DAYS="7",
         PERSONAL_FREE_DAILY_LIMIT="3",
         PERSONAL_PAID_DAILY_LIMIT="40",
-        AI_QUOTA_DEFAULT_UNITS="2",
-        AI_QUOTA_UNIT_WEIGHTS='{"personal_chat": "3.5"}',
     )
     assert custom.selara_personal_price_stars == 99
     assert custom.selara_personal_duration_days == 7
     assert PersonalQuotaLimits.from_settings(custom) == PersonalQuotaLimits(3, 40)
-    assert custom.ai_quota_unit_weights == {"personal_chat": Decimal("3.5")}
 
 
 def test_personal_product_duration_and_price_follow_configuration():
@@ -736,16 +748,12 @@ def test_configured_pricer_uses_default_and_per_feature_weights():
 
 
 @pytest.mark.asyncio
-async def test_service_reserves_with_the_configured_limit_and_weight():
+async def test_service_reserves_with_the_configured_limit():
     scope = QuotaScope.user(42)
     repository = SimpleNamespace(reserve=AsyncMock(return_value=_decision(scope)))
-    service = FeatureAccessService(
-        repository,
-        pricer=ConfiguredUsagePricer(Decimal("1"), {"personal_chat": Decimal("4")}),
-        personal_limits=PersonalQuotaLimits(free_daily=8, paid_daily=80),
-    )
+    service = FeatureAccessService(repository, personal_limits=PersonalQuotaLimits(free_daily=8, paid_daily=80))
 
     await _reserve_personal(service)
 
     assert repository.reserve.await_args.kwargs["policy"].limit == 8
-    assert repository.reserve.await_args.kwargs["cost"].units == Decimal("4")
+    assert repository.reserve.await_args.kwargs["cost"].units == Decimal("1")

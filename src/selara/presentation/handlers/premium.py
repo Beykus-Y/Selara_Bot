@@ -88,7 +88,8 @@ def _personal_terms_text(config: PersonalConfig) -> str:
         "Подписка принадлежит вам, а не чату.\n"
         f"2. Срок — {config.duration_days} дней с момента оплаты. Продление не автоматическое: "
         f"повторная покупка добавляет ещё {config.duration_days} дней к активному сроку; "
-        "после окончания остаётся бесплатный лимит.\n"
+        "после окончания остаётся бесплатный лимит. Суточный лимит фиксируется в момент оплаты и не меняется "
+        "до окончания оплаченного срока; повторная покупка закрепляет лимит, указанный в её предложении.\n"
         "3. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
         "4. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
         "удалённые данные могут оставаться в резервных копиях до их ротации.\n"
@@ -129,6 +130,7 @@ def _personal_product_for_settings(settings: Settings, config: PersonalConfig):
         product_key=SELARA_PERSONAL_PRODUCT_KEY,
         price_stars=config.price_stars,
         duration=timedelta(days=config.duration_days),
+        paid_daily_limit=config.limits.paid_daily,
     )
 
 
@@ -365,7 +367,8 @@ async def show_personal_offer(
         text = (
             f"<b>{escape(product.title)}</b>\n"
             f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
+            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b> "
+            f"и закрепит лимит {config.limits.paid_daily} запросов в сутки.\n"
             "Перед оплатой нужно подтвердить принятие условий покупки."
         )
     else:

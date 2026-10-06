@@ -35,10 +35,15 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=16), server_default="active", nullable=False),
         sa.Column("valid_from", sa.DateTime(timezone=True), nullable=False),
         sa.Column("valid_until", sa.DateTime(timezone=True), nullable=False),
+        # Daily limit sold with the subscription: later config changes never touch it.
+        sa.Column("paid_daily_limit", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint("status IN ('active', 'revoked')", name="ck_user_entitlements_status"),
         sa.CheckConstraint("valid_from < valid_until", name="ck_user_entitlements_validity"),
+        sa.CheckConstraint(
+            "paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_user_entitlements_paid_limit"
+        ),
         sa.CheckConstraint("product_key IN ('selara_personal_monthly')", name="ck_user_entitlements_product"),
         sa.UniqueConstraint("user_id", "product_key", name="uq_user_entitlements_user_product"),
     )
@@ -53,6 +58,11 @@ def upgrade() -> None:
 
     op.add_column(_INTENTS, sa.Column("target_scope", sa.String(length=8), server_default="chat", nullable=False))
     op.add_column(_INTENTS, sa.Column("target_user_id", sa.BigInteger(), nullable=True))
+    # Quota terms shown at purchase; copied onto the subscription when the payment is applied.
+    op.add_column(_INTENTS, sa.Column("paid_daily_limit", sa.Integer(), nullable=True))
+    op.create_check_constraint(
+        "ck_selara_ai_purchase_intents_paid_limit", _INTENTS, "paid_daily_limit IS NULL OR paid_daily_limit > 0"
+    )
     op.alter_column(_INTENTS, "source_chat_id", existing_type=sa.BigInteger(), nullable=True)
     op.alter_column(_INTENTS, "chat_id", existing_type=sa.BigInteger(), nullable=True)
     op.drop_constraint("ck_selara_ai_purchase_intents_product", _INTENTS, type_="check")
@@ -141,6 +151,8 @@ def downgrade() -> None:
 
     op.drop_index("idx_selara_ai_purchase_intents_target_user", table_name=_INTENTS)
     op.drop_constraint("ck_selara_ai_purchase_intents_personal_self_only", _INTENTS, type_="check")
+    op.drop_constraint("ck_selara_ai_purchase_intents_paid_limit", _INTENTS, type_="check")
+    op.drop_column(_INTENTS, "paid_daily_limit")
     op.drop_constraint("ck_selara_ai_purchase_intents_scope_product", _INTENTS, type_="check")
     op.drop_constraint("ck_selara_ai_purchase_intents_target_shape", _INTENTS, type_="check")
     op.drop_constraint("ck_selara_ai_purchase_intents_target_scope", _INTENTS, type_="check")

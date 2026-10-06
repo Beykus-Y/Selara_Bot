@@ -37,8 +37,9 @@ BASELINE_REQUEST_UNITS = Decimal("1")
 class ConfiguredUsagePricer:
     """Prices from configuration: a default for every operation plus per-feature overrides.
 
-    Feature code only calls ``price``; the numbers come from settings
-    (``AI_QUOTA_DEFAULT_UNITS`` / ``AI_QUOTA_UNIT_WEIGHTS``).
+    Feature code only calls ``price``. This is the AI Limits foundation: Selara Personal
+    features are deliberately NOT priced through it yet (they cost one request, see
+    ``feature_access.PERSONAL_REQUEST_COST``); a later PR switches that on explicitly.
     """
 
     def __init__(

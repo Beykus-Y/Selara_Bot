@@ -1,4 +1,3 @@
-from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
@@ -165,13 +164,9 @@ class Settings(BaseSettings):
     selara_personal_duration_days: int = Field(
         default=30, gt=0, le=365, validation_alias="SELARA_PERSONAL_DURATION_DAYS"
     )
-    # Personal pool limits in quota units (one request = one unit until AI Limits weights exist).
+    # Personal pool limits: one request = one unit. Fixed until a deliberate switch to AI Limits.
     personal_free_daily_limit: int = Field(default=5, gt=0, le=10_000, validation_alias="PERSONAL_FREE_DAILY_LIMIT")
     personal_paid_daily_limit: int = Field(default=150, gt=0, le=10_000, validation_alias="PERSONAL_PAID_DAILY_LIMIT")
-    # Unit cost of an operation: default for everything, optional per-feature overrides
-    # as JSON, e.g. {"personal_chat": "2"}. Features not listed use the default.
-    ai_quota_default_units: Decimal = Field(default=Decimal("1"), gt=0, le=1000, validation_alias="AI_QUOTA_DEFAULT_UNITS")
-    ai_quota_unit_weights: dict[str, Decimal] = Field(default_factory=dict, validation_alias="AI_QUOTA_UNIT_WEIGHTS")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -49,16 +48,23 @@ async def _database():
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _personal(price_stars: int = 69):
+def _personal(price_stars: int = 69, paid_daily_limit: int | None = 150):
     return get_selara_ai_product(
-        product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=price_stars, duration=timedelta(days=30)
+        product_key=SELARA_PERSONAL_PRODUCT_KEY,
+        price_stars=price_stars,
+        duration=timedelta(days=30),
+        paid_daily_limit=paid_daily_limit,
     )
 
 
-async def _intent(factory, *, buyer_user_id: int = _BUYER, now: datetime = _NOW):
+def _config(*, free: int = 5, paid: int = 150) -> StaticPersonalConfigProvider:
+    return StaticPersonalConfigProvider(PersonalConfig(None, 30, PersonalQuotaLimits(free_daily=free, paid_daily=paid)))
+
+
+async def _intent(factory, *, buyer_user_id: int = _BUYER, now: datetime = _NOW, paid_daily_limit: int | None = 150):
     return await SqlAlchemyTelegramStarsRepository(factory).create_personal_purchase_intent(
         buyer_user_id=buyer_user_id,
-        product=_personal(),
+        product=_personal(paid_daily_limit=paid_daily_limit),
         terms_version=SELARA_PERSONAL_TERMS_VERSION,
         terms_accepted_at=now,
         now=now,
@@ -399,12 +405,7 @@ async def test_personal_entitlement_resolver_returns_paid_one_fifty_policy_only_
         repository = SqlAlchemyTelegramStarsRepository(factory)
         intent = await _intent(factory)
         await _payment(repository, intent, charge_id="personal-resolver")
-        resolver = SqlAlchemyUserEntitlementResolver(
-            factory,
-            StaticPersonalConfigProvider(
-                PersonalConfig(None, 30, PersonalQuotaLimits(free_daily=5, paid_daily=150), Decimal("1"))
-            ),
-        )
+        resolver = SqlAlchemyUserEntitlementResolver(factory, _config())
 
         paid = await resolver.resolve(user_id=_BUYER, feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
         stranger = await resolver.resolve(
@@ -512,5 +513,88 @@ async def test_database_keeps_personal_and_chat_products_apart_and_gifts_off():
                 target_scope="chat",
             )
         )
+    finally:
+        await engine.dispose()
+
+
+async def _paid_limit(factory, config, user_id: int = _BUYER) -> int:
+    resolver = SqlAlchemyUserEntitlementResolver(factory, config)
+    entitlement = await resolver.resolve(user_id=user_id, feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
+    assert entitlement.access_tier == AccessTier.PAID
+    return entitlement.quota_policy.limit
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_bought_daily_limit_is_a_snapshot_that_later_config_changes_cannot_touch():
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        intent = await _intent(factory, paid_daily_limit=150)
+        await _payment(repository, intent, charge_id="snapshot-1")
+        async with factory() as session:
+            saved_intent = await session.get(SelaraAiPurchaseIntentModel, intent.id)
+            entitlement = await session.scalar(select(UserEntitlementModel).where(UserEntitlementModel.user_id == _BUYER))
+        assert saved_intent.paid_daily_limit == 150 and entitlement.paid_daily_limit == 150
+
+        # An admin lowers (or raises) the configured paid limit afterwards: the subscriber keeps 150.
+        assert await _paid_limit(factory, _config(paid=50)) == 150
+        assert await _paid_limit(factory, _config(paid=500)) == 150
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_renewal_adopts_the_limit_of_that_purchase_and_duplicates_change_nothing():
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        first = await _intent(factory, paid_daily_limit=150)
+        await _payment(repository, first, charge_id="renew-1")
+        second = await _intent(factory, paid_daily_limit=80, now=_NOW + timedelta(hours=1))
+        await _payment(repository, second, charge_id="renew-2", payment_at=_NOW + timedelta(hours=1))
+        assert await _paid_limit(factory, _config(paid=500)) == 80
+
+        # A redelivered first payment is a duplicate and must not roll the limit back to 150.
+        await _payment(repository, first, charge_id="renew-1", payment_at=_NOW + timedelta(hours=2))
+        assert await _paid_limit(factory, _config(paid=500)) == 80
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_old_rows_without_a_snapshot_use_config_and_paid_never_drops_below_free():
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        await _payment(repository, await _intent(factory), charge_id="legacy-1")
+        async with factory() as session:
+            entitlement = await session.scalar(select(UserEntitlementModel).where(UserEntitlementModel.user_id == _BUYER))
+            entitlement.paid_daily_limit = None
+            await session.commit()
+
+        assert await _paid_limit(factory, _config(paid=120)) == 120  # NULL snapshot: configured limit
+        async with factory() as session:
+            entitlement = await session.scalar(select(UserEntitlementModel).where(UserEntitlementModel.user_id == _BUYER))
+            entitlement.paid_daily_limit = 4
+            await session.commit()
+        assert await _paid_limit(factory, _config(free=10, paid=150)) == 11  # never worse than free + 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_personal_intent_must_carry_the_limit_it_sells():
+    engine, factory = await _database()
+    try:
+        with pytest.raises(ValueError):
+            await _intent(factory, paid_daily_limit=None)
     finally:
         await engine.dispose()

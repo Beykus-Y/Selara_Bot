@@ -65,6 +65,8 @@ class SelaraAiProduct:
     duration: timedelta
     scope: str = PRODUCT_SCOPE_CHAT
     terms_version: str = SELARA_AI_TERMS_VERSION
+    # Personal only: the daily limit sold with this purchase, snapshotted onto the subscription.
+    paid_daily_limit: int | None = None
 
     @property
     def duration_label(self) -> str:
@@ -72,7 +74,11 @@ class SelaraAiProduct:
 
 
 def get_selara_ai_product(
-    *, product_key: str, price_stars: int | None, duration: timedelta | None = None
+    *,
+    product_key: str,
+    price_stars: int | None,
+    duration: timedelta | None = None,
+    paid_daily_limit: int | None = None,
 ) -> SelaraAiProduct:
     """Resolve a supported product using its configured Stars price (and duration, if configurable)."""
     spec = get_product_spec(product_key)
@@ -100,6 +106,7 @@ def get_selara_ai_product(
         duration=resolved_duration,
         scope=spec.scope,
         terms_version=spec.terms_version,
+        paid_daily_limit=paid_daily_limit if spec.scope == PRODUCT_SCOPE_USER else None,
     )
 
 

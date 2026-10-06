@@ -867,11 +867,16 @@ def build_miniapp_admin_router(
             "duration_days": config.duration_days,
             "free_daily_limit": config.limits.free_daily,
             "paid_daily_limit": config.limits.paid_daily,
-            "default_units": _decimal_str(config.default_units),
-            "unit_weights": {key: _decimal_str(value) for key, value in sorted(config.unit_weights.items())},
         }
 
+    _EDITABLE_PERSONAL_FIELDS = frozenset({"price_stars", "duration_days", "free_daily_limit", "paid_daily_limit"})
+
     def _parse_personal_override(payload: dict[str, Any]) -> PersonalConfigOverride:
+        # Request weights (AI Limits) are deliberately not editable: Personal is 5/150 requests.
+        unknown = sorted(set(payload) - _EDITABLE_PERSONAL_FIELDS)
+        if unknown:
+            raise ValueError(f"fields are not editable: {', '.join(unknown)}")
+
         def integer(key: str) -> int | None:
             value = payload.get(key)
             if value is None:
@@ -880,32 +885,11 @@ def build_miniapp_admin_router(
                 raise ValueError(f"{key} must be an integer")
             return value
 
-        def decimal(value: Any, key: str) -> Decimal:
-            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-                raise ValueError(f"{key} must be a number")
-            try:
-                return Decimal(str(value))
-            except Exception:
-                raise ValueError(f"{key} must be a number") from None
-
-        raw_weights = payload.get("unit_weights")
-        if raw_weights is not None and not isinstance(raw_weights, dict):
-            raise ValueError("unit_weights must be an object")
-        known_features = {feature.value for feature in AiFeature}
-        weights = None
-        if raw_weights:
-            unknown = sorted(set(raw_weights) - known_features)
-            if unknown:
-                raise ValueError(f"unknown features in unit_weights: {', '.join(unknown)}")
-            weights = {key: decimal(value, f"unit_weights.{key}") for key, value in raw_weights.items()}
-        default_units = payload.get("default_units")
         return PersonalConfigOverride(
             price_stars=integer("price_stars"),
             duration_days=integer("duration_days"),
             free_daily_limit=integer("free_daily_limit"),
             paid_daily_limit=integer("paid_daily_limit"),
-            default_units=None if default_units is None else decimal(default_units, "default_units"),
-            unit_weights=weights,
         )
 
     @router.get("/monetization/personal-config")
@@ -923,11 +907,11 @@ def build_miniapp_admin_router(
                 "duration_days": override.duration_days,
                 "free_daily_limit": override.free_daily_limit,
                 "paid_daily_limit": override.paid_daily_limit,
-                "default_units": None if override.default_units is None else _decimal_str(override.default_units),
-                "unit_weights": {k: _decimal_str(v) for k, v in (override.unit_weights or {}).items()},
             },
             "effective": _personal_config_json(effective),
             "applies_within_seconds": 15,
+            # Existing subscriptions keep the daily limit they bought; this applies to new purchases.
+            "paid_limit_applies_to": "new_purchases_and_free_tier",
         }
 
     @router.put("/monetization/personal-config")

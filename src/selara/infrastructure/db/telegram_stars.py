@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from selara.application.feature_access import (
     AccessTier,
     FeatureEntitlement,
+    PersonalQuotaLimits,
     paid_personal_policy,
 )
 from selara.application.personal_config import PersonalConfigProvider
@@ -164,6 +165,12 @@ def _snapshot(row: SelaraAiPurchaseIntentModel) -> PurchaseIntent:
     )
 
 
+def _snapshot_limits(limits: PersonalQuotaLimits, sold_paid_limit: int | None) -> PersonalQuotaLimits:
+    """The limit a subscriber bought, never below the current free limit (and the config for old rows)."""
+    paid = sold_paid_limit if sold_paid_limit is not None else limits.paid_daily
+    return PersonalQuotaLimits(free_daily=limits.free_daily, paid_daily=max(paid, limits.free_daily + 1))
+
+
 class SqlAlchemyUserEntitlementResolver:
     """PostgreSQL resolver for the personal (user-scoped) entitlement."""
 
@@ -200,7 +207,7 @@ class SqlAlchemyUserEntitlementResolver:
             valid_until=row.valid_until,
             source="telegram_stars",
             product_key=row.product_key,
-            quota_policy=paid_personal_policy(limits),
+            quota_policy=paid_personal_policy(_snapshot_limits(limits, row.paid_daily_limit)),
         )
 
 
@@ -364,6 +371,8 @@ class SqlAlchemyTelegramStarsRepository:
             raise ValueError("Terms acceptance version is required")
         if product.scope != PRODUCT_SCOPE_USER:
             raise ValueError("Personal purchase intents require a user-scoped product")
+        if product.paid_daily_limit is None or product.paid_daily_limit <= 0:
+            raise ValueError("Personal purchase intents must carry the daily limit they sell")
         current = _as_utc(now or datetime.now(timezone.utc))
         accepted_at = _as_utc(terms_accepted_at)
         intent_id = str(uuid4())
@@ -393,6 +402,7 @@ class SqlAlchemyTelegramStarsRepository:
                     chat_title=None,
                     target_scope=PRODUCT_SCOPE_USER,
                     target_user_id=buyer_user_id,
+                    paid_daily_limit=product.paid_daily_limit,
                     product_key=product.key,
                     amount_stars=product.price_stars,
                     currency=product.currency,
@@ -692,11 +702,16 @@ class SqlAlchemyTelegramStarsRepository:
                 status="active",
                 valid_from=paid_at,
                 valid_until=paid_at + duration,
+                paid_daily_limit=intent.paid_daily_limit,
             )
             session.add(entitlement)
         else:
             entitlement_action = "extended"
             _extend_entitlement(entitlement, paid_at=paid_at, duration=duration)
+            # A renewal sells the limit shown at that purchase; merely editing the
+            # config never changes what an existing subscriber already paid for.
+            if intent.paid_daily_limit is not None:
+                entitlement.paid_daily_limit = intent.paid_daily_limit
         intent.status = "consumed"
         intent.consumed_at = intent.consumed_at or paid_at
         await session.flush()
