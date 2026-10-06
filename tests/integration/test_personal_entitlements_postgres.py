@@ -18,6 +18,7 @@ from selara.application.selara_ai_product import (
     SELARA_PERSONAL_TERMS_VERSION,
     get_selara_ai_product,
 )
+from selara.infrastructure.db.ai_analytics import AdminAiAnalyticsRepository
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
     ChatEntitlementModel,
@@ -158,6 +159,11 @@ async def test_successful_personal_payment_grants_user_entitlement_once_and_neve
             saved_intent = await session.get(SelaraAiPurchaseIntentModel, intent.id)
         assert len(payments) == 1
         assert payments[0].target_scope == "user" and payments[0].target_user_id == _BUYER
+        async with factory() as session:
+            detail = await AdminAiAnalyticsRepository(session).payment_detail(
+                payment_id=payments[0].id, now=_NOW + timedelta(days=1)
+            )
+        assert detail["entitlement"] is not None and detail["entitlement"]["active_now"] is True
         assert payments[0].target_chat_id is None
         assert payments[0].product_key == SELARA_PERSONAL_PRODUCT_KEY
         assert entitlement.product_key == SELARA_PERSONAL_PRODUCT_KEY

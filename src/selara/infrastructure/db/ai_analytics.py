@@ -539,20 +539,28 @@ class AdminAiAnalyticsRepository:
                 }
         item["intent"] = intent
         entitlement = None
-        if item["chat_id"] is not None:
+        row = None
+        if item["target_scope"] == "user" and item["target_user_id"] is not None:
+            row = await self._session.scalar(
+                select(UserEntitlementModel).where(
+                    UserEntitlementModel.user_id == item["target_user_id"],
+                    UserEntitlementModel.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                )
+            )
+        elif item["chat_id"] is not None:
             row = await self._session.scalar(
                 select(ChatEntitlementModel).where(
                     ChatEntitlementModel.chat_id == item["chat_id"],
                     ChatEntitlementModel.product_key == SELARA_AI_PRODUCT_KEY,
                 )
             )
-            if row is not None:
-                valid_until = as_utc(row.valid_until)
-                entitlement = {
-                    "status": row.status,
-                    "valid_from": as_utc(row.valid_from),
-                    "valid_until": valid_until,
-                    "active_now": row.status == "active" and valid_until > now,
-                }
+        if row is not None:
+            valid_until = as_utc(row.valid_until)
+            entitlement = {
+                "status": row.status,
+                "valid_from": as_utc(row.valid_from),
+                "valid_until": valid_until,
+                "active_now": row.status == "active" and valid_until > now,
+            }
         item["entitlement"] = entitlement
         return item

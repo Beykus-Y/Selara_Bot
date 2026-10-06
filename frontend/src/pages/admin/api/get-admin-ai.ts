@@ -52,6 +52,8 @@ export type AdminMonetizationSummary = {
   all_time: { successful_payments: number; stars_revenue: number }
   active_paid_chats: number
   expiring_within_7_days: number
+  active_personal_subscriptions?: number
+  personal_expiring_within_7_days?: number
   daily: Array<{ date: string; payments: number; stars: number }>
   checkout: { configured: boolean; price_stars: number | null }
 }
@@ -69,6 +71,8 @@ export type AdminPayment = {
   buyer_user_id: number
   source_chat_id: number | null
   target_chat_id: number | null
+  target_scope?: 'chat' | 'user'
+  target_user_id?: number | null
   chat_id: number | null
   chat_title: string | null
   amount_stars: number
@@ -88,8 +92,8 @@ export type AdminPaymentDetail = AdminPayment & {
     created_at: string | null
     expires_at: string | null
     amount_stars: number
-    source_chat_id: number
-    chat_id: number
+    source_chat_id: number | null
+    chat_id: number | null
     terms_version: string | null
     terms_accepted_at: string | null
   } | null
