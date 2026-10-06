@@ -123,7 +123,8 @@ class FakeBackend:
         request = route.request
         path = request.url.split("?", 1)[0]
         method = request.method
-        body = json.loads(request.post_data) if request.post_data else None
+        is_json = request.headers.get("content-type", "").startswith("application/json")
+        body = json.loads(request.post_data) if request.post_data and is_json else None
         if path.endswith("/miniapp/session"):
             return await self._json(route, SESSION)
         if path.endswith("/landing/context"):
