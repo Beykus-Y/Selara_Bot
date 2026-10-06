@@ -25,7 +25,7 @@ from selara.application.feature_access import (
     resolve_feature_policy,
 )
 from selara.application.model_router import DefaultModelRouter
-from selara.application.personal_config import StaticPersonalConfigProvider, config_from_settings
+from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider, config_from_settings
 from selara.application.selara_ai_product import (
     PRODUCT_SPECS,
     SELARA_AI_PRODUCT_KEY,
@@ -757,3 +757,47 @@ async def test_service_reserves_with_the_configured_limit():
 
     assert repository.reserve.await_args.kwargs["policy"].limit == 8
     assert repository.reserve.await_args.kwargs["cost"].units == Decimal("1")
+
+
+# ----- renewal limit wording, invoice description, active-subscriber screen -----
+
+
+def test_personal_invoice_description_states_the_daily_limit_being_sold():
+    product = get_selara_ai_product(
+        product_key=SELARA_PERSONAL_PRODUCT_KEY, price_stars=69, duration=timedelta(days=30), paid_daily_limit=150
+    )
+    assert "150" in product.description and len(product.description) <= 255
+    chat = get_selara_ai_product(product_key=SELARA_AI_PRODUCT_KEY, price_stars=69)
+    assert "запрос" not in chat.description
+
+
+def test_terms_describe_one_consistent_renewal_rule(monkeypatch):
+    from selara.presentation.handlers import premium
+
+    text = premium._personal_terms_text(config_from_settings(_env(monkeypatch)))
+    assert "больший" in text
+    assert "повторная покупка закрепляет" not in text
+
+
+@pytest.mark.asyncio
+async def test_active_subscriber_sees_current_limit_and_what_renewal_will_give(monkeypatch):
+    from selara.presentation.handlers import premium
+
+    settings = _settings(monkeypatch, personal_price="69")
+    entitlement = SimpleNamespace(
+        status="active", valid_until=datetime.now(timezone.utc) + timedelta(days=10), paid_daily_limit=150
+    )
+    repository = SimpleNamespace(get_user_entitlement=AsyncMock(return_value=entitlement))
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    config = StaticPersonalConfigProvider(
+        PersonalConfig(69, 30, PersonalQuotaLimits(free_daily=5, paid_daily=80))  # lowered since the purchase
+    )
+    message = SimpleNamespace(chat=SimpleNamespace(type="private"), edit_text=AsyncMock())
+    query = SimpleNamespace(message=message, from_user=SimpleNamespace(id=900), answer=AsyncMock())
+
+    await premium.show_personal_offer(query, session_factory=object(), settings=settings, personal_config=config)
+
+    text = message.edit_text.await_args.args[0]
+    assert "150" in text  # what the subscriber has now
+    assert "не урезаются" in text and "80" in text  # offered limit and the paid-days guarantee
+    assert "будет 150" in text  # the larger of current and offered

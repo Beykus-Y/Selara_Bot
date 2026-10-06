@@ -707,11 +707,17 @@ class SqlAlchemyTelegramStarsRepository:
             session.add(entitlement)
         else:
             entitlement_action = "extended"
+            still_active = entitlement.status == "active" and entitlement.valid_until > paid_at
+            previous_limit = entitlement.paid_daily_limit
             _extend_entitlement(entitlement, paid_at=paid_at, duration=duration)
-            # A renewal sells the limit shown at that purchase; merely editing the
-            # config never changes what an existing subscriber already paid for.
+            # While the subscription is active the larger limit wins, so days that were
+            # already paid for are never cut by a later, lower offer; after expiry the
+            # new purchase simply sets its own limit. Config edits never touch this value.
             if intent.paid_daily_limit is not None:
-                entitlement.paid_daily_limit = intent.paid_daily_limit
+                if still_active and previous_limit is not None:
+                    entitlement.paid_daily_limit = max(previous_limit, intent.paid_daily_limit)
+                else:
+                    entitlement.paid_daily_limit = intent.paid_daily_limit
         intent.status = "consumed"
         intent.consumed_at = intent.consumed_at or paid_at
         await session.flush()

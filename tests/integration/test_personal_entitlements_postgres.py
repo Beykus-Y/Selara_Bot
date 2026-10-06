@@ -548,18 +548,42 @@ async def test_bought_daily_limit_is_a_snapshot_that_later_config_changes_cannot
 @pytest.mark.integration
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_renewal_adopts_the_limit_of_that_purchase_and_duplicates_change_nothing():
+async def test_renewing_an_active_subscription_keeps_the_larger_limit_and_never_cuts_paid_days():
     engine, factory = await _database()
     try:
         repository = SqlAlchemyTelegramStarsRepository(factory)
         first = await _intent(factory, paid_daily_limit=150)
         await _payment(repository, first, charge_id="renew-1")
-        second = await _intent(factory, paid_daily_limit=80, now=_NOW + timedelta(hours=1))
-        await _payment(repository, second, charge_id="renew-2", payment_at=_NOW + timedelta(hours=1))
-        assert await _paid_limit(factory, _config(paid=500)) == 80
 
-        # A redelivered first payment is a duplicate and must not roll the limit back to 150.
-        await _payment(repository, first, charge_id="renew-1", payment_at=_NOW + timedelta(hours=2))
+        # Lower limit offered later: the days already paid for keep 150.
+        lower = await _intent(factory, paid_daily_limit=80, now=_NOW + timedelta(hours=1))
+        await _payment(repository, lower, charge_id="renew-2", payment_at=_NOW + timedelta(hours=1))
+        assert await _paid_limit(factory, _config(paid=500)) == 150
+
+        # Higher limit offered later: the renewal raises it.
+        higher = await _intent(factory, paid_daily_limit=200, now=_NOW + timedelta(hours=2))
+        await _payment(repository, higher, charge_id="renew-3", payment_at=_NOW + timedelta(hours=2))
+        assert await _paid_limit(factory, _config(paid=500)) == 200
+
+        # A redelivered payment is a duplicate and changes nothing.
+        await _payment(repository, lower, charge_id="renew-2", payment_at=_NOW + timedelta(hours=3))
+        assert await _paid_limit(factory, _config(paid=500)) == 200
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_purchase_after_expiry_starts_fresh_with_the_new_limit_even_if_lower():
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        await _payment(repository, await _intent(factory, paid_daily_limit=150), charge_id="expire-1")
+        later = _NOW + timedelta(days=40)  # first 30 days are over
+        renewal = await _intent(factory, paid_daily_limit=80, now=later)
+        await _payment(repository, renewal, charge_id="expire-2", payment_at=later)
+
         assert await _paid_limit(factory, _config(paid=500)) == 80
     finally:
         await engine.dispose()

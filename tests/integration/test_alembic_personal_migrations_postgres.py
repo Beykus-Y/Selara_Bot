@@ -138,15 +138,17 @@ def test_old_image_insert_and_group_migration_stay_scoped_after_upgrade(database
     assert {row["quota_scope_id"] for row in moved} == {-2002}
 
     # The current release sets both columns itself; the trigger must not override that.
+    # The new image sets chat_id and quota_scope_id together. quota_scope_id differs from both the
+    # old scope and the new chat_id here, so a trigger that always copied chat_id would give -1001.
     _run_sql(
         database,
-        "UPDATE ai_feature_quota_usage SET chat_id = -1001, quota_scope_id = -1001 "
+        "UPDATE ai_feature_quota_usage SET chat_id = -1001, quota_scope_id = -2003 "
         "WHERE idempotency_key = 'old-image-insert-2'",
     )
     explicit = _run_sql(
         database, "SELECT quota_scope_id FROM ai_feature_quota_usage WHERE idempotency_key = 'old-image-insert-2'"
     )[0][0]
-    assert explicit["quota_scope_id"] == -1001
+    assert explicit["quota_scope_id"] == -2003
 
     # Rows of other scopes are never rescoped by a chat_id change.
     _run_sql(

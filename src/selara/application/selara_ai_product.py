@@ -93,7 +93,8 @@ def get_selara_ai_product(
     duration_label = f"{int(resolved_duration.total_seconds() // 86_400)} дней"
     if spec.scope == PRODUCT_SCOPE_USER:
         title = f"Selara Personal на {duration_label}"
-        description = f"Личный доступ к Selara AI для вашего аккаунта на {duration_label}."
+        limit_note = f" До {paid_daily_limit} запросов в сутки." if paid_daily_limit else ""
+        description = f"Личный доступ к Selara AI для вашего аккаунта на {duration_label}.{limit_note}"
     else:
         title = f"Selara AI на {duration_label}"
         description = f"Доступ к AI-функциям Selara для выбранного чата на {duration_label}."
