@@ -75,6 +75,24 @@ _MODERATION_TARGET_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Tools that can change chat or DB state. execute_tool() re-checks
+# authorization for every call, which prevents privilege escalation but not a
+# confused deputy: once untrusted web content has entered the model context,
+# a poisoned page could otherwise steer authorized-but-unintended actions.
+# llm_admin withdraws these for the rest of the invocation after any web tool
+# result (see web_tools.restrict_tools_after_web).
+MUTATING_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        *_MODERATION_TARGET_TOOLS,
+        "set_rank",
+        "add_to_glossary",
+        "remove_from_glossary",
+        "restore_glossary_revision",
+        "create_artifact",
+        "send_artifact",
+    }
+)
+
 
 def register_tool(name: str, schema: dict, status_text: str = "") -> Callable:
     def decorator(fn: Callable) -> Callable:

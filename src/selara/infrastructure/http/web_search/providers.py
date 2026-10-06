@@ -57,6 +57,7 @@ class DuckDuckGoProvider:
                 headers={"User-Agent": USER_AGENT},
                 follow_redirects=True,
                 transport=self._transport,
+                trust_env=False,  # HTTP(S)_PROXY env vars must not bypass our network boundary
             ) as client:
                 response = await client.post("/lite/", data={"q": query})
         except httpx.TimeoutException as exc:

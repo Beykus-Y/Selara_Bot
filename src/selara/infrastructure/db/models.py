@@ -2322,6 +2322,11 @@ class LlmContextMessageModel(Base):
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     is_context: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Web-taint (review PR #33): rows written by an invocation whose model saw
+    # web_search/fetch_page output. Excluded from get_history (the range query
+    # has no is_context filter) so poisoned page content cannot re-enter a
+    # fresh invocation with a full tool set.
+    web_tainted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

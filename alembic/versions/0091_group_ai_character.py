@@ -4,8 +4,8 @@ Member mode answers any member who addresses Selara by a chat call name. Its
 dialogue lives in its own table so the admin assistant (``?``/``??``) and members
 never see each other's questions.
 
-Revision ID: 0090_group_ai_character
-Revises: 0089_admin_model_config
+Revision ID: 0091_group_ai_character
+Revises: 0090_web_tainted_history
 Create Date: 2026-10-06 00:00:00
 """
 
@@ -16,8 +16,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0090_group_ai_character"
-down_revision: str | None = "0089_admin_model_config"
+revision: str = "0091_group_ai_character"
+down_revision: str | None = "0090_web_tainted_history"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
