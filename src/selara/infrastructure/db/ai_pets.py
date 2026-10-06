@@ -445,6 +445,8 @@ class AiPetService:
         ``make_home`` also makes the chat the pet's home. Relationships and memory stay keyed
         by the chat they came from.
         """
+        # The same chat lock as pet creation, so a new pet cannot take the name meanwhile.
+        await _lock_resources(self._session, f"ai_pet:chat:{chat.telegram_chat_id}")
         row = await self._owner_row(owner_user_id, for_update=True)
         if row is None:
             return TravelResult(status="no_pet")
@@ -470,7 +472,10 @@ class AiPetService:
             )
             if left is not None:
                 return TravelResult(status="cooldown", pet=_view(row), retry_after=left)
-        if row.current_chat_id != target and await self._name_taken(chat_id=target, name_norm=row.name_norm):
+        # Any pet that becomes active here needs a free name, including a dormant one already here
+        # (e.g. put to sleep by a name clash on a group upgrade). It is not active, so never counts itself.
+        becomes_active_here = row.status != "active" or row.current_chat_id != target
+        if becomes_active_here and await self._name_taken(chat_id=target, name_norm=row.name_norm):
             return TravelResult(status="name_taken", pet=_view(row))
 
         await self._economy.ensure_chat_and_user(
@@ -489,17 +494,14 @@ class AiPetService:
                 pet_id=row.id,
                 chat_id=target,
                 actor_user_id=owner_user_id,
-                event_type="travel" if not make_home else "rehome",
+                # A move into a foreign chat is travel whichever command did it, so it starts the cooldown.
+                event_type="travel" if needs_travel_rights else "rehome",
                 effects={"from_chat_id": from_chat_id, "home": make_home},
                 idempotency_key=f"ai_pet:move:{row.id}:{row.version}",
                 created_at=now,
             )
         )
-        try:
-            async with self._session.begin_nested():
-                await self._session.flush()
-        except IntegrityError as exc:
-            raise PetDomainError("В этом чате уже есть питомец с таким именем.") from exc
+        await self._session.flush()
         return TravelResult(status="ok", pet=_view(row), from_chat_id=from_chat_id)
 
     async def release(self, *, owner_user_id: int, chat_id: int | None) -> PetView:

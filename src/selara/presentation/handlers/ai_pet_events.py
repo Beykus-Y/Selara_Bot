@@ -166,7 +166,7 @@ async def run_spontaneous_event(
                 await session.commit()
                 return None
             text = line or ev.template_line(name=pet.name, species_key=pet.species_key, idea=idea)
-            await bot.send_message(chat_id, escape(text), disable_notification=True)
+            await bot.send_message(chat_id, escape(text), parse_mode="HTML", disable_notification=True)
             await service.finish_spontaneous_event(event_id=claim.event_id, status="posted", text=text)
             await session.commit()
             return text

@@ -189,7 +189,7 @@ async def test_event_is_phrased_by_the_model_and_paid_by_the_owner(db, fake_quot
     llm = SimpleNamespace(chat_simple=AsyncMock(return_value=SimpleNamespace(value="Мурка приносит Лизе тапок 🧦")))
     text = await _run(factory, bot, llm)
     assert text == "Мурка приносит Лизе тапок 🧦"
-    assert bot.sent == [(HOME, "Мурка приносит Лизе тапок 🧦", {"disable_notification": True})]
+    assert bot.sent == [(HOME, "Мурка приносит Лизе тапок 🧦", {"parse_mode": "HTML", "disable_notification": True})]
     assert fake_quota.last["scope"].scope_id == OWNER and fake_quota.last["feature"] == AiFeature.PET_EVENT_TEXT
     async with factory() as session:
         event = (await session.scalars(select(AiPetEventModel).where(AiPetEventModel.event_type == "spontaneous"))).one()
@@ -300,3 +300,40 @@ async def test_home_settles_a_homeless_pet_without_travel_rights(db) -> None:
     assert (settled.status, settled.pet.status, settled.pet.home_chat_id, settled.pet.current_chat_id) == ("ok", "active", THIRD, THIRD)
     sneaky = await service.travel(owner_user_id=OWNER, chat=_chat(AWAY), now=NOW, make_home=True)
     assert sneaky.status == "locked"
+
+
+async def test_event_text_is_escaped_for_html(db, fake_quota) -> None:
+    _, factory, _ = db
+    bot = _Bot()
+    llm = SimpleNamespace(chat_simple=AsyncMock(return_value=SimpleNamespace(value="Мурка & <друзья>")))
+    await _run(factory, bot, llm)
+    assert bot.sent[0][1] == "Мурка &amp; &lt;друзья&gt;" and bot.sent[0][2]["parse_mode"] == "HTML"
+
+
+async def test_name_clash_dormant_pet_cannot_wake_by_home(db) -> None:
+    session, _, pet_id = db
+    service = AiPetService(session)
+    row = await session.get(AiPetModel, pet_id)
+    row.status = "dormant"
+    row.dormant_reason = "name_conflict"
+    await session.flush()
+    await service.create_pet(
+        owner=UserSnapshot(telegram_user_id=OTHER_OWNER, username=None, first_name="X", last_name=None, is_bot=False),
+        chat=_chat(HOME), species_raw="пёс", name_raw="Мурка", now=NOW,
+    )
+    assert (await service.travel(owner_user_id=OWNER, chat=_chat(HOME), now=NOW, make_home=True)).status == "name_taken"
+    # A different chat with the name free is fine.
+    moved = await service.travel(owner_user_id=OWNER, chat=_chat(THIRD), now=NOW, make_home=True)
+    assert (moved.status, moved.pet.status) == ("ok", "active")
+
+
+async def test_moving_by_home_into_a_foreign_chat_starts_the_travel_cooldown(db) -> None:
+    session, _, pet_id = db
+    service = AiPetService(session)
+    await _unlock(session, pet_id)
+    first = await service.travel(owner_user_id=OWNER, chat=_chat(AWAY), now=NOW, make_home=True)
+    assert first.status == "ok"
+    chained = await service.travel(owner_user_id=OWNER, chat=_chat(THIRD), now=NOW + timedelta(minutes=1), make_home=True)
+    assert chained.status == "cooldown"
+    kinds = (await session.scalars(select(AiPetEventModel.event_type).where(AiPetEventModel.event_type.in_(("travel", "rehome"))))).all()
+    assert kinds == ["travel"]
