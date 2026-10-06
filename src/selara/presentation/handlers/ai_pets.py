@@ -100,8 +100,8 @@ def _today(settings: Settings | None, now: datetime) -> date:
     return now.astimezone(zone).date()
 
 
-def _service(db_session, economy_repo) -> AiPetService:
-    return AiPetService(db_session, economy_repo)
+def _service(db_session, economy_repo, settings: Settings | None = None) -> AiPetService:
+    return AiPetService(db_session, economy_repo, admin_user_id=getattr(settings, "admin_user_id", None))
 
 
 def _user_snapshot(user) -> UserSnapshot:
@@ -283,7 +283,7 @@ async def pets_list_command(message: Message, db_session, economy_repo, chat_set
 
 
 @router.message(Command("pet_new"))
-async def pet_new_command(message: Message, command: CommandObject, activity_repo, db_session, economy_repo, chat_settings: ChatSettings) -> None:
+async def pet_new_command(message: Message, command: CommandObject, activity_repo, db_session, economy_repo, chat_settings: ChatSettings, settings: Settings | None = None) -> None:
     if message.from_user is None or not await _pets_allowed(message, chat_settings):
         return
     species_raw, _, name_raw = (command.args or "").strip().partition(" ")
@@ -294,7 +294,7 @@ async def pet_new_command(message: Message, command: CommandObject, activity_rep
             parse_mode="HTML",
         )
         return
-    service = _service(db_session, economy_repo)
+    service = _service(db_session, economy_repo, settings)
     try:
         pet = await service.create_pet(
             owner=_user_snapshot(message.from_user),
@@ -388,11 +388,11 @@ _TRAVEL_REFUSALS = {
 }
 
 
-async def _move_pet(message: Message, *, db_session, economy_repo, chat_settings: ChatSettings, make_home: bool) -> None:
+async def _move_pet(message: Message, *, db_session, economy_repo, chat_settings: ChatSettings, make_home: bool, settings: Settings | None = None) -> None:
     if message.from_user is None or not await _pets_allowed(message, chat_settings):
         return
     try:
-        result = await _service(db_session, economy_repo).travel(
+        result = await _service(db_session, economy_repo, settings).travel(
             owner_user_id=message.from_user.id,
             chat=ChatSnapshot(telegram_chat_id=message.chat.id, chat_type=message.chat.type, title=message.chat.title),
             now=_now(),
@@ -421,15 +421,15 @@ async def _move_pet(message: Message, *, db_session, economy_repo, chat_settings
 
 
 @router.message(Command("pet_travel"))
-async def pet_travel_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings) -> None:
+async def pet_travel_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings, settings: Settings | None = None) -> None:
     """The owner brings the pet into this chat (written here, so membership is proven)."""
-    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=False)
+    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=False, settings=settings)
 
 
 @router.message(Command("pet_home"))
-async def pet_home_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings) -> None:
+async def pet_home_command(message: Message, db_session, economy_repo, chat_settings: ChatSettings, settings: Settings | None = None) -> None:
     """The owner makes this chat the pet's home and settles it here (also wakes a pet that lost its home)."""
-    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=True)
+    await _move_pet(message, db_session=db_session, economy_repo=economy_repo, chat_settings=chat_settings, make_home=True, settings=settings)
 
 
 @router.message(Command("pet_release"))

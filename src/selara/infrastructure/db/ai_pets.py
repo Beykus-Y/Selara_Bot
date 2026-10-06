@@ -184,13 +184,23 @@ def _store_stats(row: AiPetModel, stats: m.PetStats) -> None:
 
 
 class AiPetService:
-    def __init__(self, session: AsyncSession, economy_repo: SqlAlchemyEconomyRepository | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        economy_repo: SqlAlchemyEconomyRepository | None = None,
+        *,
+        admin_user_id: int | None = None,
+    ) -> None:
         self._session = session
         self._economy = economy_repo or SqlAlchemyEconomyRepository(session)
+        # The configured bot owner has internal access to Personal pet features without a subscription.
+        self._admin_user_id = admin_user_id
 
     # ----- reads -------------------------------------------------------------
 
     async def has_active_personal(self, *, user_id: int, now: datetime) -> bool:
+        if self._admin_user_id is not None and user_id == self._admin_user_id:
+            return True
         row_id = await self._session.scalar(
             select(UserEntitlementModel.id).where(
                 UserEntitlementModel.user_id == user_id,
