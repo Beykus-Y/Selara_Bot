@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.application.personal_config import PersonalConfig, PersonalConfigOverride, config_from_settings
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
+from selara.web.admin_models import build_admin_models_router
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
 from selara.domain.entities import UserSnapshot
@@ -728,6 +729,7 @@ def build_miniapp_admin_router(
         repository = AdminAiAnalyticsRepository(session)
         features = await repository.feature_breakdown(window_from=window_from, window_to=window_to)
         models, marker_only_calls = await repository.model_breakdown(window_from=window_from, window_to=window_to)
+        profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
@@ -735,6 +737,7 @@ def build_miniapp_admin_router(
             "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
             "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
             "unattributed_provider_calls": marker_only_calls,
+            "profiles": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in profiles],
             "stages": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in stages],
         }
 
@@ -867,9 +870,24 @@ def build_miniapp_admin_router(
             "duration_days": config.duration_days,
             "free_daily_limit": config.limits.free_daily,
             "paid_daily_limit": config.limits.paid_daily,
+            "memory_free_limit": config.memory_free_limit,
+            "memory_paid_limit": config.memory_paid_limit,
+            "memory_auto_extract": config.memory_auto_extract,
+            "memory_extract_every": config.memory_extract_every,
         }
 
-    _EDITABLE_PERSONAL_FIELDS = frozenset({"price_stars", "duration_days", "free_daily_limit", "paid_daily_limit"})
+    _EDITABLE_PERSONAL_FIELDS = frozenset(
+        {
+            "price_stars",
+            "duration_days",
+            "free_daily_limit",
+            "paid_daily_limit",
+            "memory_free_limit",
+            "memory_paid_limit",
+            "memory_auto_extract",
+            "memory_extract_every",
+        }
+    )
 
     def _parse_personal_override(payload: dict[str, Any]) -> PersonalConfigOverride:
         # Request weights (AI Limits) are deliberately not editable: Personal is 5/150 requests.
@@ -885,11 +903,19 @@ def build_miniapp_admin_router(
                 raise ValueError(f"{key} must be an integer")
             return value
 
+        auto_extract = payload.get("memory_auto_extract")
+        if auto_extract is not None and not isinstance(auto_extract, bool):
+            raise ValueError("memory_auto_extract must be true, false or null")
+
         return PersonalConfigOverride(
             price_stars=integer("price_stars"),
             duration_days=integer("duration_days"),
             free_daily_limit=integer("free_daily_limit"),
             paid_daily_limit=integer("paid_daily_limit"),
+            memory_free_limit=integer("memory_free_limit"),
+            memory_paid_limit=integer("memory_paid_limit"),
+            memory_auto_extract=auto_extract,
+            memory_extract_every=integer("memory_extract_every"),
         )
 
     @router.get("/monetization/personal-config")
@@ -907,6 +933,10 @@ def build_miniapp_admin_router(
                 "duration_days": override.duration_days,
                 "free_daily_limit": override.free_daily_limit,
                 "paid_daily_limit": override.paid_daily_limit,
+                "memory_free_limit": override.memory_free_limit,
+                "memory_paid_limit": override.memory_paid_limit,
+                "memory_auto_extract": override.memory_auto_extract,
+                "memory_extract_every": override.memory_extract_every,
             },
             "effective": _personal_config_json(effective),
             "applies_within_seconds": 15,
@@ -992,4 +1022,7 @@ def build_miniapp_admin_router(
             "checks": checks,
         }
 
+    router.include_router(build_admin_models_router(
+        settings=settings, session_factory=session_factory, require_admin=require_admin,
+    ))
     return router

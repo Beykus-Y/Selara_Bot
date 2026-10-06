@@ -25,6 +25,7 @@ from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.models import (
     ChatAiCallNameModel,
     AiPetEventModel,
+    AiPetInventoryModel,
     AiPetItemModel,
     AiPetModel,
     AiPetRelationshipModel,
@@ -89,6 +90,14 @@ class CatalogItem:
     price: int
     effects: m.ItemEffects
     min_level: int
+    slot: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BagEntry:
+    item: CatalogItem
+    quantity: int
+    equipped: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +279,9 @@ class AiPetService:
     @staticmethod
     def _catalog_item(row: AiPetItemModel) -> CatalogItem | None:
         effects = m.parse_item_effects(row.effects, kind=row.kind)
-        if effects is None or row.price < 0:
+        slot = getattr(row, "slot", None)
+        bad_slot = (row.kind == "cosmetic") != (slot in m.COSMETIC_SLOTS)
+        if effects is None or row.price < 0 or bad_slot:
             logger.warning("ai_pet_item_invalid code=%s kind=%s", row.code, row.kind)
             return None
         return CatalogItem(
@@ -280,6 +291,7 @@ class AiPetService:
             price=int(row.price),
             effects=effects,
             min_level=int(row.min_level),
+            slot=slot if row.kind == "cosmetic" else None,
         )
 
     # ----- lifecycle ---------------------------------------------------------
@@ -629,7 +641,7 @@ class AiPetService:
         today: date,
         now: datetime,
     ) -> ActionResult:
-        """Buy an item and apply it at once (there is no inventory yet)."""
+        """Buy food or a toy and apply it at once (cosmetics go to the bag via ``buy_to_bag``)."""
         row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
         if row is None:
             return ActionResult(status="unavailable", message="Этого питомца здесь нет или он спит.")
@@ -639,6 +651,10 @@ class AiPetService:
         item = await self._pick_item(item_code=item_code, kind=kind, level=int(row.level))
         if item is None:
             return ActionResult(status="item_unavailable", pet=_view(row), message="Такого товара сейчас нет.")
+        if item.kind not in m.ITEM_EVENT_TYPES:
+            return ActionResult(
+                status="item_unavailable", pet=_view(row), item=item, message="Эту вещь можно только положить в рюкзак."
+            )
         if item.min_level > int(row.level):
             return ActionResult(
                 status="level_too_low",
@@ -664,35 +680,11 @@ class AiPetService:
         if blocked is not None:
             return ActionResult(status="blocked", pet=_view(row), item=item, message=f"{row.name} {blocked}.")
 
-        scope, error = await self._economy.resolve_scope(mode=economy_mode, chat_id=chat_id, user_id=actor.telegram_user_id)
-        if scope is None:
-            return ActionResult(status="economy_unavailable", pet=_view(row), item=item, message=error or "")
-        account, _ = await self._economy.get_or_create_account(scope=scope, user_id=actor.telegram_user_id)
-        new_balance: int | None = account.balance
-        if item.price > 0:
-            if account.balance < item.price:
-                return ActionResult(
-                    status="insufficient_funds",
-                    pet=_view(row),
-                    item=item,
-                    message=f"Не хватает монет: «{item.title}» стоит {item.price}, у вас {account.balance}.",
-                )
-            try:
-                new_balance = await self._economy.add_balance(account_id=account.id, delta=-item.price)
-            except ValueError:
-                return ActionResult(
-                    status="insufficient_funds",
-                    pet=_view(row),
-                    item=item,
-                    message=f"Не хватает монет: «{item.title}» стоит {item.price}.",
-                )
-            await self._economy.add_ledger(
-                account_id=account.id,
-                direction="out",
-                amount=item.price,
-                reason="ai_pet_item",
-                meta_json=_json({"pet_id": row.id, "item": item.code, "price": item.price, "chat_id": chat_id}),
-            )
+        new_balance, refusal = await self._charge(
+            row, actor=actor, item=item, chat_id=chat_id, economy_mode=economy_mode, reason="ai_pet_item"
+        )
+        if refusal is not None:
+            return refusal
 
         result = await self._apply(
             row,
@@ -716,7 +708,217 @@ class AiPetService:
             new_balance=new_balance,
         )
 
+    # ----- bag and wardrobe ----------------------------------------------------
+
+    async def bag(self, *, pet_id: int) -> list[BagEntry]:
+        rows = await self._session.execute(
+            select(AiPetInventoryModel, AiPetItemModel)
+            .join(AiPetItemModel, AiPetItemModel.code == AiPetInventoryModel.item_code)
+            .where(AiPetInventoryModel.pet_id == pet_id, AiPetInventoryModel.quantity > 0)
+            .order_by(AiPetItemModel.kind, AiPetItemModel.sort_order, AiPetItemModel.code)
+        )
+        entries: list[BagEntry] = []
+        for owned, item_row in rows:
+            item = self._catalog_item(item_row)
+            if item is not None:
+                entries.append(BagEntry(item=item, quantity=int(owned.quantity), equipped=bool(owned.equipped)))
+        return entries
+
+    async def outfit(self, *, pet_id: int) -> list[str]:
+        """Titles of the cosmetics the pet wears, for the card and its dialogue."""
+        return [entry.item.title for entry in await self.bag(pet_id=pet_id) if entry.equipped]
+
+    async def buy_to_bag(
+        self,
+        *,
+        pet_id: int,
+        chat_id: int,
+        actor: UserSnapshot,
+        item_code: str,
+        idempotency_key: str,
+        economy_mode: str,
+        now: datetime,
+    ) -> ActionResult:
+        """Buy an item into the pet's bag; anyone may, so it doubles as a gift to the pet."""
+        row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
+        if row is None:
+            return ActionResult(status="unavailable", message="Этого питомца здесь нет или он спит.")
+        if await self._event_exists(idempotency_key):
+            return ActionResult(status="duplicate", pet=_view(row))
+        item = await self._pick_item(item_code=item_code, kind=None, level=int(row.level))
+        if item is None:
+            return ActionResult(status="item_unavailable", pet=_view(row), message="Такого товара сейчас нет.")
+        if item.min_level > int(row.level):
+            return ActionResult(
+                status="level_too_low",
+                pet=_view(row),
+                item=item,
+                message=f"«{item.title}» откроется на {item.min_level} уровне питомца.",
+            )
+        owned = await self._session.get(
+            AiPetInventoryModel, {"pet_id": int(row.id), "item_code": item.code}, with_for_update=True
+        )
+        quantity = int(owned.quantity) if owned is not None else 0
+        if item.kind == "cosmetic" and quantity > 0:
+            return ActionResult(status="blocked", pet=_view(row), item=item, message=f"У {row.name} уже есть «{item.title}».")
+        if item.kind != "cosmetic" and quantity >= m.BAG_STACK_LIMIT:
+            return ActionResult(
+                status="blocked", pet=_view(row), item=item, message=f"В рюкзаке уже {m.BAG_STACK_LIMIT} шт. «{item.title}»."
+            )
+
+        new_balance, refusal = await self._charge(
+            row, actor=actor, item=item, chat_id=chat_id, economy_mode=economy_mode, reason="ai_pet_bag"
+        )
+        if refusal is not None:
+            return refusal
+        if owned is None:
+            owned = AiPetInventoryModel(pet_id=int(row.id), item_code=item.code, quantity=0, equipped=False, acquired_at=now)
+            self._session.add(owned)
+        owned.quantity = quantity + 1
+        owned.updated_at = now
+        self._session.add(
+            AiPetEventModel(
+                pet_id=row.id,
+                chat_id=chat_id,
+                actor_user_id=actor.telegram_user_id,
+                event_type="bag_add",
+                effects={"item": item.code, "price": item.price, "gift": actor.telegram_user_id != row.owner_user_id},
+                idempotency_key=idempotency_key,
+                created_at=now,
+            )
+        )
+        await self._session.flush()
+        return ActionResult(status="ok", pet=_view(row), item=item, new_balance=new_balance)
+
+    async def use_from_bag(
+        self,
+        *,
+        pet_id: int,
+        chat_id: int,
+        owner_user_id: int,
+        item_code: str,
+        idempotency_key: str,
+        today: date,
+        now: datetime,
+    ) -> ActionResult:
+        """The owner gives the pet food or a toy from its bag: same rules as a purchase, no payment."""
+        row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
+        if row is None:
+            return ActionResult(status="unavailable", message="Этого питомца здесь нет или он спит.")
+        if int(row.owner_user_id) != owner_user_id:
+            return ActionResult(status="blocked", pet=_view(row), message="Рюкзаком пользуется только хозяин.")
+        if await self._event_exists(idempotency_key):
+            return ActionResult(status="duplicate", pet=_view(row))
+        owned = await self._session.get(
+            AiPetInventoryModel, {"pet_id": int(row.id), "item_code": item_code}, with_for_update=True
+        )
+        item_row = await self._session.get(AiPetItemModel, item_code)
+        item = self._catalog_item(item_row) if item_row is not None else None
+        if owned is None or owned.quantity <= 0 or item is None or item.kind not in m.ITEM_EVENT_TYPES:
+            return ActionResult(status="item_unavailable", pet=_view(row), message="Этого нет в рюкзаке.")
+        event_type = m.ITEM_EVENT_TYPES[item.kind]
+        left = m.cooldown_left(
+            await self._last_event_at(pet_id=row.id, actor_user_id=owner_user_id, event_type=event_type),
+            m.ITEM_COOLDOWNS[item.kind],
+            now,
+        )
+        if left is not None:
+            return ActionResult(
+                status="cooldown",
+                pet=_view(row),
+                item=item,
+                message=f"{row.name} пока не хочет. Попробуйте через {m.format_duration(left)}.",
+            )
+        blocked = m.item_block_reason(item.kind, _stats(row))
+        if blocked is not None:
+            return ActionResult(status="blocked", pet=_view(row), item=item, message=f"{row.name} {blocked}.")
+        owned.quantity = int(owned.quantity) - 1
+        owned.updated_at = now
+        result = await self._apply(
+            row,
+            chat_id=chat_id,
+            actor_user_id=owner_user_id,
+            event_type=event_type,
+            effect=m.item_effect(item.kind, item.effects),
+            idempotency_key=idempotency_key,
+            today=today,
+            now=now,
+            extra={"item": item.code, "from_bag": True},
+        )
+        return ActionResult(
+            status=result.status,
+            pet=result.pet,
+            applied=result.applied,
+            leveled_up_to=result.leveled_up_to,
+            affinity=result.affinity,
+            item=item,
+        )
+
+    async def set_equipped(self, *, owner_user_id: int, item_code: str, equipped: bool) -> tuple[PetView, CatalogItem]:
+        """Put on or take off a cosmetic; putting one on takes off whatever was in that slot."""
+        row = await self._owner_row(owner_user_id, for_update=True)
+        if row is None:
+            raise PetDomainError("У вас нет питомца.")
+        owned = await self._session.get(
+            AiPetInventoryModel, {"pet_id": int(row.id), "item_code": item_code}, with_for_update=True
+        )
+        item_row = await self._session.get(AiPetItemModel, item_code)
+        item = self._catalog_item(item_row) if item_row is not None else None
+        if owned is None or owned.quantity <= 0 or item is None or item.kind != "cosmetic":
+            raise PetDomainError("Этой вещи нет в гардеробе.")
+        if equipped:
+            same_slot = select(AiPetItemModel.code).where(AiPetItemModel.slot == item.slot)
+            for other in await self._session.scalars(
+                select(AiPetInventoryModel).where(
+                    AiPetInventoryModel.pet_id == row.id,
+                    AiPetInventoryModel.equipped.is_(True),
+                    AiPetInventoryModel.item_code.in_(same_slot),
+                )
+            ):
+                other.equipped = False
+        owned.equipped = equipped
+        row.version = int(row.version) + 1
+        await self._session.flush()
+        return _view(row), item
+
     # ----- internals ---------------------------------------------------------
+
+    async def _charge(
+        self, row: AiPetModel, *, actor: UserSnapshot, item: CatalogItem, chat_id: int, economy_mode: str, reason: str
+    ) -> tuple[int | None, ActionResult | None]:
+        """Debit the buyer through the economy ledger; returns ``(new_balance, refusal)``."""
+        scope, error = await self._economy.resolve_scope(mode=economy_mode, chat_id=chat_id, user_id=actor.telegram_user_id)
+        if scope is None:
+            return None, ActionResult(status="economy_unavailable", pet=_view(row), item=item, message=error or "")
+        account, _ = await self._economy.get_or_create_account(scope=scope, user_id=actor.telegram_user_id)
+        if item.price <= 0:
+            return account.balance, None
+        if account.balance < item.price:
+            return None, ActionResult(
+                status="insufficient_funds",
+                pet=_view(row),
+                item=item,
+                message=f"Не хватает монет: «{item.title}» стоит {item.price}, у вас {account.balance}.",
+            )
+        try:
+            new_balance = await self._economy.add_balance(account_id=account.id, delta=-item.price)
+        except ValueError:
+            return None, ActionResult(
+                status="insufficient_funds",
+                pet=_view(row),
+                item=item,
+                message=f"Не хватает монет: «{item.title}» стоит {item.price}.",
+            )
+        await self._economy.add_ledger(
+            account_id=account.id,
+            direction="out",
+            amount=item.price,
+            reason=reason,
+            meta_json=_json({"pet_id": row.id, "item": item.code, "price": item.price, "chat_id": chat_id}),
+        )
+        return new_balance, None
+
+    # ----- internals (state) -------------------------------------------------
 
     async def _apply(
         self,

@@ -24,6 +24,7 @@ from selara.presentation.handlers.message_archive import (
 from selara.presentation.handlers.moderation import router as moderation_router
 from selara.presentation.handlers.personal_ai import chat_router as personal_ai_chat_router
 from selara.presentation.handlers.personal_ai import router as personal_ai_router
+from selara.presentation.handlers.personal_memory import router as personal_memory_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
 from selara.presentation.handlers.premium import (
     build_payment_router,
@@ -118,6 +119,7 @@ def build_router(
     application.include_router(private_panel_router)
     # Settings wizard: after the private panel and autoconfig (their pending inputs win), before text commands.
     application.include_router(personal_ai_router)
+    application.include_router(personal_memory_router)
     if llm_client is not None:
         application.include_router(llm_admin_router)
         application.include_router(daily_summary_router)

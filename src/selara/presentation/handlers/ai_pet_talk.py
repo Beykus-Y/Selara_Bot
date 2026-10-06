@@ -123,7 +123,7 @@ async def _display_name(activity_repo, *, chat_id: int, user_id: int, fallback: 
 
 async def _build_context(
     *, repo: AiPetDialogueRepository, activity_repo, pet: PetView, chat_id: int, speaker_id: int,
-    speaker_name: str, affinity: int, now: datetime,
+    speaker_name: str, affinity: int, now: datetime, outfit: tuple[str, ...] = (),
 ) -> d.PetContext:
     names: dict[int, str] = {speaker_id: speaker_name}
 
@@ -156,6 +156,7 @@ async def _build_context(
             mood=pet.mood,
             satiety=pet.satiety,
             energy=pet.energy,
+            outfit=outfit,
         ),
         speaker_name=speaker_name,
         speaker_is_owner=speaker_id == pet.owner_user_id,
@@ -231,7 +232,7 @@ async def handle_pet_talk(
     speaker_name = await _display_name(activity_repo, chat_id=chat_id, user_id=user.id, fallback=_plain_name(user))
     context = await _build_context(
         repo=repo, activity_repo=activity_repo, pet=pet, chat_id=chat_id, speaker_id=user.id,
-        speaker_name=speaker_name, affinity=affinity, now=now,
+        speaker_name=speaker_name, affinity=affinity, now=now, outfit=tuple(await service.outfit(pet_id=pet.id)),
     )
     # Admission and context are settled: release the pet row lock before quota and the provider call.
     await repo.commit()

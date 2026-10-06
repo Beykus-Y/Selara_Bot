@@ -1997,6 +1997,16 @@ class SelaraPersonalConfigModel(Base):
         CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
         CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
         CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
+        CheckConstraint(
+            "memory_free_limit IS NULL OR memory_free_limit > 0", name="ck_selara_personal_config_memory_free"
+        ),
+        CheckConstraint(
+            "memory_paid_limit IS NULL OR memory_paid_limit > 0", name="ck_selara_personal_config_memory_paid"
+        ),
+        CheckConstraint(
+            "memory_extract_every IS NULL OR memory_extract_every BETWEEN 2 AND 40",
+            name="ck_selara_personal_config_memory_every",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -2004,6 +2014,10 @@ class SelaraPersonalConfigModel(Base):
     duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_free_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_paid_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_auto_extract: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    memory_extract_every: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -2667,6 +2681,10 @@ class PersonalAiProfileModel(Base):
     emoji_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
     memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Opt-in for automatic fact extraction (also needs Selara Personal and the global switch).
+    auto_memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Id of the last user message already looked at by extraction; the next batch starts after it.
+    memory_extract_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     # Optimistic lock for the settings wizard (and the future Mini App).
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2730,6 +2748,37 @@ class PersonalAiSummaryModel(Base):
     )
 
 
+class PersonalAiMemoryModel(Base):
+    """A fact about the user that their private AI may use. Kept until the user deletes it."""
+
+    __tablename__ = "personal_ai_memories"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(String(300), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("source IN ('explicit', 'extracted')", name="ck_personal_ai_memories_source"),
+        CheckConstraint("length(content) BETWEEN 1 AND 300", name="ck_personal_ai_memories_content_len"),
+        Index("idx_personal_ai_memories_user_created", "user_id", "created_at"),
+    )
+
+
+# One fact once per user whatever its letter case; the repository also serialises writers per user.
+Index(
+    "uq_personal_ai_memories_user_content",
+    PersonalAiMemoryModel.user_id,
+    func.lower(PersonalAiMemoryModel.content),
+    unique=True,
+)
+
+
 class LlmModelCatalogModel(Base):
     __tablename__ = "llm_model_catalog"
 
@@ -2743,6 +2792,8 @@ class LlmModelCatalogModel(Base):
     supports_structured_output: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
     )
@@ -2781,6 +2832,8 @@ class LlmModelProfileModel(Base):
     )
     ail_multiplier: Mapped[Decimal] = mapped_column(Numeric(13, 9), nullable=False, default=Decimal("1"), server_default="1")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
     )
@@ -2905,7 +2958,7 @@ class AiPetEventModel(Base):
 
 
 class AiPetItemModel(Base):
-    """Owner-editable catalog of pet food and toys; prices live here, not in code."""
+    """Owner-editable catalog of pet food, toys and cosmetics; prices live here, not in code."""
 
     __tablename__ = "ai_pet_items"
 
@@ -2918,13 +2971,19 @@ class AiPetItemModel(Base):
     min_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Where a cosmetic is worn; exactly the cosmetics have a slot.
+    slot: Mapped[str | None] = mapped_column(String(16), nullable=True)
     updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
     __table_args__ = (
-        CheckConstraint("kind IN ('food', 'toy')", name="ck_ai_pet_items_kind"),
+        CheckConstraint("kind IN ('food', 'toy', 'cosmetic')", name="ck_ai_pet_items_kind"),
+        CheckConstraint(
+            "(kind = 'cosmetic' AND slot IN ('head', 'neck', 'back')) OR (kind <> 'cosmetic' AND slot IS NULL)",
+            name="ck_ai_pet_items_slot",
+        ),
         CheckConstraint("price >= 0", name="ck_ai_pet_items_price"),
         CheckConstraint("min_level >= 1", name="ck_ai_pet_items_min_level"),
     )
@@ -3067,4 +3126,27 @@ class ChatMemberAiMessageModel(Base):
         Index("idx_chat_member_ai_messages_chat_created", "chat_id", "created_at"),
         Index("idx_chat_member_ai_messages_chat_telegram", "chat_id", "telegram_message_id"),
         Index("idx_chat_member_ai_messages_author_created", "chat_id", "author_user_id", "created_at"),
+    )
+
+
+class AiPetInventoryModel(Base):
+    """What a pet owns: stored food and toys, and cosmetics it can wear. Goes with the pet."""
+
+    __tablename__ = "ai_pet_inventory"
+
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), primary_key=True)
+    # RESTRICT: an owned item cannot vanish; the catalog disables items instead of deleting them.
+    item_code: Mapped[str] = mapped_column(
+        String(32), ForeignKey("ai_pet_items.code", ondelete="RESTRICT"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    equipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("quantity >= 0", name="ck_ai_pet_inventory_quantity"),
+        CheckConstraint("NOT equipped OR quantity > 0", name="ck_ai_pet_inventory_equipped_owned"),
     )

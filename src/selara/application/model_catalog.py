@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
+from datetime import datetime
 from types import MappingProxyType
 from typing import Awaitable, Callable, Mapping, Protocol
 
@@ -67,6 +68,9 @@ class CatalogModel:
     completion_price_usd_per_million: Decimal | None = None
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
     aliases: tuple[str, ...] = ()
+    revision: int = 0
+    updated_by: int | None = None
+    updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         validate_key(self.key)
@@ -100,6 +104,9 @@ class ModelProfile:
     model_key: str | None = None
     ail_multiplier: Decimal = Decimal("1")
     enabled: bool = True
+    revision: int = 0
+    updated_by: int | None = None
+    updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.profile_key not in PROFILE_NAMES:
@@ -141,10 +148,16 @@ class CatalogProvider(Protocol):
     async def get(self) -> CatalogSnapshot: ...
 
 
+class ModelConfigurationConflict(ValueError):
+    """The configuration was changed after the editor loaded it."""
+
+
 class ModelCatalogStore(Protocol):
     async def load(self) -> CatalogSnapshot: ...
-    async def save_model(self, model: CatalogModel) -> None: ...
-    async def save_profile(self, profile: ModelProfile) -> None: ...
+    async def save_model(self, model: CatalogModel, *, expected_revision: int | None = None,
+                         updated_by: int | None = None, confirm_disable: bool = False) -> None: ...
+    async def save_profile(self, profile: ModelProfile, *, expected_revision: int | None = None,
+                           updated_by: int | None = None) -> None: ...
 
 
 class CachedModelCatalogProvider:
