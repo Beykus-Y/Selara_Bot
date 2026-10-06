@@ -132,6 +132,7 @@ async def test_llm_admin_handlers_dispatch(chat_settings):
         mock_handle.assert_awaited_once_with(
             message, bot, activity_repo, chat_settings, llm_client, db_session,
             with_context=True, settings=settings, session_factory=session_factory,
+            web_search_client=None,
         )
 
     with patch("selara.presentation.handlers.llm_admin._handle", new_callable=AsyncMock) as mock_handle:
@@ -141,6 +142,7 @@ async def test_llm_admin_handlers_dispatch(chat_settings):
         mock_handle.assert_awaited_once_with(
             message, bot, activity_repo, chat_settings, llm_client, db_session,
             with_context=False, settings=settings, session_factory=session_factory,
+            web_search_client=None,
         )
 
 

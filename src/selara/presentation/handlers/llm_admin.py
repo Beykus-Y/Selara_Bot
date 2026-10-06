@@ -24,6 +24,7 @@ from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
+from selara.infrastructure.http.web_search import WebSearchClient
 from selara.infrastructure.llm.client import LlmCallResult, LlmClient, LlmClientError
 from selara.infrastructure.llm.client import LlmAccountingContext
 from selara.infrastructure.llm.context import (
@@ -45,6 +46,7 @@ from selara.infrastructure.llm.tools import (
     get_tool_definitions,
     get_tool_status,
 )
+from selara.infrastructure.llm.web_tools import WEB_TOOL_NAMES, WebToolContext
 from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
@@ -108,10 +110,12 @@ async def llm_admin_context_handler(
     db_session: AsyncSession,
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    web_search_client: WebSearchClient | None = None,
 ) -> None:
     await _handle(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=True, settings=settings, session_factory=session_factory,
+        web_search_client=web_search_client,
     )
 
 
@@ -128,10 +132,12 @@ async def llm_admin_nocontext_handler(
     db_session: AsyncSession,
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    web_search_client: WebSearchClient | None = None,
 ) -> None:
     await _handle(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=False, settings=settings, session_factory=session_factory,
+        web_search_client=web_search_client,
     )
 
 
@@ -146,6 +152,7 @@ async def _handle(
     with_context: bool,
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    web_search_client: WebSearchClient | None = None,
 ) -> None:
     if not chat_settings.llm_enabled:
         return
@@ -361,6 +368,17 @@ async def _handle(
             activity_repo=activity_repo,
             llm_repo=llm_repo,
             bot=bot,
+            web_context=WebToolContext(
+                client=web_search_client,
+                max_calls=settings.web_search_max_calls_per_invocation,
+                max_results=settings.web_search_max_results,
+                max_page_chars=settings.web_search_max_page_chars,
+            ),
+        )
+        # Web tools are only advertised when a search client is wired in; a
+        # stray model call still gets a corrective error from the executor.
+        available_tools = get_tool_definitions(
+            exclude=None if web_search_client is not None else WEB_TOOL_NAMES
         )
 
         for _round in range(_MAX_TOOL_ROUNDS):
@@ -369,7 +387,7 @@ async def _handle(
             except Exception:
                 pass
             try:
-                request_kwargs = {"messages": messages, "tools": get_tool_definitions()}
+                request_kwargs = {"messages": messages, "tools": available_tools}
                 if call_context is not None:
                     request_kwargs["accounting_context"] = call_context
                 response = await llm_client.chat_with_tools(**request_kwargs)
