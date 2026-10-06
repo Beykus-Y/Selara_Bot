@@ -343,6 +343,11 @@ async def _send_answer(message: Message, thinking: Message, text: str) -> None:
             await message.answer(html_to_plain_text(chunk), parse_mode=None)
 
 
+# One turn per user at a time: a second message sent while the first is still being answered would
+# pass the cooldown, spend quota and generate from the same stale history.
+_inflight_users: set[int] = set()
+
+
 @router.message(PersonalChatFilter())
 async def personal_chat_handler(
     message: Message,
@@ -351,6 +356,25 @@ async def personal_chat_handler(
     settings: Settings,
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None = None,
+) -> None:
+    user_id = message.from_user.id
+    if user_id in _inflight_users:
+        await message.answer("⏳ Я ещё отвечаю на предыдущее сообщение. Подожди немного. Квота не потрачена.")
+        return
+    _inflight_users.add(user_id)
+    try:
+        await _handle_personal_chat(message, db_session, session_factory, settings, personal_config, llm_client)
+    finally:
+        _inflight_users.discard(user_id)
+
+
+async def _handle_personal_chat(
+    message: Message,
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    personal_config: PersonalConfigProvider,
+    llm_client: LlmClient | None,
 ) -> None:
     user = message.from_user
     text = (message.text or "").strip()
@@ -378,6 +402,9 @@ async def personal_chat_handler(
         personal_config=personal_config,
     )
     stored = await repo.get_or_create_profile(user.id)
+    # The quota service works in its own transactions and also upserts the user row: commit ours first,
+    # otherwise a brand-new user's first request would wait on a lock held by this very handler.
+    await db_session.commit()
     try:
         # One user message is exactly one request; internal calls below ride the same invocation.
         decision = await access_service.reserve_feature_usage(
@@ -432,8 +459,8 @@ async def personal_chat_handler(
         )
 
     outcome = {"status": "failed", "error_category": "handler_error"}
-    thinking = await message.answer("⏳ Думаю...")
     try:
+        thinking = await message.answer("⏳ Думаю...")
         try:
             await message.bot.send_chat_action(message.chat.id, "typing")
         except Exception:

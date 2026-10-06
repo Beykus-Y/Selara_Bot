@@ -75,6 +75,7 @@ def _fake_quota(monkeypatch):
     monkeypatch.setattr(handler, "SqlAlchemyFeatureQuotaRepository", lambda *a, **k: object())
     monkeypatch.setattr(handler, "SqlAlchemyUserEntitlementResolver", lambda *a, **k: object())
     handler._pending_inputs.clear()
+    handler._inflight_users.clear()
     private_panel._pending_cfg_inputs.clear()
     private_panel._pending_admin_inputs.clear()
 
@@ -426,3 +427,69 @@ async def test_input_prompt_button_sets_pending_state(session):
     await handler.ai_settings_callback(_callback("pai:in:name:0"), session)
 
     assert handler._get_pending_input(USER_ID).field == "name"
+
+
+# --- concurrency and failure edges ------------------------------------------------------
+
+
+async def test_second_message_during_an_inflight_turn_is_refused_without_quota(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    llm = _FakeLlm()
+    handler._inflight_users.add(USER_ID)
+    message = _message("ещё одно")
+
+    await _run(message, session, settings, llm)
+
+    assert "ещё отвечаю" in message.answer.await_args.args[0]
+    assert _FakeAccess.instances == [] and llm.chat_calls == []
+
+
+async def test_inflight_marker_is_released_after_success_and_after_failure(monkeypatch, session):
+    settings = _settings(monkeypatch)
+
+    await _run(_message("раз"), session, settings, _FakeLlm())
+    assert USER_ID not in handler._inflight_users
+
+    await _run(_message("два", message_id=101), session, settings, _FakeLlm(error=RuntimeError("x")))
+    assert USER_ID not in handler._inflight_users
+
+
+async def test_pending_user_row_is_committed_before_the_quota_reservation(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    order: list[str] = []
+    real_commit = session.commit
+
+    async def tracking_commit():
+        order.append("commit")
+        await real_commit()
+
+    monkeypatch.setattr(session, "commit", tracking_commit)
+    original = _FakeAccess.reserve_feature_usage
+
+    async def tracking_reserve(self, **kwargs):
+        order.append("reserve")
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(_FakeAccess, "reserve_feature_usage", tracking_reserve)
+
+    await _run(_message("привет"), session, settings, _FakeLlm())
+
+    assert order.index("commit") < order.index("reserve")
+
+
+async def test_failed_placeholder_send_still_releases_the_reservation(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    _FakeAccess.decision = _decision(invocation_id=77)
+    accounting = SimpleNamespace(finish_invocation_outcome=AsyncMock())
+    llm = _FakeLlm()
+    llm.accounting_service = accounting
+    monkeypatch.setattr(handler, "LlmClient", _FakeLlm)
+    message = _message("привет")
+    message.answer = AsyncMock(side_effect=RuntimeError("telegram down"))
+
+    with pytest.raises(RuntimeError):
+        await _run(message, session, settings, llm)
+
+    assert _FakeAccess.instances[0].released and _FakeAccess.instances[0].released[0][0] == 77
+    accounting.finish_invocation_outcome.assert_awaited_once()
+    assert USER_ID not in handler._inflight_users
