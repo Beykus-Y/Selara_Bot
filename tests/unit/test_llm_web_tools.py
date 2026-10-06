@@ -508,3 +508,39 @@ def test_web_research_registered_and_excludable():
     assert "web_research" in all_names
     pruned_names = {definition["function"]["name"] for definition in get_tool_definitions(exclude=WEB_TOOL_NAMES)}
     assert "web_research" not in pruned_names
+
+
+async def test_web_research_reserves_full_http_budget_atomically():
+    """Review 5432070938 P2: several web_research calls in one same-round
+    batch must not jointly exceed max_calls REAL HTTP requests -- the search
+    slot and every page fetch are reserved atomically before any request."""
+    http_calls: list[str] = []
+
+    def counting_handler(request: httpx.Request) -> httpx.Response:
+        http_calls.append(str(request.url))
+        if request.url.path == "/lite/":
+            return httpx.Response(200, text=_research_html())
+        tail = request.url.path.rsplit("/page", 1)[-1]
+        number = int(tail) if tail.isdigit() else 0
+        return httpx.Response(200, text=_page_html(number), headers={"Content-Type": "text/html"})
+
+    web_context = WebToolContext(client=_client(httpx.MockTransport(counting_handler)), max_calls=4)
+
+    first = await _run_web_research(web_context, {"query": "q", "open_top": 3})
+    assert first.success is True
+    assert json.loads(first.result_text)["pages_opened"] == 3
+    assert len(http_calls) == 4  # 1 search + 3 pages == the whole budget
+
+    for _ in range(3):  # same-batch follow-ups must be denied, not under-charged
+        followup = await _run_web_research(web_context, {"query": "q", "open_top": 3})
+        assert followup.success is False
+        assert "Лимит" in json.loads(followup.result_text)["error"]
+    assert len(http_calls) == 4  # actual HTTP count never exceeded max_calls
+
+
+def test_web_tool_context_reserve_grants_atomically():
+    context = WebToolContext(client=WebSearchClient(provider=_RecordingProvider()), max_calls=4)
+    assert context.reserve(10) == 4  # clamped to the remaining budget
+    assert context.calls_used == 4
+    assert context.reserve(1) == 0
+    assert context.exhausted is True

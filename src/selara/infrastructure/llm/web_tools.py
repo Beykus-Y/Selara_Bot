@@ -40,6 +40,15 @@ class WebToolContext:
         self.calls_used += 1
         return True
 
+    def reserve(self, slots: int) -> int:
+        """Atomically reserve up to `slots` budget slots; returns how many
+        were granted. Compound tools must reserve every HTTP request they
+        intend to make up-front -- otherwise several same-batch calls could
+        jointly exceed max_calls (review 5432070938)."""
+        granted = max(0, min(slots, self.max_calls - self.calls_used))
+        self.calls_used += granted
+        return granted
+
     @property
     def exhausted(self) -> bool:
         return self.client is None or self.calls_used >= self.max_calls
@@ -186,18 +195,18 @@ async def _exec_web_research(call: ToolCall, *, web_context: WebToolContext | No
         return _err(call.call_id, call.name, "Укажи непустой поисковый запрос.")
     if len(query) > _MAX_QUERY_LENGTH:
         query = query[:_MAX_QUERY_LENGTH]
-    if not web_context.try_acquire():
-        return _err(call.call_id, call.name, web_context._limit_message())
-    # Budget semantics: a single web_research costs ONE budget slot (the search
-    # acquisition above) but performs up to 1 + pages_to_open real HTTP
-    # requests. The page fetches never consume extra slots -- instead they are
-    # bounded server-side by the same invocation cap:
-    # pages_to_open = min(open_top, max_calls - calls_used) after acquisition,
-    # so one compound call can never exceed the invocation's request budget.
     server_max = max(1, min(_MAX_RESULTS_LIMIT, web_context.max_results))
     max_results = _clamp_int(call.arguments.get("max_results"), server_max, 1, server_max)
     open_top = _clamp_int(call.arguments.get("open_top"), 2, 1, 3)
-    pages_to_open = min(open_top, web_context.max_calls - web_context.calls_used)
+    # Budget semantics (review 5432070938): the search slot AND every page
+    # fetch are reserved ATOMICALLY before any HTTP happens, so several
+    # web_research calls in one same-round batch cannot jointly exceed the
+    # invocation budget (e.g. 4x web_research at max_calls=4 -> at most
+    # 4 HTTP requests in total, not 10).
+    granted = web_context.reserve(1 + open_top)
+    if granted == 0:
+        return _err(call.call_id, call.name, web_context._limit_message())
+    pages_to_open = granted - 1
     try:
         results = await web_context.client.search(query, max_results=max_results)
     except WebSearchError as exc:
