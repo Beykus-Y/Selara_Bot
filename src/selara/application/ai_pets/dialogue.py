@@ -54,17 +54,19 @@ def find_addressed_pet(text: str, pets: Iterable[tuple[int, str]]) -> tuple[int,
     raw = (text or "").lstrip()
     if not raw:
         return None
-    folded = raw.casefold().replace("ё", "е")
     best: tuple[int, str, int] | None = None
     for pet_id, name in pets:
         key = m.normalize_name(name)
-        if not key or not folded.startswith(key):
+        # Compare as many original characters as the name has: casefold() may change
+        # the length (ß -> ss), so the normalised key's length cannot locate the boundary.
+        span = len(" ".join(name.split()))
+        if not key or m.normalize_name(raw[:span]) != key:
             continue
-        tail = raw[len(key):]
+        tail = raw[span:]
         if tail and tail[0] not in _SEPARATORS:
             continue  # «Мурказавр» is not «Мурка»
-        if best is None or len(key) > best[2]:
-            best = (pet_id, tail, len(key))
+        if best is None or span > best[2]:
+            best = (pet_id, tail, span)
     if best is None:
         return None
     rest = best[1].lstrip(_SEPARATORS).strip()

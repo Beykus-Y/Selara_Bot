@@ -125,3 +125,8 @@ def test_pet_talk_limits_must_nest() -> None:
     assert (settings.pet_talk_daily_limit, settings.pet_talk_guests_daily_limit, settings.pet_talk_guest_daily_limit) == (60, 20, 5)
     with pytest.raises(ValueError):
         Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", pet_talk_guest_daily_limit=30)
+
+
+def test_names_whose_casefold_changes_length_are_still_addressed() -> None:
+    assert d.find_addressed_pet("Straße hallo", [(9, "Straße")]) == (9, "hallo")
+    assert d.find_addressed_pet("STRASSE hallo", [(9, "Straße")]) is None  # different spelling, different name

@@ -170,13 +170,25 @@ class AiPetDialogueRepository:
         )
         return list(reversed(list(rows)))
 
-    async def count_ok_talks(self, *, pet_id: int, chat_id: int) -> int:
+    async def record_talk(self, *, pet_id: int, chat_id: int, author_user_id: int, idempotency_key: str, now: datetime) -> int:
+        """Journal a successful talk and return how many this pet has had in this chat.
+
+        The journal is never pruned (unlike the dialogue history), so the count stays
+        monotonic and drives the note-extraction cadence.
+        """
+        self._session.add(
+            AiPetEventModel(
+                pet_id=pet_id, chat_id=chat_id, actor_user_id=author_user_id, event_type="talk",
+                effects={}, idempotency_key=idempotency_key, created_at=now,
+            )
+        )
+        await self._session.flush()
         return int(
             await self._session.scalar(
                 select(func.count()).where(
-                    AiPetMessageModel.pet_id == pet_id,
-                    AiPetMessageModel.chat_id == chat_id,
-                    AiPetMessageModel.role == "assistant",
+                    AiPetEventModel.pet_id == pet_id,
+                    AiPetEventModel.chat_id == chat_id,
+                    AiPetEventModel.event_type == "talk",
                 )
             )
             or 0

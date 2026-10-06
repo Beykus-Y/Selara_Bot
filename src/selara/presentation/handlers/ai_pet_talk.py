@@ -317,6 +317,10 @@ async def handle_pet_talk(
             return
 
         await repo.set_status(message_id=message_row_id, status="ok")
+        talks_total = await repo.record_talk(
+            pet_id=pet.id, chat_id=chat_id, author_user_id=user.id,
+            idempotency_key=f"ai_pet_talk_done:{chat_id}:{message.message_id}", now=now,
+        )
         reply_row_id = await repo.add_reply(pet_id=pet.id, chat_id=chat_id, content=answer, now=datetime.now(timezone.utc))
         await repo.prune_history(pet_id=pet.id, chat_id=chat_id, now=now)
         await repo.commit()
@@ -328,7 +332,7 @@ async def handle_pet_talk(
         await repo.commit()
 
         try:
-            if await repo.count_ok_talks(pet_id=pet.id, chat_id=chat_id) % d.EXTRACT_EVERY_TALKS == 0:
+            if talks_total % d.EXTRACT_EVERY_TALKS == 0:
                 turns = [
                     *context.recent,
                     d.DialogueTurn(speaker=speaker_name, role="user", content=talk_text),

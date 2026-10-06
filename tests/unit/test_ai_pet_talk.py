@@ -280,3 +280,16 @@ async def test_names_in_the_middle_or_disabled_chats_are_ignored(db, patched) ->
     assert await ai_pet_talk.resolve_talk_target(named, chat_settings=settings_off, db_session=db, economy_repo=None) is None
     command = _message("/pet")
     assert await ai_pet_talk.resolve_talk_target(command, chat_settings=settings_on, db_session=db, economy_repo=None) is None
+
+
+async def test_talk_counter_survives_history_pruning(db) -> None:
+    repo, pet_id = AiPetDialogueRepository(db), db.info["pet_id"]
+    old = NOW - timedelta(days=5)
+    for index in range(30):
+        await repo.add_reply(pet_id=pet_id, chat_id=CHAT, content=f"r{index}", now=old + timedelta(minutes=index))
+        await repo.record_talk(pet_id=pet_id, chat_id=CHAT, author_user_id=OWNER, idempotency_key=f"t{index}", now=old)
+    for index in range(30):
+        await repo.add_reply(pet_id=pet_id, chat_id=CHAT, content=f"n{index}", now=NOW + timedelta(minutes=index))
+    await repo.prune_history(pet_id=pet_id, chat_id=CHAT, now=NOW + timedelta(hours=1))
+    assert len(await repo.recent(pet_id=pet_id, chat_id=CHAT, limit=100)) == 40
+    assert await repo.record_talk(pet_id=pet_id, chat_id=CHAT, author_user_id=OWNER, idempotency_key="t-last", now=NOW) == 31
