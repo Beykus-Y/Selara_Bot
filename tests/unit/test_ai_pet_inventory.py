@@ -176,3 +176,12 @@ def test_bag_add_message_says_gift_for_guests() -> None:
     assert "дарит" in text and "Потрачено 150" in text and "/pet_bag" in text
     own = ai_pets.render_bag_add(result, actor=SimpleNamespace(id=OWNER), actor_link="Илья")
     assert "кладёт в рюкзак" in own
+
+
+def test_bag_use_does_not_claim_a_second_payment() -> None:
+    from selara.infrastructure.db.ai_pets import ActionResult
+
+    pet = SimpleNamespace(name="Мурка", species_key="cat")
+    result = ActionResult(status="ok", pet=pet, applied={"satiety": 15}, item=_item("dry_food", "food", price=40))
+    assert "Потрачено" not in ai_pets.render_result(result, event_type="feed", actor_link="Илья", charged=False)
+    assert "Потрачено 40" in ai_pets.render_result(result, event_type="feed", actor_link="Илья")

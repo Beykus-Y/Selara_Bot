@@ -172,7 +172,8 @@ def _effects_line(applied: dict[str, int]) -> str:
     return f"({', '.join(parts)})" if parts else ""
 
 
-def render_result(result: ActionResult, *, event_type: str, actor_link: str) -> str:
+def render_result(result: ActionResult, *, event_type: str, actor_link: str, charged: bool = True) -> str:
+    """``charged=False`` for items taken from the bag: they were paid for when bought."""
     pet = result.pet
     assert pet is not None
     item_title = result.item.title.lower() if result.item is not None else None
@@ -180,13 +181,13 @@ def render_result(result: ActionResult, *, event_type: str, actor_link: str) -> 
     effects = _effects_line(result.applied)
     if effects:
         lines.append(effects)
-    if result.item is not None and result.item.price:
+    if charged and result.item is not None and result.item.price:
         balance = f", баланс: {result.new_balance}" if result.new_balance is not None else ""
         lines.append(f"Потрачено {result.item.price} монет{balance}.")
     if result.leveled_up_to is not None:
         lines.append(f"🎉 {escape(pet.name)} достигает {result.leveled_up_to} уровня!")
         if result.leveled_up_to == m.TRAVEL_UNLOCK_LEVEL:
-            lines.append("Открыты путешествия — они появятся в одном из следующих обновлений.")
+            lines.append("Открыты путешествия: напишите /pet_travel в другом чате, где включены питомцы.")
     return "\n".join(lines)
 
 
@@ -836,7 +837,10 @@ async def ai_pet_callback(query: CallbackQuery, activity_repo, db_session, econo
             return
         await query.answer()
         event_type = m.ITEM_EVENT_TYPES[result.item.kind]
-        await message.answer(render_result(result, event_type=event_type, actor_link=_actor_link(query.from_user)), parse_mode="HTML")
+        await message.answer(
+            render_result(result, event_type=event_type, actor_link=_actor_link(query.from_user), charged=False),
+            parse_mode="HTML",
+        )
         return
 
     if kind == "a" and len(parts) == 3 and (parts[2] in m.ACTIONS or parts[2] == "feed"):

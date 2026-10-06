@@ -27,7 +27,6 @@ _SEED_COSMETICS = (
     ("hero_cape", "Плащ героя", 500, "back", 5, 90),
     ("crown", "Корона", 1000, "head", 10, 100),
 )
-_SEED_CODES = tuple(code for code, *_ in _SEED_COSMETICS)
 
 
 def upgrade() -> None:
@@ -80,12 +79,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("ai_pet_inventory")
-    # Cosmetics cannot exist under the old CHECK: the seeded ones go, any others must be removed first.
-    op.execute(
-        sa.text("DELETE FROM ai_pet_items WHERE kind = 'cosmetic' AND code IN :codes").bindparams(
-            sa.bindparam("codes", value=list(_SEED_CODES), expanding=True)
-        )
-    )
+    # Cosmetics cannot exist under the old CHECK: every cosmetic row goes, including ones the admin added.
+    op.execute("DELETE FROM ai_pet_items WHERE kind = 'cosmetic'")
     op.drop_constraint("ck_ai_pet_items_slot", "ai_pet_items", type_="check")
     op.drop_constraint("ck_ai_pet_items_kind", "ai_pet_items", type_="check")
     op.create_check_constraint("ck_ai_pet_items_kind", "ai_pet_items", "kind IN ('food', 'toy')")
