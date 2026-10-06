@@ -96,7 +96,7 @@ user_entitlements(
 - добавить `target_scope varchar(8) NOT NULL DEFAULT 'chat' CHECK IN ('chat','user')`;
 - добавить `target_user_id bigint NULL`;
 - `chat_id`/`source_chat_id` у intent сделать NULL-able с CHECK: `target_scope='chat' ⇒ chat_id NOT NULL`, `target_scope='user' ⇒ target_user_id NOT NULL AND target_user_id = buyer_user_id` (подарки другим людям — открытый вопрос, по умолчанию запрещены);
-- расширить три CHECK `product_key IN (...)` новым ключом (drop + create constraint, имена известны: `ck_chat_entitlements_product`, `ck_selara_ai_purchase_intents_product`, `ck_selara_ai_payments_product`).
+- расширить новым ключом только CHECK аудита покупок: `ck_selara_ai_purchase_intents_product` и `ck_selara_ai_payments_product` (drop + create). `ck_chat_entitlements_product` **не трогать**: чатовая таблица остаётся только для чатовых продуктов, чтобы ошибочно смаршрутизированный платёж или ручная запись не смогли выдать личную подписку чату. Дополнительно CHECK на intent: `target_scope` согласован с product_key.
 
 Downgrade: возможен, пока нет строк с `target_scope='user'`; миграция downgrade должна падать явно, если такие строки есть (не терять оплаты молча).
 
@@ -114,9 +114,11 @@ Downgrade: возможен, пока нет строк с `target_scope='user'`
 
 `ai_feature_quota_usage` сейчас считает и лочит по `chat_id`. Для личного продукта нужен счёт по пользователю, и это принципиально для петов: пет говорит **в группе**, а платит **хозяин**.
 
-- добавить `quota_scope_type varchar(8) NOT NULL DEFAULT 'chat' CHECK IN ('chat','user')` и `quota_scope_id bigint NOT NULL` (backfill = `chat_id`);
+- добавить `quota_scope_type varchar(8) NOT NULL DEFAULT 'chat' CHECK IN ('chat','user')` и `quota_scope_id bigint NULL`;
+- backfill `quota_scope_id = chat_id`. Внимание: `chat_id` nullable с `ON DELETE SET NULL`, поэтому у строк удалённых чатов он NULL. Такие исторические строки помечаются `quota_scope_type='legacy_orphan'` (добавить в CHECK) и в подсчёт не попадают; затем CHECK `quota_scope_type = 'legacy_orphan' OR quota_scope_id IS NOT NULL` вместо голого `NOT NULL`. Миграция не должна падать на проде из-за таких строк;
 - индекс `(feature, quota_scope_type, quota_scope_id, period_start, status)`;
 - `feature_quota_lock_key` строить от `(feature, scope_type, scope_id, period_start)`;
+- `chat_migration.py` (group→supergroup) должен обновлять не только `chat_id`, но и `quota_scope_id` у строк с `quota_scope_type='chat'`, иначе после апгрейда группы квоты текущего периода обнулятся. Тест: использование до миграции сохраняется после неё, включая коллизию с уже существующими строками нового id;
 - `FeatureAccessService.reserve_feature_usage(..., scope=QuotaScope.user(user_id))`; `chat_id` остаётся как «где произошло» для аналитики.
 - `ai_feature_invocations.scope_type/scope_id` уже существуют — заполнять `user`/`<id>`.
 
