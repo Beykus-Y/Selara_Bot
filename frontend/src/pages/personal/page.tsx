@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { formatDate, quotaView } from '@/pages/chat/lib/ai-access-view'
 import { getPersonalOverview } from '@/pages/personal/api/personal-api'
 import { MemorySection } from '@/pages/personal/ui/MemorySection'
+import { ModelSection } from '@/pages/personal/ui/ModelSection'
 import { PrivacySection } from '@/pages/personal/ui/PrivacySection'
 import type { PersonalOverview } from '@/pages/personal/model/types'
 import { routes } from '@/shared/config/routes'
@@ -30,7 +31,9 @@ function subscriptionBadge(subscription: PersonalOverview['subscription'], timeZ
 function SubscriptionSection({ data }: { data: PersonalOverview }) {
   const { subscription, quota } = data
   const badge = subscriptionBadge(subscription, data.timezone)
-  const view = quotaView(quota, 'сегодня', data.timezone)
+  const ail = quota.unit === 'ail'
+  const view = quotaView(quota, ail ? 'AIL сегодня' : 'сегодня', data.timezone)
+  const headline = ail && quota.status === 'ok' && (quota.remaining ?? 0) > 0 ? `${view.headline} AIL` : view.headline
   const showOffer = subscription.offer_available && subscription.tier !== 'owner_internal' && subscription.state === 'available'
   return (
     <section className="miniapp-section-card selara-ai" aria-labelledby="personal-sub-title">
@@ -43,9 +46,9 @@ function SubscriptionSection({ data }: { data: PersonalOverview }) {
       </div>
       <dl className="selara-ai__list">
         <div className={`selara-ai__row is-${view.tone}`}>
-          <dt>AI-запросы в личных сообщениях</dt>
+          <dt>{ail ? 'AI Limits в личных сообщениях' : 'AI-запросы в личных сообщениях'}</dt>
           <dd>
-            <strong>{view.headline}</strong>
+            <strong>{headline}</strong>
             {view.percentUsed !== null && (
               <span
                 className="selara-ai__bar"
@@ -116,6 +119,7 @@ export function PersonalPage() {
         {data.profile.mode === 'roleplay' ? 'Режим: ролевая игра' : 'Режим: помощник'}
       </p>
       <SubscriptionSection data={data} />
+      <ModelSection data={data} />
       <MemorySection data={data} />
       <PrivacySection />
       <Link className="button button--secondary" to={routes.more}>

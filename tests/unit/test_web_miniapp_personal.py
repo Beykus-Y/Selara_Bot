@@ -16,7 +16,10 @@ from selara.application.feature_access import (
     FeatureUsageSummary,
     PersonalQuotaLimits,
 )
-from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider
+from decimal import Decimal
+
+from selara.application.model_catalog import CatalogModel, CatalogSnapshot, ModelCapabilities, ModelProfile
+from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider, ail_limits_from
 from selara.core.config import Settings
 from selara.domain.entities import UserSnapshot
 from selara.infrastructure.db.base import Base
@@ -106,6 +109,23 @@ def _settings(admin_user_id: int | None = 999) -> Settings:
     )
 
 
+def _snapshot():
+    models = tuple(
+        CatalogModel(key, model_id, key.title(), capabilities=ModelCapabilities())
+        for key, model_id in (("base", "provider/basic-model"), ("a", "provider/analytics-model"))
+    )
+    return CatalogSnapshot(models, (
+        ModelProfile("basic", "Базовая", "base", Decimal("1")),
+        ModelProfile("analytics", "Аналитик", "a", Decimal("2.5")),
+        ModelProfile("creative", "Творческая", None, Decimal("5")),
+    ))
+
+
+class _Catalog:
+    async def get(self):
+        return _snapshot()
+
+
 class Env:
     def __init__(self, client, factory, access):
         self.client = client
@@ -148,6 +168,7 @@ async def env():
             personal_config=_Provider(),
             access_service=access,
             offer_checker=lambda _settings, config: config.price_stars is not None,
+            model_catalog=_Catalog(),
         )
     )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
@@ -184,6 +205,7 @@ async def test_every_endpoint_requires_a_session(env):
         ("DELETE", "/api/miniapp/personal/memory/1"),
         ("POST", "/api/miniapp/personal/memory/1/pin"),
         ("PUT", "/api/miniapp/personal/settings"),
+        ("PUT", "/api/miniapp/personal/model"),
         ("POST", "/api/miniapp/personal/forget-all"),
     ):
         response = await env.client.request(method, url, headers=JSON, content=b"{}")
@@ -204,7 +226,7 @@ async def test_new_user_overview_is_read_only_and_uses_free_limits(env):
     assert body["subscription"]["price_stars"] == 69
     assert body["subscription"]["purchase"] == {"command": "/premium", "bot_dm_url": "https://t.me/selara_test_bot"}
     assert body["quota"] == {
-        "status": "ok", "used": 3, "limit": 5, "remaining": 2,
+        "status": "ok", "unit": "request", "used": 3, "limit": 5, "remaining": 2,
         "reset_at": (NOW + timedelta(hours=5)).isoformat(), "exhausted": False,
     }
     assert body["memory"] == {"count": 0, "limit": 20, "items": []}
@@ -413,6 +435,7 @@ async def test_mutations_require_a_json_content_type(env):
     for method, url in (
         ("POST", "/api/miniapp/personal/memory"),
         ("PUT", "/api/miniapp/personal/settings"),
+        ("PUT", "/api/miniapp/personal/model"),
         ("POST", "/api/miniapp/personal/forget-all"),
     ):
         response = await env.client.request(
@@ -475,3 +498,52 @@ async def test_forget_all_waits_for_a_running_turn_and_releases_its_lock(env):
     done = await env.client.post("/api/miniapp/personal/forget-all", headers=headers, json={"confirm": True})
     assert done.status_code == 200
     assert 1 not in personal_ai._inflight_users
+
+
+# --- model profile (PR 13) ----------------------------------------------------------------
+
+
+def _ail_config():
+    return _config(quota_mode="ail", ail_limits=ail_limits_from(10, 100))
+
+
+async def test_overview_shows_profiles_without_physical_ids_and_locks_them_in_requests_mode(env):
+    body = (await env.client.get("/api/miniapp/personal", headers=env.as_user(1))).json()
+    model = body["model"]
+    assert model["selectable"] is False and model["quota_mode"] == "requests"
+    assert (model["selected"], model["effective"], model["cost_ail"]) == ("basic", "basic", "1")
+    options = {o["profile_key"]: o for o in model["options"]}
+    assert options["analytics"] == {
+        "profile_key": "analytics", "emoji": "🧠", "display_name": "Аналитик",
+        "description": "Для сложного анализа", "ail_multiplier": "2.5", "available": True,
+    }
+    assert options["creative"]["available"] is False  # no model assigned
+    assert "provider/" not in str(body)
+    response = await env.client.put("/api/miniapp/personal/model", headers={**JSON, **env.as_user(1)},
+                                    json={"profile_key": "analytics"})
+    assert response.status_code == 409 and "AI Limits" in response.json()["message"]
+
+
+async def test_model_choice_is_saved_in_the_same_field_as_ai(env):
+    env.state["config"] = _ail_config()
+    headers = {**JSON, **env.as_user(1)}
+    response = await env.client.put("/api/miniapp/personal/model", headers=headers, json={"profile_key": "analytics"})
+    assert response.status_code == 200 and response.json()["model"]["selected"] == "analytics"
+    assert response.json()["model"]["cost_ail"] == "2.5"
+    async with env.factory() as session:
+        assert (await PersonalAiRepository(session).get_profile(1)).model_profile_key == "analytics"
+    body = (await env.client.get("/api/miniapp/personal", headers=env.as_user(1))).json()
+    assert body["model"]["selectable"] is True and body["model"]["effective"] == "analytics"
+
+
+@pytest.mark.parametrize("payload", [
+    {"profile_key": "creative"}, {"profile_key": "gpt-4o"}, {"profile_key": "provider/analytics-model"},
+    {"profile_key": 1}, {"profile_key": "analytics", "model_id": "x"}, {},
+])
+async def test_forged_or_unavailable_profiles_are_rejected(env, payload):
+    env.state["config"] = _ail_config()
+    response = await env.client.put("/api/miniapp/personal/model", headers={**JSON, **env.as_user(1)}, json=payload)
+    assert response.status_code in (409, 422) and response.json()["ok"] is False
+    async with env.factory() as session:
+        stored = await PersonalAiRepository(session).get_profile(1)
+    assert stored is None or stored.model_profile_key == "basic"

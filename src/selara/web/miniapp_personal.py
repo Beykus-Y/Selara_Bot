@@ -20,7 +20,15 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.feature_access import AccessTier, FeatureAccessService
+from selara.application.model_catalog import CatalogProvider
 from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
+from selara.application.personal_models import (
+    choose_from_snapshot,
+    format_ail,
+    is_profile_key,
+    load_snapshot,
+    profile_options,
+)
 from selara.application.personal_memory import MemoryValidationError, normalize_memory_text
 from selara.application.personal_overview import (
     PAID_TIERS,
@@ -31,6 +39,7 @@ from selara.application.personal_overview import (
 from selara.core.config import Settings
 from selara.domain.entities import UserSnapshot
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
+from selara.infrastructure.db.model_catalog import build_model_catalog
 from selara.infrastructure.db.personal_ai_repository import AddMemoryStatus, PersonalAiRepository
 from selara.infrastructure.db.personal_config import build_personal_config
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
@@ -105,6 +114,7 @@ def build_miniapp_personal_router(
     personal_config: PersonalConfigProvider | None = None,
     access_service: FeatureAccessService | None = None,
     offer_checker: OfferChecker | None = None,
+    model_catalog: CatalogProvider | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/miniapp/personal", tags=["miniapp-personal"])
     config_provider = personal_config or build_personal_config(session_factory, settings)[0]
@@ -117,6 +127,8 @@ def build_miniapp_personal_router(
         from selara.presentation.handlers.premium import personal_offer_available as offer_checker  # noqa: PLC0415
 
     bot_dm_url = f"https://t.me/{settings.bot_username.strip().lstrip('@')}"
+    # Same catalog and resolution rules as the bot's /ai, so both screens show and accept the same profiles.
+    catalog = model_catalog if model_catalog is not None else build_model_catalog(session_factory)[0]
 
     @asynccontextmanager
     async def scope(request: Request):
@@ -151,6 +163,32 @@ def build_miniapp_personal_router(
             "mode": stored.profile.mode if stored else "assistant",
         }
 
+    async def _model_payload(selected_key: str, config: PersonalConfig) -> dict[str, Any]:
+        """The /ai model selector as data: one source of truth, personal_ai_profiles.model_profile_key."""
+        snapshot = await load_snapshot(catalog)
+        choice = choose_from_snapshot(snapshot, selected_key=selected_key, legacy_model=settings.llm_model)
+        return {
+            "quota_mode": config.quota_mode,
+            # Requests mode keeps every request at one request on the basic model: nothing to select yet.
+            "selectable": config.ail_enabled,
+            "selected": choice.selected_key,
+            "effective": choice.profile_key,
+            "effective_name": choice.display_name,
+            "fell_back": choice.fell_back,
+            "cost_ail": format_ail(choice.ail_cost),
+            "options": [
+                {
+                    "profile_key": option.profile_key,
+                    "emoji": option.emoji,
+                    "display_name": option.display_name,
+                    "description": option.description,
+                    "ail_multiplier": format_ail(option.ail_multiplier),
+                    "available": option.available,
+                }
+                for option in profile_options(snapshot, legacy_model=settings.llm_model)
+            ],
+        }
+
     @router.get("")
     @_json_errors
     async def overview(request: Request):
@@ -179,6 +217,7 @@ def build_miniapp_personal_router(
                 "timezone": settings.bot_timezone,
                 **status,
                 "profile": _profile_payload(stored, config, tier),
+                "model": await _model_payload(stored.model_profile_key if stored else "basic", config),
                 "memory": {
                     "count": len(rows),
                     "limit": memory_limit_for(tier, config),
@@ -240,6 +279,31 @@ def build_miniapp_personal_router(
             if not done:
                 raise _ApiError(404, "Этого факта уже нет.")
         return JSONResponse(content={"ok": True, "pinned": pinned}, headers={"Cache-Control": "no-store"})
+
+    @router.put("/model")
+    @_json_errors
+    async def update_model(request: Request):
+        async with scope(request) as (session, user):
+            payload = await _read_json_object(request)
+            key = payload.get("profile_key")
+            if set(payload) != {"profile_key"} or not is_profile_key(key):
+                # Never a physical model id: only a stable profile key from the catalog.
+                raise _ApiError(422, "Неизвестный профиль модели.")
+            config = await config_provider.get()
+            if not config.ail_enabled:
+                raise _ApiError(409, "Выбор моделей станет доступен после включения AI Limits.")
+            options = profile_options(await load_snapshot(catalog), legacy_model=settings.llm_model)
+            if not any(option.profile_key == key and option.available for option in options):
+                raise _ApiError(409, "Этот профиль сейчас недоступен.")
+            repo = PersonalAiRepository(session)
+            current = await repo.get_or_create_profile(user.telegram_user_id)
+            updated = await repo.update_profile(
+                user.telegram_user_id, expected_revision=current.revision, model_profile_key=key
+            )
+            if updated is None:
+                raise _ApiError(409, "Настройки уже изменились. Обновите страницу.")
+            model = await _model_payload(updated.model_profile_key, config)
+        return JSONResponse(content={"ok": True, "model": model}, headers={"Cache-Control": "no-store"})
 
     @router.put("/settings")
     @_json_errors
