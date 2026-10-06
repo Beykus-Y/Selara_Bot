@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
@@ -35,6 +36,7 @@ from selara.infrastructure.llm.features import AiFeature
 
 _NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 _LIMITS = PersonalQuotaLimits(free_daily=5, paid_daily=150)
+_CONFIG = StaticPersonalConfigProvider(PersonalConfig(None, 30, _LIMITS, Decimal("1")))
 
 
 async def _database():
@@ -214,7 +216,7 @@ async def test_active_personal_entitlement_raises_the_limit_to_one_fifty_until_i
             await session.commit()
         service = FeatureAccessService(
             SqlAlchemyFeatureQuotaRepository(factory),
-            user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, _LIMITS),
+            user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, _CONFIG),
             personal_limits=_LIMITS,
         )
 
@@ -493,5 +495,43 @@ async def test_configured_limits_drive_the_free_and_paid_pool_in_the_database():
 
         assert [result.allowed for result in results] == [True, True, False]
         assert results[0].quota_limit == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_saved_override_changes_price_limits_and_weights_without_restart():
+    from selara.application.personal_config import PersonalConfigOverride
+    from selara.core.config import Settings
+    from selara.infrastructure.db.personal_config import build_personal_config
+
+    engine, factory = await _database()
+    try:
+        os.environ.setdefault("BOT_TOKEN", "123:TEST")
+        settings = Settings(_env_file=None, database_url=os.environ["TEST_DATABASE_URL"])
+        provider, store = build_personal_config(factory, settings, ttl_seconds=3600)
+        service = FeatureAccessService(SqlAlchemyFeatureQuotaRepository(factory), personal_config=provider)
+        user_id = 611_201
+
+        assert (await provider.get()).limits == PersonalQuotaLimits(5, 150)
+        # Cached for an hour, so only the save below can change what the service sees.
+        effective = await store.save_override(
+            PersonalConfigOverride(price_stars=99, free_daily_limit=1, paid_daily_limit=10), updated_by=7
+        )
+        assert effective.price_stars == 99
+
+        first = await _reserve(service, user_id=user_id, key="ovr:1")
+        second = await _reserve(service, user_id=user_id, key="ovr:2")
+        assert first.quota_limit == 1 and first.allowed and not second.allowed
+
+        with pytest.raises(ValueError):
+            await store.save_override(PersonalConfigOverride(free_daily_limit=500))
+        assert (await provider.get()).limits.free_daily == 1  # rejected save left the row untouched
+
+        await store.save_override(PersonalConfigOverride())  # clear: back to .env values
+        assert (await provider.get()).limits == PersonalQuotaLimits(5, 150)
+        assert await store.load_override() == PersonalConfigOverride()
     finally:
         await engine.dispose()

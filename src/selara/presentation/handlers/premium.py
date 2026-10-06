@@ -17,6 +17,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.selara_ai_product import (
     PRODUCT_SCOPE_CHAT,
     PRODUCT_SCOPE_USER,
@@ -78,15 +79,15 @@ def _terms_text() -> str:
     )
 
 
-def _personal_terms_text(settings: Settings) -> str:
+def _personal_terms_text(config: PersonalConfig) -> str:
     return (
         "<b>Условия покупки Selara Personal</b>\n\n"
         "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом "
-        f"(до {settings.personal_paid_daily_limit} запросов в сутки вместо {settings.personal_free_daily_limit} бесплатных), "
+        f"(до {config.limits.paid_daily} запросов в сутки вместо {config.limits.free_daily} бесплатных), "
         "персонализация и личная память. "
         "Подписка принадлежит вам, а не чату.\n"
-        f"2. Срок — {settings.selara_personal_duration_days} дней с момента оплаты. Продление не автоматическое: "
-        f"повторная покупка добавляет ещё {settings.selara_personal_duration_days} дней к активному сроку; "
+        f"2. Срок — {config.duration_days} дней с момента оплаты. Продление не автоматическое: "
+        f"повторная покупка добавляет ещё {config.duration_days} дней к активному сроку; "
         "после окончания остаётся бесплатный лимит.\n"
         "3. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
         "4. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
@@ -121,13 +122,13 @@ def _product_for_settings(settings: Settings):
     )
 
 
-def _personal_product_for_settings(settings: Settings):
+def _personal_product_for_settings(settings: Settings, config: PersonalConfig):
     if llm_runtime_config(settings) is None:
         raise SelaraAiProductUnavailable("AI provider is not enabled")
     return get_selara_ai_product(
         product_key=SELARA_PERSONAL_PRODUCT_KEY,
-        price_stars=settings.selara_personal_price_stars,
-        duration=timedelta(days=settings.selara_personal_duration_days),
+        price_stars=config.price_stars,
+        duration=timedelta(days=config.duration_days),
     )
 
 
@@ -288,6 +289,7 @@ async def premium_command(
     bot: Bot,
     session_factory,
     settings: Settings,
+    personal_config: PersonalConfigProvider,
 ) -> None:
     if message.chat.type != "private":
         username = settings.bot_username.strip().lstrip("@")
@@ -303,7 +305,10 @@ async def premium_command(
     if message.from_user is None:
         return
 
-    personal_available = _available(_personal_product_for_settings, settings) is not None
+    personal_config_value = await personal_config.get()
+    personal_available = (
+        _available(lambda value: _personal_product_for_settings(value, personal_config_value), settings) is not None
+    )
     if personal_available:
         group_available = _available(_product_for_settings, settings) is not None
         await message.answer(
@@ -331,8 +336,11 @@ async def show_group_offer(query: CallbackQuery, session_factory, settings: Sett
 
 
 @router.callback_query(F.data == "premium:self")
-async def show_personal_offer(query: CallbackQuery, session_factory, settings: Settings) -> None:
+async def show_personal_offer(
+    query: CallbackQuery, session_factory, settings: Settings, personal_config: PersonalConfigProvider
+) -> None:
     await query.answer()
+    config = await personal_config.get()
     if query.message is None or query.message.chat.type != "private" or query.from_user is None:
         return
     if resolve_owner_private_exemption(user_id=query.from_user.id, admin_user_id=settings.admin_user_id):
@@ -341,7 +349,7 @@ async def show_personal_offer(query: CallbackQuery, session_factory, settings: S
         )
         return
     try:
-        product = _personal_product_for_settings(settings)
+        product = _personal_product_for_settings(settings, config)
     except SelaraAiProductUnavailable:
         await _edit_callback_message(query, "Покупка временно недоступна: цена или AI-провайдер ещё не настроены.")
         return
@@ -364,8 +372,8 @@ async def show_personal_offer(query: CallbackQuery, session_factory, settings: S
         text = (
             f"<b>{escape(product.title)}</b>\n"
             f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
-            f"Бесплатно в личке доступно {settings.personal_free_daily_limit} AI-запросов в сутки, "
-            f"с Selara Personal — {settings.personal_paid_daily_limit}.\n"
+            f"Бесплатно в личке доступно {config.limits.free_daily} AI-запросов в сутки, "
+            f"с Selara Personal — {config.limits.paid_daily}.\n"
             "Подписка оформляется для вашего аккаунта, а не для чата.\n"
             "Перед оплатой нужно подтвердить принятие условий покупки."
         )
@@ -375,12 +383,12 @@ async def show_personal_offer(query: CallbackQuery, session_factory, settings: S
 
 
 @router.callback_query(F.data == "premium:terms_self")
-async def show_personal_terms(query: CallbackQuery, settings: Settings) -> None:
+async def show_personal_terms(query: CallbackQuery, personal_config: PersonalConfigProvider) -> None:
     await query.answer()
     if query.message is None or query.message.chat.type != "private":
         return
     await _edit_callback_message(
-        query, _personal_terms_text(settings), reply_markup=_personal_terms_keyboard()
+        query, _personal_terms_text(await personal_config.get()), reply_markup=_personal_terms_keyboard()
     )
 
 
@@ -390,8 +398,10 @@ async def accept_terms_and_buy_selara_personal(
     bot: Bot,
     session_factory,
     settings: Settings,
+    personal_config: PersonalConfigProvider,
 ) -> None:
     await query.answer()
+    config = await personal_config.get()
     if query.message is None or query.message.chat.type != "private" or query.from_user is None:
         return
     if resolve_owner_private_exemption(user_id=query.from_user.id, admin_user_id=settings.admin_user_id):
@@ -400,7 +410,7 @@ async def accept_terms_and_buy_selara_personal(
         )
         return
     try:
-        product = _personal_product_for_settings(settings)
+        product = _personal_product_for_settings(settings, config)
     except SelaraAiProductUnavailable:
         await _edit_callback_message(query, "Покупка временно недоступна: цена или AI-провайдер ещё не настроены.")
         return

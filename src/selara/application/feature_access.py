@@ -5,11 +5,14 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from selara.application.usage_pricing import ConfiguredUsagePricer, QuotaCost, UsagePricer
 from selara.infrastructure.llm.features import AiFeature
+
+if TYPE_CHECKING:
+    from selara.application.personal_config import PersonalConfigProvider
 
 logger = logging.getLogger(__name__)
 
@@ -346,12 +349,21 @@ class FeatureAccessService:
         user_entitlement_resolver: UserEntitlementResolver | None = None,
         pricer: UsagePricer | None = None,
         personal_limits: PersonalQuotaLimits | None = None,
+        personal_config: PersonalConfigProvider | None = None,
     ) -> None:
+        # ``personal_config`` (settings + DB override, hot-reloaded) wins over the static ``personal_limits``.
         self._personal_limits = personal_limits
+        self._personal_config = personal_config
         self._repository = repository
         self._entitlement_resolver = entitlement_resolver or NoPaidChatEntitlementResolver()
         self._user_entitlement_resolver = user_entitlement_resolver or NoPaidUserEntitlementResolver()
         self._pricer: UsagePricer = pricer or ConfiguredUsagePricer()
+
+    async def _personal_runtime(self) -> tuple[PersonalQuotaLimits | None, UsagePricer]:
+        if self._personal_config is None:
+            return self._personal_limits, self._pricer
+        config = await self._personal_config.get()
+        return config.limits, config.pricer()
 
     async def _resolve_entitlement(
         self,
@@ -538,8 +550,9 @@ class FeatureAccessService:
         """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened."""
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
+        personal_limits, pricer = await self._personal_runtime()
         policy = resolve_feature_policy(
-            feature=feature, trigger=trigger, personal_limits=self._personal_limits
+            feature=feature, trigger=trigger, personal_limits=personal_limits
         )
         entitlement = None
         if policy is not None and not owner_exempt:
@@ -572,7 +585,7 @@ class FeatureAccessService:
             now=now or datetime.now(timezone.utc),
             timezone_name=timezone_name,
         )
-        cost = self._pricer.price(feature=feature, model_key=None, operation=trigger)
+        cost = pricer.price(feature=feature, model_key=None, operation=trigger)
         decision = await self._repository.reserve(
             policy=policy,
             access_tier=tier,
@@ -624,8 +637,9 @@ class FeatureAccessService:
     ) -> FeatureUsageSummary:
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
+        personal_limits, pricer = await self._personal_runtime()
         policy = resolve_feature_policy(
-            feature=feature, trigger=trigger, personal_limits=self._personal_limits
+            feature=feature, trigger=trigger, personal_limits=personal_limits
         )
         if policy is not None and not owner_exempt:
             policy, tier, _ = await self._paid_feature_policy(

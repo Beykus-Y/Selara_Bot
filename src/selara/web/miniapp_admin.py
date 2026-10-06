@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from sqlalchemy import case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.personal_config import PersonalConfig, PersonalConfigOverride, config_from_settings
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
 from selara.core.config import Settings
@@ -38,6 +39,7 @@ from selara.infrastructure.db.models import (
     UserFeatureRequestModel,
     UserModel,
 )
+from selara.infrastructure.db.personal_config import build_personal_config
 from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.runtime import llm_runtime_problem
@@ -106,6 +108,7 @@ def build_miniapp_admin_router(
             await session.commit()
 
     AdminSession = Depends(require_admin)
+    _personal_provider, personal_config_store = build_personal_config(session_factory, settings)
 
     async def _read_broadcast_payload(request: Request) -> dict[str, Any]:
         if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
@@ -857,6 +860,93 @@ def build_miniapp_admin_router(
                 for row in rows
             ],
         }
+
+    def _personal_config_json(config: PersonalConfig) -> dict[str, Any]:
+        return {
+            "price_stars": config.price_stars,
+            "duration_days": config.duration_days,
+            "free_daily_limit": config.limits.free_daily,
+            "paid_daily_limit": config.limits.paid_daily,
+            "default_units": _decimal_str(config.default_units),
+            "unit_weights": {key: _decimal_str(value) for key, value in sorted(config.unit_weights.items())},
+        }
+
+    def _parse_personal_override(payload: dict[str, Any]) -> PersonalConfigOverride:
+        def integer(key: str) -> int | None:
+            value = payload.get(key)
+            if value is None:
+                return None
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} must be an integer")
+            return value
+
+        def decimal(value: Any, key: str) -> Decimal:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError(f"{key} must be a number")
+            try:
+                return Decimal(str(value))
+            except Exception:
+                raise ValueError(f"{key} must be a number") from None
+
+        raw_weights = payload.get("unit_weights")
+        if raw_weights is not None and not isinstance(raw_weights, dict):
+            raise ValueError("unit_weights must be an object")
+        known_features = {feature.value for feature in AiFeature}
+        weights = None
+        if raw_weights:
+            unknown = sorted(set(raw_weights) - known_features)
+            if unknown:
+                raise ValueError(f"unknown features in unit_weights: {', '.join(unknown)}")
+            weights = {key: decimal(value, f"unit_weights.{key}") for key, value in raw_weights.items()}
+        default_units = payload.get("default_units")
+        return PersonalConfigOverride(
+            price_stars=integer("price_stars"),
+            duration_days=integer("duration_days"),
+            free_daily_limit=integer("free_daily_limit"),
+            paid_daily_limit=integer("paid_daily_limit"),
+            default_units=None if default_units is None else decimal(default_units, "default_units"),
+            unit_weights=weights,
+        )
+
+    @router.get("/monetization/personal-config")
+    async def personal_config_read(session: AsyncSession = AdminSession):
+        base = config_from_settings(settings)
+        override = await personal_config_store.load_override()
+        effective = await _personal_provider.get()
+        return {
+            "ok": True,
+            "env": _personal_config_json(base),
+            "override": None
+            if override is None
+            else {
+                "price_stars": override.price_stars,
+                "duration_days": override.duration_days,
+                "free_daily_limit": override.free_daily_limit,
+                "paid_daily_limit": override.paid_daily_limit,
+                "default_units": None if override.default_units is None else _decimal_str(override.default_units),
+                "unit_weights": {k: _decimal_str(v) for k, v in (override.unit_weights or {}).items()},
+            },
+            "effective": _personal_config_json(effective),
+            "applies_within_seconds": 15,
+        }
+
+    @router.put("/monetization/personal-config")
+    async def personal_config_write(request: Request, session: AsyncSession = AdminSession):
+        """Replace the override: omitted or null fields fall back to .env. Applies without a restart."""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Ожидался JSON.") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Некорректные данные.")
+        user = await load_user(session, request)
+        try:
+            effective = await personal_config_store.save_override(
+                _parse_personal_override(payload), updated_by=user.telegram_user_id if user else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return {"ok": True, "effective": _personal_config_json(effective)}
 
     @router.get("/ai/readiness")
     async def ai_readiness(session: AsyncSession = AdminSession):

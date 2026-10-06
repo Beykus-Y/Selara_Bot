@@ -610,6 +610,7 @@ _AI_ADMIN_ROUTES = (
     "/api/miniapp/admin/monetization/payments",
     "/api/miniapp/admin/monetization/payments/1",
     "/api/miniapp/admin/monetization/entitlements",
+    "/api/miniapp/admin/monetization/personal-config",
 )
 
 

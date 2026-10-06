@@ -1975,6 +1975,33 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class SelaraPersonalConfigModel(Base):
+    """Singleton row of Selara Personal overrides edited at runtime; NULL falls back to .env."""
+
+    __tablename__ = "selara_personal_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_selara_personal_config_singleton"),
+        CheckConstraint("price_stars IS NULL OR price_stars > 0", name="ck_selara_personal_config_price"),
+        CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
+        CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
+        CheckConstraint("default_units IS NULL OR default_units >= 0", name="ck_selara_personal_config_units"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    price_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_units: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # {"feature_key": "weight"}; strings keep Decimal precision through JSON.
+    unit_weights: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class OperationalAlertModel(Base):
     __tablename__ = "operational_alerts"
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.feature_access import AccessTier, PersonalQuotaLimits
+from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider
 from selara.application.selara_ai_product import (
     SELARA_AI_PRODUCT_KEY,
     SELARA_PERSONAL_PRODUCT_KEY,
@@ -391,7 +393,12 @@ async def test_personal_entitlement_resolver_returns_paid_one_fifty_policy_only_
         repository = SqlAlchemyTelegramStarsRepository(factory)
         intent = await _intent(factory)
         await _payment(repository, intent, charge_id="personal-resolver")
-        resolver = SqlAlchemyUserEntitlementResolver(factory, PersonalQuotaLimits(free_daily=5, paid_daily=150))
+        resolver = SqlAlchemyUserEntitlementResolver(
+            factory,
+            StaticPersonalConfigProvider(
+                PersonalConfig(None, 30, PersonalQuotaLimits(free_daily=5, paid_daily=150), Decimal("1"))
+            ),
+        )
 
         paid = await resolver.resolve(user_id=_BUYER, feature=AiFeature.PERSONAL_CHAT, trigger="telegram_message")
         stranger = await resolver.resolve(

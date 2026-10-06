@@ -25,6 +25,7 @@ from selara.application.feature_access import (
     resolve_feature_policy,
 )
 from selara.application.model_router import DefaultModelRouter
+from selara.application.personal_config import StaticPersonalConfigProvider, config_from_settings
 from selara.application.selara_ai_product import (
     PRODUCT_SPECS,
     SELARA_AI_PRODUCT_KEY,
@@ -414,9 +415,11 @@ def _load_migration(filename: str):
 def test_new_migrations_extend_the_single_alembic_chain():
     personal = _load_migration("0078_personal_entitlements.py")
     quota = _load_migration("0079_quota_user_scope.py")
+    config = _load_migration("0080_selara_personal_config.py")
 
     assert personal.down_revision == "0077_selara_ai_payment_refunds"
     assert quota.down_revision == personal.revision
+    assert config.down_revision == quota.revision
     revisions, parents = set(), set()
     for path in _VERSIONS.glob("[0-9]*.py"):
         module = _load_migration(path.name)
@@ -426,7 +429,7 @@ def test_new_migrations_extend_the_single_alembic_chain():
             parents.update(down)
         elif down:
             parents.add(down)
-    assert revisions - parents == {quota.revision}
+    assert revisions - parents == {config.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 
@@ -519,8 +522,13 @@ async def test_premium_hides_selara_personal_until_its_price_is_configured(monke
     monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
     message = _private_message()
 
+    settings = _settings(monkeypatch, personal_price=None)
     await premium.premium_command(
-        message, bot=object(), session_factory=object(), settings=_settings(monkeypatch, personal_price=None)
+        message,
+        bot=object(),
+        session_factory=object(),
+        settings=settings,
+        personal_config=StaticPersonalConfigProvider(config_from_settings(settings)),
     )
 
     markup = message.answer.await_args.kwargs["reply_markup"]
@@ -533,8 +541,13 @@ async def test_premium_offers_group_or_self_when_personal_price_is_configured(mo
 
     message = _private_message()
 
+    settings = _settings(monkeypatch, personal_price="69")
     await premium.premium_command(
-        message, bot=object(), session_factory=object(), settings=_settings(monkeypatch, personal_price="69")
+        message,
+        bot=object(),
+        session_factory=object(),
+        settings=settings,
+        personal_config=StaticPersonalConfigProvider(config_from_settings(settings)),
     )
 
     assert _buttons(message.answer.await_args.kwargs["reply_markup"]) == ["premium:group", "premium:self"]
@@ -694,7 +707,7 @@ def test_premium_texts_use_configured_limits_and_duration(monkeypatch):
         PERSONAL_FREE_DAILY_LIMIT="3",
         PERSONAL_PAID_DAILY_LIMIT="40",
     )
-    text = premium._personal_terms_text(settings)
+    text = premium._personal_terms_text(config_from_settings(settings))
     assert "40 запросов" in text and "3 бесплатных" in text and "7 дней" in text
     assert "150" not in text and "30 дней" not in text
 
