@@ -441,6 +441,7 @@ def test_new_migrations_extend_the_single_alembic_chain():
     pet_events = _load_migration("0086_ai_pet_events.py")
     memory = _load_migration("0087_personal_ai_memory.py")
     pet_inventory = _load_migration("0088_ai_pet_inventory.py")
+    web_tainted = _load_migration("0090_web_tainted_history.py")
 
     assert personal.down_revision == "0078_family_pet_command_key"
     assert quota.down_revision == personal.revision
@@ -463,7 +464,8 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert pet_inventory.down_revision == memory.revision
     admin_models = _load_migration("0089_admin_model_config.py")
     assert admin_models.down_revision == pet_inventory.revision
-    assert revisions - parents == {admin_models.revision}
+    assert web_tainted.down_revision == admin_models.revision
+    assert revisions - parents == {web_tainted.revision}
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 
