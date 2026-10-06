@@ -223,7 +223,7 @@ async def test_confirming_saves_the_fact_as_explicit_once(monkeypatch, session):
 
 async def test_cancelling_saves_nothing(monkeypatch, session):
     settings = _settings(monkeypatch)
-    message = _message("запомни: я живу в Казани")
+    message = _message("запомни, что я живу в Казани")
     await _chat(message, session, settings, _FakeLlm())
     no = _callbacks(message.answer.await_args.kwargs["reply_markup"])[1]
 
@@ -554,7 +554,7 @@ async def test_memories_of_this_user_reach_the_prompt_and_are_marked_used(monkey
     await repo.add_memory(user_id=USER_ID, content="я веган", source="explicit", limit=20)
     await repo.add_memory(user_id=OTHER_ID, content="чужой пароль 123", source="explicit", limit=20)
 
-    await _chat(_message("что приготовить?"), session, settings, llm)
+    await _chat(_message("я веган, что приготовить?"), session, settings, llm)
 
     system = " ".join(m["content"] for m in llm.chat_calls[0] if m["role"] == "system")
     assert "я веган" in system and "чужой" not in system
@@ -759,3 +759,190 @@ async def test_wizard_has_memory_toggles_that_persist(monkeypatch, session):
     assert stored.memory_enabled is False
     await handler.ai_settings_callback(_query(f"pai:set:automemory:1:{stored.revision}"), db_session=session)
     assert (await repo.get_profile(USER_ID)).auto_memory_enabled is True
+
+
+# --- review follow-ups (PR 29) -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Remember when we talked about Rome? What was the hotel?",
+        "Запомни это стихотворение и потом проверь меня",
+        "Запомните-ка",
+        "запомни: меня зовут Илья",
+    ],
+)
+async def test_ordinary_messages_starting_with_remember_go_to_the_model(monkeypatch, session, text):
+    settings, llm = _settings(monkeypatch), _FakeLlm()
+
+    await _chat(_message(text), session, settings, llm)
+
+    assert len(llm.chat_calls) == 1 and memory_handler._pending_memories == {}
+
+
+async def _enable_extraction_with_history(session, count=50):
+    repo = PersonalAiRepository(session)
+    for i in range(count):
+        await repo.add_message(user_id=USER_ID, thread="assistant", role="user", content=f"старое {i}")
+    stored = await repo.get_or_create_profile(USER_ID)
+    return repo, stored
+
+
+async def test_enabling_auto_memory_starts_after_the_existing_history(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    llm = _FakeLlm(extraction=json.dumps(["Любит джаз"], ensure_ascii=False))
+    repo, stored = await _enable_extraction_with_history(session)
+    # Enabled through the wizard button, the same path a user takes.
+    await handler.ai_settings_callback(
+        _query(f"pai:set:automemory:1:{stored.revision}"), db_session=session
+    )
+    _FakeAccess.decision = _decision(AccessTier.PAID)
+    provider = _auto_provider(settings)
+
+    await _chat(_message("новое одно", message_id=1), session, settings, llm, provider)
+    assert llm.extract_calls == []  # the old backlog is not analysed
+    await _chat(_message("новое два", message_id=2), session, settings, llm, provider)
+
+    assert len(llm.extract_calls) == 1
+    prompt = llm.extract_calls[0][0][-1]["content"]
+    assert "новое одно" in prompt and "новое два" in prompt and "старое" not in prompt
+
+
+async def test_turning_memory_back_on_does_not_expose_messages_written_while_it_was_off(monkeypatch, session):
+    repo, stored = await _enable_extraction_with_history(session, count=3)
+    await repo.update_profile(USER_ID, expected_revision=stored.revision, auto_memory_enabled=True)
+    after_on = await repo.get_profile(USER_ID)
+    await repo.update_profile(USER_ID, expected_revision=after_on.revision, auto_memory_enabled=False)
+    await repo.add_message(user_id=USER_ID, thread="assistant", role="user", content="пока выключено")
+    off = await repo.get_profile(USER_ID)
+
+    await repo.update_profile(USER_ID, expected_revision=off.revision, auto_memory_enabled=True)
+
+    batch = await repo.user_messages_after(
+        user_id=USER_ID, thread="assistant", after_id=(await repo.get_profile(USER_ID)).memory_extract_cursor, limit=50
+    )
+    assert batch == []
+
+
+async def test_forget_all_blocks_new_turns_while_it_deletes(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    await _populate(session)
+    seen: list[bool] = []
+    real = PersonalAiRepository.delete_all_user_data
+
+    async def spy(self, *, user_id):
+        seen.append(user_id in handler._inflight_users)
+        return await real(self, user_id=user_id)
+
+    monkeypatch.setattr(PersonalAiRepository, "delete_all_user_data", spy)
+
+    await _memory_call(memory_handler.memory_callback, _query("pam:fy"), session, settings)
+
+    assert seen == [True] and USER_ID not in handler._inflight_users
+
+
+async def test_delete_is_committed_before_telegram_is_called(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    mine = (await PersonalAiRepository(session).add_memory(user_id=USER_ID, content="моё", source="explicit", limit=20)).memory
+    events: list[str] = []
+    real_commit = session.commit
+
+    async def commit():
+        events.append("commit")
+        await real_commit()
+
+    monkeypatch.setattr(session, "commit", commit)
+    query = _query(f"pam:del:{mine.id}:0")
+    query.answer = AsyncMock(side_effect=lambda *a, **k: events.append("answer"))
+
+    await _memory_call(memory_handler.memory_callback, query, session, settings)
+
+    assert events[:2] == ["commit", "answer"]
+
+
+async def test_confirmation_is_committed_before_telegram_is_called(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    message = _message("запомни, что я веган")
+    await _chat(message, session, settings, _FakeLlm())
+    ok = _callbacks(message.answer.await_args.kwargs["reply_markup"])[0]
+    events: list[str] = []
+    real_commit = session.commit
+
+    async def commit():
+        events.append("commit")
+        await real_commit()
+
+    monkeypatch.setattr(session, "commit", commit)
+    query = _query(ok)
+    query.answer = AsyncMock(side_effect=lambda *a, **k: events.append("answer"))
+
+    await _memory_call(memory_handler.memory_callback, query, session, settings)
+
+    assert events[:2] == ["commit", "answer"]
+
+
+async def test_a_failed_access_check_keeps_the_confirmation_usable(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    message = _message("запомни, что я веган")
+    await _chat(message, session, settings, _FakeLlm())
+    ok = _callbacks(message.answer.await_args.kwargs["reply_markup"])[0]
+    _FakeAccess.resolve_error = RuntimeError("db down")
+    await _memory_call(memory_handler.memory_callback, _query(ok), session, settings)
+    assert await _facts(session) == []
+
+    _FakeAccess.resolve_error = None
+    await _memory_call(memory_handler.memory_callback, _query(ok), session, settings)
+
+    assert await _facts(session) == ["я веган"]
+
+
+async def test_expired_proposals_of_other_users_are_dropped_lazily(monkeypatch, session):
+    from datetime import datetime, timedelta, timezone
+
+    stale = memory_handler._PendingMemory(text="x", expires_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    memory_handler._pending_memories[OTHER_ID] = {"old": stale}
+
+    memory_handler._store_pending(USER_ID, "новый")
+
+    assert OTHER_ID not in memory_handler._pending_memories
+
+
+async def test_only_matching_or_pinned_memories_are_marked_used(monkeypatch, session):
+    settings, llm = _settings(monkeypatch), _FakeLlm()
+    repo = PersonalAiRepository(session)
+    await repo.add_memory(user_id=USER_ID, content="я веган", source="explicit", limit=20)
+    await repo.add_memory(user_id=USER_ID, content="люблю джаз", source="explicit", limit=20)
+
+    await _chat(_message("посоветуй веган рецепт"), session, settings, llm)
+
+    used = {i.content: i.last_used_at is not None for i in await repo.memory_items(user_id=USER_ID)}
+    assert used == {"я веган": True, "люблю джаз": False}
+    # The unmatched fact still reaches the prompt: touching is about relevance, not inclusion.
+    system = " ".join(m["content"] for m in llm.chat_calls[0] if m["role"] == "system")
+    assert "люблю джаз" in system
+
+
+async def test_export_is_rate_limited_per_user(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    await PersonalAiRepository(session).add_memory(user_id=USER_ID, content="моё", source="explicit", limit=20)
+    memory_handler._last_export.clear()
+    first, second = _query("pam:exp"), _query("pam:exp")
+
+    await _memory_call(memory_handler.memory_callback, first, session, settings)
+    await _memory_call(memory_handler.memory_callback, second, session, settings)
+
+    assert first.message.answer.await_count == 1
+    assert second.message.answer.await_count == 0
+    assert second.answer.await_args.kwargs.get("show_alert") is True
+
+
+async def test_auto_memory_toggle_says_it_needs_personal(monkeypatch, session):
+    stored = await PersonalAiRepository(session).get_or_create_profile(USER_ID)
+    message = _message("/ai")
+
+    await handler.ai_settings_command(message, db_session=session)
+
+    buttons = [b.text for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Авто-память" in text and "Personal" in text for text in buttons)
+    assert stored.auto_memory_enabled is False

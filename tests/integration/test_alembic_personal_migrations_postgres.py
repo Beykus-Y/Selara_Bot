@@ -225,6 +225,7 @@ def test_personal_memory_table_enforces_constraints_and_cascades_with_the_user(d
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (9110, 'I AM VEGAN', 'explicit')",
         "INSERT INTO personal_ai_memories (user_id, content, source) VALUES (999999991, 'x', 'explicit')",
         "INSERT INTO selara_personal_config (id, memory_extract_every) VALUES (1, 1)",
+        "INSERT INTO selara_personal_config (id, memory_extract_every) VALUES (1, 41)",
     ):
         try:
             _run_sql(database, bad)

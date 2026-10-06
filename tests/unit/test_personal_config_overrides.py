@@ -200,6 +200,7 @@ def test_memory_override_cannot_make_free_exceed_paid(monkeypatch):
         {"memory_paid_limit": -1},
         {"memory_free_limit": 100_000},
         {"memory_extract_every": 1},
+        {"memory_extract_every": 41},  # larger than one extraction batch could ever satisfy (review M2)
         {"memory_extract_every": 100_000},
     ],
 )
@@ -211,3 +212,9 @@ def test_memory_override_values_are_bounded(kwargs):
 def test_settings_reject_memory_free_limit_above_paid(monkeypatch):
     with pytest.raises(ValueError, match="PERSONAL_MEMORY_FREE_LIMIT"):
         _env(monkeypatch, PERSONAL_MEMORY_FREE_LIMIT="300", PERSONAL_MEMORY_PAID_LIMIT="200")
+
+
+def test_settings_reject_extract_interval_above_the_batch_size(monkeypatch):
+    with pytest.raises(ValueError):
+        _env(monkeypatch, PERSONAL_MEMORY_EXTRACT_EVERY="41")
+    assert _base(monkeypatch, PERSONAL_MEMORY_EXTRACT_EVERY="40").memory_extract_every == 40

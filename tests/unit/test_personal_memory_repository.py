@@ -201,3 +201,29 @@ async def _now(session):
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+async def test_extraction_runs_at_the_largest_allowed_interval(session):
+    """With every == batch size the batch must still satisfy the threshold (review M2)."""
+    from types import SimpleNamespace
+
+    from selara.application.personal_config import MAX_EXTRACT_EVERY
+    from selara.infrastructure.llm.personal_ai import maybe_extract_memories
+
+    repo = PersonalAiRepository(session)
+    await repo.get_or_create_profile(1)
+    await repo.update_profile(1, expected_revision=0, auto_memory_enabled=True)
+    for i in range(MAX_EXTRACT_EVERY + 5):
+        await repo.add_message(user_id=1, thread="assistant", role="user", content=f"м{i}")
+    calls = []
+
+    class Llm:
+        async def summarize(self, messages, **kwargs):
+            calls.append(messages)
+            return SimpleNamespace(value='["Любит джаз"]')
+
+    added = await maybe_extract_memories(
+        repo=repo, llm_client=Llm(), user_id=1, thread="assistant", cursor=0, every=MAX_EXTRACT_EVERY, limit=10
+    )
+
+    assert added == 1 and len(calls) == 1
