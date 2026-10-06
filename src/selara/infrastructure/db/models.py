@@ -84,6 +84,41 @@ class ChatEntitlementModel(Base):
     )
 
 
+class UserEntitlementModel(Base):
+    """Current time-bounded personal product access for one Telegram user.
+
+    Kept apart from ``chat_entitlements`` on purpose: that table carries the
+    group -> supergroup merge rules and chat-keyed advisory locks, and its
+    product CHECK must keep refusing personal products.
+    """
+
+    __tablename__ = "user_entitlements"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Daily limit sold with the subscription (snapshot taken at purchase); NULL = use the configured one.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_key", name="uq_user_entitlements_user_product"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_user_entitlements_paid_limit"),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_user_entitlements_status"),
+        CheckConstraint("valid_from < valid_until", name="ck_user_entitlements_validity"),
+        CheckConstraint("product_key IN ('selara_personal_monthly')", name="ck_user_entitlements_product"),
+        Index("idx_user_entitlements_active_until", "product_key", "status", "valid_until"),
+    )
+
+
 class SelaraAiPurchaseIntentModel(Base):
     """Server-side invoice context; the payload itself contains only its UUID."""
 
@@ -91,8 +126,14 @@ class SelaraAiPurchaseIntentModel(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Buyer and recipient are stored separately so gifts need no schema change;
+    # until then ``ck_..._personal_self_only`` pins the recipient to the buyer.
+    target_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="chat", server_default="chat")
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Quota terms sold with the invoice; copied onto the user entitlement when the payment is applied.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     product_key: Mapped[str] = mapped_column(String(64), nullable=False)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -110,7 +151,28 @@ class SelaraAiPurchaseIntentModel(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_selara_ai_purchase_intents_product"),
+        CheckConstraint(
+            "product_key IN ('selara_ai_monthly', 'selara_personal_monthly')",
+            name="ck_selara_ai_purchase_intents_product",
+        ),
+        CheckConstraint("target_scope IN ('chat', 'user')", name="ck_selara_ai_purchase_intents_target_scope"),
+        CheckConstraint(
+            "(target_scope = 'chat' AND chat_id IS NOT NULL AND target_user_id IS NULL) OR "
+            "(target_scope = 'user' AND target_user_id IS NOT NULL AND chat_id IS NULL)",
+            name="ck_selara_ai_purchase_intents_target_shape",
+        ),
+        CheckConstraint(
+            "(target_scope = 'chat' AND product_key = 'selara_ai_monthly') OR "
+            "(target_scope = 'user' AND product_key = 'selara_personal_monthly')",
+            name="ck_selara_ai_purchase_intents_scope_product",
+        ),
+        CheckConstraint(
+            "target_scope <> 'user' OR target_user_id = buyer_user_id",
+            name="ck_selara_ai_purchase_intents_personal_self_only",
+        ),
+        CheckConstraint(
+            "paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_ai_purchase_intents_paid_limit"
+        ),
         CheckConstraint("amount_stars > 0", name="ck_selara_ai_purchase_intents_amount"),
         CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
         CheckConstraint("status IN ('open', 'checkout_accepted', 'consumed')", name="ck_selara_ai_purchase_intents_status"),
@@ -122,6 +184,7 @@ class SelaraAiPurchaseIntentModel(Base):
         ),
         Index("idx_selara_ai_purchase_intents_buyer_created", "buyer_user_id", "created_at"),
         Index("idx_selara_ai_purchase_intents_chat", "chat_id", "status"),
+        Index("idx_selara_ai_purchase_intents_target_user", "target_user_id", "status"),
     )
 
 
@@ -140,6 +203,8 @@ class SelaraAiPaymentModel(Base):
     buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="chat", server_default="chat")
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     product_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
@@ -152,10 +217,23 @@ class SelaraAiPaymentModel(Base):
         CheckConstraint("amount_stars >= 0", name="ck_selara_ai_payments_nonnegative_amount"),
         CheckConstraint("processing_state IN ('applied', 'rejected')", name="ck_selara_ai_payments_state"),
         CheckConstraint(
-            "product_key IS NULL OR product_key IN ('selara_ai_monthly')",
+            "product_key IS NULL OR product_key IN ('selara_ai_monthly', 'selara_personal_monthly')",
             name="ck_selara_ai_payments_product",
         ),
+        CheckConstraint("target_scope IN ('chat', 'user')", name="ck_selara_ai_payments_target_scope"),
+        CheckConstraint(
+            "(target_scope = 'chat' AND target_user_id IS NULL) OR "
+            "(target_scope = 'user' AND target_user_id IS NOT NULL AND target_chat_id IS NULL)",
+            name="ck_selara_ai_payments_target_shape",
+        ),
+        CheckConstraint(
+            "product_key IS NULL OR "
+            "(target_scope = 'chat' AND product_key = 'selara_ai_monthly') OR "
+            "(target_scope = 'user' AND product_key = 'selara_personal_monthly')",
+            name="ck_selara_ai_payments_scope_product",
+        ),
         Index("idx_selara_ai_payments_target_time", "target_chat_id", "payment_at"),
+        Index("idx_selara_ai_payments_target_user_time", "target_user_id", "payment_at"),
         Index("idx_selara_ai_payments_buyer_time", "buyer_user_id", "payment_at"),
         Index("idx_selara_ai_payments_state_time", "processing_state", "payment_at"),
     )
@@ -1905,6 +1983,29 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class SelaraPersonalConfigModel(Base):
+    """Singleton row of Selara Personal overrides edited at runtime; NULL falls back to .env."""
+
+    __tablename__ = "selara_personal_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_selara_personal_config_singleton"),
+        CheckConstraint("price_stars IS NULL OR price_stars > 0", name="ck_selara_personal_config_price"),
+        CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
+        CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    price_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class OperationalAlertModel(Base):
     __tablename__ = "operational_alerts"
 
@@ -2376,6 +2477,19 @@ class AiFeatureInvocationModel(Base):
     )
 
 
+def _quota_scope_id_default(context) -> int | None:
+    """Chat-scoped rows default their scope id to ``chat_id`` (mirrors the DB trigger)."""
+    params = context.get_current_parameters()
+    if params.get("quota_scope_type") in (None, "chat"):
+        return params.get("chat_id")
+    return None
+
+
+def _quota_pool_default(context) -> str | None:
+    """Without an explicit pool a feature is its own pool."""
+    return context.get_current_parameters().get("feature")
+
+
 class AiFeatureQuotaUsageModel(Base):
     """One logical feature quota reservation, separate from provider-call cost."""
 
@@ -2408,14 +2522,37 @@ class AiFeatureQuotaUsageModel(Base):
     release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who pays for the request: a chat or a user. ``chat_id`` above stays "where it happened".
+    # 'legacy_orphan' marks pre-scope rows whose chat was already deleted; they are never counted.
+    quota_scope_type: Mapped[str] = mapped_column(String(16), nullable=False, default="chat", server_default="chat")
+    quota_scope_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=_quota_scope_id_default)
+    # Several features may spend one pool; today a feature is its own pool.
+    pool_key: Mapped[str] = mapped_column(String(48), nullable=False, default=_quota_pool_default)
+    units: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("1"), server_default="1")
 
     __table_args__ = (
         CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
+        CheckConstraint(
+            "quota_scope_type IN ('chat', 'user', 'legacy_orphan')", name="ck_ai_feature_quota_scope_type"
+        ),
+        CheckConstraint(
+            "quota_scope_type = 'legacy_orphan' OR quota_scope_id IS NOT NULL",
+            name="ck_ai_feature_quota_scope_id",
+        ),
+        CheckConstraint("units >= 0", name="ck_ai_feature_quota_units"),
         CheckConstraint("quota_limit > 0", name="ck_ai_feature_quota_positive_limit"),
         CheckConstraint("status IN ('consumed', 'released')", name="ck_ai_feature_quota_status"),
         UniqueConstraint("idempotency_key", name="uq_ai_feature_quota_idempotency"),
         UniqueConstraint("invocation_id", name="uq_ai_feature_quota_invocation"),
         Index("idx_ai_feature_quota_period_usage", "feature", "chat_id", "period_start", "status"),
+        Index(
+            "idx_ai_feature_quota_scope_usage",
+            "pool_key",
+            "quota_scope_type",
+            "quota_scope_id",
+            "period_start",
+            "status",
+        ),
     )
 
 

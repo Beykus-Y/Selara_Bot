@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from selara.core.web_auth import normalize_base_url
@@ -157,9 +157,25 @@ class Settings(BaseSettings):
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     # Checkout stays disabled until the owner selects an explicit Stars price.
     selara_ai_price_stars: int | None = Field(default=None, gt=0, validation_alias="SELARA_AI_PRICE_STARS")
+    # Selara Personal (a per-user subscription) stays hidden until its own price is set.
+    selara_personal_price_stars: int | None = Field(
+        default=None, gt=0, le=10_000, validation_alias="SELARA_PERSONAL_PRICE_STARS"
+    )
+    selara_personal_duration_days: int = Field(
+        default=30, gt=0, le=365, validation_alias="SELARA_PERSONAL_DURATION_DAYS"
+    )
+    # Personal pool limits: one request = one unit. Fixed until a deliberate switch to AI Limits.
+    personal_free_daily_limit: int = Field(default=5, gt=0, le=10_000, validation_alias="PERSONAL_FREE_DAILY_LIMIT")
+    personal_paid_daily_limit: int = Field(default=150, gt=0, le=10_000, validation_alias="PERSONAL_PAID_DAILY_LIMIT")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_personal_limits(self):
+        if self.personal_free_daily_limit >= self.personal_paid_daily_limit:
+            raise ValueError("PERSONAL_FREE_DAILY_LIMIT must be lower than PERSONAL_PAID_DAILY_LIMIT")
+        return self
 
     @property
     def supported_chat_types(self) -> set[str]:

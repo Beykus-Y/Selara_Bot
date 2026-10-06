@@ -249,6 +249,7 @@ function StarsSection({ periodDays }: { periodDays: number }) {
             <Metric label="Выручка Stars" value={formatStars(data.stars_revenue)} note={`всего: ${formatStars(data.all_time.stars_revenue)}`} />
             <Metric label="Успешных платежей" value={formatCount(data.successful_payments)} />
             <Metric label="Активных платных чатов" value={formatCount(data.active_paid_chats)} note={`истекают за 7 дн: ${formatCount(data.expiring_within_7_days)}`} />
+            <Metric label="Активных Personal" value={formatCount(data.active_personal_subscriptions ?? 0)} note={`истекают за 7 дн: ${formatCount(data.personal_expiring_within_7_days ?? 0)}`} />
             <Metric label="Отклонённых платежей" value={formatCount(data.rejected_payments)} tone={data.rejected_payments > 0 ? 'warn' : undefined} />
           </div>
           <p className="admin-footnote">
@@ -354,7 +355,11 @@ function PaymentCard({ payment }: { payment: AdminPayment }) {
           <span className={rejected ? 'admin-badge is-warn' : 'admin-badge'}>{rejected ? '! Отклонён' : '✓ Применён'}</span>
         </span>
         <small>{formatDateTime(payment.payment_at)} · покупатель {payment.buyer_user_id}</small>
-        <small className="admin-payment__chat">{payment.chat_title ?? 'Чат недоступен'} · {payment.chat_id ?? payment.target_chat_id ?? '—'}</small>
+        <small className="admin-payment__chat">
+          {payment.target_scope === 'user'
+            ? `Selara Personal · пользователь ${payment.target_user_id ?? '—'}`
+            : `${payment.chat_title ?? 'Чат недоступен'} · ${payment.chat_id ?? payment.target_chat_id ?? '—'}`}
+        </small>
         {rejected && payment.reason && <small>Причина: {payment.reason}</small>}
         {payment.refund && <small>{refundLabels[payment.refund.status]}</small>}
       </button>

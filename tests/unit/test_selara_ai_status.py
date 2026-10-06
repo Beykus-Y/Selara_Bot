@@ -21,7 +21,7 @@ class _Repository:
         self.used = used or {}
         self.fail = fail
 
-    async def usage_summary(self, *, policy, chat_id, owner_exempt, period_start, period_end):
+    async def usage_summary(self, *, policy, chat_id, owner_exempt, period_start, period_end, scope=None):
         if self.fail:
             raise RuntimeError("database unavailable")
         if owner_exempt:

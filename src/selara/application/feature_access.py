@@ -3,11 +3,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from selara.application.usage_pricing import ConfiguredUsagePricer, QuotaCost, UsagePricer
 from selara.infrastructure.llm.features import AiFeature
+
+if TYPE_CHECKING:
+    from selara.application.personal_config import PersonalConfigProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +37,68 @@ class QuotaPeriod(StrEnum):
     MONTH = "month"
 
 
+class QuotaScopeType(StrEnum):
+    CHAT = "chat"
+    USER = "user"
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaScope:
+    """Who pays for a request. ``chat_id`` elsewhere only says where it happened."""
+
+    scope_type: QuotaScopeType
+    scope_id: int
+
+    @classmethod
+    def chat(cls, chat_id: int) -> "QuotaScope":
+        return cls(QuotaScopeType.CHAT, chat_id)
+
+    @classmethod
+    def user(cls, user_id: int) -> "QuotaScope":
+        return cls(QuotaScopeType.USER, user_id)
+
+
+PERSONAL_POOL_KEY = "personal_daily"
+# Features the personal config may price; group features never read its weights.
+PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
+# What a personal request draws from the pool: 5/150 are requests, not weighted units.
+PERSONAL_REQUEST_COST = QuotaCost(Decimal("1"))
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalQuotaLimits:
+    """Daily limits of the personal pool, in quota units; values come from settings."""
+
+    free_daily: int
+    paid_daily: int
+
+    def __post_init__(self) -> None:
+        if self.free_daily <= 0 or self.paid_daily <= self.free_daily:
+            raise ValueError("Personal limits must satisfy 0 < free < paid")
+
+    @classmethod
+    def from_settings(cls, settings) -> "PersonalQuotaLimits":
+        return cls(
+            free_daily=settings.personal_free_daily_limit,
+            paid_daily=settings.personal_paid_daily_limit,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureQuotaPolicy:
     feature: AiFeature
     policy_key: str
     limit: int
     period: QuotaPeriod
+    # Policies spend a pool, not a feature, so several features can share one
+    # budget later. ``None`` keeps today's behaviour: a feature is its own pool.
+    pool_key: str | None = None
+    # What ``limit`` counts: plain requests now, AI Limits later.
+    unit: str = "request"
+
+    @property
+    def pool(self) -> str:
+        return self.pool_key or self.feature.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +186,29 @@ class ChatEntitlementResolver(Protocol):
     ) -> FeatureEntitlement: ...
 
 
+class UserEntitlementResolver(Protocol):
+    async def resolve(
+        self,
+        *,
+        user_id: int,
+        feature: AiFeature,
+        trigger: str,
+    ) -> FeatureEntitlement: ...
+
+
+class NoPaidUserEntitlementResolver:
+    """Fail closed to the free tier when no personal entitlement source is wired."""
+
+    async def resolve(
+        self,
+        *,
+        user_id: int,
+        feature: AiFeature,
+        trigger: str,
+    ) -> FeatureEntitlement:
+        return FeatureEntitlement(access_tier=AccessTier.FREE)
+
+
 class NoPaidChatEntitlementResolver:
     """Fail closed when a caller has not been wired to an entitlement source."""
 
@@ -145,6 +229,8 @@ class FeatureQuotaRepository(Protocol):
         policy: FeatureQuotaPolicy,
         access_tier: AccessTier,
         chat_id: int,
+        scope: QuotaScope,
+        cost: QuotaCost,
         chat_type: str,
         chat_title: str | None,
         actor_user_id: int | None,
@@ -164,6 +250,7 @@ class FeatureQuotaRepository(Protocol):
         *,
         policy: FeatureQuotaPolicy,
         chat_id: int,
+        scope: QuotaScope,
         owner_exempt: bool,
         period_start: datetime,
         period_end: datetime,
@@ -172,7 +259,9 @@ class FeatureQuotaRepository(Protocol):
     async def release_if_no_provider_attempts(self, *, invocation_id: int, reason: str) -> bool: ...
 
 
-def resolve_feature_policy(*, feature: AiFeature, trigger: str) -> FeatureQuotaPolicy | None:
+def resolve_feature_policy(
+    *, feature: AiFeature, trigger: str, personal_limits: PersonalQuotaLimits | None = None
+) -> FeatureQuotaPolicy | None:
     """Return the explicit commercial policy for a user-facing feature.
 
     ``None`` means the known feature intentionally has no commercial quota in
@@ -187,9 +276,37 @@ def resolve_feature_policy(*, feature: AiFeature, trigger: str) -> FeatureQuotaP
         if trigger == "scheduled":
             return None
         raise ValueError(f"Unsupported Daily Summary trigger for access policy: {trigger!r}")
-    if feature in (AiFeature.AUTOCONFIG, AiFeature.LLM_CONTEXT_COMPRESSION):
+    if feature == AiFeature.PERSONAL_CHAT:
+        if personal_limits is None:
+            # Fail closed: without configured limits the feature must not become unlimited.
+            raise ValueError("Personal quota limits are not configured")
+        return FeatureQuotaPolicy(
+            feature,
+            "personal_chat_free_daily_v1",
+            personal_limits.free_daily,
+            QuotaPeriod.DAY,
+            pool_key=PERSONAL_POOL_KEY,
+        )
+    # /autocfg and internal operations (memory extraction, context compression) are
+    # accounted for cost but never spend a user's or chat's commercial quota.
+    if feature in (
+        AiFeature.AUTOCONFIG,
+        AiFeature.LLM_CONTEXT_COMPRESSION,
+        AiFeature.PERSONAL_MEMORY_EXTRACT,
+    ):
         return None
     raise ValueError(f"No explicit feature access policy for {feature!r}")
+
+
+def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
+    """Selara Personal raises the same daily pool from the free to the paid limit."""
+    return FeatureQuotaPolicy(
+        AiFeature.PERSONAL_CHAT,
+        "personal_chat_paid_daily_v1",
+        limits.paid_daily,
+        QuotaPeriod.DAY,
+        pool_key=PERSONAL_POOL_KEY,
+    )
 
 
 def quota_period_bounds(
@@ -233,9 +350,48 @@ class FeatureAccessService:
         repository: FeatureQuotaRepository,
         *,
         entitlement_resolver: ChatEntitlementResolver | None = None,
+        user_entitlement_resolver: UserEntitlementResolver | None = None,
+        pricer: UsagePricer | None = None,
+        personal_limits: PersonalQuotaLimits | None = None,
+        personal_config: PersonalConfigProvider | None = None,
     ) -> None:
+        # ``personal_config`` (settings + DB override, hot-reloaded) wins over the static ``personal_limits``.
+        self._personal_limits = personal_limits
+        self._personal_config = personal_config
         self._repository = repository
         self._entitlement_resolver = entitlement_resolver or NoPaidChatEntitlementResolver()
+        self._user_entitlement_resolver = user_entitlement_resolver or NoPaidUserEntitlementResolver()
+        self._pricer: UsagePricer = pricer or ConfiguredUsagePricer()
+
+    async def _personal_limits_now(self) -> PersonalQuotaLimits | None:
+        if self._personal_config is None:
+            return self._personal_limits
+        return (await self._personal_config.get()).limits
+
+    def _cost_of(self, feature: AiFeature, trigger: str) -> QuotaCost:
+        """Personal features cost exactly one request: AI Limits weights are a later, deliberate switch."""
+        if feature in PERSONAL_FEATURES:
+            return PERSONAL_REQUEST_COST
+        return self._pricer.price(feature=feature, model_key=None, operation=trigger)
+
+    async def _resolve_entitlement(
+        self,
+        *,
+        scope: QuotaScope,
+        feature: AiFeature,
+        trigger: str,
+    ) -> FeatureEntitlement:
+        if scope.scope_type == QuotaScopeType.USER:
+            return await self._user_entitlement_resolver.resolve(
+                user_id=scope.scope_id,
+                feature=feature,
+                trigger=trigger,
+            )
+        return await self._entitlement_resolver.resolve(
+            chat_id=scope.scope_id,
+            feature=feature,
+            trigger=trigger,
+        )
 
     async def resolve_feature_access(
         self,
@@ -243,16 +399,19 @@ class FeatureAccessService:
         feature: AiFeature,
         chat_id: int,
         trigger: str,
+        scope: QuotaScope | None = None,
         owner_exempt: bool = False,
         now: datetime | None = None,
     ) -> FeatureAccessDecision:
         """Resolve feature entitlement without reserving or consuming quota."""
+        scope = scope or QuotaScope.chat(chat_id)
+        scope_type, scope_id = scope.scope_type.value, str(scope.scope_id)
         if owner_exempt:
             return FeatureAccessDecision(
                 allowed=True,
                 feature=feature,
-                scope_type="chat",
-                scope_id=str(chat_id),
+                scope_type=scope_type,
+                scope_id=scope_id,
                 access_tier=AccessTier.OWNER_INTERNAL,
                 quota_limit=None,
                 quota_used=None,
@@ -264,11 +423,7 @@ class FeatureAccessService:
             )
 
         try:
-            entitlement = await self._entitlement_resolver.resolve(
-                chat_id=chat_id,
-                feature=feature,
-                trigger=trigger,
-            )
+            entitlement = await self._resolve_entitlement(scope=scope, feature=feature, trigger=trigger)
             if not isinstance(entitlement, FeatureEntitlement):
                 raise TypeError("Entitlement resolver returned an unsupported result")
             if entitlement.access_tier == AccessTier.OWNER_INTERNAL:
@@ -277,17 +432,18 @@ class FeatureAccessService:
                 raise ValueError("Entitlement resolver returned an unsupported access tier")
         except Exception:
             logger.debug(
-                "Feature entitlement resolver failed feature=%s trigger=%s chat_id=%s",
+                "Feature entitlement resolver failed feature=%s trigger=%s scope=%s:%s",
                 feature.value,
                 trigger,
-                chat_id,
+                scope_type,
+                scope_id,
                 exc_info=True,
             )
             return FeatureAccessDecision(
                 allowed=False,
                 feature=feature,
-                scope_type="chat",
-                scope_id=str(chat_id),
+                scope_type=scope_type,
+                scope_id=scope_id,
                 access_tier=AccessTier.FREE,
                 quota_limit=None,
                 quota_used=None,
@@ -309,8 +465,8 @@ class FeatureAccessService:
                 return FeatureAccessDecision(
                     allowed=False,
                     feature=feature,
-                    scope_type="chat",
-                    scope_id=str(chat_id),
+                    scope_type=scope_type,
+                    scope_id=scope_id,
                     access_tier=AccessTier.FREE,
                     quota_limit=None,
                     quota_used=None,
@@ -327,8 +483,8 @@ class FeatureAccessService:
         return FeatureAccessDecision(
             allowed=paid,
             feature=feature,
-            scope_type="chat",
-            scope_id=str(chat_id),
+            scope_type=scope_type,
+            scope_id=scope_id,
             access_tier=entitlement.access_tier,
             quota_limit=None,
             quota_used=None,
@@ -390,6 +546,7 @@ class FeatureAccessService:
         trigger: str,
         timezone_name: str,
         idempotency_key: str,
+        scope: QuotaScope | None = None,
         chat_type: str = "supergroup",
         chat_title: str | None = None,
         actor_is_bot: bool = False,
@@ -399,13 +556,18 @@ class FeatureAccessService:
         owner_exempt: bool = False,
         now: datetime | None = None,
     ) -> FeatureAccessDecision:
+        """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened."""
+        scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        personal_limits = await self._personal_limits_now()
+        policy = resolve_feature_policy(
+            feature=feature, trigger=trigger, personal_limits=personal_limits
+        )
         entitlement = None
         if policy is not None and not owner_exempt:
             policy, tier, entitlement = await self._paid_feature_policy(
                 policy=policy,
-                chat_id=chat_id,
+                scope=scope,
                 feature=feature,
                 trigger=trigger,
                 now=now,
@@ -414,8 +576,8 @@ class FeatureAccessService:
             return FeatureAccessDecision(
                 allowed=True,
                 feature=feature,
-                scope_type="chat",
-                scope_id=str(chat_id),
+                scope_type=scope.scope_type.value,
+                scope_id=str(scope.scope_id),
                 access_tier=tier,
                 quota_limit=None,
                 quota_used=None,
@@ -432,10 +594,13 @@ class FeatureAccessService:
             now=now or datetime.now(timezone.utc),
             timezone_name=timezone_name,
         )
+        cost = self._cost_of(feature, trigger)
         decision = await self._repository.reserve(
             policy=policy,
             access_tier=tier,
             chat_id=chat_id,
+            scope=scope,
+            cost=cost,
             chat_type=chat_type,
             chat_title=chat_title,
             actor_user_id=actor_user_id,
@@ -459,6 +624,15 @@ class FeatureAccessService:
             )
         return decision
 
+    async def adjust(self, *, invocation_id: int, actual_units: Decimal) -> None:
+        """Interface only: correcting a reservation by actual cost arrives with AI Limits.
+
+        Reservations are made from an estimate before the provider call. A later stage
+        will implement this to settle the difference; until then it deliberately does
+        nothing, so callers can already be written against the final shape.
+        """
+        return None
+
     async def get_usage_summary(
         self,
         *,
@@ -466,22 +640,27 @@ class FeatureAccessService:
         chat_id: int,
         trigger: str,
         timezone_name: str,
+        scope: QuotaScope | None = None,
         owner_exempt: bool = False,
         now: datetime | None = None,
     ) -> FeatureUsageSummary:
+        scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
-        policy = resolve_feature_policy(feature=feature, trigger=trigger)
+        personal_limits = await self._personal_limits_now()
+        policy = resolve_feature_policy(
+            feature=feature, trigger=trigger, personal_limits=personal_limits
+        )
         if policy is not None and not owner_exempt:
             policy, tier, _ = await self._paid_feature_policy(
                 policy=policy,
-                chat_id=chat_id,
+                scope=scope,
                 feature=feature,
                 trigger=trigger,
                 now=now,
             )
         if policy is None:
             return FeatureUsageSummary(
-                feature, "chat", str(chat_id), tier, None, None, None, None, None, None,
+                feature, scope.scope_type.value, str(scope.scope_id), tier, None, None, None, None, None, None,
                 True, owner_exempt, None,
             )
         start, end = quota_period_bounds(
@@ -492,6 +671,7 @@ class FeatureAccessService:
         summary = await self._repository.usage_summary(
             policy=policy,
             chat_id=chat_id,
+            scope=scope,
             owner_exempt=owner_exempt,
             period_start=start,
             period_end=end,
@@ -502,18 +682,14 @@ class FeatureAccessService:
         self,
         *,
         policy: FeatureQuotaPolicy,
-        chat_id: int,
+        scope: QuotaScope,
         feature: AiFeature,
         trigger: str,
         now: datetime | None,
     ) -> tuple[FeatureQuotaPolicy, AccessTier, FeatureEntitlement | None]:
         """Keep paid tier visible while preserving free quota until a paid limit exists."""
         try:
-            entitlement = await self._entitlement_resolver.resolve(
-                chat_id=chat_id,
-                feature=feature,
-                trigger=trigger,
-            )
+            entitlement = await self._resolve_entitlement(scope=scope, feature=feature, trigger=trigger)
             if not isinstance(entitlement, FeatureEntitlement):
                 raise TypeError("Entitlement resolver returned an unsupported result")
             if entitlement.access_tier != AccessTier.PAID:
@@ -532,13 +708,16 @@ class FeatureAccessService:
             paid_policy = entitlement.quota_policy
             if paid_policy.feature != feature:
                 raise ValueError("Paid entitlement supplied a quota policy for another feature")
+            if paid_policy.pool != policy.pool or paid_policy.unit != policy.unit:
+                raise ValueError("Paid entitlement supplied a quota policy for another pool")
             if paid_policy.period != policy.period or paid_policy.limit <= policy.limit:
                 raise ValueError("Paid feature quota policy must raise the existing period limit")
             return paid_policy, AccessTier.PAID, entitlement
         except Exception:
             logger.debug(
-                "Paid feature quota policy resolution failed; applying free policy chat_id=%s feature=%s",
-                chat_id,
+                "Paid feature quota policy resolution failed; applying free policy scope=%s:%s feature=%s",
+                scope.scope_type.value,
+                scope.scope_id,
                 feature.value,
                 exc_info=True,
             )

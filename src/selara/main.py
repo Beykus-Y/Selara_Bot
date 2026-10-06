@@ -17,6 +17,7 @@ from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
+from selara.infrastructure.db.personal_config import build_personal_config
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -190,7 +191,12 @@ async def _run_bot(settings, session_factory) -> None:
         )
         await daily_summary_stt_queue.start()
 
-    polling_kwargs: dict = {"settings": settings, "session_factory": session_factory}
+    personal_config, _ = build_personal_config(session_factory, settings)
+    polling_kwargs: dict = {
+        "settings": settings,
+        "session_factory": session_factory,
+        "personal_config": personal_config,
+    }
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:
