@@ -23,8 +23,8 @@ PostgreSQL, and invalidate the local cache only after commit.
 are editable. Each profile can assign a nullable catalog key and an enabled flag.
 The migration seeds profiles with no assignment and `ail_multiplier = 1`.
 
-**`ail_multiplier` in PR 11 is metadata and does not participate in quota
-consumption.** Its Decimal value is validated in (0, 1000], with 9 decimal places.
+**`ail_multiplier` in PR 11/12 was metadata; since PR 13 it prices Personal AI
+requests only when the owner switches Personal to AI Limits mode (see below).** Its Decimal value is validated in (0, 1000], with 9 decimal places.
 Personal quotas remain 5 free / 150 paid requests by default, and one request
 consumes exactly one unit regardless of the selected model or multiplier.
 
@@ -85,7 +85,7 @@ than silently truncating them.
 ## Later PRs
 
 PR 12 supplies owner administration UI/HTTP endpoints using these store interfaces.
-User model selection, auto-mode/classification, enabling actual AIL consumption,
+User model selection and AIL consumption arrived in PR 13; auto-mode/classification
 and multi-provider credentials/transport are separate future PRs. This change
 introduces none of those product behaviors or changes to payment semantics.
 
@@ -133,10 +133,50 @@ cache invalidates immediately; other bot/web workers pick up changes at their
 existing 15-second TTL. Failed commits do not invalidate last-known-good runtime
 state. No runtime restart or provider call is required by these forms.
 
-AIL remains metadata: a request still consumes one quota unit, with existing
-free/paid limits 5/150. Stars billing and subscription terms are unchanged.
+In the default requests mode a request still consumes one quota unit, with the
+existing free/paid limits 5/150; AIL consumption is a separate owner switch (PR 13). Stars billing and subscription terms are unchanged.
 Historical profile breakdown is grouped directly by usage.model_profile,
 including unassigned calls, without joining current profile assignments.
-Physical model statistics remain in the existing expenses breakdown. Public
-profile DTOs, user selection and real AIL consumption remain future work (PR 13
-and later).
+Physical model statistics remain in the existing expenses breakdown. User selection and real AIL consumption are described in the PR 13 section below.
+
+## User model selection and AI Limits (PR 13)
+
+Migration `0092_personal_model_ail` adds `personal_ai_profiles.model_profile_key`
+(default `basic`), `selara_personal_config.quota_mode` (`NULL`/`requests`/`ail`) with
+`free_daily_ail`/`paid_daily_ail`, and `ai_feature_quota_usage.model_profile`. All
+columns are additive with defaults, so the previous image keeps working. Downgrade
+refuses while users' profile choices, AIL mode/budgets or AIL reservations exist.
+
+**Modes.** `requests` (default after deploy) keeps Personal at 5/150 requests in the
+`personal_daily` pool; the multiplier never changes the cost and Personal keeps calling
+the legacy model, so an expensive profile cannot be used for one request. `ail` charges
+`ModelProfile.ail_multiplier` against the separate `personal_ail_daily` pool with the
+owner-configured `free_daily_ail`/`paid_daily_ail` budgets. Request rows and AIL rows
+never share a pool: switching modes does not turn spent requests into AIL. History is
+kept in both directions. A broken or unreadable override never fails open: the cache
+keeps the last known good config, and without one falls back to requests 5/150.
+
+**Enabling AIL** (owner only, `GET`/`PUT /api/miniapp/admin/monetization/quota-mode`,
+UI «Система лимитов Personal»): both budgets set, `0 < free < paid ≤ 100000`, `basic`
+enabled and assigned to an enabled model, every enabled profile's multiplier in
+(0, 1000] with at most 2 decimals (AIL units are stored in `NUMERIC(10,2)`), and an
+explicit confirmation (409 without `confirm: true`). Changes apply within the 15 s TTL.
+
+**One resolution per turn.** `personal_models.choose_from_snapshot` resolves the user's
+profile against one catalog snapshot (`model_router.resolve_from_snapshot`). The
+returned `ResolvedModel` carries `profile_key`, `catalog_key`, `model_id`,
+`ail_multiplier`, capabilities and the snapshot itself as the pricing reference. The
+quota reservation takes `units` from it, and `LlmClient.chat_simple(resolved_model=...)`
+calls exactly that model and prices usage from the same snapshot without resolving
+again. An admin edit after resolution affects only the next request. Unusable selected
+profiles fall back to `basic` (then to the legacy model at 1 AIL) and are charged at
+the effective profile's cost.
+
+**Accounting.** Historical AIL = the `units` actually reserved
+(`ai_feature_quota_usage.units`, grouped by `model_profile`); it is never recomputed
+from current multipliers. Owner-exempt and released reservations are not counted. The
+admin breakdown shows `ail_profiles`/`ail_consumed` next to (not instead of) the USD
+per-model and per-profile statistics. AIL and USD are independent: model prices never
+change multipliers and multipliers never enter USD estimates. Internal operations
+(memory extraction, compression), `/autocfg`, pets and group AI do not spend AIL and
+keep their own routing; there is no auto mode or classifier.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -15,7 +16,15 @@ from redis.asyncio import Redis
 from sqlalchemy import case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.application.personal_config import PersonalConfig, PersonalConfigOverride, config_from_settings
+from selara.application.personal_config import (
+    MAX_DAILY_AIL,
+    QUOTA_MODE_AIL,
+    QUOTA_MODES,
+    PersonalConfig,
+    PersonalConfigOverride,
+    config_from_settings,
+)
+from selara.application.personal_models import ail_activation_problems, format_ail, profile_options
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
 from selara.web.admin_models import build_admin_models_router
@@ -57,6 +66,8 @@ _PAYMENT_STATES = {"all", "applied", "rejected"}
 _PAYMENT_SCOPES = {"all", "chat", "user"}
 _REFUND_FILTERS = {"all", "none", "pending", "refunded", "failed"}
 _health_last_success: dict[str, str] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -731,6 +742,7 @@ def build_miniapp_admin_router(
         models, marker_only_calls = await repository.model_breakdown(window_from=window_from, window_to=window_to)
         profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
+        ail_rows = await repository.ail_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
             "period_days": period_days,
@@ -739,6 +751,9 @@ def build_miniapp_admin_router(
             "unattributed_provider_calls": marker_only_calls,
             "profiles": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in profiles],
             "stages": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in stages],
+            # Product units reserved from users' AI Limits budgets; never converted to USD.
+            "ail_profiles": [{**row, "ail_consumed": format_ail(row["ail_consumed"])} for row in ail_rows],
+            "ail_consumed": format_ail(sum((row["ail_consumed"] for row in ail_rows), Decimal(0))),
         }
 
     @router.get("/monetization/summary")
@@ -961,6 +976,92 @@ def build_miniapp_admin_router(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return {"ok": True, "effective": _personal_config_json(effective)}
+
+    async def _catalog_snapshot():
+        from selara.infrastructure.db.model_catalog import SqlAlchemyModelCatalogStore
+
+        try:
+            return await SqlAlchemyModelCatalogStore(session_factory).load()
+        except Exception:
+            logger.exception("Model catalog unavailable for the quota mode check")
+            return None
+
+    def _quota_mode_json(config: PersonalConfig, override: PersonalConfigOverride | None, snapshot) -> dict[str, Any]:
+        options = profile_options(snapshot, legacy_model=settings.llm_model)
+        return {
+            "quota_mode": config.quota_mode,
+            "free_daily_ail": override.free_daily_ail if override else None,
+            "paid_daily_ail": override.paid_daily_ail if override else None,
+            "requests": {"free_daily": config.limits.free_daily, "paid_daily": config.limits.paid_daily},
+            "max_daily_ail": MAX_DAILY_AIL,
+            "activation_problems": ail_activation_problems(snapshot),
+            "profiles": [
+                {
+                    "profile_key": option.profile_key,
+                    "display_name": option.display_name,
+                    "ail_multiplier": format_ail(option.ail_multiplier),
+                    "available": option.available,
+                }
+                for option in options
+            ],
+            "applies_within_seconds": 15,
+        }
+
+    @router.get("/monetization/quota-mode")
+    async def quota_mode_read(session: AsyncSession = AdminSession):
+        """Requests (5/150) or AI Limits, with the AIL budgets and why AIL could not be enabled."""
+        override = await personal_config_store.load_override()
+        effective = await _personal_provider.get()
+        return {"ok": True, **_quota_mode_json(effective, override, await _catalog_snapshot())}
+
+    @router.put("/monetization/quota-mode")
+    async def quota_mode_write(request: Request, session: AsyncSession = AdminSession):
+        """Owner-only switch; enabling AIL needs budgets, a usable basic profile and explicit confirmation."""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Ожидался JSON.") from None
+        if not isinstance(payload, dict) or set(payload) - {"quota_mode", "free_daily_ail", "paid_daily_ail", "confirm"}:
+            raise HTTPException(status_code=422, detail="Некорректные данные.")
+        mode = payload.get("quota_mode")
+        if mode not in QUOTA_MODES:
+            raise HTTPException(status_code=422, detail="Режим: requests или ail.")
+        budgets: dict[str, int | None] = {}
+        for key in ("free_daily_ail", "paid_daily_ail"):
+            value = payload.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise HTTPException(status_code=422, detail=f"{key}: целое число.")
+            if value is not None and not 0 < value <= MAX_DAILY_AIL:
+                raise HTTPException(status_code=422, detail=f"{key}: от 1 до {MAX_DAILY_AIL}.")
+            budgets[key] = value
+        current = await _personal_provider.get()
+        if mode == QUOTA_MODE_AIL:
+            if budgets["free_daily_ail"] is None or budgets["paid_daily_ail"] is None:
+                raise HTTPException(status_code=422, detail="Сначала задайте Free/Paid AIL budget.")
+            problems = ail_activation_problems(await _catalog_snapshot())
+            if problems:
+                raise HTTPException(status_code=422, detail=" ".join(problems))
+            if not current.ail_enabled and payload.get("confirm") is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "После включения разные модели будут расходовать разное количество AI Limits. "
+                        "Текущие лимиты запросов перестанут использоваться. Подтвердите включение."
+                    ),
+                )
+        user = await load_user(session, request)
+        try:
+            effective = await personal_config_store.save_quota_mode(
+                quota_mode=mode,
+                free_daily_ail=budgets["free_daily_ail"],
+                paid_daily_ail=budgets["paid_daily_ail"],
+                updated_by=user.telegram_user_id if user else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        logger.info("Personal quota mode saved mode=%s by=%s", mode, user.telegram_user_id if user else None)
+        override = await personal_config_store.load_override()
+        return {"ok": True, **_quota_mode_json(effective, override, await _catalog_snapshot())}
 
     @router.get("/ai/readiness")
     async def ai_readiness(session: AsyncSession = AdminSession):

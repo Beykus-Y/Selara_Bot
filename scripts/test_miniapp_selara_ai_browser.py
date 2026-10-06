@@ -274,6 +274,10 @@ BREAKDOWN = {
     "models": [{"model": "a-very-long-model-name-" * 3, "provider_calls": 7, "prompt_tokens": 12000,
                 "completion_tokens": 900, "known_cost_usd": "0.0184", "unknown_cost_calls": 1}],
     "stages": [{"feature": "daily_summary", "stage": "writer", "provider_calls": 2, "known_cost_usd": "0.01"}],
+    "profiles": [{"profile_key": "analytics", "provider_calls": 3, "known_cost_usd": "0.0042", "unknown_cost_calls": 0}],
+    "ail_profiles": [{"profile_key": "basic", "requests": 420, "ail_consumed": "420"},
+                     {"profile_key": "analytics", "requests": 155, "ail_consumed": "310.5"}],
+    "ail_consumed": "730.5",
 }
 
 READINESS = {
@@ -363,6 +367,7 @@ async def _run_admin_scenarios(browser) -> None:
         assert "$0.0184" in body_text
         assert "brand_new_feature" in body_text and "? / ??" in body_text  # unknown features are not dropped
         assert "Выручка в Stars и расходы AI в USD" in body_text
+        assert "ai limits по профилям" in body_text.lower() and "730.5 AIL" in body_text and "310.5 AIL" in body_text
         assert "Исход возврата требует ручной проверки." in body_text
         assert "истекают в ближайшие 7 дней" in body_text.lower()
         assert "Checkout выключен: SELARA_AI_PRICE_STARS не настроен." in body_text

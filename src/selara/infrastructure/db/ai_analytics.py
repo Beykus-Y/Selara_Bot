@@ -17,9 +17,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Date, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from selara.application.feature_access import PERSONAL_AIL_POOL_KEY
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY, SELARA_PERSONAL_PRODUCT_KEY
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     ChatEntitlementModel,
     UserEntitlementModel,
     ChatModel,
@@ -215,6 +217,34 @@ class AdminAiAnalyticsRepository:
              "unknown_cost_calls": int(unknown)}
             for profile, calls, cost, unknown in result.all()
         ]
+
+    async def ail_breakdown(self, *, window_from: datetime, window_to: datetime) -> list[dict]:
+        """AI Limits actually reserved, by the profile recorded on each reservation.
+
+        Sums the stored ``units`` (never current multiplier × requests), so multiplier edits do not
+        rewrite history. Owner-exempt and released reservations consumed nothing and are skipped.
+        """
+        result = await self._session.execute(
+            select(
+                AiFeatureQuotaUsageModel.model_profile,
+                func.count(AiFeatureQuotaUsageModel.id),
+                func.coalesce(func.sum(AiFeatureQuotaUsageModel.units), 0),
+            )
+            .where(
+                AiFeatureQuotaUsageModel.pool_key == PERSONAL_AIL_POOL_KEY,
+                AiFeatureQuotaUsageModel.status == "consumed",
+                AiFeatureQuotaUsageModel.owner_exempt.is_(False),
+                AiFeatureQuotaUsageModel.created_at >= window_from,
+                AiFeatureQuotaUsageModel.created_at < window_to,
+            )
+            .group_by(AiFeatureQuotaUsageModel.model_profile)
+        )
+        rows = [
+            {"profile_key": profile, "requests": int(count), "ail_consumed": Decimal(units)}
+            for profile, count, units in result.all()
+        ]
+        rows.sort(key=lambda item: item["ail_consumed"], reverse=True)
+        return rows
 
     async def stage_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
         result = await self._session.execute(

@@ -61,6 +61,13 @@ class QuotaScope:
 
 
 PERSONAL_POOL_KEY = "personal_daily"
+# AI Limits mode spends a separate pool: request rows and AIL rows never add up together.
+PERSONAL_AIL_POOL_KEY = "personal_ail_daily"
+REQUEST_UNIT = "request"
+AIL_UNIT = "ail"
+# AIL units are stored in ai_feature_quota_usage.units NUMERIC(10,2).
+AIL_UNITS_QUANTUM = Decimal("0.01")
+MAX_AIL_REQUEST_UNITS = Decimal("1000")
 # A pet's talk is paid by its owner: one pool per owner (one pet per owner today).
 PET_POOL_KEY = "pet_daily"
 DEFAULT_PET_TALK_DAILY_LIMIT = 60
@@ -68,20 +75,36 @@ DEFAULT_PET_TALK_DAILY_LIMIT = 60
 GROUP_MEMBER_POOL_KEY = "group_member_daily"
 # Features the personal config may price; group features never read its weights.
 PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
-# What a personal request draws from the pool: 5/150 are requests, not weighted units.
+# What a personal request draws from the pool in requests mode: 5/150 are requests, not weighted units.
 PERSONAL_REQUEST_COST = QuotaCost(Decimal("1"))
+
+
+def validate_ail_units(units: Decimal) -> Decimal:
+    """A positive, finite AIL cost with at most two decimals (what the units column stores exactly)."""
+    if not isinstance(units, Decimal) or not units.is_finite() or units <= 0 or units > MAX_AIL_REQUEST_UNITS:
+        raise ValueError("AIL cost must be a positive finite Decimal")
+    if units != units.quantize(AIL_UNITS_QUANTUM):
+        raise ValueError("AIL cost supports at most 2 decimal places")
+    return units
 
 
 @dataclass(frozen=True, slots=True)
 class PersonalQuotaLimits:
-    """Daily limits of the personal pool, in quota units; values come from settings."""
+    """Daily limits of the personal pool: requests (from settings) or AI Limits (owner-configured)."""
 
     free_daily: int
     paid_daily: int
+    unit: str = REQUEST_UNIT
 
     def __post_init__(self) -> None:
         if self.free_daily <= 0 or self.paid_daily <= self.free_daily:
             raise ValueError("Personal limits must satisfy 0 < free < paid")
+        if self.unit not in (REQUEST_UNIT, AIL_UNIT):
+            raise ValueError("Personal limits unit must be 'request' or 'ail'")
+
+    @property
+    def pool_key(self) -> str:
+        return PERSONAL_AIL_POOL_KEY if self.unit == AIL_UNIT else PERSONAL_POOL_KEY
 
     @classmethod
     def from_settings(cls, settings) -> "PersonalQuotaLimits":
@@ -128,7 +151,7 @@ class FeatureQuotaPolicy:
     # budget later. ``None`` keeps today's behaviour: a feature is its own pool.
     pool_key: str | None = None
     # What ``limit`` counts: plain requests now, AI Limits later.
-    unit: str = "request"
+    unit: str = REQUEST_UNIT
     # Optional share of the pool one actor may spend in a period, counted under the same lock.
     per_actor_limit: int | None = None
 
@@ -158,6 +181,8 @@ class FeatureAccessDecision:
     entitlement_valid_until: datetime | None = None
     entitlement_source: str | None = None
     entitlement_product: str | None = None
+    # What the pool counted for this decision: "request" or "ail" (None: no quota policy).
+    quota_unit: str | None = None
 
     @property
     def unlimited(self) -> bool:
@@ -179,6 +204,7 @@ class FeatureUsageSummary:
     unlimited: bool
     owner_exempt: bool
     policy_key: str | None
+    quota_unit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,10 +348,11 @@ def resolve_feature_policy(
             raise ValueError("Personal quota limits are not configured")
         return FeatureQuotaPolicy(
             feature,
-            "personal_chat_free_daily_v1",
+            "personal_chat_free_daily_ail_v1" if personal_limits.unit == AIL_UNIT else "personal_chat_free_daily_v1",
             personal_limits.free_daily,
             QuotaPeriod.DAY,
-            pool_key=PERSONAL_POOL_KEY,
+            pool_key=personal_limits.pool_key,
+            unit=personal_limits.unit,
         )
     if feature == AiFeature.GROUP_MEMBER:
         if group_member_limits is None:
@@ -358,10 +385,11 @@ def paid_personal_policy(limits: PersonalQuotaLimits) -> FeatureQuotaPolicy:
     """Selara Personal raises the same daily pool from the free to the paid limit."""
     return FeatureQuotaPolicy(
         AiFeature.PERSONAL_CHAT,
-        "personal_chat_paid_daily_v1",
+        "personal_chat_paid_daily_ail_v1" if limits.unit == AIL_UNIT else "personal_chat_paid_daily_v1",
         limits.paid_daily,
         QuotaPeriod.DAY,
-        pool_key=PERSONAL_POOL_KEY,
+        pool_key=limits.pool_key,
+        unit=limits.unit,
     )
 
 
@@ -449,12 +477,21 @@ class FeatureAccessService:
     async def _personal_limits_now(self) -> PersonalQuotaLimits | None:
         if self._personal_config is None:
             return self._personal_limits
-        return (await self._personal_config.get()).limits
+        # Requests (5/150) or, once the owner switched it on, AI Limits budgets.
+        return (await self._personal_config.get()).active_limits
 
-    def _cost_of(self, feature: AiFeature, trigger: str) -> QuotaCost:
-        """Personal features cost exactly one request: AI Limits weights are a later, deliberate switch."""
+    def _cost_of(
+        self, feature: AiFeature, trigger: str, policy: FeatureQuotaPolicy, units: Decimal | None
+    ) -> QuotaCost:
+        """A personal message costs one request, or in AIL mode its model profile's multiplier."""
         if feature in PERSONAL_FEATURES:
-            return PERSONAL_REQUEST_COST
+            if policy.unit != AIL_UNIT:
+                # Requests mode: the multiplier never changes what a message costs.
+                return PERSONAL_REQUEST_COST
+            if units is None:
+                # Fail closed: an AIL reservation without a resolved model cost must not run.
+                raise ValueError("AIL reservations need the resolved model profile cost")
+            return QuotaCost(validate_ail_units(units))
         return self._pricer.price(feature=feature, model_key=None, operation=trigger)
 
     async def _resolve_entitlement(
@@ -638,8 +675,14 @@ class FeatureAccessService:
         mode: str | None = None,
         owner_exempt: bool = False,
         now: datetime | None = None,
+        units: Decimal | None = None,
+        model_profile: str | None = None,
     ) -> FeatureAccessDecision:
-        """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened."""
+        """Reserve quota for ``scope`` (default: the chat); ``chat_id`` is where the request happened.
+
+        ``units`` is the AIL cost taken from the request's resolved model snapshot; it is used only
+        when the pool counts AI Limits. ``model_profile`` is recorded on the reservation for analytics.
+        """
         scope = scope or QuotaScope.chat(chat_id)
         tier = AccessTier.OWNER_INTERNAL if owner_exempt else AccessTier.FREE
         personal_limits = await self._personal_limits_now()
@@ -657,6 +700,7 @@ class FeatureAccessService:
                 feature=feature,
                 trigger=trigger,
                 now=now,
+                personal_limits=personal_limits,
             )
         if policy is None:
             return FeatureAccessDecision(
@@ -680,7 +724,9 @@ class FeatureAccessService:
             now=now or datetime.now(timezone.utc),
             timezone_name=timezone_name,
         )
-        cost = self._cost_of(feature, trigger)
+        cost = self._cost_of(feature, trigger, policy, units)
+        # The profile is recorded only where it priced the reservation (AIL); request rows stay as before.
+        extra = {"model_profile": model_profile} if model_profile is not None and policy.unit == AIL_UNIT else {}
         decision = await self._repository.reserve(
             policy=policy,
             access_tier=tier,
@@ -699,7 +745,9 @@ class FeatureAccessService:
             owner_exempt=owner_exempt,
             period_start=start,
             period_end=end,
+            **extra,
         )
+        decision = replace(decision, quota_unit=policy.unit)
         if entitlement is not None:
             return replace(
                 decision,
@@ -746,6 +794,7 @@ class FeatureAccessService:
                 feature=feature,
                 trigger=trigger,
                 now=now,
+                personal_limits=personal_limits,
             )
         if policy is None:
             return FeatureUsageSummary(
@@ -765,7 +814,7 @@ class FeatureAccessService:
             period_start=start,
             period_end=end,
         )
-        return replace(summary, access_tier=tier)
+        return replace(summary, access_tier=tier, quota_unit=policy.unit)
 
     async def _paid_feature_policy(
         self,
@@ -775,6 +824,7 @@ class FeatureAccessService:
         feature: AiFeature,
         trigger: str,
         now: datetime | None,
+        personal_limits: PersonalQuotaLimits | None = None,
     ) -> tuple[FeatureQuotaPolicy, AccessTier, FeatureEntitlement | None]:
         """Keep paid tier visible while preserving free quota until a paid limit exists."""
         try:
@@ -795,6 +845,14 @@ class FeatureAccessService:
             if entitlement.quota_policy is None:
                 return policy, AccessTier.PAID, entitlement
             paid_policy = entitlement.quota_policy
+            if (
+                feature == AiFeature.PERSONAL_CHAT
+                and personal_limits is not None
+                and (paid_policy.unit != policy.unit or policy.unit == AIL_UNIT)
+            ):
+                # The AIL budget is not sold per subscription: take it from the same config snapshot
+                # as the free policy, so a mode switch between two reads cannot demote a subscriber.
+                paid_policy = paid_personal_policy(personal_limits)
             if paid_policy.feature != feature:
                 raise ValueError("Paid entitlement supplied a quota policy for another feature")
             if paid_policy.pool != policy.pool or paid_policy.unit != policy.unit:

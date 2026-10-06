@@ -33,6 +33,24 @@ SESSION = {
 }
 
 
+def _model(*, ail=False, selected="basic"):
+    def option(key, emoji, name, description, multiplier, available=True):
+        return {"profile_key": key, "emoji": emoji, "display_name": name, "description": description,
+                "ail_multiplier": multiplier, "available": available}
+
+    return {
+        "quota_mode": "ail" if ail else "requests", "selectable": ail, "selected": selected,
+        "effective": selected, "effective_name": {"basic": "Базовая", "analytics": "Аналитик"}.get(selected, selected),
+        "fell_back": False, "cost_ail": {"basic": "1", "analytics": "2.5"}.get(selected, "1"),
+        "options": [
+            option("basic", "⚪", "Базовая", "Для обычных разговоров", "1"),
+            option("analytics", "🧠", "Аналитик", "Для сложного анализа", "2.5"),
+            option("creative", "🎨", "Творческая модель с очень длинным названием профиля", "Для сложных творческих задач",
+                   "5", available=False),
+        ],
+    }
+
+
 def _overview(*, tier="free", facts=None, limit=20, memory_enabled=True, available=True, valid_days=None):
     facts = facts if facts is not None else []
     paid = tier == "paid"
@@ -59,6 +77,7 @@ def _overview(*, tier="free", facts=None, limit=20, memory_enabled=True, availab
             "memory_enabled": memory_enabled, "auto_memory_enabled": False, "auto_memory_available": paid,
             "display_name": "Селара", "mode": "assistant",
         },
+        "model": _model(),
         "memory": {"count": len(facts), "limit": limit if available else None, "items": facts},
     }
 
@@ -158,6 +177,9 @@ class FakeBackend:
         if tail == "/settings" and method == "PUT":
             self.state["profile"].update(body)
             return await self._json(route, {"ok": True, "profile": self.state["profile"]})
+        if tail == "/model" and method == "PUT":
+            self.state["model"] = _model(ail=True, selected=body["profile_key"])
+            return await self._json(route, {"ok": True, "model": self.state["model"]})
         if tail == "/forget-all" and method == "POST":
             removed = {"memories": len(items), "messages": 4, "summaries": 0, "profile": True}
             items.clear()
@@ -286,6 +308,35 @@ async def _run_forget_all(browser) -> None:
     await context.close()
 
 
+async def _run_model_selection(browser) -> None:
+    # Requests mode: profiles are listed but cannot be bought for one request.
+    backend = FakeBackend(_overview())
+    context, page, errors = await _open(browser, 393, backend)
+    await page.get_by_text("станет доступен после включения AI Limits").wait_for()
+    await expect(page.get_by_role("button", name="🧠 Аналитик ×2.5 AIL Для сложного анализа")).to_be_disabled()
+    await context.close()
+
+    for width in WIDTHS:
+        overview = _overview(tier="paid", limit=200)
+        overview["model"] = _model(ail=True)
+        overview["quota"] = {"status": "ok", "unit": "ail", "used": 77, "limit": 150, "remaining": 73.5,
+                             "reset_at": "2026-10-06T21:00:00+00:00", "exhausted": False}
+        backend = FakeBackend(overview)
+        context, page, errors = await _open(browser, width, backend)
+        text = await page.locator("body").inner_text()
+        assert "AI Limits в личных сообщениях" in text and "Осталось 73.5 из 150 AIL" in text, text
+        assert "Сейчас недоступна" in text and "provider/" not in text
+        await expect(page.locator(".personal-model__option").filter(has_text="Творческая")).to_be_disabled()
+        await page.locator(".personal-model__option").filter(has_text="Аналитик").click()
+        await page.get_by_text("Сейчас: Аналитик, 2.5 AIL за запрос.").wait_for()
+        await expect(page.locator(".personal-model__option").filter(has_text="Аналитик")).to_have_attribute(
+            "aria-pressed", "true")
+        assert ("PUT", "/model", {"profile_key": "analytics"}) in backend.calls
+        await _overflow_free(page, f"model selection@{width}")
+        assert not errors, errors
+        await context.close()
+
+
 async def _run_more_link(browser) -> None:
     backend = FakeBackend(_overview())
     context, page, errors = await _new_page(browser, 393)
@@ -306,6 +357,7 @@ async def _run() -> None:
             await _run_limits_and_errors(browser)
             await _run_paid_and_owner(browser)
             await _run_forget_all(browser)
+            await _run_model_selection(browser)
             await _run_more_link(browser)
             await browser.close()
     finally:

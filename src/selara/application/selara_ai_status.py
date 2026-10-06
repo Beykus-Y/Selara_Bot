@@ -55,6 +55,8 @@ def quota_payload(summary: FeatureUsageSummary | None) -> dict[str, Any]:
     remaining = summary.quota_remaining
     return {
         "status": "ok",
+        # "request" or "ail" (AI Limits): what used/limit/remaining count.
+        "unit": summary.quota_unit or "request",
         "used": summary.quota_used,
         "limit": summary.quota_limit,
         "remaining": remaining,

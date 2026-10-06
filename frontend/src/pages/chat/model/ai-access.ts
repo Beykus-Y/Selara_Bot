@@ -7,6 +7,8 @@ export type AiQuota = {
   remaining: number | null
   reset_at: string | null
   exhausted?: boolean
+  /** What used/limit/remaining count: requests or AI Limits (Personal in AIL mode). */
+  unit?: 'request' | 'ail'
 }
 
 export type AiAutomaticSummaryState =

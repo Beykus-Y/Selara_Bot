@@ -2007,6 +2007,15 @@ class SelaraPersonalConfigModel(Base):
             "memory_extract_every IS NULL OR memory_extract_every BETWEEN 2 AND 40",
             name="ck_selara_personal_config_memory_every",
         ),
+        CheckConstraint(
+            "quota_mode IS NULL OR quota_mode IN ('requests', 'ail')", name="ck_selara_personal_config_quota_mode"
+        ),
+        CheckConstraint("free_daily_ail IS NULL OR free_daily_ail > 0", name="ck_selara_personal_config_free_ail"),
+        CheckConstraint("paid_daily_ail IS NULL OR paid_daily_ail > 0", name="ck_selara_personal_config_paid_ail"),
+        CheckConstraint(
+            "quota_mode IS DISTINCT FROM 'ail' OR (free_daily_ail IS NOT NULL AND paid_daily_ail > free_daily_ail)",
+            name="ck_selara_personal_config_ail_budgets",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -2018,6 +2027,10 @@ class SelaraPersonalConfigModel(Base):
     memory_paid_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     memory_auto_extract: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     memory_extract_every: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 'requests' (5/150) or 'ail'; NULL means requests. Switched only by the owner.
+    quota_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    free_daily_ail: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_daily_ail: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -2552,6 +2565,8 @@ class AiFeatureQuotaUsageModel(Base):
     # Several features may spend one pool; today a feature is its own pool.
     pool_key: Mapped[str] = mapped_column(String(48), nullable=False, default=_quota_pool_default)
     units: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("1"), server_default="1")
+    # Model profile whose AIL multiplier priced this reservation (historical text, no FK).
+    model_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
@@ -2690,6 +2705,10 @@ class PersonalAiProfileModel(Base):
     auto_memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Id of the last user message already looked at by extraction; the next batch starts after it.
     memory_extract_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # Logical model profile the user picked (never a physical model id); applied in AIL mode only.
+    model_profile_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="basic", server_default="basic"
+    )
     # Optimistic lock for the settings wizard (and the future Mini App).
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2705,6 +2724,10 @@ class PersonalAiProfileModel(Base):
         CheckConstraint("formality IN ('ty', 'vy')", name="ck_personal_ai_profiles_formality"),
         CheckConstraint("reply_length IN ('short', 'medium', 'long')", name="ck_personal_ai_profiles_reply_length"),
         CheckConstraint("mode IN ('assistant', 'roleplay')", name="ck_personal_ai_profiles_mode"),
+        CheckConstraint(
+            "model_profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+            name="ck_personal_ai_profiles_model_profile",
+        ),
     )
 
 

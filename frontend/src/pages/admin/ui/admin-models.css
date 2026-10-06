@@ -1,4 +1,5 @@
 .admin-models,
+.admin-quota,
 .admin-model-card,
 .admin-model-form {
   min-width: 0;
@@ -40,9 +41,19 @@
   flex-wrap: wrap;
   gap: 8px;
 }
-.admin-models button {
+.admin-models button,
+.admin-quota button {
   min-height: 44px;
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.admin-quota-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  margin: 0;
 }

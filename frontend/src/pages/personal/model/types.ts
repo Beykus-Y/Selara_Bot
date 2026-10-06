@@ -30,6 +30,28 @@ export type PersonalProfile = {
   mode: 'assistant' | 'roleplay'
 }
 
+export type PersonalModelOption = {
+  profile_key: string
+  emoji: string
+  display_name: string
+  description: string
+  /** AIL per request, printed without trailing zeros ("2.5"). */
+  ail_multiplier: string
+  available: boolean
+}
+
+export type PersonalModel = {
+  quota_mode: 'requests' | 'ail'
+  /** Profiles can be chosen only while Personal counts AI Limits. */
+  selectable: boolean
+  selected: string
+  effective: string
+  effective_name: string
+  fell_back: boolean
+  cost_ail: string
+  options: PersonalModelOption[]
+}
+
 export type PersonalOverview = {
   checked_at: string
   /** Zone of the daily quota boundary (BOT_TIMEZONE); dates on the page are shown in it. */
@@ -37,6 +59,7 @@ export type PersonalOverview = {
   subscription: PersonalSubscription
   quota: AiQuota
   profile: PersonalProfile
+  model: PersonalModel
   memory: {
     count: number
     /** null while access could not be checked: writes are refused then. */

@@ -28,14 +28,25 @@ from selara.application.ai_character import (
     validate_display_name,
 )
 from selara.application.feature_access import (
+    AIL_UNIT,
     AccessReason,
     AccessTier,
     FeatureAccessService,
     QuotaScope,
     message_idempotency_key,
 )
-from selara.application.personal_config import PersonalConfigProvider
+from selara.application.model_catalog import PROFILE_EMOJI
+from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.personal_memory import parse_remember_request
+from selara.application.personal_models import (
+    PersonalModelChoice,
+    choose_from_snapshot,
+    format_ail,
+    is_profile_key,
+    load_snapshot,
+    profile_display_name,
+    profile_options,
+)
 from selara.core.config import Settings
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
@@ -49,7 +60,11 @@ from selara.infrastructure.llm.personal_ai import (
     maybe_extract_memories,
 )
 from selara.presentation.auth import resolve_owner_private_exemption
-from selara.presentation.feature_access_messages import quota_exhausted_message
+from selara.presentation.feature_access_messages import (
+    ail_insufficient_message,
+    daily_reset_text,
+    quota_exhausted_message,
+)
 from selara.presentation.handlers import personal_memory
 from selara.presentation.handlers.premium import personal_offer_available
 from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
@@ -135,7 +150,84 @@ def _cb(action: str, *parts: object) -> str:
     return ":".join(["pai", action, *(str(part) for part in parts)])
 
 
-def _profile_text(stored: StoredProfile) -> str:
+@dataclass(frozen=True, slots=True)
+class _ModelDeps:
+    """What the settings screens need to show and change the model profile; optional in tests."""
+
+    settings: Settings
+    session_factory: async_sessionmaker[AsyncSession]
+    personal_config: PersonalConfigProvider
+    llm_client: Any = None
+
+    @property
+    def catalog(self):
+        return getattr(self.llm_client, "model_catalog", None)
+
+    @property
+    def legacy_model(self) -> str:
+        return getattr(self.llm_client, "default_model", None) or self.settings.llm_model
+
+
+def _model_deps(settings, session_factory, personal_config, llm_client) -> _ModelDeps | None:
+    if settings is None or session_factory is None or personal_config is None:
+        return None
+    return _ModelDeps(settings, session_factory, personal_config, llm_client)
+
+
+def _access_service(session_factory, personal_config: PersonalConfigProvider) -> FeatureAccessService:
+    return FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(session_factory),
+        user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(session_factory, personal_config),
+        personal_config=personal_config,
+    )
+
+
+async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | None) -> tuple[list[str], str]:
+    """Model and AIL status lines for /ai, plus the label of the model button."""
+    if deps is None:
+        return [], "Модель"
+    config = await deps.personal_config.get()
+    snapshot = await load_snapshot(deps.catalog)
+    if not config.ail_enabled:
+        # Requests mode answers with the base model whatever was picked earlier; the pick is kept for AIL.
+        lines = [f"Модель: {PROFILE_EMOJI['basic']} {escape(profile_display_name(snapshot, 'basic'))}"]
+        if stored.model_profile_key != "basic":
+            lines.append(
+                f"Сохранённый выбор «{escape(profile_display_name(snapshot, stored.model_profile_key))}» "
+                "включится вместе с AI Limits."
+            )
+        else:
+            lines.append("Выбор моделей станет доступен после включения AI Limits.")
+        return lines, "Модель"
+    choice = choose_from_snapshot(snapshot, selected_key=stored.model_profile_key, legacy_model=deps.legacy_model)
+    emoji = PROFILE_EMOJI.get(choice.profile_key, "")
+    lines = [f"Модель: {emoji} {escape(choice.display_name)}"]
+    if choice.fell_back:
+        lines.append("Выбранный профиль сейчас недоступен, используется Базовая модель.")
+    lines.append(f"Стоимость запроса: {format_ail(choice.ail_cost)} AIL")
+    try:
+        summary = await _access_service(deps.session_factory, deps.personal_config).get_usage_summary(
+            feature=AiFeature.PERSONAL_CHAT,
+            chat_id=user_id,
+            trigger="telegram_message",
+            timezone_name=deps.settings.bot_timezone,
+            scope=QuotaScope.user(user_id),
+            owner_exempt=resolve_owner_private_exemption(user_id=user_id, admin_user_id=deps.settings.admin_user_id),
+        )
+    except Exception:
+        log.warning("personal_ai: AIL usage summary unavailable user_id=%s", user_id, exc_info=True)
+        return lines, f"Модель: {choice.display_name}"
+    if summary.unlimited:
+        lines.append("Осталось сегодня: без ограничений")
+    elif summary.quota_unit == AIL_UNIT:
+        lines.append(
+            f"Осталось сегодня: {format_ail(summary.quota_remaining)} / {format_ail(summary.quota_limit)} AIL"
+            f" (обновится {daily_reset_text(summary.reset_at, timezone_name=deps.settings.bot_timezone)})"
+        )
+    return lines, f"Модель: {choice.display_name}"
+
+
+def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -> str:
     p = stored.profile
     character = escape(p.character_custom) if p.character_preset == CUSTOM_PRESET_KEY and p.character_custom else escape(preset_title(p.character_preset))
     lines = [
@@ -147,6 +239,7 @@ def _profile_text(stored: StoredProfile) -> str:
         f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
         f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
         f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        *(model_lines or []),
         "",
         "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново, /memory — что я о вас помню, "
         "/forget_all — удалить все личные данные.",
@@ -156,7 +249,7 @@ def _profile_text(stored: StoredProfile) -> str:
     return "\n".join(lines)
 
 
-def _main_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
+def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> InlineKeyboardMarkup:
     p, rev = stored.profile, stored.revision
     builder = InlineKeyboardBuilder()
     builder.button(text="Имя", callback_data=_cb("in", "name", rev))
@@ -170,6 +263,7 @@ def _main_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
         callback_data=_cb("set", "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
     )
+    builder.button(text=model_label, callback_data=_cb("models", rev))
     builder.button(
         text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
         callback_data=_cb("set", "memory", 0 if stored.memory_enabled else 1, rev),
@@ -179,8 +273,37 @@ def _main_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         callback_data=_cb("set", "automemory", 0 if stored.auto_memory_enabled else 1, rev),
     )
     builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 2, 1, 2, 1)
+    builder.adjust(2, 2, 2, 1, 1, 2, 1)
     return builder.as_markup()
+
+
+async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, InlineKeyboardMarkup]:
+    config = await deps.personal_config.get()
+    options = profile_options(await load_snapshot(deps.catalog), legacy_model=deps.legacy_model)
+    lines = ["<b>Модель ответа</b>", ""]
+    builder = InlineKeyboardBuilder()
+    for option in options:
+        cost = f"×{format_ail(option.ail_multiplier)} AIL"
+        state = "" if option.available else " — сейчас недоступна"
+        lines.append(f"{option.emoji} <b>{escape(option.display_name)}</b> — {cost}{state}")
+        lines.append(escape(option.description))
+        lines.append("")
+        if config.ail_enabled and option.available:
+            marker = "✅ " if option.profile_key == stored.model_profile_key else ""
+            builder.button(
+                text=f"{marker}{option.emoji} {option.display_name} · {cost}",
+                callback_data=_cb("model", option.profile_key, stored.revision),
+            )
+    if config.ail_enabled:
+        lines.append("Каждый запрос списывает из суточного бюджета AI Limits столько AIL, сколько стоит модель.")
+    else:
+        lines.append(
+            "Сейчас каждый запрос считается как один из суточного лимита, и ответы даёт базовая модель. "
+            "Выбор моделей станет доступен после включения AI Limits."
+        )
+    builder.button(text="Назад", callback_data=_cb("home"))
+    builder.adjust(1)
+    return "\n".join(lines).rstrip(), builder.as_markup()
 
 
 def _presets_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
@@ -205,12 +328,17 @@ async def _edit(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | 
         pass
 
 
-async def _show_home(query: CallbackQuery, repo: PersonalAiRepository, notice: str | None = None) -> None:
+async def _show_home(
+    query: CallbackQuery, repo: PersonalAiRepository, notice: str | None = None, deps: _ModelDeps | None = None
+) -> None:
     stored = await repo.get_or_create_profile(query.from_user.id)
-    text = _profile_text(stored)
+    # The usage summary runs in its own transaction: do not keep ours open across it.
+    await repo.commit()
+    lines, label = await _model_lines(query.from_user.id, stored, deps)
+    text = _profile_text(stored, lines)
     if notice:
         text = f"{escape(notice)}\n\n{text}"
-    await _edit(query, text, _main_keyboard(stored))
+    await _edit(query, text, _main_keyboard(stored, label))
 
 
 def _is_private_callback(query: CallbackQuery) -> bool:
@@ -218,13 +346,25 @@ def _is_private_callback(query: CallbackQuery) -> bool:
 
 
 @router.message(Command("ai"))
-async def ai_settings_command(message: Message, db_session: AsyncSession) -> None:
+async def ai_settings_command(
+    message: Message,
+    db_session: AsyncSession,
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    personal_config: PersonalConfigProvider | None = None,
+    llm_client: LlmClient | None = None,
+) -> None:
     if message.chat.type != "private" or message.from_user is None:
         await message.answer("Личные настройки Selara AI доступны в личных сообщениях с ботом: откройте диалог и отправьте /ai.")
         return
     _pending_inputs.pop(message.from_user.id, None)
-    stored = await PersonalAiRepository(db_session).get_or_create_profile(message.from_user.id)
-    await message.answer(_profile_text(stored), parse_mode="HTML", reply_markup=_main_keyboard(stored))
+    repo = PersonalAiRepository(db_session)
+    stored = await repo.get_or_create_profile(message.from_user.id)
+    await repo.commit()
+    lines, label = await _model_lines(
+        message.from_user.id, stored, _model_deps(settings, session_factory, personal_config, llm_client)
+    )
+    await message.answer(_profile_text(stored, lines), parse_mode="HTML", reply_markup=_main_keyboard(stored, label))
 
 
 @router.message(Command("ai_reset"))
@@ -240,7 +380,14 @@ async def ai_reset_command(message: Message, db_session: AsyncSession) -> None:
 
 
 @router.callback_query(F.data.startswith("pai:"))
-async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -> None:
+async def ai_settings_callback(
+    query: CallbackQuery,
+    db_session: AsyncSession,
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    personal_config: PersonalConfigProvider | None = None,
+    llm_client: LlmClient | None = None,
+) -> None:
     if not _is_private_callback(query):
         await query.answer()
         return
@@ -248,6 +395,7 @@ async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -
     action, args = (parts[1] if len(parts) > 1 else ""), parts[2:]
     repo = PersonalAiRepository(db_session)
     user_id = query.from_user.id
+    deps = _model_deps(settings, session_factory, personal_config, llm_client)
 
     if action == "close":
         _pending_inputs.pop(user_id, None)
@@ -260,7 +408,7 @@ async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -
     if action == "home":
         _pending_inputs.pop(user_id, None)
         await query.answer()
-        await _show_home(query, repo)
+        await _show_home(query, repo, deps=deps)
         return
 
     try:
@@ -272,11 +420,32 @@ async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -
     stored = await repo.get_or_create_profile(user_id)
     if stored.revision != revision:
         await query.answer("Настройки уже изменились, показываю актуальные.")
-        await _show_home(query, repo)
+        await _show_home(query, repo, deps=deps)
         return
 
     changes: dict[str, Any] | None = None
-    if action == "presets":
+    if action == "models":
+        if deps is None:
+            await query.answer("Выбор модели сейчас недоступен.")
+            return
+        await query.answer()
+        await repo.commit()
+        text, markup = await _models_screen(stored, deps)
+        await _edit(query, text, markup)
+        return
+    if action == "model" and len(args) == 2:
+        # Callback data is user-controlled: only a stable profile key that the current catalog
+        # can actually serve is stored, and only while AI Limits price the choice.
+        key = args[0]
+        if deps is None or not is_profile_key(key) or not await _selectable(key, deps):
+            await query.answer("Этот профиль сейчас недоступен.", show_alert=True)
+            if deps is not None:
+                await repo.commit()
+                text, markup = await _models_screen(stored, deps)
+                await _edit(query, text, markup)
+            return
+        changes = {"model_profile_key": key}
+    elif action == "presets":
         await query.answer()
         await _edit(query, "<b>Характер</b>\nВыберите готовый вариант или опишите свой.", _presets_keyboard(stored))
         return
@@ -307,11 +476,25 @@ async def ai_settings_callback(query: CallbackQuery, db_session: AsyncSession) -
 
     updated = await repo.update_profile(user_id, expected_revision=revision, **changes)
     await query.answer("Сохранено" if updated is not None else "Настройки уже изменились.")
-    await _show_home(query, repo)
+    await _show_home(query, repo, deps=deps)
+
+
+async def _selectable(profile_key: str, deps: _ModelDeps) -> bool:
+    if not (await deps.personal_config.get()).ail_enabled:
+        return False
+    options = profile_options(await load_snapshot(deps.catalog), legacy_model=deps.legacy_model)
+    return any(option.profile_key == profile_key and option.available for option in options)
 
 
 @router.message(PendingPersonalInputFilter())
-async def ai_settings_input(message: Message, db_session: AsyncSession) -> None:
+async def ai_settings_input(
+    message: Message,
+    db_session: AsyncSession,
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    personal_config: PersonalConfigProvider | None = None,
+    llm_client: LlmClient | None = None,
+) -> None:
     user_id = message.from_user.id
     state = _get_pending_input(user_id)
     if state is None:
@@ -334,7 +517,11 @@ async def ai_settings_input(message: Message, db_session: AsyncSession) -> None:
     if updated is None:
         await message.answer("Настройки изменились одновременно. Откройте /ai и повторите.")
         return
-    await message.answer("Сохранено.\n\n" + _profile_text(updated), parse_mode="HTML", reply_markup=_main_keyboard(updated))
+    await repo.commit()
+    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client))
+    await message.answer(
+        "Сохранено.\n\n" + _profile_text(updated, lines), parse_mode="HTML", reply_markup=_main_keyboard(updated, label)
+    )
 
 
 # --- dialogue -------------------------------------------------------------------
@@ -364,6 +551,26 @@ async def _send_answer(message: Message, thinking: Message, text: str) -> None:
             # The user blocked the bot while the model was answering: the turn is already stored and charged.
             log.info("personal_ai: user blocked the bot before the answer was delivered")
             return
+
+
+# Users already told that their profile is unavailable (in-memory: at worst repeated after a restart).
+_fallback_notified: dict[int, str] = {}
+
+
+async def _notify_fallback_once(message: Message, user_id: int, choice: PersonalModelChoice) -> None:
+    if not choice.fell_back:
+        _fallback_notified.pop(user_id, None)
+        return
+    if _fallback_notified.get(user_id) == choice.selected_key:
+        return
+    _fallback_notified[user_id] = choice.selected_key
+    try:
+        await message.answer(
+            f"Выбранный профиль сейчас недоступен, используется {choice.display_name} модель "
+            f"({format_ail(choice.ail_cost)} AIL за запрос)."
+        )
+    except Exception:
+        log.debug("personal_ai: fallback notice not delivered", exc_info=True)
 
 
 # One turn per user at a time: a second message sent while the first is still being answered would
@@ -425,12 +632,15 @@ async def _handle_personal_chat(
             return
 
     config = await personal_config.get()
-    access_service = FeatureAccessService(
-        SqlAlchemyFeatureQuotaRepository(session_factory),
-        user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(session_factory, personal_config),
-        personal_config=personal_config,
-    )
+    access_service = _access_service(session_factory, personal_config)
     stored = await repo.get_or_create_profile(user.id)
+    # Resolved exactly once per turn: the same snapshot gives the AIL cost to the reservation and
+    # the physical model to the provider call, whatever the admin changes in between.
+    choice = choose_from_snapshot(
+        await load_snapshot(getattr(llm_client, "model_catalog", None)),
+        selected_key=stored.model_profile_key,
+        legacy_model=getattr(llm_client, "default_model", None) or settings.llm_model,
+    )
     # The quota service works in its own transactions and also upserts the user row: commit ours first,
     # otherwise a brand-new user's first request would wait on a lock held by this very handler.
     await db_session.commit()
@@ -452,6 +662,9 @@ async def _handle_personal_chat(
             source_message_id=message.message_id,
             mode=stored.profile.mode,
             owner_exempt=resolve_owner_private_exemption(user_id=user.id, admin_user_id=settings.admin_user_id),
+            # Used only if the pool counts AI Limits; in requests mode a message is one request.
+            units=choice.ail_cost,
+            model_profile=choice.profile_key,
         )
     except Exception:
         log.exception("Personal AI quota reservation failed message_id=%s", message.message_id)
@@ -461,8 +674,21 @@ async def _handle_personal_chat(
     if decision.reused:
         await message.answer("Этот запрос уже был обработан. Повторный запуск не выполнялся.")
         return
+    ail_mode = decision.quota_unit == AIL_UNIT
     if not decision.allowed:
-        if decision.reason == AccessReason.QUOTA_EXHAUSTED:
+        if decision.reason == AccessReason.QUOTA_EXHAUSTED and ail_mode:
+            # Not enough AIL for this profile: nothing is charged and no provider call is made.
+            await message.answer(
+                ail_insufficient_message(
+                    decision,
+                    profile_name=choice.display_name,
+                    cost=choice.ail_cost,
+                    timezone_name=settings.bot_timezone,
+                    can_buy=_offer_markup(settings, config, decision) is not None,
+                ),
+                reply_markup=_offer_markup(settings, config, decision),
+            )
+        elif decision.reason == AccessReason.QUOTA_EXHAUSTED:
             await message.answer(
                 quota_exhausted_message(decision, timezone_name=settings.bot_timezone),
                 reply_markup=_offer_markup(settings, config, decision),
@@ -470,6 +696,8 @@ async def _handle_personal_chat(
         else:
             await message.answer("⚠️ Сейчас не удалось разрешить запрос. Попробуйте позже.")
         return
+    # Requests mode keeps the original behaviour (legacy model); AIL mode calls the priced snapshot.
+    resolved_model = choice.effective if ail_mode else None
 
     accounting = llm_client.accounting_service if isinstance(llm_client, LlmClient) else None
     invocation_id = decision.invocation_id
@@ -489,6 +717,9 @@ async def _handle_personal_chat(
 
     outcome = {"status": "failed", "error_category": "handler_error"}
     try:
+        if ail_mode:
+            # Inside the cleanup region: a cancellation here still releases the unused reservation.
+            await _notify_fallback_once(message, user.id, choice)
         thinking = await message.answer("⏳ Думаю...")
         try:
             await message.bot.send_chat_action(message.chat.id, "typing")
@@ -503,6 +734,7 @@ async def _handle_personal_chat(
                 user_text=text,
                 accounting_context=_context(AiFeature.PERSONAL_CHAT, "chat_turn"),
                 use_memory=stored.memory_enabled,
+                resolved_model=resolved_model,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"

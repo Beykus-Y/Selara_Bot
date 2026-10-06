@@ -8,6 +8,8 @@ SELARA_AI_PRODUCT_KEY = "selara_ai_monthly"
 SELARA_AI_TERMS_VERSION = "v2"
 SELARA_PERSONAL_PRODUCT_KEY = "selara_personal_monthly"
 SELARA_PERSONAL_TERMS_VERSION = "personal-v1"
+# Terms shown and snapshotted on new intents while Personal is in AI Limits mode.
+SELARA_PERSONAL_AIL_TERMS_VERSION = "personal-v2-ail"
 SELARA_AI_CURRENCY = "XTR"
 SELARA_AI_DURATION = timedelta(days=30)
 PRODUCT_SCOPE_CHAT = "chat"
@@ -51,6 +53,11 @@ PRODUCT_SPECS: dict[str, ProductSpec] = {
 }
 
 
+def personal_terms_version(*, ail_enabled: bool) -> str:
+    """The Selara Personal terms version a new purchase intent accepts in the current quota mode."""
+    return SELARA_PERSONAL_AIL_TERMS_VERSION if ail_enabled else SELARA_PERSONAL_TERMS_VERSION
+
+
 def get_product_spec(product_key: str | None) -> ProductSpec | None:
     return PRODUCT_SPECS.get(product_key) if product_key else None
 
@@ -79,6 +86,7 @@ def get_selara_ai_product(
     price_stars: int | None,
     duration: timedelta | None = None,
     paid_daily_limit: int | None = None,
+    daily_ail: int | None = None,
 ) -> SelaraAiProduct:
     """Resolve a supported product using its configured Stars price (and duration, if configurable)."""
     spec = get_product_spec(product_key)
@@ -93,7 +101,11 @@ def get_selara_ai_product(
     duration_label = f"{int(resolved_duration.total_seconds() // 86_400)} дней"
     if spec.scope == PRODUCT_SCOPE_USER:
         title = f"Selara Personal на {duration_label}"
-        limit_note = f" До {paid_daily_limit} запросов в сутки." if paid_daily_limit else ""
+        if daily_ail:
+            # AI Limits mode: the buyer gets a budget, never a promised number of requests.
+            limit_note = f" {daily_ail} AI Limits (AIL) в сутки; расход зависит от выбранной модели."
+        else:
+            limit_note = f" До {paid_daily_limit} запросов в сутки." if paid_daily_limit else ""
         description = f"Личный доступ к Selara AI для вашего аккаунта на {duration_label}.{limit_note}"
     else:
         title = f"Selara AI на {duration_label}"

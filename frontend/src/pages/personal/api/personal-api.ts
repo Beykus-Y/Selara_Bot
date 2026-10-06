@@ -5,6 +5,7 @@ import { http } from '@/shared/api/http'
 import type {
   ForgetAllResult,
   PersonalMemoryItem,
+  PersonalModel,
   PersonalOverview,
   PersonalProfile,
   PersonalSettingsPatch,
@@ -69,4 +70,8 @@ export function forgetAllPersonalData() {
   return request<{ removed: ForgetAllResult }>('post', '/forget-all', 'Не удалось удалить данные.', {
     confirm: true,
   })
+}
+
+export function updatePersonalModel(profileKey: string) {
+  return request<{ model: PersonalModel }>('put', '/model', 'Не удалось сменить модель.', { profile_key: profileKey })
 }

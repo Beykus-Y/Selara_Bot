@@ -21,6 +21,7 @@ from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_s
 from selara.core.logging import configure_logging
 from selara.domain.entities import UserSnapshot
 from selara.infrastructure.db.models import (
+    AiFeatureQuotaUsageModel,
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
     AdminBroadcastReplyModel,
@@ -149,6 +150,7 @@ async def _client(
             AdminBroadcastReplyModel.__table__,
             UserChatActivityModel.__table__,
             AiFeatureInvocationModel.__table__,
+            AiFeatureQuotaUsageModel.__table__,
             LlmUsageLogModel.__table__,
             ChatEntitlementModel.__table__,
             UserEntitlementModel.__table__,
@@ -671,6 +673,7 @@ async def test_ai_summary_empty_period_is_not_an_error_and_cost_is_a_decimal_str
     assert summary["unknown_cost_calls"] == 0 and Decimal(summary["known_cost_usd"]) == 0
     assert summary["average_known_cost_per_invocation_usd"] is None
     assert breakdown["features"] == [] and breakdown["models"] == []
+    assert breakdown["ail_profiles"] == [] and breakdown["ail_consumed"] == "0"
     assert monetization["stars_revenue"] == 0 and monetization["active_paid_chats"] == 0
     assert monetization["refunds"] == {"pending": 0, "refunded": 0, "failed": 0}
     assert payments["items"] == [] and payments["next_cursor"] is None
