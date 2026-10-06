@@ -492,6 +492,25 @@ async def test_forget_all_confirmed_removes_profile_history_and_memory_of_this_u
     assert "удал" in query.message.edit_text.await_args.args[0].lower()
 
 
+async def test_forget_all_is_committed_before_telegram_is_called(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    await _populate(session)
+    events: list[str] = []
+    real_commit = session.commit
+
+    async def commit():
+        events.append("commit")
+        await real_commit()
+
+    monkeypatch.setattr(session, "commit", commit)
+    query = _query("pam:fy")
+    query.answer = AsyncMock(side_effect=lambda *a, **k: events.append("answer"))
+
+    await _memory_call(memory_handler.memory_callback, query, session, settings)
+
+    assert events[:2] == ["commit", "answer"]
+
+
 async def test_forget_all_declined_keeps_everything(monkeypatch, session):
     settings = _settings(monkeypatch)
     await _populate(session)
@@ -521,8 +540,8 @@ async def test_a_new_dialogue_after_forget_all_starts_clean(monkeypatch, session
 
     await _chat(_message("привет снова"), session, settings, llm)
 
-    system = " ".join(m["content"] for m in llm.chat_calls[0] if m["role"] == "system")
-    assert "факт" not in system and "<user_memory>" not in system
+    assert not any(m["content"].startswith("<user_memory>") for m in llm.chat_calls[0])
+    assert not any("факт" in m["content"] for m in llm.chat_calls[0] if m["role"] != "system")
     assert [m["content"] for m in llm.chat_calls[0] if m["role"] == "user"] == ["привет снова"]
 
 

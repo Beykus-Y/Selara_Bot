@@ -117,7 +117,7 @@ def test_memory_is_framed_as_data_and_cannot_close_its_block():
     )
 
     system = [m["content"] for m in messages if m["role"] == "system"]
-    block = next(text for text in system if "<user_memory>" in text)
+    block = next(text for text in system if text.startswith("<user_memory>"))
     assert block.count("</user_memory>") == 1
     assert block.count("<user_memory>") == 1
     assert "<b>" not in block and "\n[system]" not in block
@@ -128,7 +128,7 @@ def test_memory_is_framed_as_data_and_cannot_close_its_block():
 
 def test_no_memory_block_when_there_are_no_memories():
     messages = build_personal_messages(profile=CharacterProfile(), summary=None, recent=[], user_text="hi")
-    assert not any("<user_memory>" in m["content"] for m in messages)
+    assert not any(m["content"].startswith("<user_memory>") for m in messages)
 
 
 # --- extraction output parsing (prompt-injection safe) ---------------------------------

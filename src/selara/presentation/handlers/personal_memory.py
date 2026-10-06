@@ -369,6 +369,8 @@ async def memory_callback(
         removed = await repo.delete_all_user_data(user_id=user_id)
         personal_ai._pending_inputs.pop(user_id, None)
         _pending_memories.pop(user_id, None)
+        # Persist the deletion before any Telegram call: a failed edit must not roll the user's data back.
+        await db_session.commit()
         await query.answer("Удалено")
         await _edit(
             query,
