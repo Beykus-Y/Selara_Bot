@@ -122,3 +122,26 @@ def test_today_uses_bot_timezone() -> None:
     late_utc = datetime(2026, 10, 6, 22, 0, tzinfo=timezone.utc)
     assert ai_pets._today(SimpleNamespace(bot_timezone="Asia/Barnaul"), late_utc).isoformat() == "2026-10-07"
     assert ai_pets._today(SimpleNamespace(bot_timezone="Nowhere/Bad"), late_utc).isoformat() == "2026-10-06"
+
+
+async def test_pet_buttons_enforce_the_pet_rank_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    access = AsyncMock(return_value=(False, None, "admin", False))
+    monkeypatch.setattr(ai_pets, "has_command_access", access)
+    run_action = AsyncMock()
+    monkeypatch.setattr(ai_pets, "_run_action", run_action)
+    query = SimpleNamespace(
+        data="aipet:a:7:pat",
+        id="cb1",
+        from_user=SimpleNamespace(id=5, username=None, first_name="U", last_name=None, is_bot=False),
+        message=SimpleNamespace(chat=SimpleNamespace(id=-1, type="supergroup", title="Chat"), answer=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await ai_pets.ai_pet_callback(query, SimpleNamespace(), None, None, SimpleNamespace(pets_enabled=True), None)
+
+    assert access.await_args.kwargs["command_key"] == "pet"
+    assert access.await_args.kwargs["user_id"] == 5
+    run_action.assert_not_awaited()
+    assert "прав" in query.answer.await_args.args[0]

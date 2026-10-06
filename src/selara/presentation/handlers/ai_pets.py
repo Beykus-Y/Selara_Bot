@@ -21,7 +21,7 @@ from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.ai_pets import ActionResult, AiPetService, PetDomainError, PetView
-from selara.presentation.auth import has_permission
+from selara.presentation.auth import has_command_access, has_permission
 from selara.presentation.formatters import format_user_link
 
 logger = logging.getLogger(__name__)
@@ -393,6 +393,28 @@ async def pet_wake_command(message: Message, command: CommandObject, activity_re
     await _sleep_command(message, command, activity_repo, db_session, economy_repo, asleep=False)
 
 
+async def callback_access_allowed(query: CallbackQuery, activity_repo) -> bool:
+    """Buttons bypass CommandAccessMiddleware, so the «pet» rank rule is checked for the clicker here."""
+    message = query.message
+    user = query.from_user
+    if message is None or user is None or message.chat.type not in _GROUP_TYPES:
+        return True
+    allowed, _, _, _ = await has_command_access(
+        activity_repo,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        chat_title=message.chat.title,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        is_bot=bool(user.is_bot),
+        command_key="pet",
+        bootstrap_if_missing_owner=False,
+    )
+    return allowed
+
+
 # ----- shop ---------------------------------------------------------------------
 
 
@@ -533,6 +555,9 @@ async def ai_pet_callback(query: CallbackQuery, activity_repo, db_session, econo
         await query.answer("Кнопка устарела.")
         return
     kind, pet_id = parts[0], int(parts[1])
+    if kind != "keep" and not await callback_access_allowed(query, activity_repo):
+        await query.answer("Недостаточно прав для команд питомцев в этом чате.", show_alert=True)
+        return
     service = _service(db_session, economy_repo)
 
     if kind in {"rel", "keep"}:
