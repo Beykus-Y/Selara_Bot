@@ -106,6 +106,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('pets_core'))}\n"
         "• Без /: <code>пет</code>, <code>петы</code>, <code>пет погладить Мурка</code>, <code>пет покормить</code>\n"
         "• Поговорить: <code>Мурка, как дела?</code> или ответ на реплику питомца (лимит Selara Personal хозяина)\n"
+        "• <code>/pet_bag</code> — рюкзак и гардероб: еда и игрушки в запас, косметика (📦 в магазине)\n"
         "• С 10 уровня: <code>/pet_travel</code> в другом чате — взять питомца в гости, <code>/pet_home</code> — сделать чат домом\n"
         "• Питомцы работают в чатах с <code>pets_enabled</code>; завести — с Selara Personal\n"
         "• Ролевое «стать питомцем» — <code>/bepet</code>"

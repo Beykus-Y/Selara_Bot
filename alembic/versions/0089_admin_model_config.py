@@ -2,8 +2,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0088_admin_model_config"
-down_revision = "0087_personal_ai_memory"
+revision = "0089_admin_model_config"
+down_revision = "0088_ai_pet_inventory"
 branch_labels = None
 depends_on = None
 
