@@ -138,7 +138,7 @@ async def _open(browser, width, backend):
 async def _run_layouts(browser) -> None:
     for width in WIDTHS:
         for tier, expected in (
-            ("free", ["Бесплатный доступ", "Лимит на сегодня исчерпан: 5 из 5", "Оформить Selara Personal", "2 из 3"]),
+            ("free", ["Бесплатный доступ", "Лимит на сегодня исчерпан: 5 из 5", "Оформить Selara Personal"]),
             ("paid", ["Selara Personal до 04.11.2026", "Сегодня осталось 140 из 150", "Продлить подписку"]),
         ):
             backend = Backend(tier=tier)
@@ -146,6 +146,8 @@ async def _run_layouts(browser) -> None:
             text = await page.locator("body").inner_text()
             for fragment in expected:
                 assert fragment in text, f"{tier}@{width}: missing {fragment!r}"
+            # Section titles are upper-cased by the theme, so compare the counter case-insensitively.
+            assert "2 из 3" in text.lower(), f"{tier}@{width}: missing memory counter"
             if tier == "paid":
                 assert "Оформить Selara Personal" not in text
             # Auto memory needs a paid plan and the admin switch: disabled here in both scenarios.
