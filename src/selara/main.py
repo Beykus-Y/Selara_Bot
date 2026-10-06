@@ -18,6 +18,7 @@ from selara.infrastructure.db.session import create_engine, create_session_facto
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.db.personal_config import build_personal_config
+from selara.infrastructure.db.model_catalog import build_model_catalog
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -92,7 +93,8 @@ def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
             logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", problem)
         return None
     accounting = AiAccountingService(session_factory) if session_factory is not None else None
-    return LlmClient(config, accounting_service=accounting)
+    catalog, _ = build_model_catalog(session_factory) if session_factory is not None else (None, None)
+    return LlmClient(config, accounting_service=accounting, model_catalog=catalog)
 
 
 async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
