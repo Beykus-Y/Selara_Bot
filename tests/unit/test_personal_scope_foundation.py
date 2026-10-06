@@ -217,11 +217,23 @@ async def test_model_router_default_preserves_the_configured_model():
 
 
 @pytest.mark.asyncio
-async def test_adjust_is_an_interface_only_noop():
-    repository = SimpleNamespace()
+async def test_adjust_hands_the_validated_actual_units_to_the_repository():
+    settlement = SimpleNamespace(settled=True)
+    repository = SimpleNamespace(adjust_units=AsyncMock(return_value=settlement))
     service = FeatureAccessService(repository)
 
-    assert await service.adjust(invocation_id=1, actual_units=Decimal("3")) is None
+    assert await service.adjust(invocation_id=1, actual_units=Decimal("3")) is settlement
+    repository.adjust_units.assert_awaited_once_with(invocation_id=1, actual_units=Decimal("3"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [Decimal("0"), Decimal("1.234"), Decimal("NaN"), 3])
+async def test_adjust_refuses_units_the_column_cannot_store_before_touching_the_repository(bad):
+    repository = SimpleNamespace(adjust_units=AsyncMock())
+
+    with pytest.raises(ValueError):
+        await FeatureAccessService(repository).adjust(invocation_id=1, actual_units=bad)
+    repository.adjust_units.assert_not_awaited()
 
 
 # ----- FeatureAccessService with user scope ----------------------------------
