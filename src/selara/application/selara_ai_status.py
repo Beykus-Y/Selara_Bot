@@ -32,7 +32,7 @@ def checkout_ready(settings: Any) -> bool:
     return llm_runtime_config(settings) is not None and settings.selara_ai_price_stars is not None
 
 
-def _iso(value: datetime | None) -> str | None:
+def iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
     if value.tzinfo is None:
@@ -40,7 +40,7 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _quota_payload(summary: FeatureUsageSummary | None) -> dict[str, Any]:
+def quota_payload(summary: FeatureUsageSummary | None) -> dict[str, Any]:
     if summary is None:
         return {"status": "unavailable", "used": None, "limit": None, "remaining": None, "reset_at": None}
     if summary.quota_limit is None:
@@ -58,7 +58,7 @@ def _quota_payload(summary: FeatureUsageSummary | None) -> dict[str, Any]:
         "used": summary.quota_used,
         "limit": summary.quota_limit,
         "remaining": remaining,
-        "reset_at": _iso(summary.reset_at),
+        "reset_at": iso_utc(summary.reset_at),
         "exhausted": remaining is not None and remaining <= 0,
     }
 
@@ -90,7 +90,7 @@ async def build_chat_ai_access_status(
     current = now or datetime.now(timezone.utc)
     base: dict[str, Any] = {
         "chat_id": chat_id,
-        "checked_at": _iso(current),
+        "checked_at": iso_utc(current),
         "timezone": display_timezone,
         "can_manage_purchase": can_manage_purchase,
         "checkout_configured": checkout_configured,
@@ -115,8 +115,8 @@ async def build_chat_ai_access_status(
             "state": "unavailable",
             "tier": None,
             "entitlement": None,
-            "llm": _quota_payload(None),
-            "manual_summary": _quota_payload(None),
+            "llm": quota_payload(None),
+            "manual_summary": quota_payload(None),
             "automatic_summary": {
                 "enabled": automatic_enabled,
                 "access_allowed": None,
@@ -156,8 +156,8 @@ async def build_chat_ai_access_status(
         remaining_seconds = (expiry - current).total_seconds()
     entitlement = {
         "active": paid,
-        "valid_until": _iso(valid_until) if paid else None,
-        "expired_at": _iso(valid_until) if expired else None,
+        "valid_until": iso_utc(valid_until) if paid else None,
+        "expired_at": iso_utc(valid_until) if expired else None,
         "expiring_soon": remaining_seconds is not None and remaining_seconds <= EXPIRING_SOON.total_seconds(),
         "days_left": (
             max(0, -(-int(remaining_seconds) // 86_400)) if remaining_seconds is not None else None
@@ -169,8 +169,8 @@ async def build_chat_ai_access_status(
         "state": "available",
         "tier": automatic.access_tier.value,
         "entitlement": entitlement,
-        "llm": _quota_payload(llm),
-        "manual_summary": _quota_payload(manual),
+        "llm": quota_payload(llm),
+        "manual_summary": quota_payload(manual),
         "automatic_summary": {
             "enabled": automatic_enabled,
             "access_allowed": automatic.allowed,
