@@ -14,6 +14,8 @@ def quota_exhausted_message(decision: FeatureAccessDecision, *, timezone_name: s
         label = "AI-ассистента для этого чата на сегодня"
     elif decision.feature == AiFeature.PERSONAL_CHAT:
         label = "личных AI-запросов на сегодня"
+    elif decision.feature == AiFeature.PET_TALK:
+        label = "разговоров с питомцем на сегодня"
     else:
         label = "ручных итогов дня для этого чата в этом месяце"
 
@@ -25,7 +27,7 @@ def quota_exhausted_message(decision: FeatureAccessDecision, *, timezone_name: s
             local_tz = ZoneInfo("UTC")
         reset_local = decision.period_end.astimezone(local_tz)
         now_local = datetime.now(timezone.utc).astimezone(local_tz)
-        if decision.feature in (AiFeature.LLM_ADMIN, AiFeature.PERSONAL_CHAT) and reset_local.date() == now_local.date() + timedelta(days=1):
+        if decision.feature in (AiFeature.LLM_ADMIN, AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK) and reset_local.date() == now_local.date() + timedelta(days=1):
             reset_text = "завтра"
         else:
             reset_text = reset_local.strftime("%d.%m.%Y в %H:%M") + " по времени бота"

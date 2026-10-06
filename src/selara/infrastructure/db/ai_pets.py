@@ -67,6 +67,7 @@ class PetView:
     current_chat_id: int | None
     home_chat_id: int | None
     travel_unlocked: bool
+    character_custom: str | None = None
 
     @property
     def species_title(self) -> str:
@@ -117,6 +118,7 @@ def _view(row: AiPetModel) -> PetView:
         current_chat_id=row.current_chat_id,
         home_chat_id=row.home_chat_id,
         travel_unlocked=bool(row.travel_unlocked),
+        character_custom=row.character_custom,
     )
 
 
@@ -326,6 +328,16 @@ class AiPetService:
         if row is None:
             raise PetDomainError("У вас нет питомца. Заведите его: /pet_new <вид> <имя>.")
         row.traits = list(traits)
+        row.version = int(row.version) + 1
+        await self._session.flush()
+        return _view(row)
+
+    async def set_character(self, *, owner_user_id: int, character: str | None) -> PetView:
+        """Owner-written character; validated by the caller, used by the pet's dialogue as data."""
+        row = await self._owner_row(owner_user_id, for_update=True)
+        if row is None:
+            raise PetDomainError("У вас нет питомца. Заведите его: /pet_new <вид> <имя>.")
+        row.character_custom = character
         row.version = int(row.version) + 1
         await self._session.flush()
         return _view(row)

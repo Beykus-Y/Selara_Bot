@@ -16,7 +16,9 @@ from selara.application.feature_access import (
     AccessTier,
     FeatureEntitlement,
     PersonalQuotaLimits,
+    DEFAULT_PET_TALK_DAILY_LIMIT,
     paid_personal_policy,
+    paid_pet_policy,
 )
 from selara.application.personal_config import PersonalConfigProvider
 from selara.application.selara_ai_product import (
@@ -175,13 +177,18 @@ class SqlAlchemyUserEntitlementResolver:
     """PostgreSQL resolver for the personal (user-scoped) entitlement."""
 
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], config: PersonalConfigProvider
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        config: PersonalConfigProvider,
+        *,
+        pet_daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT,
     ) -> None:
         self._session_factory = session_factory
         self._config = config
+        self._pet_daily_limit = pet_daily_limit
 
     async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
-        if feature != AiFeature.PERSONAL_CHAT:
+        if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK):
             return FeatureEntitlement(access_tier=AccessTier.FREE)
         limits = (await self._config.get()).limits
         try:
@@ -207,7 +214,11 @@ class SqlAlchemyUserEntitlementResolver:
             valid_until=row.valid_until,
             source="telegram_stars",
             product_key=row.product_key,
-            quota_policy=paid_personal_policy(_snapshot_limits(limits, row.paid_daily_limit)),
+            quota_policy=(
+                paid_pet_policy(self._pet_daily_limit)
+                if feature == AiFeature.PET_TALK
+                else paid_personal_policy(_snapshot_limits(limits, row.paid_daily_limit))
+            ),
         )
 
 

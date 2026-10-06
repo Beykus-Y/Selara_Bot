@@ -2861,3 +2861,59 @@ class AiPetItemModel(Base):
         CheckConstraint("price >= 0", name="ck_ai_pet_items_price"),
         CheckConstraint("min_level >= 1", name="ck_ai_pet_items_min_level"),
     )
+
+
+class AiPetMessageModel(Base):
+    """A pet's short dialogue history in one chat; also the per-guest talk counter."""
+
+    __tablename__ = "ai_pet_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    # Whether the author owned the pet when they spoke: guests have their own daily share.
+    author_is_owner: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", server_default="ok")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_ai_pet_messages_role"),
+        CheckConstraint("status IN ('pending', 'ok', 'failed')", name="ck_ai_pet_messages_status"),
+        UniqueConstraint("idempotency_key", name="uq_ai_pet_messages_idempotency_key"),
+        Index("idx_ai_pet_messages_pet_chat_created", "pet_id", "chat_id", "created_at"),
+        Index("idx_ai_pet_messages_chat_telegram", "chat_id", "telegram_message_id"),
+    )
+
+
+class AiPetMemoryModel(Base):
+    """Neutral notes a pet keeps from conversations in one chat; never carried to other chats."""
+
+    __tablename__ = "ai_pet_memories"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    subject_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    content: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="dialogue", server_default="dialogue")
+    weight: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("source IN ('aggregate', 'dialogue')", name="ck_ai_pet_memories_source"),
+        Index("idx_ai_pet_memories_pet_chat_created", "pet_id", "chat_id", "created_at"),
+    )

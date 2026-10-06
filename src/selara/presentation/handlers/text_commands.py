@@ -60,6 +60,7 @@ from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import get_role_label_ru, has_command_access, has_permission
 from selara.presentation.commands.access import parse_command_rank_phrase, resolve_command_key_input
+from selara.presentation.handlers.ai_pet_talk import handle_pet_talk, resolve_talk_target, talk_allowed
 from selara.presentation.handlers.ai_pets import ai_pet_text_command, parse_pet_text
 from selara.presentation.commands.catalog import (
     COMMAND_KEYS_WITH_TAIL,
@@ -5782,6 +5783,8 @@ async def text_commands_handler(
     session_factory,
     db_session=None,
     achievement_orchestrator=None,
+    personal_config=None,
+    llm_client=None,
 ) -> None:
     text = message.text or ""
     if _is_reply_profile_lookup(message, text):
@@ -5877,6 +5880,26 @@ async def text_commands_handler(
 
     if await _handle_command_rank_phrase(message, activity_repo, text):
         return
+
+    # Talking to an AI pet is plain speech, not a text command: it works even with text commands off.
+    if not write_locked and parse_pet_text(text) is None and message.chat.type in {"group", "supergroup"}:
+        talk = await resolve_talk_target(
+            message, chat_settings=chat_settings, db_session=db_session, economy_repo=economy_repo
+        )
+        if talk is not None and await talk_allowed(message, activity_repo):
+            await handle_pet_talk(
+                message,
+                pet_id=talk[0],
+                talk_text=talk[1],
+                activity_repo=activity_repo,
+                db_session=db_session,
+                economy_repo=economy_repo,
+                settings=settings,
+                session_factory=session_factory,
+                personal_config=personal_config,
+                llm_client=llm_client,
+            )
+            return
 
     if not chat_settings.text_commands_enabled:
         if message.chat.type in {"group", "supergroup"}:
