@@ -27,7 +27,8 @@ from selara.application.ai_character.group import (
     GROUP_PRESETS,
     MAX_MEMBER_TEXT_LENGTH,
     MEMBER_RECENT_MESSAGES,
-    MEMBER_REPLY_MAX_TOKENS,
+    LAST_ROUND_NOTICE,
+    group_tool_rounds,
     CallName,
     MemberTurn,
     active_call_names,
@@ -69,7 +70,6 @@ router = Router(name="group_character")
 _GROUP_TYPES = {"group", "supergroup"}
 _STATE_TTL_SECONDS = 30.0
 _HINT_INTERVAL_SECONDS = 3600.0
-_MAX_TOOL_ROUNDS = 4
 
 # chat_id -> (expires_at, member_mode_enabled, active names): checked on every group message.
 _state_cache: dict[int, tuple[float, bool, list[CallName]]] = {}
@@ -303,8 +303,11 @@ async def handle_group_call(
     )
     outcome = {"status": "failed", "error_category": "handler_error"}
     try:
+        has_ai = await chat_has_selara_ai(session_factory, chat_id=chat_id, settings=settings)
         answer = await _run_member_dialogue(
             message,
+            total_rounds=group_tool_rounds(settings, has_subscription=has_ai),
+            max_tokens=settings.group_member_max_tokens,
             bot=bot,
             messages=build_member_messages(
                 character=character,
@@ -368,6 +371,8 @@ async def _run_member_dialogue(
     llm_client: LlmClient,
     call_context: LlmAccountingContext | None,
     outcome: dict,
+    total_rounds: int,
+    max_tokens: int,
 ) -> str:
     chat_snapshot = ChatSnapshot(
         telegram_chat_id=message.chat.id, chat_type=message.chat.type, title=message.chat.title
@@ -381,14 +386,17 @@ async def _run_member_dialogue(
         is_bot=bool(user.is_bot),
     )
     tools = member_tool_definitions(history_access=history_access)
-    for round_index in range(_MAX_TOOL_ROUNDS + 1):
+    for round_index in range(total_rounds):
         try:
             await bot.send_chat_action(message.chat.id, "typing")
         except Exception:
             pass
-        # The last round offers no tools, so the model has to answer with what it already has.
-        request: dict = {"messages": messages, "tools": tools if round_index < _MAX_TOOL_ROUNDS else []}
-        request["max_tokens"] = MEMBER_REPLY_MAX_TOKENS
+        # The last round offers no tools and says so, so the model answers with what it already has.
+        is_last = round_index == total_rounds - 1
+        if is_last:
+            messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
+        request: dict = {"messages": messages, "tools": [] if is_last else tools}
+        request["max_tokens"] = max_tokens
         if call_context is not None:
             request["accounting_context"] = call_context
         try:
@@ -404,8 +412,11 @@ async def _run_member_dialogue(
         if not response or not response.choices:
             return ""
         msg = response.choices[0].message
-        if not msg.tool_calls:
-            return (msg.content or "").strip()
+        if not msg.tool_calls or is_last:
+            text = (msg.content or "").strip()
+            if text and getattr(response.choices[0], "finish_reason", None) == "length":
+                text += "…"
+            return text
         messages.append(msg.model_dump(exclude_none=True))
         for tool_call in msg.tool_calls:
             try:

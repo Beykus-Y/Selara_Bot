@@ -224,10 +224,17 @@ class Settings(BaseSettings):
     group_member_free_per_user_daily_limit: int = Field(
         default=5, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_PER_USER_DAILY_LIMIT"
     )
-    group_member_paid_daily_limit: int = Field(default=300, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
+    group_member_paid_daily_limit: int = Field(default=100, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
     group_member_paid_per_user_daily_limit: int = Field(
         default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_PER_USER_DAILY_LIMIT"
     )
+    # Model turns (tool rounds incl. the last, tool-free answer round) for «?»/«??» and the group nickname.
+    group_tool_rounds_free: int = Field(default=4, ge=1, le=20, validation_alias="GROUP_TOOL_ROUNDS_FREE")
+    group_tool_rounds_paid: int = Field(default=8, ge=1, le=20, validation_alias="GROUP_TOOL_ROUNDS_PAID")
+    llm_admin_max_tokens: int = Field(default=800, ge=64, le=8_000, validation_alias="LLM_ADMIN_MAX_TOKENS")
+    group_member_max_tokens: int = Field(default=500, ge=64, le=8_000, validation_alias="GROUP_MEMBER_MAX_TOKENS")
+    # OpenRouter `provider` object for group features (?, nickname), e.g. {"order": ["DeepInfra"], "allow_fallbacks": false}.
+    llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
@@ -249,6 +256,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Group member limits must satisfy per member <= per chat and free < paid (per member: free <= paid)"
             )
+        if self.group_tool_rounds_paid < self.group_tool_rounds_free:
+            raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
     @property

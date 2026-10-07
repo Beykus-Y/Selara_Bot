@@ -119,7 +119,7 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
     unbounded by anything except the hardcoded round cap (no cost/time budget check)."""
     call_count = 0
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         nonlocal call_count
         call_count += 1
         # Always return a tool_call for a harmless, always-available read tool so the
@@ -170,11 +170,11 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
             with_context=False, session_factory=object(),
         )
 
-    # _MAX_TOOL_ROUNDS = 8 in llm_admin.py - one Telegram message => up to 8 billed
+    # Free chat: 4 model turns in llm_admin.py (8 with a group subscription) - one Telegram message => up to 4 billed
     # chat completion calls. The deterministic DM receipt adds no provider call. No budget/cost check
     # short-circuits this early within a single invocation (cross-invocation
     # repeats are now throttled by the #3 cooldown fix -- see next test).
-    assert call_count == llm_admin_module._MAX_TOOL_ROUNDS
+    assert call_count == 4
     llm_client.chat_simple.assert_not_awaited()
 
 
@@ -187,7 +187,7 @@ async def test_llm_cooldown_throttles_immediate_repeat_invocation_by_same_admin(
 
     call_count = 0
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         nonlocal call_count
         call_count += 1
         message = SimpleNamespace(

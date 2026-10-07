@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.application.ai_character.group import group_character_block
+from selara.application.ai_character.group import LAST_ROUND_NOTICE, group_character_block, group_tool_rounds
 from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
@@ -54,14 +54,13 @@ from selara.infrastructure.llm.web_tools import (
     restrict_tools_after_web,
 )
 from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.handlers.group_character import chat_has_selara_ai
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
 
 router = Router(name="llm_admin")
-
-_MAX_TOOL_ROUNDS = 8
 
 
 @router.message(
@@ -402,8 +401,15 @@ async def _handle(
         # trusted context (see save_interaction below).
         web_tainted = False
         web_withdrawal = False
+        artifacts_skill_read = False
 
-        for _round in range(_MAX_TOOL_ROUNDS):
+        # 4 model turns without a group subscription, 8 with one; the last turn offers no tools and says so.
+        has_ai = await chat_has_selara_ai(session_factory, chat_id=message.chat.id, settings=settings)
+        total_rounds = group_tool_rounds(settings, has_subscription=has_ai)
+        for _round in range(total_rounds):
+            is_last_round = _round == total_rounds - 1
+            if is_last_round:
+                messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
             # Allowlist snapshot for THIS round: every tool call in the batch
             # is checked against the same set the provider was offered, so a
             # withdrawal triggered by an earlier call in the batch cannot
@@ -417,7 +423,17 @@ async def _handle(
             except Exception:
                 pass
             try:
-                request_kwargs: dict[str, Any] = {"messages": messages, "tools": available_tools}
+                request_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "tools": [] if is_last_round else available_tools,
+                }
+                # Plain answers are capped; only after the artifacts skill was read (the model is about to
+                # write long create_artifact arguments, which a cut-off would break) the ceiling is higher.
+                request_kwargs["max_tokens"] = (
+                    _ARTIFACT_MAX_TOKENS
+                    if artifacts_skill_read and not is_last_round
+                    else settings.llm_admin_max_tokens
+                )
                 # `tools` is always passed, [] included: LlmClient normalizes
                 # it to tools=None / tool_choice=None (a required positional
                 # -- omitting the key would raise TypeError on the real
@@ -462,9 +478,12 @@ async def _handle(
 
             # Some compatible providers report stop even with executable tool calls.
             # Actual calls take precedence over that metadata.
-            if not msg.tool_calls:
+            if not msg.tool_calls or is_last_round:
+                # On the last round tools were not offered: a stray call is ignored, the text is the answer.
                 if (msg.content or "").strip():
                     final_answer = msg.content
+                    if choice.finish_reason == "length":
+                        final_answer = final_answer.rstrip() + _TRUNCATED_MARK
                     break
                 log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
                     choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
@@ -479,9 +498,31 @@ async def _handle(
 
             messages.append(msg.model_dump(exclude_none=True))
             for tc in msg.tool_calls:
+                try:
+                    parsed_arguments = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(parsed_arguments, dict):
+                        raise ValueError("arguments must be an object")
+                except ValueError:
+                    # Cut-off or malformed arguments: tell the model instead of failing the whole request.
+                    result = ToolResult(
+                        call_id=tc.id,
+                        name=tc.function.name,
+                        result_text=json.dumps(
+                            {"error": "Некорректные аргументы инструмента (JSON повреждён или обрезан). "
+                                      "Повтори вызов короче или ответь текстом."},
+                            ensure_ascii=False,
+                        ),
+                        action_description="",
+                        success=False,
+                    )
+                    tool_results.append(result)
+                    bad_msg = {"role": "tool", "tool_call_id": result.call_id, "content": result.result_text}
+                    messages.append(bad_msg)
+                    tool_messages.append(bad_msg)
+                    continue
                 call = ToolCall(
                     name=tc.function.name,
-                    arguments=json.loads(tc.function.arguments),
+                    arguments=parsed_arguments,
                     call_id=tc.id,
                 )
                 status = get_tool_status(call.name, call.arguments)
@@ -510,6 +551,8 @@ async def _handle(
                 else:
                     result = await execute_tool(call, **tool_ctx)
                 tool_results.append(result)
+                if call.name == "read_skill" and result.success and call.arguments.get("name") == "artifacts":
+                    artifacts_skill_read = True
                 if result.success and result.db_action_id is not None:
                     # #22: commit immediately so a crash on a *later* round can
                     # no longer roll back an already-completed action's DB state
@@ -554,6 +597,7 @@ async def _handle(
         else:
             final_answer = final_answer.strip() or _verified_fallback(tool_results)
             await _send_formatted_answer(message, thinking_msg, final_answer)
+        outcome["answer_sent"] = True
         chat_answer = final_answer
         if artifact_context.sent_artifacts:
             final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
@@ -602,6 +646,20 @@ async def _handle(
 
     try:
         await _run_invocation()
+    except Exception:
+        # Never leave the «Думаю...» placeholder hanging when something unexpected breaks the loop.
+        log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)
+        outcome["status"] = "failed"
+        outcome["error_category"] = "handler_error"
+        if outcome.get("answer_sent"):
+            # The answer already reached the chat; only post-processing failed, so keep the answer as is.
+            outcome["error_category"] = "post_answer_error"
+        else:
+            error_text = "⚠️ Ошибка AI-ассистента: не удалось завершить запрос. Попробуйте позже."
+            try:
+                await thinking_msg.edit_text(error_text)
+            except Exception:
+                pass
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
@@ -620,6 +678,10 @@ async def _handle(
                 )
             except Exception:
                 log.exception("Could not finalize llm_admin invocation id=%s", invocation_id)
+
+
+_ARTIFACT_MAX_TOKENS = 4000
+_TRUNCATED_MARK = "\n\n…(ответ обрезан по длине)"
 
 
 def _empty_answer_recovery() -> dict:

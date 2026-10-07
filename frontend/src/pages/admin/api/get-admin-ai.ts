@@ -39,6 +39,16 @@ export type AdminAiBreakdown = {
   features: AdminAiFeatureRow[]
   models: AdminAiModelRow[]
   unattributed_provider_calls: number
+  chats?: Array<{
+    chat_id: number
+    title: string | null
+    provider_calls: number
+    invocations: number
+    known_cost_usd: string
+    unknown_cost_calls: number
+    question_calls: number
+    nickname_calls: number
+  }>
   stages: Array<{ feature: string; stage: string; provider_calls: number; known_cost_usd: string }>
   profiles?: Array<{ profile_key: string | null; provider_calls: number; known_cost_usd: string; unknown_cost_calls: number }>
   ail_profiles?: Array<{ profile_key: string | null; requests: number; ail_consumed: string }>

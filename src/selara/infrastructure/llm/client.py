@@ -66,6 +66,8 @@ class LlmConfig:
     # OpenRouter: ask for ``usage.cost`` and optionally pass ``provider`` routing preferences.
     include_usage_cost: bool = False
     provider_preferences: dict | None = None
+    # Same OpenRouter ``provider`` object, only for group features («?», nickname); e.g. pin a cheap provider.
+    group_provider_preferences: dict | None = None
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -393,6 +395,8 @@ class LlmClient:
                     **self._with_provider_options(
                         request_kwargs,
                         route=accounting_context is not None and accounting_context.feature == "personal_chat",
+                        group_route=accounting_context is not None
+                        and accounting_context.feature in {"llm_admin", "group_member"},
                     )
                 )
             except asyncio.CancelledError:
@@ -450,7 +454,7 @@ class LlmClient:
 
         raise AssertionError("provider retry loop always returns or raises")
 
-    def _with_provider_options(self, request_kwargs: dict, *, route: bool = True) -> dict:
+    def _with_provider_options(self, request_kwargs: dict, *, route: bool = True, group_route: bool = False) -> dict:
         """Add the OpenRouter extras (real cost, provider preferences) without mutating the caller's kwargs.
 
         Provider preferences (``max_price`` and friends) are only meant for the Personal chat turn, so ``route``
@@ -461,6 +465,8 @@ class LlmClient:
             extra["usage"] = {"include": True}
         if route and self._config.provider_preferences:
             extra["provider"] = dict(self._config.provider_preferences)
+        elif group_route and self._config.group_provider_preferences:
+            extra["provider"] = dict(self._config.group_provider_preferences)
         if not extra:
             return request_kwargs
         merged = dict(request_kwargs.get("extra_body") or {})

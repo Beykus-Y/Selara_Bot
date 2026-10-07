@@ -119,6 +119,19 @@ def test_request_options_are_added_only_when_asked_for():
     assert routed["extra_body"] == {"custom": 1, "usage": {"include": False}, "provider": {"max_price": {"prompt": 1}}}
 
 
+def test_group_provider_preferences_apply_only_to_group_features():
+    plain = {"model": "m", "messages": []}
+    client = _client(
+        provider_preferences={"max_price": {"prompt": 1}},
+        group_provider_preferences={"order": ["DeepInfra"], "allow_fallbacks": False},
+    )
+    group = client._with_provider_options(plain, route=False, group_route=True)
+    assert group["extra_body"] == {"provider": {"order": ["DeepInfra"], "allow_fallbacks": False}}
+    personal = client._with_provider_options(plain, route=True)
+    assert personal["extra_body"] == {"provider": {"max_price": {"prompt": 1}}}
+    assert client._with_provider_options(plain, route=False) is plain
+
+
 def test_runtime_detects_openrouter_and_validates_preferences(monkeypatch):
     base = dict(_env_file=None, bot_token="1:x", database_url="sqlite:///", llm_enabled=True, llm_api_key="k")
     config, problem = llm_runtime_problem(Settings(**base, llm_base_url="https://openrouter.ai/api/v1"))

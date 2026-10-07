@@ -117,7 +117,7 @@ async def test_send_chat_action_failure_does_not_crash_the_tool_loop():
     not abort the whole handler -- it's not guarded today, unlike edit_text."""
     call_count = 0
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         nonlocal call_count
         call_count += 1
         message = SimpleNamespace(
@@ -170,7 +170,7 @@ async def test_completed_moderation_action_is_committed_before_next_round_can_lo
     rounds = 0
     commit_calls_seen_before_round: list[int] = []
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         nonlocal rounds
         rounds += 1
         commit_calls_seen_before_round.append(db_session.commit.await_count)

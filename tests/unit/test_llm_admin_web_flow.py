@@ -115,6 +115,9 @@ def _settings() -> MagicMock:
     settings.bot_timezone = "UTC"
     settings.admin_user_id = 111
     settings.artifact_renderer_url = "http://artifact-renderer:8090"
+    settings.group_tool_rounds_free = 4
+    settings.group_tool_rounds_paid = 8
+    settings.llm_admin_max_tokens = 800
     return settings
 
 
