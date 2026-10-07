@@ -243,3 +243,13 @@ async def test_a_tool_turn_is_never_charged_above_its_reservation():
                             max_units=Decimal("3"))
 
     assert [call.kwargs["actual_units"] for call in access.adjust.await_args_list] == [Decimal("3"), Decimal("1.00")]
+
+
+async def test_a_provider_cost_above_the_tool_reservation_is_logged_as_our_loss(caplog):
+    access = SimpleNamespace(adjust=AsyncMock())
+    config = PersonalConfig(None, 30, PersonalQuotaLimits(5, 50), quota_mode="ail",
+                            ail_limits=PersonalQuotaLimits(10, 100, unit="ail"))
+    with caplog.at_level(logging.WARNING):
+        await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.05")], user_id=5,
+                                max_units=Decimal("3"))
+    assert "above its reservation" in caplog.text

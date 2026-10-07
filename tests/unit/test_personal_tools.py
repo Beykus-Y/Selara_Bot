@@ -43,7 +43,7 @@ def _response(*, content="", tool_calls=None, finish="stop", cost="0.001"):
                                                   "name": t.function.name, "arguments": t.function.arguments}}
                                                              for t in (tool_calls or [])]},
     )
-    usage = SimpleNamespace(status="succeeded", estimated_cost_usd=Decimal(cost))
+    usage = SimpleNamespace(status="succeeded", estimated_cost_usd=None if cost is None else Decimal(cost))
     return LlmCallResult(SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)]), (usage,))
 
 
@@ -225,6 +225,29 @@ async def test_a_spent_budget_turns_the_next_round_into_the_last_one():
     )
     assert turn.text == "Ответ."
     assert llm.calls[1]["tools"] == [] and len(llm.calls) == 2
+
+
+async def test_an_unpriced_round_withdraws_the_tools_when_a_budget_is_set():
+    # Round 1 is priced, round 2 has no provider price: its spend is unknown, so round 3 must not offer tools.
+    llm = ScriptedLlm(
+        _response(tool_calls=[_tool_call("read_skill", name="web-search")], cost="0.001"),
+        _response(tool_calls=[_tool_call("read_skill", name="web-search", call_id="c2")], cost=None),
+        _response(content="Ответ."),
+    )
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(rounds=6, budget=Decimal("1"))
+    )
+    assert turn.text == "Ответ."
+    assert llm.calls[2]["tools"] == [] and len(llm.calls) == 3
+
+
+async def test_unpriced_rounds_keep_the_round_limit_when_no_budget_is_known():
+    llm = ScriptedLlm(
+        _response(tool_calls=[_tool_call("read_skill", name="web-search")], cost=None),
+        _response(content="Ответ."),
+    )
+    await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(rounds=6))
+    assert _names(llm.calls[1]["tools"]) == {"web_search", "fetch_page", "read_skill"}
 
 
 async def test_artifact_rounds_get_a_higher_token_ceiling_only_after_the_skill():

@@ -251,9 +251,14 @@ async def _settle_chat_turn(
         return
     try:
         units = ail_units_from_cost_usd(cost, config.ail_usd_value)
-        if max_units is not None:
-            # A tool turn is never charged above what its reservation (checked against the balance) covered.
-            units = min(units, max_units)
+        if max_units is not None and units > max_units:
+            # A tool turn is never charged above what its reservation (checked against the balance) covered;
+            # the provider cost beyond it is not recovered from the user, so it is logged as our loss.
+            log.warning(
+                "personal_ai: tool turn cost above reservation, excess not charged invocation_id=%s units=%s reserve=%s",
+                invocation_id, units, max_units,
+            )
+            units = max_units
         await access_service.adjust(invocation_id=invocation_id, actual_units=units)
     except Exception:
         log.exception("personal_ai: AIL settlement failed user_id=%s invocation_id=%s", user_id, invocation_id)
