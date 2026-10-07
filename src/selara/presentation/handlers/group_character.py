@@ -394,7 +394,7 @@ async def _run_member_dialogue(
             pass
         # The last round offers no tools and says so, so the model answers with what it already has.
         is_last = round_index == total_rounds - 1
-        if is_last and total_rounds > 1:
+        if is_last:
             messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
         request: dict = {"messages": messages, "tools": [] if is_last else tools}
         # The short cap belongs to the tool-free final answer; tool rounds keep the previous ceiling.

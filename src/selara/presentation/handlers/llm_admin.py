@@ -407,7 +407,7 @@ async def _handle(
         total_rounds = group_tool_rounds(settings, has_subscription=has_ai)
         for _round in range(total_rounds):
             is_last_round = _round == total_rounds - 1
-            if is_last_round and total_rounds > 1:
+            if is_last_round:
                 messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
             # Allowlist snapshot for THIS round: every tool call in the batch
             # is checked against the same set the provider was offered, so a

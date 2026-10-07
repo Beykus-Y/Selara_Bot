@@ -267,6 +267,7 @@ class AdminAiAnalyticsRepository:
             .where(
                 *self._in_window(window_from, window_to),
                 ChatModel.type.in_(("group", "supergroup")),
+                AiFeatureInvocationModel.feature.in_(("llm_admin", "group_member")),
             )
             .group_by(LlmUsageLogModel.chat_id, ChatModel.title)
             .order_by(cost.desc(), calls.desc(), LlmUsageLogModel.chat_id)
