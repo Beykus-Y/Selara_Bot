@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram import Dispatcher
 from aiogram.exceptions import TelegramBadRequest
-from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, StatementError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, ProgrammingError, StatementError
 
 from selara.application.selara_ai_product import (
     SELARA_AI_CURRENCY,
@@ -272,6 +273,7 @@ async def test_payment_persistence_retry_alerts_owner_after_three_failures(monke
             + [PaymentResult("applied", chat_id=-100, valid_until=now + timedelta(days=30))]
         ),
         record_unprocessable_payment=AsyncMock(return_value=1),
+        get_chat_title=AsyncMock(return_value="Test group"),
     )
     monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
     monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
@@ -302,6 +304,7 @@ async def test_payment_persistence_retry_alerts_owner_after_three_failures(monke
     bot.send_message.assert_awaited_once()
     assert "Charge: charge-retry" in bot.send_message.await_args.kwargs["text"]
     message.answer.assert_awaited_once()
+    assert "Test group" in message.answer.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -346,7 +349,7 @@ async def test_poison_payment_is_dead_lettered_and_polling_can_resume(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_payment_stays_unacknowledged_while_even_the_dead_letter_write_fails(monkeypatch):
+async def test_payment_stays_unacknowledged_while_even_the_dead_letter_write_fails(monkeypatch, caplog):
     now = datetime.now(timezone.utc)
     attempts = {"count": 0}
 
@@ -377,23 +380,35 @@ async def test_payment_stays_unacknowledged_while_even_the_dead_letter_write_fai
     bot = SimpleNamespace(send_message=AsyncMock())
 
     with pytest.raises(asyncio.CancelledError):
-        await premium.selara_ai_successful_payment(
-            message,
-            session_factory=object(),
-            settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
-            bot=bot,
-        )
+        with caplog.at_level(logging.ERROR, logger="selara.presentation.handlers.premium"):
+            await premium.selara_ai_successful_payment(
+                message,
+                session_factory=object(),
+                settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+                bot=bot,
+            )
 
     assert repository.record_unprocessable_payment.await_count >= 2
     assert bot.send_message.await_count == 1
     assert "приостановлены" in bot.send_message.await_args.kwargs["text"]
     message.answer.assert_not_awaited()
+    # The operator must be able to tell why the terminal path cannot fire.
+    dead_letter_logs = [
+        record.getMessage() for record in caplog.records if "dead-letter write failed" in record.getMessage()
+    ]
+    assert any("charge-outage" in text and "db down" in text for text in dead_letter_logs)
 
 
 @pytest.mark.asyncio
-async def test_transient_payment_failure_never_enters_the_dead_letter_path(monkeypatch):
-    """A contended or unavailable database must keep the update retrying instead of
-    dead-lettering an already-charged, valid payment as rejected."""
+@pytest.mark.parametrize(
+    "transient_error_type",
+    [OperationalError, ProgrammingError],
+    ids=["operational_error", "programming_error"],
+)
+async def test_transient_payment_failure_never_enters_the_dead_letter_path(monkeypatch, transient_error_type):
+    """A contended or unavailable database, or a deploy/schema window, must keep the
+    update retrying instead of dead-lettering an already-charged, valid payment as
+    rejected."""
     now = datetime.now(timezone.utc)
     attempts = {"count": 0}
 
@@ -401,7 +416,7 @@ async def test_transient_payment_failure_never_enters_the_dead_letter_path(monke
         attempts["count"] += 1
         if attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT + 2:
             raise asyncio.CancelledError()
-        raise OperationalError("SELECT ... FOR UPDATE", {}, RuntimeError("55P03 lock timeout"))
+        raise transient_error_type("SELECT ... FOR UPDATE", {}, RuntimeError("transient database failure"))
 
     repository = SimpleNamespace(
         process_successful_payment=AsyncMock(side_effect=lock_timeout_then_cancel),
@@ -448,6 +463,15 @@ def test_permanent_payment_failure_classification():
     )
     assert not premium._is_permanent_payment_failure(
         OperationalError("SELECT ... FOR UPDATE", {}, RuntimeError("lock timeout"))
+    )
+    # A schema/deploy window ("column ... does not exist") is deterministic for the
+    # connection, not for the payment: the deploy finishes and the statement succeeds.
+    assert not premium._is_permanent_payment_failure(
+        ProgrammingError(
+            "INSERT INTO selara_ai_payments ...",
+            {},
+            RuntimeError('column "target_scope" does not exist'),
+        )
     )
     # Deadlock, serialization and lock waits surface as the DBAPIError base.
     assert not premium._is_permanent_payment_failure(DBAPIError("stmt", {}, RuntimeError("40P01 deadlock")))

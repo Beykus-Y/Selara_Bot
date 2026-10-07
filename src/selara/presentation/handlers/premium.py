@@ -17,7 +17,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy.exc import DataError, IntegrityError, ProgrammingError
+from sqlalchemy.exc import DataError, IntegrityError
 from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.selara_ai_product import (
     PRODUCT_SCOPE_CHAT,
@@ -56,16 +56,20 @@ _PAYMENT_RETRY_MAX_SECONDS = 60
 # After this many failed attempts the confirmed payment is dead-lettered into
 # the rejected-payment audit so one poison payload cannot stall polling forever.
 _PAYMENT_RETRY_DEADLETTER_ATTEMPT = 5
-# Failures bound to the payload or the schema: replaying the same statement can
-# never succeed, so the terminal dead-letter path is the only exit. Everything
+# Failures bound to the payload or the stored data: replaying the same statement
+# can never succeed, so the terminal dead-letter path is the only exit. Everything
 # else (connection loss, timeouts, lock waits, serialization and deadlock
-# conflicts) stays transient and must keep retrying — a dead-letter row would
-# misfile a valid, already-charged payment as rejected while the database is
-# merely unhealthy or a contended row is still held.
+# conflicts, and schema/deploy-window errors) stays transient and must keep
+# retrying — a dead-letter row would misfile a valid, already-charged payment as
+# rejected while the database is merely unhealthy or a contended row is still
+# held. SQLAlchemy ``ProgrammingError`` ("column ... does not exist", cached plan
+# vs DDL mismatch) is deterministic for the connection but not for the payment:
+# during a partial migration it lasts only until the deploy finishes, so the
+# update must stay unacknowledged and succeed then instead of dead-lettering a
+# captured charge that can only be recovered with a manual /stars_refund.
 _PERMANENT_PAYMENT_ERROR_TYPES: tuple[type[Exception], ...] = (
     ValueError,
     TypeError,
-    ProgrammingError,
     DataError,
     IntegrityError,
 )
@@ -934,8 +938,11 @@ async def _record_unprocessable_payment(repository, *, message: Message, payment
         raise
     except Exception as exc:
         logger.error(
-            "Telegram Stars payment dead-letter write failed exception_type=%s",
+            "Telegram Stars payment dead-letter write failed "
+            "telegram_payment_charge_id=%s exception_type=%s exception=%s",
+            payment.telegram_payment_charge_id,
             type(exc).__name__,
+            exc,
         )
         return None
 
