@@ -1,5 +1,5 @@
 import warnings
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     web_enabled: bool = Field(default=True, validation_alias="WEB_ENABLED")
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(default=8080, validation_alias="WEB_PORT")
+    web_forwarded_allow_ips: str = Field(default="127.0.0.1,::1", validation_alias="WEB_FORWARDED_ALLOW_IPS")
     web_domain: str | None = Field(default=None, validation_alias="WEB_DOMAIN")
     web_base_url: str = Field(default="http://127.0.0.1:8080", validation_alias="WEB_BASE_URL")
     gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
@@ -274,6 +275,20 @@ class Settings(BaseSettings):
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_trusted_web_proxies(self):
+        for host in self.web_forwarded_allow_ips.split(","):
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                network = ip_network(host)
+            except ValueError:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS accepts explicit proxy IPs/CIDRs; wildcard trust is forbidden") from None
+            if network.prefixlen == 0:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS must not trust every client")
+        return self
 
     @model_validator(mode="after")
     def _check_session_cookie_security(self):
