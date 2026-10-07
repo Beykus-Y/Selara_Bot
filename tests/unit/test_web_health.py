@@ -51,7 +51,9 @@ async def test_healthz_checks_database_readiness() -> None:
     await getattr(app.router, "shutdown", app.router._shutdown)()
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["game_store_redis"] in {"disabled", "connected", "degraded", "recovering"}
 
 
 @pytest.mark.asyncio

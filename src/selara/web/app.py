@@ -4515,7 +4515,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         except Exception:
             logger.warning("Web readiness check failed", exc_info=True)
             return JSONResponse(content={"status": "unavailable"}, status_code=503)
-        return JSONResponse(content={"status": "ok"}, status_code=200)
+        # game_store_redis surfaces the game store's Redis mode
+        # (disabled/connected/degraded/recovering) for operators: a degraded
+        # store still serves games from memory, so it must not fail the check.
+        return JSONResponse(content={"status": "ok", "game_store_redis": GAME_STORE.redis_recovery_state}, status_code=200)
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):

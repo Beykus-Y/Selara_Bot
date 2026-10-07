@@ -5470,6 +5470,9 @@ class RedisGameStateRepository:
     def ttl_seconds(self) -> int:
         return max(300, int(self._ttl.total_seconds()))
 
+    async def ping(self) -> None:
+        await self._client.ping()
+
     def _game_key(self, game_id: str) -> str:
         return f"{self._GAME_KEY_PREFIX}:{game_id}"
 
@@ -5514,6 +5517,19 @@ class RedisGameStateRepository:
         if value is not None:
             await self._client.expire(self._active_key(chat_id), self.ttl_seconds)
         return value
+
+    async def set_active_game_id(self, *, chat_id: int, game_id: str | None) -> None:
+        """Deterministically point the chat's active-game key at `game_id`.
+
+        Used by the post-outage reconciliation so a stale Redis pointer can
+        never resurrect a game this process has already finished or replaced.
+        Passing `game_id=None` clears the key.
+        """
+        active_key = self._active_key(chat_id)
+        if game_id is None:
+            await self._client.delete(active_key)
+            return
+        await self._client.set(active_key, game_id, ex=self.ttl_seconds)
 
     async def list_active_game_ids(self, *, chat_ids: set[int] | None = None) -> list[str]:
         if chat_ids:
@@ -5679,12 +5695,31 @@ def _event_type_for_method(name: str) -> str:
 
 
 class RuntimeGameStore:
+    """In-memory game store with best-effort Redis persistence.
+
+    Failure model (see issue #65): a Redis outage degrades the runtime to
+    memory-only; mutations keep working against the in-memory backend while
+    Redis keeps a stale snapshot. A background recovery loop periodically
+    probes Redis and, once it answers, reconciles the diverged state before
+    switching back. Conflict resolution is deterministic: the in-memory view
+    always wins — Redis is never read over a game this process already has,
+    and every chat's active-game pointer is re-asserted from memory, so a
+    restart after recovery cannot resurrect a stale phase or a finished game.
+    """
+
+    _RECOVERY_RETRY_SECONDS = 15.0
+
     def __init__(self, backend: InMemoryGameStore | None = None) -> None:
         self._backend = backend or InMemoryGameStore()
         self._codec = GameStateCodec()
         self._state_repo: RedisGameStateRepository | None = None
         self._broker: LiveEventBroker | None = None
         self._redis_degraded = False
+        self._redis_url: str | None = None
+        self._redis_ttl: timedelta = timedelta(hours=24)
+        self._recovery_in_progress = False
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_retry_seconds = self._RECOVERY_RETRY_SECONDS
 
     @staticmethod
     def _is_redis_error(exc: Exception) -> bool:
@@ -5701,6 +5736,8 @@ class RuntimeGameStore:
                 stage,
                 exc,
             )
+        if self._redis_degraded:
+            self._schedule_recovery()
 
     @property
     def backend(self) -> InMemoryGameStore:
@@ -5710,24 +5747,155 @@ class RuntimeGameStore:
     def live_broker(self) -> LiveEventBroker | None:
         return self._broker
 
+    @property
+    def redis_recovery_state(self) -> Literal["disabled", "connected", "degraded", "recovering"]:
+        """Operator-visible Redis mode of the game store."""
+        if self._redis_url is None:
+            return "disabled"
+        if self._recovery_in_progress:
+            return "recovering"
+        if self._redis_degraded:
+            return "degraded"
+        return "connected"
+
     def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
         ttl = timedelta(hours=max(1, ttl_hours))
         self._backend = InMemoryGameStore()
         self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
         self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
+        self._redis_url = redis_url
+        self._redis_ttl = ttl
         self._redis_degraded = False
+        self._cancel_recovery_task()
 
     def use_in_memory(self) -> None:
         self._backend = InMemoryGameStore()
         self._state_repo = None
         self._broker = None
+        self._redis_url = None
         self._redis_degraded = False
+        self._cancel_recovery_task()
 
     async def close(self) -> None:
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if self._broker is not None:
             await self._broker.close()
         if self._state_repo is not None:
             await self._state_repo.close()
+
+    def _schedule_recovery(self) -> None:
+        if self._redis_url is None or self._recovery_task is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - degrade only happens in async context
+            return
+        self._recovery_task = loop.create_task(self._recovery_loop(), name="game-store-redis-recovery")
+
+    def _cancel_recovery_task(self) -> None:
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _recovery_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while self._redis_degraded and self._state_repo is None and self._redis_url is not None:
+                await asyncio.sleep(self._recovery_retry_seconds)
+                if not (self._redis_degraded and self._state_repo is None and self._redis_url is not None):
+                    break
+                try:
+                    await self._attempt_recovery()
+                except Exception as exc:
+                    if self._is_redis_error(exc):
+                        logger.info("Redis recovery attempt failed; will retry. Error: %s", exc)
+                    else:
+                        logger.warning("Redis recovery attempt crashed; will retry.", exc_info=True)
+        finally:
+            if self._recovery_task is current_task:
+                self._recovery_task = None
+
+    def _build_redis_runtime(self) -> tuple[RedisGameStateRepository, RedisLiveEventBroker]:
+        assert self._redis_url is not None
+        return (
+            RedisGameStateRepository.from_url(redis_url=self._redis_url, codec=self._codec, ttl=self._redis_ttl),
+            RedisLiveEventBroker.from_url(redis_url=self._redis_url),
+        )
+
+    @staticmethod
+    async def _close_quietly(component: Any) -> None:
+        close = getattr(component, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Failed to close replaced Redis game store component", exc_info=True)
+
+    async def _attempt_recovery(self) -> None:
+        """Probe Redis and, if it answers, reconcile before switching back.
+
+        Fail-closed: the fresh repo/broker are only wired in after the whole
+        resync succeeded; otherwise the store stays degraded and the loop
+        retries later.
+        """
+        if self._redis_url is None:
+            return
+        self._recovery_in_progress = True
+        try:
+            repo, broker = self._build_redis_runtime()
+            try:
+                await repo.ping()
+                synced_games = await self._reconcile_degraded_state(repo)
+            except Exception:
+                await self._close_quietly(repo)
+                await self._close_quietly(broker)
+                raise
+            self._state_repo = repo
+            self._broker = broker
+            self._redis_degraded = False
+            logger.warning(
+                "Redis connectivity restored; re-synced %d in-memory game(s) and re-enabled the Redis game store.",
+                synced_games,
+            )
+        finally:
+            self._recovery_in_progress = False
+
+    async def _reconcile_degraded_state(self, repo: RedisGameStateRepository) -> int:
+        """Push the in-memory view over the stale Redis snapshot.
+
+        The in-memory backend kept accepting mutations during the outage, so
+        it is strictly newer for every game this process knows. Active-game
+        pointers are re-asserted for every known chat, clearing keys that
+        point at games this process finished or replaced while degraded.
+        Chats unknown to this process are left untouched so their games stay
+        hydratable after a restart.
+        """
+        games = dict(self._backend._by_id)
+        active_by_chat = dict(self._backend._active_by_chat)
+        active_ids = set(active_by_chat.values())
+        for game in games.values():
+            await repo.save_game(game, is_active=game.game_id in active_ids)
+
+        known_chats = {game.chat_id for game in games.values()}
+        for chat_id in sorted(known_chats):
+            active_id = active_by_chat.get(chat_id)
+            active_game = games.get(active_id) if active_id is not None else None
+            if active_game is not None and active_game.status != "finished":
+                await repo.set_active_game_id(chat_id=chat_id, game_id=active_game.game_id)
+            else:
+                await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+        return len(games)
 
     async def publish_event(
         self,
