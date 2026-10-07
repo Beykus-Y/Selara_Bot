@@ -1,8 +1,10 @@
 import warnings
+from ipaddress import ip_address
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -127,7 +129,7 @@ class Settings(BaseSettings):
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
     web_session_cookie_name: str = Field(default="selara_session", validation_alias="WEB_SESSION_COOKIE_NAME")
-    web_session_cookie_secure: bool = Field(default=False, validation_alias="WEB_SESSION_COOKIE_SECURE")
+    web_session_cookie_secure: bool = Field(default=True, validation_alias="WEB_SESSION_COOKIE_SECURE")
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
@@ -271,7 +273,29 @@ class Settings(BaseSettings):
     llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
-    admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+    admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_session_cookie_security(self):
+        url = urlsplit(self.resolved_web_base_url)
+        hostname = (url.hostname or "").lower()
+        local = hostname == "localhost" or hostname.endswith(".localhost")
+        try:
+            local = local or ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        https = url.scheme.lower() == "https"
+        default_secure = https or not local
+        for field_name, env_name in (
+            ("web_session_cookie_secure", "WEB_SESSION_COOKIE_SECURE"),
+            ("admin_session_cookie_secure", "ADMIN_SESSION_COOKIE_SECURE"),
+        ):
+            if field_name not in self.model_fields_set:
+                # Only HTTP loopback defaults to insecure cookies for local dev.
+                object.__setattr__(self, field_name, default_secure)
+            elif self.web_enabled and https and not getattr(self, field_name):
+                raise ValueError(f"{env_name} must be true for an HTTPS web panel")
+        return self
 
     @model_validator(mode="after")
     def _check_personal_limits(self):

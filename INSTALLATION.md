@@ -59,7 +59,11 @@ WEB_SESSION_COOKIE_SECURE=false
 ### 3.2 Важные замечания
 - `WEB_AUTH_SECRET` обязателен: без него (или если он совпадает с `BOT_TOKEN`) процесс завершается с `pydantic_core.ValidationError` ещё до старта бота и веб-панели (настройки проверяются при загрузке конфигурации) — независимо от `APP_ENV`. Fallback на `BOT_TOKEN` существует только для локальной разработки и включается явным флагом `WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true` (с предупреждением в лог); по умолчанию он выключен, поэтому «свежий» deployment из `.env.example` не может тихо получить небезопасную конфигурацию.
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
-- При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
+- Для HTTPS и публичного домена обе session cookies автоматически получают
+  `Secure=true`. HTTP localhost/loopback по умолчанию сохраняет `Secure=false`.
+  Не переносите dev override `WEB_SESSION_COOKIE_SECURE=false` или
+  `ADMIN_SESSION_COOKIE_SECURE=false` в HTTPS production: запуск завершится
+  ошибкой конфигурации. Для явного значения выставляйте обе переменные в `true`.
 
 ### 3.3 Опционально: AI-ассистент и голос (STT/LLM)
 

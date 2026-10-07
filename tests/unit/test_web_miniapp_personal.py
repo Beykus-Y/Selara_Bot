@@ -103,6 +103,8 @@ def _settings(admin_user_id: int | None = 999) -> Settings:
             "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
             "WEB_AUTH_SECRET": "test-secret",
             "WEB_BASE_URL": "http://testserver",
+            "WEB_SESSION_COOKIE_SECURE": False,
+            "ADMIN_SESSION_COOKIE_SECURE": False,
             "ADMIN_USER_ID": admin_user_id,
             "BOT_USERNAME": "selara_test_bot",
         }
