@@ -230,6 +230,7 @@ async def test_send_daily_backup_sends_nothing_when_encryption_fails(
     job_dir.mkdir()
     sent: list[object] = []
     _install_dump_verifier(monkeypatch)
+    _install_restore_drill(monkeypatch)
 
     async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
         _ = settings
@@ -258,7 +259,11 @@ async def test_send_daily_backup_sends_nothing_when_encryption_fails(
     monkeypatch.setattr(backup, "encrypt_file", failing_encrypt_file)
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
+    settings = SimpleNamespace(
+        admin_user_id=42,
+        backup_encryption_public_key=_PUBLIC_KEY,
+        backup_restore_drill_enabled=True,
+    )
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     with pytest.raises(backup.BackupJobError, match="Backup encryption failed for bot_pg_dump.dump: disk full"):
