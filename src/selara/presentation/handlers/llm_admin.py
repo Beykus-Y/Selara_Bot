@@ -122,7 +122,7 @@ async def llm_admin_context_handler(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
 ) -> None:
-    await _handle_serialised(
+    await _handle(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=True, settings=settings, session_factory=session_factory,
         web_search_client=web_search_client,
@@ -144,45 +144,11 @@ async def llm_admin_nocontext_handler(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
 ) -> None:
-    await _handle_serialised(
+    await _handle(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=False, settings=settings, session_factory=session_factory,
         web_search_client=web_search_client,
     )
-
-
-async def _handle_serialised(
-    message: Message,
-    bot: Bot,
-    activity_repo: Any,
-    chat_settings: ChatSettings,
-    llm_client: LlmClient,
-    db_session: AsyncSession,
-    *,
-    with_context: bool,
-    settings: Settings,
-    session_factory: async_sessionmaker[AsyncSession] | None,
-    web_search_client: WebSearchClient | None,
-) -> None:
-    """Run one admin turn under a durable (chat, admin) lease, so overlapping ?/?? cannot run two tool loops."""
-    args = (message, bot, activity_repo, chat_settings, llm_client, db_session)
-    kwargs = {
-        "with_context": with_context,
-        "settings": settings,
-        "session_factory": session_factory,
-        "web_search_client": web_search_client,
-    }
-    if session_factory is None:
-        # _handle answers "quota service unavailable" before any provider call, so no lease is needed.
-        await _handle(*args, **kwargs)
-        return
-    async with ai_turn_lease(
-        session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
-    ) as acquired:
-        if not acquired:
-            await message.reply(_ADMIN_TURN_BUSY_TEXT)
-            return
-        await _handle(*args, **kwargs)
 
 
 async def _handle(
@@ -198,6 +164,10 @@ async def _handle(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
 ) -> None:
+    """Run one admin turn under a durable (chat, admin) lease, so overlapping ?/?? cannot run two tool loops.
+
+    The cheap guards and the permission check run first, so a refused or disabled request never takes the lease.
+    """
     if not chat_settings.llm_enabled:
         return
 
@@ -245,6 +215,41 @@ async def _handle(
         )
         return
 
+    args = (message, bot, activity_repo, chat_settings, llm_client, db_session)
+    kwargs = {
+        "with_context": with_context,
+        "settings": settings,
+        "session_factory": session_factory,
+        "web_search_client": web_search_client,
+    }
+    if session_factory is None:
+        # _run_admin_turn answers "quota service unavailable" before any provider call, so no lease is needed.
+        await _run_admin_turn(*args, **kwargs)
+        return
+    async with ai_turn_lease(
+        session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
+    ) as acquired:
+        if not acquired:
+            await message.reply(_ADMIN_TURN_BUSY_TEXT)
+            return
+        await _run_admin_turn(*args, **kwargs)
+        # Commit before the lease is released: the next ?/?? must see this turn's saved history and cooldown row.
+        await db_session.commit()
+
+
+async def _run_admin_turn(
+    message: Message,
+    bot: Bot,
+    activity_repo: Any,
+    chat_settings: ChatSettings,
+    llm_client: LlmClient,
+    db_session: AsyncSession,
+    *,
+    with_context: bool,
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    web_search_client: WebSearchClient | None = None,
+) -> None:
     raw_text = message.text or ""
     prefix = "??" if with_context else "?"
     query = raw_text[len(prefix):].strip()
