@@ -180,8 +180,10 @@ def build_admin_models_router(*, settings, session_factory, require_admin) -> AP
         for key, title in ROUTE_TITLES.items():
             profile_key = stored.get(key)
             resolved = await resolver.resolve(profile_key=profile_key)
+            effective = snapshot.models_by_id.get(resolved.model_id)
             items.append({"route_key": key, "title": title, "profile_key": profile_key,
-                          "effective_model_id": resolved.model_id, "is_fallback": resolved.is_fallback})
+                          "effective_model_id": resolved.model_id, "is_fallback": resolved.is_fallback,
+                          "effective_pricing": _model_json(effective, snapshot) if effective else None})
         return items
 
     @router.get("/feature-routes")

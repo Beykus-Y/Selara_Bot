@@ -38,6 +38,8 @@ export function AdminFeatureRoutesSection() {
             {data.profiles.map((profile) => <option key={profile.profile_key} value={profile.profile_key}>{profile.display_name}</option>)}
           </select>
         </label>
+        <p>{route.effective_pricing ? `Цена: input $${route.effective_pricing.prompt_price_usd_per_million ?? '?'} / output $${route.effective_pricing.completion_price_usd_per_million ?? '?'} за 1M токенов` : 'Модель вне каталога: цена по умолчанию'}. Группы и питомцы расходуют квоты чата/владельца как раньше, дорогая модель увеличивает ваши расходы.</p>
+        {route.profile_key && route.is_fallback && <p className="admin-warning">Профиль недоступен (выключен, не назначен или модель без tools): используется LLM_MODEL.</p>}
         <p className="admin-mono">Сейчас: {route.effective_model_id}{route.is_fallback && route.profile_key ? ' (профиль недоступен, fallback)' : ''}</p>
       </article>)}
       {saved && <p role="status">Сохранено. Применяется без рестарта в течение {data.applies_within_seconds} секунд.</p>}

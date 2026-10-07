@@ -70,6 +70,7 @@ export async function saveQuotaMode(payload: {
 
 export type FeatureRoute = {
   route_key: string; title: string; profile_key: string | null; effective_model_id: string; is_fallback: boolean
+  effective_pricing: { prompt_price_usd_per_million: string | null; completion_price_usd_per_million: string | null } | null
 }
 export const getFeatureRoutes = () => getMiniAppData<{
   items: FeatureRoute[]; profiles: Array<{ profile_key: string; display_name: string }>
