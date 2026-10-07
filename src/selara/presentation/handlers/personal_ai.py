@@ -12,7 +12,7 @@ from typing import Any
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, Filter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -53,8 +53,12 @@ from selara.core.config import Settings
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
+from selara.infrastructure.db.artifact_repository import ArtifactRepository
+from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
+from selara.infrastructure.llm.personal_tools import PersonalToolRun
+from selara.infrastructure.llm.web_tools import WebToolContext
 from selara.infrastructure.llm.personal_ai import (
     MAX_USER_TEXT_LENGTH,
     generate_reply,
@@ -160,6 +164,8 @@ class _ModelDeps:
     session_factory: async_sessionmaker[AsyncSession]
     personal_config: PersonalConfigProvider
     llm_client: Any = None
+    # The server has a web search client wired in (the web tool switch is pointless without it).
+    web_available: bool = False
 
     @property
     def catalog(self):
@@ -170,10 +176,10 @@ class _ModelDeps:
         return getattr(self.llm_client, "default_model", None) or self.settings.llm_model
 
 
-def _model_deps(settings, session_factory, personal_config, llm_client) -> _ModelDeps | None:
+def _model_deps(settings, session_factory, personal_config, llm_client, web_search_client=None) -> _ModelDeps | None:
     if settings is None or session_factory is None or personal_config is None:
         return None
-    return _ModelDeps(settings, session_factory, personal_config, llm_client)
+    return _ModelDeps(settings, session_factory, personal_config, llm_client, web_available=web_search_client is not None)
 
 
 def _access_service(session_factory, personal_config: PersonalConfigProvider) -> FeatureAccessService:
@@ -205,8 +211,34 @@ def failed_turn_cost_usd(usages) -> Decimal | None:
     return sum((Decimal(usage.estimated_cost_usd) for usage in answered), Decimal(0))
 
 
+_TOOLS_RESERVE_HINT = (
+    "\n\nЗапрос с инструментами резервирует больше AIL. Их можно выключить: /ai → Поведение и настройки → Инструменты."
+)
+
+
+async def _tool_flags(user_id: int, stored: StoredProfile, choice, deps: _ModelDeps | None) -> tuple[bool, bool] | None:
+    """(web, artifacts) for this turn, or ``None`` when it runs without tools.
+
+    Read from the database on every turn: switched off means gone from the next message. Tools need an active
+    Selara Personal, the assistant mode (never role play) and a model that supports them.
+    """
+    if stored.profile.mode != "assistant" or deps is None:
+        return None
+    web_on = bool(stored.tools_web_enabled and deps.web_available)
+    artifacts_on = bool(stored.tools_artifacts_enabled)
+    if not (web_on or artifacts_on):
+        return None
+    capabilities = getattr(getattr(choice, "effective", None), "capabilities", None)
+    if capabilities is not None and not capabilities.supports_tools:
+        return None
+    if not await _has_personal(user_id, deps):
+        return None
+    return web_on, artifacts_on
+
+
 async def _settle_chat_turn(
-    access_service, *, config, invocation_id, usages, user_id: int, failed: bool = False
+    access_service, *, config, invocation_id, usages, user_id: int, failed: bool = False,
+    max_units: Decimal | None = None,
 ) -> None:
     """Replace the multiplier reservation by the request's actual cost; never fails the answer."""
     if invocation_id is None:
@@ -218,6 +250,9 @@ async def _settle_chat_turn(
         return
     try:
         units = ail_units_from_cost_usd(cost, config.ail_usd_value)
+        if max_units is not None:
+            # A tool turn is never charged above what its reservation (checked against the balance) covered.
+            units = min(units, max_units)
         await access_service.adjust(invocation_id=invocation_id, actual_units=units)
     except Exception:
         log.exception("personal_ai: AIL settlement failed user_id=%s invocation_id=%s", user_id, invocation_id)
@@ -283,6 +318,14 @@ async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | N
     return lines, f"Модель: {choice.display_name}"
 
 
+def _tools_summary(stored: StoredProfile) -> str:
+    parts = [
+        f"веб-поиск {'вкл' if stored.tools_web_enabled else 'выкл'}",
+        f"артефакты {'вкл' if stored.tools_artifacts_enabled else 'выкл'}",
+    ]
+    return ", ".join(parts)
+
+
 def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -> str:
     p = stored.profile
     character = escape(p.character_custom) if p.character_preset == CUSTOM_PRESET_KEY and p.character_custom else escape(preset_title(p.character_preset))
@@ -295,6 +338,7 @@ def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -
         f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
         f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
         f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        f"Инструменты (только Selara Personal): {_tools_summary(stored)}",
         *(model_lines or []),
         "",
         "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново, /memory — что я о вас помню, "
@@ -306,31 +350,160 @@ def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -
 
 
 def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> InlineKeyboardMarkup:
+    rev = stored.revision
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎭 Персонаж", callback_data=_cb("cat", "character", rev))
+    builder.button(text="⚙️ Поведение и настройки", callback_data=_cb("cat", "behavior", rev))
+    builder.button(text="🧠 Память", callback_data=_cb("cat", "memory", rev))
+    builder.button(text=f"🤖 {model_label}", callback_data=_cb("models", rev))
+    builder.button(text="Закрыть", callback_data=_cb("close"))
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+_CATEGORIES = ("character", "behavior", "memory", "tools")
+_CATEGORY_TITLES = {
+    "character": "🎭 Персонаж",
+    "behavior": "⚙️ Поведение и настройки",
+    "memory": "🧠 Память",
+    "tools": "🛠 Инструменты",
+}
+# Callback value -> profile column for the switches a category screen can flip (``sc`` actions).
+_TOOL_SWITCHES = {"tweb": "tools_web_enabled", "tart": "tools_artifacts_enabled"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolsView:
+    """What the tools screen needs to know about the person and the server."""
+
+    has_personal: bool = False
+    web_available: bool = False
+
+
+def _switch_text(label: str, on: bool, locked: bool) -> str:
+    return f"{'🔒 ' if locked else ''}{label}: {'вкл' if on else 'выкл'}"
+
+
+async def _has_personal(user_id: int, deps: _ModelDeps | None) -> bool:
+    """True while the person holds an active Selara Personal entitlement (tools are a paid feature)."""
+    if deps is None:
+        return False
+    if deps.settings.admin_user_id is not None and user_id == deps.settings.admin_user_id:
+        return True  # the owner's internal access, like the Mini App
+    resolver = SqlAlchemyUserEntitlementResolver(deps.session_factory, deps.personal_config)
+    try:
+        entitlement = await resolver.resolve(user_id=user_id, feature=AiFeature.PERSONAL_CHAT, trigger="tools_menu")
+    except Exception:
+        return False
+    if entitlement.access_tier != AccessTier.PAID:
+        return False
+    return entitlement.valid_until is None or entitlement.valid_until > datetime.now(timezone.utc)
+
+
+async def _tools_view(user_id: int, deps: _ModelDeps | None) -> _ToolsView:
+    return _ToolsView(has_personal=await _has_personal(user_id, deps), web_available=bool(deps and deps.web_available))
+
+
+def _category_screen(
+    category: str, stored: StoredProfile, tools: _ToolsView | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     p, rev = stored.profile, stored.revision
     builder = InlineKeyboardBuilder()
-    builder.button(text="Имя", callback_data=_cb("in", "name", rev))
-    builder.button(text="Характер", callback_data=_cb("presets", rev))
-    builder.button(text="Обращение", callback_data=_cb("in", "address", rev))
-    builder.button(text=f"Ты/вы: {'вы' if p.formality == 'vy' else 'ты'}", callback_data=_cb("set", "formality", "ty" if p.formality == "vy" else "vy", rev))
-    next_length = {"short": "medium", "medium": "long", "long": "short"}[p.reply_length]
-    builder.button(text=f"Длина: {_LENGTH_TITLES[p.reply_length]}", callback_data=_cb("set", "length", next_length, rev))
-    builder.button(text=f"Эмодзи: {'вкл' if p.emoji_enabled else 'выкл'}", callback_data=_cb("set", "emoji", 0 if p.emoji_enabled else 1, rev))
+    if category == "character":
+        text = "\n".join(
+            [
+                "<b>Персонаж</b>",
+                f"Имя: <b>{escape(p.display_name)}</b>",
+                "Характер: "
+                + (
+                    escape(p.character_custom)
+                    if p.character_preset == CUSTOM_PRESET_KEY and p.character_custom
+                    else escape(preset_title(p.character_preset))
+                ),
+                f"Обращение: {escape(p.address_form) if p.address_form else 'по умолчанию'}, на «{'вы' if p.formality == 'vy' else 'ты'}»",
+            ]
+        )
+        builder.button(text="Имя", callback_data=_cb("in", "name", rev))
+        builder.button(text="Характер", callback_data=_cb("presets", rev))
+        builder.button(text="Обращение", callback_data=_cb("in", "address", rev))
+        builder.button(
+            text=f"Ты/вы: {'вы' if p.formality == 'vy' else 'ты'}",
+            callback_data=_cb("sc", category, "formality", "ty" if p.formality == "vy" else "vy", rev),
+        )
+        sizes: tuple[int, ...] = (2, 2)
+    elif category == "behavior":
+        text = "\n".join(
+            [
+                "<b>Поведение и настройки</b>",
+                f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
+                f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
+                f"Инструменты: {_tools_summary(stored)}",
+            ]
+        )
+        next_length = {"short": "medium", "medium": "long", "long": "short"}[p.reply_length]
+        builder.button(
+            text=f"Длина: {_LENGTH_TITLES[p.reply_length]}",
+            callback_data=_cb("sc", category, "length", next_length, rev),
+        )
+        builder.button(
+            text=f"Эмодзи: {'вкл' if p.emoji_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "emoji", 0 if p.emoji_enabled else 1, rev),
+        )
+        builder.button(
+            text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
+            callback_data=_cb("sc", category, "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
+        )
+        builder.button(text="🛠 Инструменты", callback_data=_cb("cat", "tools", rev))
+        sizes = (2, 1, 1)
+    elif category == "memory":
+        text = "\n".join(
+            [
+                "<b>Память</b>",
+                f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
+                f"Авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+                "/memory — что я о вас помню, /forget_all — удалить все личные данные.",
+            ]
+        )
+        builder.button(
+            text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "memory", 0 if stored.memory_enabled else 1, rev),
+        )
+        builder.button(
+            text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "automemory", 0 if stored.auto_memory_enabled else 1, rev),
+        )
+        sizes = (1,)
+    else:
+        view = tools or _ToolsView()
+        locked = not view.has_personal
+        lines = [
+            "<b>Инструменты</b>",
+            "Всё выключено, пока вы сами не включите. Инструменты делают ответ дольше и дороже: запрос тратит больше AIL, "
+            "но не больше заранее зарезервированного.",
+            "• <b>Веб-поиск</b> — ищу в интернете и читаю страницы. После результатов поиска других инструментов в этом запросе нет.",
+            "• <b>Артефакты</b> — таблицы, схемы и инфографика картинкой.",
+        ]
+        if locked:
+            lines.append("🔒 Нужна подписка Selara Personal: пока её нет, инструменты не работают (настройки сохраняются).")
+        if not view.web_available:
+            lines.append("Веб-поиск на этом сервере не подключён.")
+        if p.mode == "roleplay":
+            lines.append("В ролевой игре инструменты недоступны.")
+        text = "\n".join(lines)
+        builder.button(
+            text=_switch_text("Веб-поиск", stored.tools_web_enabled, locked),
+            callback_data=_cb("sc", category, "tweb", 0 if stored.tools_web_enabled else 1, rev),
+        )
+        builder.button(
+            text=_switch_text("Артефакты", stored.tools_artifacts_enabled, locked),
+            callback_data=_cb("sc", category, "tart", 0 if stored.tools_artifacts_enabled else 1, rev),
+        )
+        sizes = (1,)
     builder.button(
-        text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
-        callback_data=_cb("set", "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
+        text="Назад", callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
     )
-    builder.button(text=model_label, callback_data=_cb("models", rev))
-    builder.button(
-        text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
-        callback_data=_cb("set", "memory", 0 if stored.memory_enabled else 1, rev),
-    )
-    builder.button(
-        text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
-        callback_data=_cb("set", "automemory", 0 if stored.auto_memory_enabled else 1, rev),
-    )
-    builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 2, 1, 1, 2, 1)
-    return builder.as_markup()
+    builder.adjust(*sizes, 1)
+    return text, builder.as_markup()
 
 
 async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, InlineKeyboardMarkup]:
@@ -418,6 +591,7 @@ async def ai_settings_command(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     if message.chat.type != "private" or message.from_user is None:
         await message.answer("Личные настройки Selara AI доступны в личных сообщениях с ботом: откройте диалог и отправьте /ai.")
@@ -427,7 +601,7 @@ async def ai_settings_command(
     stored = await repo.get_or_create_profile(message.from_user.id)
     await repo.commit()
     lines, label = await _model_lines(
-        message.from_user.id, stored, _model_deps(settings, session_factory, personal_config, llm_client)
+        message.from_user.id, stored, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
     )
     await message.answer(_profile_text(stored, lines), parse_mode="HTML", reply_markup=_main_keyboard(stored, label))
 
@@ -452,6 +626,7 @@ async def ai_settings_callback(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     if not _is_private_callback(query):
         await query.answer()
@@ -460,7 +635,7 @@ async def ai_settings_callback(
     action, args = (parts[1] if len(parts) > 1 else ""), parts[2:]
     repo = PersonalAiRepository(db_session)
     user_id = query.from_user.id
-    deps = _model_deps(settings, session_factory, personal_config, llm_client)
+    deps = _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
 
     if action == "close":
         _pending_inputs.pop(user_id, None)
@@ -489,6 +664,12 @@ async def ai_settings_callback(
         return
 
     changes: dict[str, Any] | None = None
+    if action == "cat" and args and args[0] in _CATEGORIES:
+        await query.answer()
+        await repo.commit()
+        text, markup = _category_screen(args[0], stored, await _tools_view(user_id, deps))
+        await _edit(query, text, markup)
+        return
     if action == "models":
         if deps is None:
             await query.answer("Выбор модели сейчас недоступен.")
@@ -522,19 +703,28 @@ async def ai_settings_callback(
     if action == "preset" and len(args) == 2 and args[0] in CHARACTER_PRESETS:
         changes = {"character_preset": args[0]}
     elif action == "set" and len(args) == 3:
-        field, value = args[0], args[1]
-        if field == "formality" and value in ("ty", "vy"):
-            changes = {"formality": value}
-        elif field == "length" and value in ("short", "medium", "long"):
-            changes = {"reply_length": value}
-        elif field == "emoji" and value in ("0", "1"):
-            changes = {"emoji_enabled": value == "1"}
-        elif field == "mode" and value in ("assistant", "roleplay"):
-            changes = {"mode": value}
-        elif field == "memory" and value in ("0", "1"):
-            changes = {"memory_enabled": value == "1"}
-        elif field == "automemory" and value in ("0", "1"):
-            changes = {"auto_memory_enabled": value == "1"}
+        changes = _parse_switch(args[0], args[1])
+        if changes is not None and any(column in changes for column in _TOOL_SWITCHES.values()):
+            changes = None  # tool switches live in the category screen, where the Personal check is done
+    elif action == "sc" and len(args) == 4 and args[0] in _CATEGORIES:
+        category = args[0]
+        changes = _parse_switch(args[1], args[2])
+        if changes is not None and any(column in changes for column in _TOOL_SWITCHES.values()):
+            # Switching a tool on needs Selara Personal; switching it off is always allowed.
+            if any(changes.values()) and not await _has_personal(user_id, deps):
+                await query.answer("Инструменты доступны с Selara Personal.", show_alert=True)
+                await repo.commit()
+                text, markup = _category_screen(category, stored, await _tools_view(user_id, deps))
+                await _edit(query, text, markup)
+                return
+        if changes is not None:
+            updated = await repo.update_profile(user_id, expected_revision=revision, **changes)
+            await query.answer("Сохранено" if updated is not None else "Настройки уже изменились.")
+            fresh = updated or await repo.get_or_create_profile(user_id)
+            await repo.commit()
+            text, markup = _category_screen(category, fresh, await _tools_view(user_id, deps))
+            await _edit(query, text, markup)
+            return
     if changes is None:
         await query.answer()
         return
@@ -542,6 +732,25 @@ async def ai_settings_callback(
     updated = await repo.update_profile(user_id, expected_revision=revision, **changes)
     await query.answer("Сохранено" if updated is not None else "Настройки уже изменились.")
     await _show_home(query, repo, deps=deps)
+
+
+def _parse_switch(field: str, value: str) -> dict[str, Any] | None:
+    """Validate one switch from callback data (user-controlled) into profile column changes."""
+    if field == "formality" and value in ("ty", "vy"):
+        return {"formality": value}
+    if field == "length" and value in ("short", "medium", "long"):
+        return {"reply_length": value}
+    if field == "emoji" and value in ("0", "1"):
+        return {"emoji_enabled": value == "1"}
+    if field == "mode" and value in ("assistant", "roleplay"):
+        return {"mode": value}
+    if field == "memory" and value in ("0", "1"):
+        return {"memory_enabled": value == "1"}
+    if field == "automemory" and value in ("0", "1"):
+        return {"auto_memory_enabled": value == "1"}
+    if field in _TOOL_SWITCHES and value in ("0", "1"):
+        return {_TOOL_SWITCHES[field]: value == "1"}
+    return None
 
 
 async def _selectable(profile_key: str, deps: _ModelDeps) -> bool:
@@ -559,6 +768,7 @@ async def ai_settings_input(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     user_id = message.from_user.id
     state = _get_pending_input(user_id)
@@ -583,7 +793,7 @@ async def ai_settings_input(
         await message.answer("Настройки изменились одновременно. Откройте /ai и повторите.")
         return
     await repo.commit()
-    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client))
+    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client))
     await message.answer(
         "Сохранено.\n\n" + _profile_text(updated, lines), parse_mode="HTML", reply_markup=_main_keyboard(updated, label)
     )
@@ -600,18 +810,24 @@ def _offer_markup(settings: Settings, config, decision) -> InlineKeyboardMarkup 
     return builder.as_markup()
 
 
+# A model that read a web page can be talked into writing a link that carries the person's data out; a preview
+# would load that address on Telegram's side without a click, so Personal answers never get one.
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+ARTIFACT_ANSWER_PLACEHOLDER = "[отправлен артефакт]"
+
+
 async def _send_answer(message: Message, thinking: Message, text: str) -> None:
     for index, chunk in enumerate(render_llm_html(text)):
         if index == 0:
             try:
-                await thinking.edit_text(chunk, parse_mode="HTML")
+                await thinking.edit_text(chunk, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
                 continue
             except Exception as exc:
                 log.warning("personal_ai: editing answer failed, sending reply: %s", exc)
         try:
-            await message.answer(chunk, parse_mode="HTML")
+            await message.answer(chunk, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
         except TelegramBadRequest:
-            await message.answer(html_to_plain_text(chunk), parse_mode=None)
+            await message.answer(html_to_plain_text(chunk), parse_mode=None, link_preview_options=_NO_PREVIEW)
         except TelegramForbiddenError:
             # The user blocked the bot while the model was answering: the turn is already stored and charged.
             log.info("personal_ai: user blocked the bot before the answer was delivered")
@@ -651,6 +867,7 @@ async def personal_chat_handler(
     settings: Settings,
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     user_id = message.from_user.id
     fact = parse_remember_request(message.text)
@@ -664,7 +881,9 @@ async def personal_chat_handler(
         return
     _inflight_users.add(user_id)
     try:
-        await _handle_personal_chat(message, db_session, session_factory, settings, personal_config, llm_client)
+        await _handle_personal_chat(
+            message, db_session, session_factory, settings, personal_config, llm_client, web_search_client
+        )
     finally:
         _inflight_users.discard(user_id)
 
@@ -676,6 +895,7 @@ async def _handle_personal_chat(
     settings: Settings,
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None,
+    web_search_client=None,
 ) -> None:
     user = message.from_user
     text = (message.text or "").strip()
@@ -706,6 +926,15 @@ async def _handle_personal_chat(
         selected_key=stored.model_profile_key,
         legacy_model=getattr(llm_client, "default_model", None) or settings.llm_model,
     )
+    tool_flags = await _tool_flags(
+        user.id, stored, choice, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
+    )
+    tools_active = tool_flags is not None
+    reserve_units = choice.ail_cost
+    if tools_active and config.ail_settles_actual_cost:
+        # Tool turns cost several model calls: reserve a multiple up front (the balance must cover it) and settle
+        # to the real cost, never above that reservation.
+        reserve_units = choice.ail_cost * settings.personal_tools_reserve_factor
     # The quota service works in its own transactions and also upserts the user row: commit ours first,
     # otherwise a brand-new user's first request would wait on a lock held by this very handler.
     await db_session.commit()
@@ -728,7 +957,7 @@ async def _handle_personal_chat(
             mode=stored.profile.mode,
             owner_exempt=resolve_owner_private_exemption(user_id=user.id, admin_user_id=settings.admin_user_id),
             # Used only if the pool counts AI Limits; in requests mode a message is one request.
-            units=choice.ail_cost,
+            units=reserve_units,
             model_profile=choice.profile_key,
         )
     except Exception:
@@ -747,10 +976,11 @@ async def _handle_personal_chat(
                 ail_insufficient_message(
                     decision,
                     profile_name=choice.display_name,
-                    cost=choice.ail_cost,
+                    cost=reserve_units,
                     timezone_name=settings.bot_timezone,
                     can_buy=_offer_markup(settings, config, decision) is not None,
-                ),
+                )
+                + (_TOOLS_RESERVE_HINT if tools_active and reserve_units != choice.ail_cost else ""),
                 reply_markup=_offer_markup(settings, config, decision),
             )
         elif decision.reason == AccessReason.QUOTA_EXHAUSTED:
@@ -780,6 +1010,32 @@ async def _handle_personal_chat(
             telegram_message_id=message.message_id,
         )
 
+    tool_run = None
+    if tool_flags is not None:
+        web_on, artifacts_on = tool_flags
+        usd_per_ail = config.ail_usd_value
+        budget_units = reserve_units if config.ail_settles_actual_cost else choice.ail_cost * settings.personal_tools_reserve_factor
+        tool_run = PersonalToolRun(
+            web_enabled=web_on,
+            artifacts_enabled=artifacts_on,
+            web_context=WebToolContext(
+                client=web_search_client,
+                max_calls=settings.personal_web_max_calls,
+                max_results=settings.web_search_max_results,
+                max_page_chars=settings.personal_web_page_chars,
+            ),
+            artifact_context=ArtifactRequestContext(
+                repository=ArtifactRepository(db_session),
+                renderer_url=settings.artifact_renderer_url,
+                chat_id=user.id,
+                creator_id=user.id,
+                message_id=message.message_id,
+            ),
+            bot=message.bot,
+            total_rounds=settings.personal_tool_rounds,
+            cost_budget_usd=Decimal(budget_units) * Decimal(usd_per_ail) if usd_per_ail else None,
+        )
+    reply_outcome: dict = {}
     outcome = {"status": "failed", "error_category": "handler_error"}
     turn_usages: list = []
     try:
@@ -802,14 +1058,18 @@ async def _handle_personal_chat(
                 use_memory=stored.memory_enabled,
                 resolved_model=resolved_model,
                 usage_sink=turn_usages,
+                tool_run=tool_run,
+                outcome_sink=reply_outcome,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
             # A provider error is not charged the full reservation; with no attempt at all the release below runs.
-            if exc.usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+            failed_usages = [*turn_usages, *exc.usages]
+            if failed_usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
                 await _settle_chat_turn(
                     access_service, config=config, invocation_id=invocation_id,
-                    usages=exc.usages, user_id=user.id, failed=True,
+                    usages=failed_usages, user_id=user.id, failed=True,
+                    max_units=reserve_units if tools_active else None,
                 )
             await thinking.edit_text("⚠️ Не удалось получить ответ от AI. Попробуйте позже.")
             return
@@ -819,12 +1079,17 @@ async def _handle_personal_chat(
             await thinking.edit_text("⚠️ Не удалось выполнить запрос. Попробуйте позже.")
             return
 
+        artifact_sent = bool(reply_outcome.get("artifact_sent"))
+        if not answer and artifact_sent:
+            # An artifact without a caption is still an answer: keep the turn and its charge.
+            answer = ARTIFACT_ANSWER_PLACEHOLDER
         if not answer:
             outcome["error_category"] = "empty_answer"
             if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
                 await _settle_chat_turn(
                     access_service, config=config, invocation_id=invocation_id,
                     usages=turn_usages, user_id=user.id, failed=True,
+                    max_units=reserve_units if tools_active else None,
                 )
             await thinking.edit_text("⚠️ AI не дал ответа. Попробуйте переформулировать.")
             return
@@ -832,17 +1097,28 @@ async def _handle_personal_chat(
         # Settle now, before compression and memory extraction: only the chat turn's own cost is charged.
         if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
             await _settle_chat_turn(
-                access_service, config=config, invocation_id=invocation_id, usages=turn_usages, user_id=user.id
+                access_service, config=config, invocation_id=invocation_id, usages=turn_usages, user_id=user.id,
+                max_units=reserve_units if tools_active else None,
             )
+        web_tainted = bool(reply_outcome.get("web_tainted"))
         await repo.add_message(
             user_id=user.id, thread=thread, role="user", content=text, telegram_message_id=message.message_id
         )
-        await repo.add_message(user_id=user.id, thread=thread, role="assistant", content=answer)
+        await repo.add_message(
+            user_id=user.id, thread=thread, role="assistant", content=answer, web_tainted=web_tainted
+        )
         # Persist the turn now and give the connection back before delivery and compression.
         await db_session.commit()
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
-        await _send_answer(message, thinking, answer)
+        if artifact_sent:
+            # The artifact's caption is the answer and is already in the chat.
+            try:
+                await thinking.delete()
+            except Exception:
+                log.warning("personal_ai: could not remove the progress message", exc_info=True)
+        else:
+            await _send_answer(message, thinking, answer)
         try:
             await maybe_compress_personal(
                 repo=repo,
@@ -862,6 +1138,8 @@ async def _handle_personal_chat(
             and stored.auto_memory_enabled
             and decision.access_tier in (AccessTier.PAID, AccessTier.OWNER_INTERNAL)
             and thread == "assistant"
+            # A turn that read the web never feeds automatic memory.
+            and not web_tainted
         ):
             try:
                 await maybe_extract_memories(

@@ -207,6 +207,25 @@ class Settings(BaseSettings):
     personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
     # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
+    # In AI Limits mode a pet's model line reserves this many AIL (the per-request cap), then settles at its real cost.
+    # Tools of the private assistant (Selara Personal only, switched on per user): model turns per request
+    # (the last one offers no tools), internet calls and page size, and how many times the profile's AIL cost is
+    # reserved for a request that may use tools (the charge never exceeds that reservation).
+    personal_tool_rounds: int = Field(default=6, ge=2, le=12, validation_alias="PERSONAL_TOOL_ROUNDS")
+    personal_web_max_calls: int = Field(default=3, ge=1, le=10, validation_alias="PERSONAL_WEB_MAX_CALLS")
+    personal_web_page_chars: int = Field(default=6000, ge=500, le=20_000, validation_alias="PERSONAL_WEB_PAGE_CHARS")
+    personal_tools_reserve_factor: Decimal = Field(
+        default=Decimal("3"), ge=Decimal("1"), le=Decimal("10"), validation_alias="PERSONAL_TOOLS_RESERVE_FACTOR"
+    )
+    pet_request_ail_cap: Decimal = Field(default=Decimal("3"), gt=0, le=Decimal("50"), validation_alias="PET_REQUEST_AIL_CAP")
+    # Custom pet actions («/pet_do ...»): per person per day, the owner and everyone else; the owner's AIL pays.
+    pet_custom_actions_daily_limit: int = Field(default=10, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_DAILY_LIMIT")
+    pet_custom_actions_guest_daily_limit: int = Field(
+        default=5, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_GUEST_DAILY_LIMIT"
+    )
+    pet_custom_actions_guests_daily_limit: int = Field(
+        default=20, ge=0, le=10_000, validation_alias="PET_CUSTOM_ACTIONS_GUESTS_DAILY_LIMIT"
+    )
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,

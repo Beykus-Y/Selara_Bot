@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_macros.html" import breadcrumb %}
+
+{% block content %}
+  <div class="panel admin-ai" data-admin-ai>
+    <div class="panel-head">
+      <div>
+        {{ breadcrumb([
+          {"href": "/app/admin", "label": "Админка"},
+          {"label": "AI-настройки"},
+        ]) }}
+        <h1 class="sr-only">AI-настройки владельца</h1>
+        <h2>AI-настройки</h2>
+        <p class="panel-subtitle">
+          Те же настройки и тот же API, что в Mini App (раздел «AI»): модели, профили, лимиты, подписки.
+          Изменения применяются в течение 15 секунд, перезапуск не нужен.
+        </p>
+      </div>
+    </div>
+
+    <noscript><div class="banner banner-warning" role="note">Для этой страницы нужен JavaScript.</div></noscript>
+
+    <div class="admin-ai-grid">
+      <section class="admin-ai-section" data-ai-section="quota" aria-labelledby="ai-quota-title">
+        <h3 id="ai-quota-title">Режим лимитов Personal</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="profiles" aria-labelledby="ai-profiles-title">
+        <h3 id="ai-profiles-title">Профили моделей</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="models" aria-labelledby="ai-models-title">
+        <h3 id="ai-models-title">Каталог моделей</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="routes" aria-labelledby="ai-routes-title">
+        <h3 id="ai-routes-title">Модели для групп и функций</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="personal" aria-labelledby="ai-personal-title">
+        <h3 id="ai-personal-title">Selara Personal: цена и лимиты</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="report" aria-labelledby="ai-report-title">
+        <h3 id="ai-report-title">Расходы и отчёт по чатам</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="grants" aria-labelledby="ai-grants-title">
+        <h3 id="ai-grants-title">Выдача подписок</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="chat" aria-labelledby="ai-chat-title">
+        <h3 id="ai-chat-title">Selara в чате</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+      <section class="admin-ai-section" data-ai-section="readiness" aria-labelledby="ai-readiness-title">
+        <h3 id="ai-readiness-title">Готовность AI</h3>
+        <div class="admin-ai-body" data-ai-body>Загрузка…</div>
+      </section>
+    </div>
+  </div>
+{% endblock %}

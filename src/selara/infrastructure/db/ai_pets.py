@@ -14,12 +14,14 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character.group import normalize_call_name
 from selara.application.ai_pets import mechanics as m
+from selara.application.ai_pets import custom_action as ca
+from selara.application.ai_pets import personality as personality
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.models import (
@@ -42,6 +44,7 @@ ResultStatus = Literal[
     "cooldown",
     "blocked",
     "unavailable",
+    "refused",
     "item_unavailable",
     "level_too_low",
     "insufficient_funds",
@@ -261,6 +264,38 @@ class AiPetService:
         )
         return int(value or 0)
 
+    async def chat_relations(self, *, pet_id: int, chat_id: int) -> list[tuple[int, int]]:
+        """``(affinity, interactions)`` of everyone the pet has met in this chat (its attitude to the group)."""
+        rows = await self._session.execute(
+            select(AiPetRelationshipModel.affinity, AiPetRelationshipModel.interactions).where(
+                AiPetRelationshipModel.pet_id == pet_id, AiPetRelationshipModel.chat_id == chat_id
+            )
+        )
+        return [(int(affinity), int(interactions or 0)) for affinity, interactions in rows]
+
+    async def refresh_traits(self, *, pet_id: int) -> tuple[str, ...]:
+        """Recompute the pet's traits from its journal; they form by themselves and nobody sets them."""
+        row = await self._session.get(AiPetModel, pet_id)
+        if row is None:
+            return ()
+        return await self._refresh_traits(row)
+
+    async def _refresh_traits(self, row: AiPetModel) -> tuple[str, ...]:
+        rows = await self._session.execute(
+            select(AiPetEventModel.event_type, func.count())
+            .where(AiPetEventModel.pet_id == row.id, AiPetEventModel.event_type.in_(personality.BEHAVIOR_EVENT_TYPES))
+            .group_by(AiPetEventModel.event_type)
+        )
+        counts = {str(event_type): int(count) for event_type, count in rows}
+        top = await self._session.scalar(
+            select(func.max(AiPetRelationshipModel.affinity)).where(AiPetRelationshipModel.pet_id == row.id)
+        )
+        traits = personality.derive_traits(counts, top_affinity=int(top or 0))
+        # Too little history to form traits yet: keep what the pet had instead of clearing it.
+        if traits and traits != list(row.traits or ()):
+            row.traits = traits
+        return tuple(row.traits or ())
+
     async def top_relations(self, *, pet_id: int, chat_id: int, limit: int = 3) -> list[tuple[int, int]]:
         rows = await self._session.execute(
             select(AiPetRelationshipModel.user_id, AiPetRelationshipModel.affinity)
@@ -318,8 +353,6 @@ class AiPetService:
         species_key, species_custom = m.resolve_species(species_raw)
         name = m.validate_name(name_raw)
         name_norm = m.normalize_name(name)
-        if not await self.has_active_personal(user_id=owner.telegram_user_id, now=now):
-            raise PetDomainError("Завести AI-питомца можно с подпиской Selara Personal: /premium в личке с ботом.")
 
         await _lock_resources(
             self._session,
@@ -371,15 +404,6 @@ class AiPetService:
         await self._session.flush()
         return _view(row)
 
-    async def set_traits(self, *, owner_user_id: int, traits: list[str]) -> PetView:
-        row = await self._owner_row(owner_user_id, for_update=True)
-        if row is None:
-            raise PetDomainError("У вас нет питомца. Заведите его: /pet_new <вид> <имя>.")
-        row.traits = list(traits)
-        row.version = int(row.version) + 1
-        await self._session.flush()
-        return _view(row)
-
     async def set_character(self, *, owner_user_id: int, character: str | None) -> PetView:
         """Owner-written character; validated by the caller, used by the pet's dialogue as data."""
         row = await self._owner_row(owner_user_id, for_update=True)
@@ -404,8 +428,8 @@ class AiPetService:
         """Reserve one spontaneous event in this chat, or ``None`` when nothing may happen now.
 
         A chat-scoped advisory lock serialises concurrent checks, so the chat interval and
-        each pet's daily cap hold even when several updates arrive at once. Only pets whose
-        owner has an active Selara Personal qualify (§5.0).
+        each pet's daily cap hold even when several updates arrive at once. Every pet qualifies:
+        the line is a free template unless the owner has Selara Personal (which unlocks the model).
         """
         await _lock_resources(self._session, f"ai_pet:events:{chat_id}")
         last_in_chat = await self._session.scalar(
@@ -428,8 +452,6 @@ class AiPetService:
                 )
             )
             if int(today or 0) >= daily_limit:
-                continue
-            if not await self.has_active_personal(user_id=int(row.owner_user_id), now=now):
                 continue
             candidates.append(row)
         if not candidates:
@@ -636,6 +658,174 @@ class AiPetService:
             today=today,
             now=now,
             extra={},
+        )
+
+    async def custom_action_gate(
+        self,
+        *,
+        pet_id: int,
+        chat_id: int,
+        actor_user_id: int,
+        now: datetime,
+        day_start: datetime,
+        daily_limit: int,
+        claim_key: str | None = None,
+        owner_user_id: int | None = None,
+        guests_daily_limit: int | None = None,
+    ) -> tuple[str, str]:
+        """Check before a model line is paid for: ``("ok" | "unavailable" | "cooldown" | "limit" | "tired", message)``.
+
+        With ``claim_key`` the check runs under the pet lock and an ``ok`` writes a claim event in the same
+        transaction, so parallel calls cannot all pass: the cooldown and both caps count the claim. The caller
+        commits before the model call.
+        """
+        if claim_key is not None:
+            row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
+        else:
+            row = await self._session.get(AiPetModel, pet_id)
+            if row is not None and (row.status != "active" or row.current_chat_id != chat_id):
+                row = None
+        if row is None:
+            return "unavailable", "Этого питомца здесь нет или он спит."
+        if claim_key is not None and await self._event_exists(claim_key):
+            return "duplicate", ""  # a redelivered update must not be told about its own claim
+        custom_types = [ca.event_type(key) for key in ca.CLASS_KEYS]
+        last = await self._session.scalar(
+            select(func.max(AiPetEventModel.created_at)).where(
+                AiPetEventModel.pet_id == pet_id,
+                AiPetEventModel.actor_user_id == actor_user_id,
+                AiPetEventModel.event_type.in_(custom_types),
+            )
+        )
+        left = m.cooldown_left(_as_utc(last) if last is not None else None, ca.CUSTOM_COOLDOWN, now)
+        if left is not None:
+            return "cooldown", f"{row.name} ещё не готов(а) к новому. Попробуйте через {m.format_duration(left)}."
+        today = await self._session.scalar(
+            select(func.count()).where(
+                AiPetEventModel.pet_id == pet_id,
+                AiPetEventModel.actor_user_id == actor_user_id,
+                AiPetEventModel.event_type.in_(custom_types),
+                AiPetEventModel.created_at >= day_start,
+            )
+        )
+        if int(today or 0) >= daily_limit:
+            return "limit", f"На сегодня хватит: {row.name} уже наобщался(ась) с вами своими затеями. Завтра придумаем новое."
+        if guests_daily_limit is not None and owner_user_id is not None and actor_user_id != owner_user_id:
+            guests_today = await self._session.scalar(
+                select(func.count()).where(
+                    AiPetEventModel.pet_id == pet_id,
+                    AiPetEventModel.actor_user_id != owner_user_id,
+                    AiPetEventModel.event_type.in_(custom_types),
+                    AiPetEventModel.created_at >= day_start,
+                )
+            )
+            if int(guests_today or 0) >= guests_daily_limit:
+                return "limit", f"{row.name} сегодня уже наигрался(ась) с гостями. Завтра придумаем новое."
+        if min(c.min_energy for c in ca.CLASSES.values()) > _stats(row).energy:
+            return "tired", f"{row.name} слишком устал(а) — пусть отдохнёт."
+        if claim_key is not None:
+            if await self._event_exists(claim_key):
+                return "duplicate", ""
+            self._session.add(
+                AiPetEventModel(
+                    pet_id=row.id, chat_id=chat_id, actor_user_id=actor_user_id,
+                    event_type=ca.event_type(ca.CLAIM_CLASS), effects={}, idempotency_key=claim_key, created_at=now,
+                )
+            )
+            await self._session.flush()
+        return "ok", ""
+
+    async def _drop_claim(self, claim_key: str | None) -> None:
+        if claim_key is not None:
+            await self.release_custom_claim(claim_key=claim_key)
+
+    async def _keep_claim_as_blocked(
+        self, claim_key: str | None, *, row: AiPetModel, chat_id: int, actor_user_id: int, now: datetime, fallback_key: str
+    ) -> None:
+        blocked_type = ca.event_type(ca.BLOCKED_CLASS)
+        if claim_key is not None:
+            await self._session.execute(
+                update(AiPetEventModel)
+                .where(AiPetEventModel.idempotency_key == claim_key)
+                .values(event_type=blocked_type)
+            )
+            return
+        self._session.add(
+            AiPetEventModel(
+                pet_id=row.id, chat_id=chat_id, actor_user_id=actor_user_id,
+                event_type=blocked_type, effects={}, idempotency_key=fallback_key, created_at=now,
+            )
+        )
+        await self._session.flush()
+
+    async def release_custom_claim(self, *, claim_key: str) -> None:
+        """The model call produced nothing (or never ran): the claim must not eat the person's cooldown and cap."""
+        await self._session.execute(
+            delete(AiPetEventModel).where(
+                AiPetEventModel.idempotency_key == claim_key,
+                AiPetEventModel.event_type == ca.event_type(ca.CLAIM_CLASS),
+            )
+        )
+
+    async def perform_custom_action(
+        self,
+        *,
+        pet_id: int,
+        chat_id: int,
+        actor_user_id: int,
+        class_key: str,
+        narration: str,
+        action_text: str,
+        idempotency_key: str,
+        today: date,
+        now: datetime,
+        claim_key: str | None = None,
+    ) -> ActionResult:
+        """Apply a classified custom action: the effect comes from the class table, never from the model's text.
+
+        ``claim_key`` is the claim written by ``custom_action_gate``: it is replaced by the real event, or kept as a
+        ``blocked`` record when the paid call had no effect, so a tired or full pet cannot be asked again for free.
+        """
+        row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
+        if row is None:
+            return ActionResult(status="unavailable", message="Этого питомца здесь нет или он спит.")
+        if await self._event_exists(idempotency_key):
+            return ActionResult(status="duplicate", pet=_view(row))
+        extra = {"class": class_key, "action": action_text[: ca.ACTION_TEXT_MAX_LEN]}
+        action_class = ca.CLASSES.get(class_key)
+        if action_class is None:
+            # A refusal is journaled so it counts against the person's daily cap and replays are no-ops.
+            self._session.add(
+                AiPetEventModel(
+                    pet_id=row.id, chat_id=chat_id, actor_user_id=actor_user_id,
+                    event_type=ca.event_type(ca.REFUSE_CLASS), effects=extra, idempotency_key=idempotency_key, created_at=now,
+                )
+            )
+            await self._drop_claim(claim_key)
+            await self._session.flush()
+            return ActionResult(status="refused", pet=_view(row))
+        stats = _stats(row)
+        if stats.energy < action_class.min_energy:
+            await self._keep_claim_as_blocked(
+                claim_key, row=row, chat_id=chat_id, actor_user_id=actor_user_id, now=now, fallback_key=idempotency_key
+            )
+            return ActionResult(status="blocked", pet=_view(row), message=f"{row.name} слишком устал(а) — пусть отдохнёт.")
+        if action_class.blocked_when_full and stats.satiety >= m.FOOD_FULL_AT:
+            await self._keep_claim_as_blocked(
+                claim_key, row=row, chat_id=chat_id, actor_user_id=actor_user_id, now=now, fallback_key=idempotency_key
+            )
+            return ActionResult(status="blocked", pet=_view(row), message=f"{row.name} не голоден(на).")
+        await self._drop_claim(claim_key)
+        return await self._apply(
+            row,
+            chat_id=chat_id,
+            actor_user_id=actor_user_id,
+            event_type=ca.event_type(class_key),
+            effect=action_class.effect,
+            idempotency_key=idempotency_key,
+            today=today,
+            now=now,
+            extra=extra,
         )
 
     async def use_item(
@@ -985,6 +1175,7 @@ class AiPetService:
                 )
             )
         await self._session.flush()
+        await self._refresh_traits(row)
         return ActionResult(
             status="ok",
             pet=_view(row),

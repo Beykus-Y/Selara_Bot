@@ -138,12 +138,12 @@ async def test_claims_respect_chat_interval_and_daily_cap(db) -> None:
     assert await _claim(session, at=NOW + timedelta(days=1), limit=2) is not None  # a new day
 
 
-async def test_only_pets_of_personal_owners_get_events(db) -> None:
+async def test_pets_of_owners_without_personal_still_get_events(db) -> None:
     session, _, _ = db
     row = (await session.scalars(select(UserEntitlementModel).where(UserEntitlementModel.user_id == OWNER))).one()
     row.valid_until = NOW - timedelta(minutes=1)
     await session.flush()
-    assert await _claim(session) is None
+    assert await _claim(session) is not None
 
 
 class _Bot:
@@ -194,6 +194,17 @@ async def test_event_is_phrased_by_the_model_and_paid_by_the_owner(db, fake_quot
     async with factory() as session:
         event = (await session.scalars(select(AiPetEventModel).where(AiPetEventModel.event_type == "spontaneous"))).one()
         assert event.effects["status"] == "posted" and event.effects["person"] == GUEST
+
+
+async def test_owner_without_personal_gets_a_free_template_and_no_model_call(db, fake_quota) -> None:
+    session, factory, _ = db
+    row = (await session.scalars(select(UserEntitlementModel).where(UserEntitlementModel.user_id == OWNER))).one()
+    row.valid_until = NOW - timedelta(minutes=1)
+    await session.commit()
+    llm = SimpleNamespace(chat_simple=AsyncMock())
+    text = await _run(factory, _Bot(), llm)
+    assert text and text.startswith("🐱 Мурка")
+    llm.chat_simple.assert_not_awaited()
 
 
 async def test_without_a_model_a_template_is_posted_and_without_quota_nothing(db, fake_quota) -> None:

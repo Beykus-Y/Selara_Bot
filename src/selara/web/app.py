@@ -627,6 +627,10 @@ async def _build_achievement_sections(
     return sections
 
 
+# Owner JSON APIs (Mini App and the /app/admin AI settings) answer errors as JSON, never as HTML status pages.
+_ADMIN_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "app/admin/api/")
+
+
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     template_environment = create_template_environment(
@@ -678,6 +682,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return {"status": "healthy", "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000)}
         except Exception:
             return {"status": "down", "latency_ms": None, "detail": "Telegram Bot API не ответил на проверку."}
+
+    async def _send_owner_grant_notice(chat_id: int, text: str) -> bool:
+        """Best-effort notice for a granted or revoked subscription: a DM to the user or a message in the chat."""
+        try:
+            await (await _get_game_bot()).send_message(chat_id, text)
+        except Exception:
+            logger.warning("Subscription notice was not delivered chat_id=%s", chat_id)
+            return False
+        return True
 
     async def _close_game_bot() -> None:
         nonlocal game_bot
@@ -1164,8 +1177,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
-            message = exc.detail if isinstance(exc.detail, str) and exc.detail else "Сервер отклонил запрос."
+        if request.url.path.startswith(_ADMIN_API_PREFIXES):
+            detail = exc.detail.get("message") if isinstance(exc.detail, dict) else exc.detail
+            message = detail if isinstance(detail, str) and detail else "Сервер отклонил запрос."
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"ok": False, "status_code": exc.status_code, "message": message},
@@ -1207,7 +1221,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
+        if request.url.path.startswith(_ADMIN_API_PREFIXES):
             return JSONResponse(
                 status_code=422,
                 content={"ok": False, "status_code": 422, "message": "Проверьте параметры запроса."},
@@ -8166,6 +8180,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ("broadcasts", "/app/admin#broadcasts", "Рассылки"),
             ("history", "/app/admin/table/messages_compact", "История"),
             ("database", "/app/admin#database", "База данных"),
+            ("ai", "/app/admin/ai", "AI-настройки"),
         )
         return {
             "top_links": [
@@ -11333,6 +11348,127 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "created_at": broadcast.created_at.isoformat(),
         }
 
+    # --- AI settings of the owner in the server-rendered /app/admin --------------------------------------------
+    # The same endpoints and services as the Mini App admin (build_miniapp_admin_router), mounted a second time
+    # under /app/admin/api with the admin web session instead of the Telegram one.
+
+    async def _load_web_admin_user(session: AsyncSession, request: Request) -> UserSnapshot | None:
+        admin_user_id = await _load_admin_from_request(session, request, touch=True)
+        if not _admin_auth_required(admin_user_id):
+            return None
+        return UserSnapshot(
+            telegram_user_id=int(admin_user_id), username=None, first_name=None, last_name=None, is_bot=False
+        )
+
+    def _web_admin_mutation_guard(request: Request) -> None:
+        # The admin cookie is SameSite=Lax and the API reads JSON only; a custom header on every change makes a
+        # cross-site request impossible without a CORS preflight (this app allows none).
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("x-selara-admin") != "1":
+            raise StarletteHTTPException(status_code=403, detail="Недопустимый запрос: нужен заголовок X-Selara-Admin.")
+
+    @app.get("/app/admin/ai", response_class=HTMLResponse)
+    async def admin_ai_page(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+        return _render_template(
+            "admin_ai.html",
+            page_title="Selara • AI-настройки",
+            page_name="admin_ai",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"), error=request.query_params.get("error"), active="ai"
+            ),
+            extra_styles=["admin-ai.css"],
+            extra_scripts=["admin-ai.js"],
+        )
+
+    async def _web_admin_chat_context(session: AsyncSession, request: Request, chat_id: int):
+        """(admin_user_id, chat) for the owner's per-chat Selara settings, or an error response."""
+        _web_admin_mutation_guard(request)
+        admin_user_id = await _load_admin_from_request(session, request, touch=True)
+        if not _admin_auth_required(admin_user_id):
+            return None, None, _json_result(ok=False, message="Сессия админки истекла. Войдите снова.", status_code=401)
+        chat = await session.scalar(select(ChatModel).where(ChatModel.telegram_chat_id == chat_id))
+        if chat is None or chat.type not in {"group", "supergroup"}:
+            return admin_user_id, None, _json_result(ok=False, message="Группа не найдена.", status_code=404)
+        return admin_user_id, chat, None
+
+    @app.get("/app/admin/api/chats/{chat_id}/selara")
+    async def admin_chat_selara_settings_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            _, chat, failure = await _web_admin_chat_context(session, request, chat_id)
+            if failure is not None:
+                await session.commit()
+                return failure
+            payload = await build_selara_settings_payload(
+                db_session=session, chat_id=chat_id, session_factory=session_factory, settings=settings,
+                can_manage=True,
+            )
+            await session.commit()
+        return JSONResponse(
+            content={"ok": True, "chat_title": chat.title, **payload}, headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/app/admin/api/chats/{chat_id}/selara")
+    async def admin_chat_selara_settings_update_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            admin_user_id, chat, failure = await _web_admin_chat_context(session, request, chat_id)
+            if failure is not None:
+                await session.commit()
+                return failure
+            activity_repo = SqlAlchemyActivityRepository(session)
+            form = await _parse_form(request)
+            action = (form.get("action") or "").strip()
+            ok, message = await apply_selara_action(
+                db_session=session,
+                activity_repo=activity_repo,
+                chat_id=chat_id,
+                actor_id=admin_user_id,
+                action=action,
+                value=form.get("value") or "",
+                session_factory=session_factory,
+                settings=settings,
+            )
+            if ok:
+                await log_chat_action(
+                    activity_repo,
+                    chat_id=chat_id,
+                    chat_type=chat.type,
+                    chat_title=chat.title,
+                    action_code="web_setting_updated",
+                    description=f"Владелец изменил настройки Selara в чате через /app/admin ({action})",
+                    actor_user_id=admin_user_id,
+                )
+            await session.commit()
+            payload = await build_selara_settings_payload(
+                db_session=session, chat_id=chat_id, session_factory=session_factory, settings=settings,
+                can_manage=True,
+            )
+            await session.commit()
+        return JSONResponse(
+            content={"ok": ok, "message": message, "chat_title": chat.title, **payload},
+            status_code=200 if ok else 400,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    app.include_router(
+        build_miniapp_admin_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=_load_web_admin_user,
+            broadcast_preview_handler=_miniapp_broadcast_preview,
+            broadcast_start_handler=_miniapp_broadcast_start,
+            broadcast_status_handler=_miniapp_broadcast_status,
+            telegram_bot_probe=_probe_miniapp_telegram_bot,
+            send_notice=_send_owner_grant_notice,
+            prefix="/" + "app/admin/api",
+            ai_only=True,
+            unauthorized_detail="Сессия админки истекла. Войдите снова.",
+            mutation_guard=_web_admin_mutation_guard,
+        )
+    )
     app.include_router(
         build_miniapp_admin_router(
             settings=settings,
@@ -11342,6 +11478,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
+            send_notice=_send_owner_grant_notice,
         )
     )
     app.include_router(

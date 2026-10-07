@@ -5,6 +5,7 @@ import { formatDate, quotaView } from '@/pages/chat/lib/ai-access-view'
 import { getPersonalOverview } from '@/pages/personal/api/personal-api'
 import { MemorySection } from '@/pages/personal/ui/MemorySection'
 import { ModelSection } from '@/pages/personal/ui/ModelSection'
+import { ToolsSection } from '@/pages/personal/ui/ToolsSection'
 import { PrivacySection } from '@/pages/personal/ui/PrivacySection'
 import type { PersonalOverview } from '@/pages/personal/model/types'
 import { routes } from '@/shared/config/routes'
@@ -121,6 +122,7 @@ export function PersonalPage() {
       <SubscriptionSection data={data} />
       <ModelSection data={data} />
       <MemorySection data={data} />
+      <ToolsSection data={data} />
       <PrivacySection />
       <Link className="button button--secondary" to={routes.more}>
         Назад

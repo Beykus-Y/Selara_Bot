@@ -160,7 +160,20 @@ class LlmClient:
         accounting_context: LlmAccountingContext | None = None,
         model: str | None = None,
         model_profile: str | None = None,
+        resolved_model: ResolvedModel | None = None,
     ):
+        if resolved_model is not None:
+            # Already resolved by the caller (Personal AI tools): exactly that model and pricing snapshot.
+            if model is not None or model_profile is not None:
+                raise ValueError("Pass either resolved_model or model/model_profile")
+            validate_text(resolved_model.model_id, "model override", 255)
+            response, usages = await self._request_with_retries(
+                "chat_with_tools", resolved_model.model_id, accounting_context,
+                catalog_snapshot=resolved_model.catalog, model_profile=resolved_model.profile_key,
+                model=resolved_model.model_id, messages=messages, tools=tools or None,
+                tool_choice="auto" if tools else None, max_tokens=max_tokens,
+            )
+            return LlmCallResult(response, usages)
         routed = await self._routed_profile(model, model_profile, accounting_context)
         # A routed tool feature needs tool support in every round of its loop, also in the final
         # round without tools: otherwise one request would switch models halfway through.

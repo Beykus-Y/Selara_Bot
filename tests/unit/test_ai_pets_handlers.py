@@ -145,3 +145,40 @@ async def test_pet_buttons_enforce_the_pet_rank_rule(monkeypatch: pytest.MonkeyP
     assert access.await_args.kwargs["user_id"] == 5
     run_action.assert_not_awaited()
     assert "прав" in query.answer.await_args.args[0]
+
+
+def test_card_shows_formed_traits_mood_of_the_day_and_attitude_to_the_chat() -> None:
+    from selara.infrastructure.db.ai_pets import PetView
+
+    pet = PetView(
+        id=1, owner_user_id=5, name="Мурка", species_key="cat", species_custom=None, traits=("playful",), level=2, xp=10,
+        mood=70, satiety=60, energy=50, status="active", dormant_reason=None, current_chat_id=-1, home_chat_id=-1,
+        travel_unlocked=False,
+    )
+    text = ai_pets.render_card(
+        pet, owner_label="Вася", viewer_affinity=None, mood_of_day="Сегодня спокойный день.",
+        group_attitude="тепло относится к чату",
+    )
+    assert "Черты (складываются сами): игривый" in text
+    assert "Настроение дня: Сегодня спокойный день." in text and "К чату: тепло относится" in text
+    from dataclasses import replace
+
+    fresh = ai_pets.render_card(replace(pet, traits=()), owner_label="Вася", viewer_affinity=None)
+    assert "Черты ещё формируются" in fresh
+
+
+async def test_traits_command_only_shows_and_memory_is_per_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    pet = SimpleNamespace(id=1, name="Мурка", emoji="🐱", traits=("calm",))
+    service = SimpleNamespace(get_owner_pet=AsyncMock(return_value=pet))
+    monkeypatch.setattr(ai_pets, "_service", lambda *a, **k: service)
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=5), chat=SimpleNamespace(id=-1, type="supergroup"), answer=AsyncMock()
+    )
+    await ai_pets.pet_traits_command(message, None, None)
+    reply = message.answer.await_args.args[0]
+    assert "спокойный" in reply and "Задать их нельзя" in reply
+    private = SimpleNamespace(from_user=SimpleNamespace(id=5), chat=SimpleNamespace(id=5, type="private"), answer=AsyncMock())
+    await ai_pets.pet_memory_command(private, None, None, None)
+    assert "в той группе" in private.answer.await_args.args[0]

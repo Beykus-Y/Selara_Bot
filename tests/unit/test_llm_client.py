@@ -355,3 +355,22 @@ async def test_cancelling_inflight_provider_attempt_persists_unknown_failed_call
     assert usage.prompt_tokens is None and usage.completion_tokens is None
     assert usage.pricing_status == "unknown" and usage.estimated_cost_usd is None
     assert usage.attempt_number == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_uses_exactly_the_resolved_model_and_rejects_mixing():
+    from selara.application.model_router import ResolvedModel
+
+    client = LlmClient(LlmConfig(api_key="test-key", model="legacy-model"))
+    client._client.chat.completions.create = AsyncMock(return_value=MagicMock())
+    resolved = ResolvedModel(model_id="priced-model", profile_key="analytics")
+
+    await client.chat_with_tools(
+        [{"role": "user", "content": "hi"}], [{"type": "function", "function": {"name": "t"}}],
+        max_tokens=100, resolved_model=resolved,
+    )
+
+    kwargs = client._client.chat.completions.create.await_args.kwargs
+    assert kwargs["model"] == "priced-model" and kwargs["tool_choice"] == "auto" and kwargs["max_tokens"] == 100
+    with pytest.raises(ValueError):
+        await client.chat_with_tools([{"role": "user", "content": "hi"}], [], model="other", resolved_model=resolved)

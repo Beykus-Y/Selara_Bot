@@ -751,14 +751,18 @@ async def test_wizard_has_memory_toggles_that_persist(monkeypatch, session):
     stored = await repo.get_or_create_profile(USER_ID)
     message = _message("/ai")
     await handler.ai_settings_command(message, db_session=session)
-    callbacks = _callbacks(message.answer.await_args.kwargs["reply_markup"])
-    assert f"pai:set:memory:0:{stored.revision}" in callbacks
-    assert f"pai:set:automemory:1:{stored.revision}" in callbacks
+    assert f"pai:cat:memory:{stored.revision}" in _callbacks(message.answer.await_args.kwargs["reply_markup"])
 
-    await handler.ai_settings_callback(_query(f"pai:set:memory:0:{stored.revision}"), db_session=session)
+    screen = _query(f"pai:cat:memory:{stored.revision}")
+    await handler.ai_settings_callback(screen, db_session=session)
+    callbacks = _callbacks(screen.message.edit_text.await_args.kwargs["reply_markup"])
+    assert f"pai:sc:memory:memory:0:{stored.revision}" in callbacks
+    assert f"pai:sc:memory:automemory:1:{stored.revision}" in callbacks
+
+    await handler.ai_settings_callback(_query(f"pai:sc:memory:memory:0:{stored.revision}"), db_session=session)
     stored = await repo.get_profile(USER_ID)
     assert stored.memory_enabled is False
-    await handler.ai_settings_callback(_query(f"pai:set:automemory:1:{stored.revision}"), db_session=session)
+    await handler.ai_settings_callback(_query(f"pai:sc:memory:automemory:1:{stored.revision}"), db_session=session)
     assert (await repo.get_profile(USER_ID)).auto_memory_enabled is True
 
 
@@ -944,10 +948,11 @@ async def test_export_is_rate_limited_per_user(monkeypatch, session):
 
 async def test_auto_memory_toggle_says_it_needs_personal(monkeypatch, session):
     stored = await PersonalAiRepository(session).get_or_create_profile(USER_ID)
-    message = _message("/ai")
+    screen = _query(f"pai:cat:memory:{stored.revision}")
 
-    await handler.ai_settings_command(message, db_session=session)
+    await handler.ai_settings_callback(screen, db_session=session)
 
-    buttons = [b.text for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard for b in row]
+    markup = screen.message.edit_text.await_args.kwargs["reply_markup"]
+    buttons = [b.text for row in markup.inline_keyboard for b in row]
     assert any("Авто-память" in text and "Personal" in text for text in buttons)
     assert stored.auto_memory_enabled is False

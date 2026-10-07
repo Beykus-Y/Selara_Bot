@@ -82,7 +82,7 @@ class ChatSettings:
     daily_summary_style: str = "neutral"
     daily_summary_include_voice: bool = False
     daily_summary_include_video_notes: bool = False
-    pets_enabled: bool = False
+    pets_enabled: bool = True
     pets_spontaneous_enabled: bool = False
 
 
