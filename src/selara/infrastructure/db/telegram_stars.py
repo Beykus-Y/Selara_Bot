@@ -760,6 +760,60 @@ class SqlAlchemyTelegramStarsRepository:
             user_id=user_id,
         )
 
+    async def record_unprocessable_payment(
+        self,
+        *,
+        buyer_user_id: int,
+        invoice_payload: str,
+        telegram_payment_charge_id: str,
+        provider_payment_charge_id: str | None,
+        amount_stars: int,
+        currency: str,
+        payment_at: datetime,
+    ) -> int | None:
+        """Durably dead-letter a confirmed payment whose processing keeps failing.
+
+        The row reuses the rejected-payment audit (state ``rejected`` with reason
+        ``processing_failed``) so the existing owner alerts and ``/stars_refund``
+        stay usable even though the economic effect was never applied. Idempotent
+        on the charge id; returns the stored payment id, or ``None`` when even
+        this write failed (the caller must keep the update unacknowledged).
+        """
+        charge_id = telegram_payment_charge_id[:255]
+        paid_at = _as_utc(payment_at)
+        async with self._session_factory() as session:
+            async with session.begin():
+                _require_postgresql(session)
+                await _advisory_xact_lock(session, _payment_lock_key(charge_id))
+                stored_id = await session.scalar(
+                    pg_insert(SelaraAiPaymentModel)
+                    .values(
+                        telegram_payment_charge_id=charge_id,
+                        provider_payment_charge_id=(
+                            provider_payment_charge_id[:255] if provider_payment_charge_id is not None else None
+                        ),
+                        invoice_payload=invoice_payload,
+                        buyer_user_id=buyer_user_id,
+                        target_scope=PRODUCT_SCOPE_CHAT,
+                        # Defensive bounds only: this row must survive a poison
+                        # payload, and rejected rows never feed revenue totals.
+                        amount_stars=max(int(amount_stars), 0),
+                        currency=currency[:3],
+                        payment_at=paid_at,
+                        processing_state="rejected",
+                        processing_reason="processing_failed",
+                    )
+                    .on_conflict_do_nothing(index_elements=[SelaraAiPaymentModel.telegram_payment_charge_id])
+                    .returning(SelaraAiPaymentModel.id)
+                )
+                if stored_id is not None:
+                    return int(stored_id)
+                return await session.scalar(
+                    select(SelaraAiPaymentModel.id).where(
+                        SelaraAiPaymentModel.telegram_payment_charge_id == charge_id
+                    )
+                )
+
     async def _duplicate_result(
         self,
         session: AsyncSession,

@@ -353,6 +353,52 @@ async def test_invalid_successful_payment_is_audited_without_entitlement(
 @pytest.mark.integration
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_unprocessable_payment_is_dead_lettered_once_and_stays_refundable():
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        charge_id = "stars-poison-dead-letter"
+
+        first_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER,
+            invoice_payload="selara_ai:v1:ffffffff-ffff-4fff-8fff-ffffffffffff",
+            telegram_payment_charge_id=charge_id,
+            provider_payment_charge_id="",
+            amount_stars=137,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+        redelivered_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER,
+            invoice_payload="tampered-after-redelivery",
+            telegram_payment_charge_id=charge_id,
+            provider_payment_charge_id="",
+            amount_stars=999,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+
+        assert first_id is not None
+        assert redelivered_id == first_id
+        claim = await repository.claim_rejected_payment_refund(
+            payment_id=first_id,
+            requested_by_user_id=_BUYER + 10,
+        )
+        assert claim.state == "claimed"
+        assert claim.telegram_payment_charge_id == charge_id
+        assert claim.amount_stars == 137
+        async with factory() as session:
+            payment = await session.get(SelaraAiPaymentModel, first_id)
+        assert payment.processing_state == "rejected"
+        assert payment.processing_reason == "processing_failed"
+        assert payment.amount_stars == 137
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_rejected_payment_refund_claim_is_single_use_and_audited():
     engine, factory = await _database()
     try:

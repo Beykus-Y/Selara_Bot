@@ -53,6 +53,9 @@ _PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
 _PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
 _PAYMENT_RETRY_ALERT_ATTEMPT = 3
 _PAYMENT_RETRY_MAX_SECONDS = 60
+# After this many failed attempts the confirmed payment is dead-lettered into
+# the rejected-payment audit so one poison payload cannot stall polling forever.
+_PAYMENT_RETRY_DEADLETTER_ATTEMPT = 5
 _PAYMENT_OWNER_ALERT_TIMEOUT_SECONDS = 3.0
 _PAYMENT_CONFIRMATION_TIMEOUT_SECONDS = 3.0
 _STAR_REFUND_TIMEOUT_SECONDS = 10.0
@@ -888,6 +891,30 @@ async def selara_ai_pre_checkout(
         )
 
 
+async def _record_unprocessable_payment(repository, *, message: Message, payment) -> int | None:
+    """Dead-letter the confirmed payment; ``None`` means even the audit write failed."""
+    if message.from_user is None:
+        return None
+    try:
+        return await repository.record_unprocessable_payment(
+            buyer_user_id=message.from_user.id,
+            invoice_payload=payment.invoice_payload,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            provider_payment_charge_id=payment.provider_payment_charge_id,
+            amount_stars=payment.total_amount,
+            currency=payment.currency,
+            payment_at=message.date,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Telegram Stars payment dead-letter write failed exception_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
 async def selara_ai_successful_payment(
     message: Message,
     session_factory,
@@ -940,6 +967,32 @@ async def selara_ai_successful_payment(
                     ),
                     log_event="persistence_retry",
                 )
+            if attempt >= _PAYMENT_RETRY_DEADLETTER_ATTEMPT:
+                # A deterministic (poison) failure would retry forever and keep the
+                # whole polling loop from reading any other Telegram update. Once the
+                # payment is durably dead-lettered as a rejected payment, give up on
+                # this update: the owner alert and /stars_refund take over, and
+                # polling resumes. A temporary DB outage still blocks, because the
+                # dead-letter write fails too and the update stays unacknowledged.
+                dead_letter_payment_id = await _record_unprocessable_payment(
+                    repository,
+                    message=message,
+                    payment=payment,
+                )
+                if dead_letter_payment_id is not None:
+                    logger.error(
+                        "Telegram Stars payment dead-lettered after retries; "
+                        "resuming polling payment_id=%s attempts=%s exception_type=%s",
+                        dead_letter_payment_id,
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    dead_letter_result = PaymentResult(
+                        "rejected", "processing_failed", payment_id=dead_letter_payment_id
+                    )
+                    await _notify_owner_of_rejected_payment(bot=bot, settings=settings, result=dead_letter_result)
+                    await _send_payment_reconciliation_message(message, dead_letter_result)
+                    return
             await asyncio.sleep(delay)
 
     if result.state == "rejected":
