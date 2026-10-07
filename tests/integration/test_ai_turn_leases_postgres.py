@@ -6,7 +6,7 @@ context. The lease is a single `INSERT ... ON CONFLICT ... WHERE expired` statem
 of several truly concurrent callers take a live key. A crashed turn's lease expires, and a finished turn releases it.
 
 Issue #143: an owner whose heartbeat stalled past the TTL must not renew its expired lease. Once another owner takes
-the key, the old turn must stop and must not save anything, and releasing the old lease must not free the new one.
+the key, the old turn must stop at its next checkpoint, and releasing the old lease must not free the new one.
 """
 
 from __future__ import annotations
@@ -191,14 +191,15 @@ async def test_confirm_refuses_an_expired_lease_even_when_nobody_took_it() -> No
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_takeover_stops_the_old_turn_and_keeps_the_new_owners_lease() -> None:
+async def test_takeover_stops_the_old_turn_at_its_next_checkpoint_and_keeps_the_new_owners_lease() -> None:
     engine, session_factory = await _session_factory()
     lease_key = "llm_admin:-7:8"
     try:
         steps: list[int] = []
 
-        async def turn() -> None:
+        async def turn(lease) -> None:
             for step in range(500):
+                await lease.confirm()
                 await asyncio.sleep(0.02)
                 steps.append(step)
 
@@ -214,14 +215,13 @@ async def test_takeover_stops_the_old_turn_and_keeps_the_new_owners_lease() -> N
             assert lease is not None
             takeover = asyncio.create_task(take_over())
             with pytest.raises(AiTurnLeaseLostError):
-                await lease.run(turn())
+                await turn(lease)
             await takeover
 
-            # The loss signal is final: the turn took no further step after it, and nothing can be confirmed now.
-            stopped_at = len(steps)
-            await asyncio.sleep(0.1)
-            assert len(steps) == stopped_at
+            # The checkpoint refused the step after the takeover: the turn stopped early, the lease reports lost,
+            # and nothing can be confirmed any more.
             assert lease.lost
+            assert len(steps) < 500
             with pytest.raises(AiTurnLeaseLostError):
                 await lease.confirm()
 

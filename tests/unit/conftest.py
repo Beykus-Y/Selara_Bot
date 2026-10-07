@@ -4,18 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
 import pytest
 
 
 class _GrantedTurnLease:
-    """Stands in for a lease the test holds: the turn runs to its end and no loss is ever reported."""
+    """Stands in for a lease the test holds: every checkpoint passes and no loss is ever reported."""
 
     lost = False
-
-    async def run(self, turn: Any) -> Any:
-        return await turn
 
     async def confirm(self) -> None:
         return None

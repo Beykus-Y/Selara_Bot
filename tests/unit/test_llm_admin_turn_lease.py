@@ -30,9 +30,6 @@ async def _call(message: MagicMock, *, db_session: MagicMock, llm_enabled: bool 
 
 def _recording_lease(events: list[str]):
     class _Lease:
-        async def run(self, turn):
-            return await turn
-
         async def confirm(self) -> None:
             events.append("confirm")
 
@@ -102,24 +99,25 @@ async def test_transaction_ends_before_the_lease_and_the_turn_is_confirmed_befor
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_loses_its_lease_commits_nothing_and_says_so(monkeypatch) -> None:
-    class _LostLease:
-        async def run(self, turn):
-            turn.close()
-            raise AiTurnLeaseLostError("llm_admin:-100123:111")
+@pytest.mark.parametrize("lost_at", ["turn", "commit"])
+async def test_a_turn_that_loses_its_lease_commits_nothing_and_says_so(monkeypatch, lost_at: str) -> None:
+    lost = AiTurnLeaseLostError("llm_admin:-100123:111")
 
+    class _Lease:
         async def confirm(self) -> None:
-            raise AssertionError("confirm must not run once the turn was stopped")
+            if lost_at == "commit":
+                raise lost
 
     @asynccontextmanager
-    async def lost_lease(**_kwargs):
-        yield _LostLease()
+    async def lease(**_kwargs):
+        yield _Lease()
 
-    monkeypatch.setattr(llm_admin, "ai_turn_lease", lost_lease)
+    monkeypatch.setattr(llm_admin, "ai_turn_lease", lease)
+    run_turn = AsyncMock(side_effect=lost if lost_at == "turn" else None)
     db_session = AsyncMock()
     message = _message()
     with patch.object(llm_admin, "has_permission", new=AsyncMock(return_value=(True, None, None))), patch.object(
-        llm_admin, "_run_admin_turn", AsyncMock()
+        llm_admin, "_run_admin_turn", run_turn
     ):
         await _call(message, db_session=db_session)
 

@@ -236,7 +236,7 @@ async def _handle(
             await message.reply(_ADMIN_TURN_BUSY_TEXT)
             return
         try:
-            await lease.run(_run_admin_turn(*args, turn_lease=lease, **kwargs))
+            await _run_admin_turn(*args, turn_lease=lease, **kwargs)
             # Re-check ownership before the commit: a turn that lost its lease must not save history over the new owner's.
             await lease.confirm()
         except AiTurnLeaseLostError:
@@ -478,6 +478,9 @@ async def _run_admin_turn(
             # round on. Calls are decided before any of their results are
             # seen, so same-batch execution is never web-poisoned.
             round_allowed = {definition["function"]["name"] for definition in available_tools}
+            if turn_lease is not None:
+                # No further model round once the lease is gone: its answer could not be saved or published anyway.
+                await turn_lease.confirm()
             try:
                 await bot.send_chat_action(message.chat.id, "typing")
             except Exception:
@@ -709,6 +712,9 @@ async def _run_admin_turn(
                 ) if invocation_id is not None else None),
             )
 
+        if turn_lease is not None:
+            # The summary is sent to the admin, so it goes out only while the turn still holds its lease.
+            await turn_lease.confirm()
         await _send_dm_summary(
             bot=bot,
             admin_user_id=message.from_user.id,
@@ -723,6 +729,8 @@ async def _run_admin_turn(
 
     try:
         await _run_invocation()
+    except AiTurnLeaseLostError:
+        raise
     except Exception:
         # Never leave the «Думаю...» placeholder hanging when something unexpected breaks the loop.
         log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)

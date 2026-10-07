@@ -892,11 +892,9 @@ async def personal_chat_handler(
                 await message.answer(_BUSY_TEXT)
                 return
             try:
-                await lease.run(
-                    _handle_personal_chat(
-                        message, db_session, session_factory, settings, personal_config, llm_client, web_search_client,
-                        turn_lease=lease,
-                    )
+                await _handle_personal_chat(
+                    message, db_session, session_factory, settings, personal_config, llm_client, web_search_client,
+                    turn_lease=lease,
                 )
             except AiTurnLeaseLostError:
                 # Another instance took the key while this turn was stalled. The turn was stopped, and whatever it had

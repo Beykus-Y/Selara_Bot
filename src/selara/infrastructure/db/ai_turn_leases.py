@@ -5,8 +5,10 @@ provider call runs. While a turn runs, a heartbeat keeps extending the lease, so
 instance start on the same key. Expiry uses the database clock, so replicas with skewed clocks agree on it. If an
 instance dies mid-turn, its heartbeat stops and the lease expires after ``AI_TURN_LEASE_TTL_SECONDS``.
 
-A turn that stops owning its key is fenced. The heartbeat marks the lease lost and cancels the turn (see
-``AiTurnLease.run``), and a result is saved or published only after ``AiTurnLease.confirm`` has re-checked ownership.
+A turn that loses its key is fenced at its checkpoints. ``AiTurnLease.confirm`` re-checks ownership in the database and
+extends the lease for a full TTL, so a step that follows a passing check runs while the key is still held. A turn
+calls it before each model round, each tool call, and before it publishes or commits. A running step is never
+cancelled, because a half-finished tool call would leave a side effect without its audit row.
 """
 
 from __future__ import annotations
@@ -14,10 +16,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, TypeVar
 
 from sqlalchemy import delete, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -29,8 +30,6 @@ log = logging.getLogger(__name__)
 
 AI_TURN_LEASE_TTL_SECONDS = 60.0
 _HEARTBEATS_PER_TTL = 3
-
-_T = TypeVar("_T")
 
 
 class AiTurnLeaseLostError(RuntimeError):
@@ -107,7 +106,7 @@ async def release_ai_turn_lease(
 
 
 class AiTurnLease:
-    """A lease this turn holds. ``run`` executes the turn, and ``confirm`` must pass before a result is saved or published."""
+    """A lease this turn holds. Call ``confirm`` before each step that acts on the outside world or saves a result."""
 
     def __init__(
         self,
@@ -126,46 +125,23 @@ class AiTurnLease:
         # so the deadline derived from it always falls before the lease expires.
         self._renewed_at = acquired_at
         self._lost = False
-        self._turn: asyncio.Task[Any] | None = None
 
     @property
     def lost(self) -> bool:
         return self._lost
 
-    async def run(self, turn: Coroutine[Any, Any, _T]) -> _T:
-        """Run the turn. If the lease is lost while it runs, the turn is cancelled and AiTurnLeaseLostError is raised."""
-        if self._lost:
-            turn.close()
-            raise AiTurnLeaseLostError(self.lease_key)
-        task = asyncio.ensure_future(turn)
-        self._turn = task
-        try:
-            return await task
-        except asyncio.CancelledError:
-            # Only our own cancellation is a loss. A cancellation of the caller itself must keep propagating.
-            current = asyncio.current_task()
-            if self._lost and current is not None and current.cancelling() == 0:
-                raise AiTurnLeaseLostError(self.lease_key) from None
-            raise
-        finally:
-            self._turn = None
-
     async def confirm(self) -> None:
-        """Re-check ownership in the database before a result is saved or published.
+        """Re-check ownership in the database. A passing check extends the lease for a full TTL.
 
-        A passing check extends the lease for a full TTL, so what follows it runs while the key is still held. Raises
-        AiTurnLeaseLostError when the lease is gone. Database errors propagate, and the caller fails the turn.
+        Raises AiTurnLeaseLostError when the key is no longer held. Database errors propagate, so the caller fails the
+        step it was about to take.
         """
         await self._renew()
 
     def _mark_lost(self, reason: str) -> None:
-        if self._lost:
-            return
-        self._lost = True
-        log.warning("AI turn lease lost key=%s: %s", self.lease_key, reason)
-        turn = self._turn
-        if turn is not None and turn is not asyncio.current_task():
-            turn.cancel()
+        if not self._lost:
+            self._lost = True
+            log.warning("AI turn lease lost key=%s: %s", self.lease_key, reason)
 
     async def _renew(self) -> None:
         """Renew before the local deadline. Raises AiTurnLeaseLostError when the lease is gone; other errors propagate."""

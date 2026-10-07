@@ -91,47 +91,24 @@ async def test_a_renewal_hanging_past_the_ttl_marks_the_lease_lost(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_a_lost_lease_stops_the_turn_before_its_next_step() -> None:
+async def test_a_lost_lease_stops_the_turn_at_its_next_checkpoint(monkeypatch) -> None:
+    # The first checkpoint passes; by the second, another owner has taken the key.
+    renew = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
     lease = _lease()
     steps: list[int] = []
 
-    async def turn() -> None:
-        for step in range(100):
-            await asyncio.sleep(0.01)
+    with pytest.raises(AiTurnLeaseLostError):
+        for step in range(3):
+            await lease.confirm()
             steps.append(step)
 
-    async def lose_the_key() -> None:
-        await asyncio.sleep(0.05)
-        lease._mark_lost("taken over")
-
+    assert steps == [0]
+    assert lease.lost
+    # Once lost, the checkpoint refuses without asking the database again.
     with pytest.raises(AiTurnLeaseLostError):
-        await asyncio.gather(lease.run(turn()), lose_the_key())
-
-    stopped_at = len(steps)
-    await asyncio.sleep(0.05)
-    assert 0 < stopped_at < 100
-    assert len(steps) == stopped_at
-
-
-@pytest.mark.asyncio
-async def test_run_returns_the_turn_result_while_the_lease_is_held() -> None:
-    assert await _lease().run(asyncio.sleep(0, result=42)) == 42
-
-
-@pytest.mark.asyncio
-async def test_cancelling_the_caller_is_not_reported_as_a_lost_lease() -> None:
-    lease = _lease()
-
-    async def turn() -> None:
-        await asyncio.sleep(10)
-
-    task = asyncio.create_task(lease.run(turn()))
-    await asyncio.sleep(0.01)
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert not lease.lost
+        await lease.confirm()
+    assert renew.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -205,17 +182,12 @@ async def test_personal_turn_answers_busy_when_the_durable_lease_is_held(monkeyp
 
 @pytest.mark.asyncio
 async def test_personal_turn_that_loses_its_lease_says_so_and_rolls_back(monkeypatch) -> None:
-    class _LostLease:
-        async def run(self, turn):
-            turn.close()
-            raise AiTurnLeaseLostError(_KEY)
-
     @asynccontextmanager
-    async def lost_lease(**_kwargs):
-        yield _LostLease()
+    async def held_lease(**_kwargs):
+        yield object()
 
-    turn = AsyncMock()
-    monkeypatch.setattr(personal_ai, "ai_turn_lease", lost_lease)
+    turn = AsyncMock(side_effect=AiTurnLeaseLostError(_KEY))
+    monkeypatch.setattr(personal_ai, "ai_turn_lease", held_lease)
     monkeypatch.setattr(personal_ai, "_handle_personal_chat", turn)
     message = MagicMock()
     message.from_user = MagicMock(id=42)
