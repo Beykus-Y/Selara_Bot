@@ -18,12 +18,24 @@ scan runs periodically -- not just once at startup -- so a job lost to a full
 queue (or to a process restart) is re-discovered from the DB within one scan
 interval; repeated discovery is safe because two workers can never both win
 `claim_message_for_transcription` for the same message.
+
+A periodic scan that blindly re-discovered the same rows would also turn every
+failing message into an unbounded retry loop: a failed attempt releases the DB
+claim (`transcribed_at = NULL`), which makes the row a candidate again on the
+very next pass. Before, that cost one retry per process restart; a scan every
+minute would re-download the file from Telegram and re-bill the STT provider
+forever for a deterministic failure (too large file, provider 4xx, permanent
+over-budget). So every released attempt puts its message into an in-memory
+retry cooldown: the recovery scan skips it until the cooldown expires, which
+bounds the retry rate without losing the durable work state (a restart simply
+re-arms everything once).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
@@ -46,6 +58,13 @@ _DEFAULT_MAX_QUEUE_SIZE = 1000
 _DEFAULT_MAX_LOOKUP_ATTEMPTS = 5
 _DEFAULT_LOOKUP_BACKOFF_SECONDS = 2.0
 _DEFAULT_RECOVERY_SCAN_INTERVAL_SECONDS = 60.0
+# Minimum spacing between the periodic scan and the next pass over the same
+# message whose attempt failed and released its DB claim. Without it the scan
+# retries a deterministically failing message every scan interval forever
+# (re-downloading the file and re-billing the STT provider each time).
+_DEFAULT_RETRY_COOLDOWN_SECONDS = 900.0
+_MIN_RECOVERY_SCAN_INTERVAL_SECONDS = 1.0
+_QUEUE_FULL_LOG_INTERVAL_SECONDS = 60.0
 _RECOVERY_LOOKBACK_HOURS = 26  # a bit over the 24h analysis window, in case of clock/scan skew
 
 
@@ -61,6 +80,7 @@ class DailySummaryTranscriptionQueue:
         max_lookup_attempts: int = _DEFAULT_MAX_LOOKUP_ATTEMPTS,
         lookup_backoff_seconds: float = _DEFAULT_LOOKUP_BACKOFF_SECONDS,
         recovery_scan_interval_seconds: float = _DEFAULT_RECOVERY_SCAN_INTERVAL_SECONDS,
+        retry_cooldown_seconds: float = _DEFAULT_RETRY_COOLDOWN_SECONDS,
     ) -> None:
         self._bot = bot
         self._stt_client = stt_client
@@ -69,12 +89,22 @@ class DailySummaryTranscriptionQueue:
         self._queue: asyncio.Queue[TranscriptionJob] = asyncio.Queue(maxsize=max_queue_size)
         self._max_lookup_attempts = max_lookup_attempts
         self._lookup_backoff_seconds = lookup_backoff_seconds
-        self._recovery_scan_interval_seconds = recovery_scan_interval_seconds
+        self._recovery_scan_interval_seconds = (
+            float(recovery_scan_interval_seconds)
+            if recovery_scan_interval_seconds > 0
+            else _MIN_RECOVERY_SCAN_INTERVAL_SECONDS
+        )
+        self._retry_cooldown_seconds = max(0.0, float(retry_cooldown_seconds))
         # (chat_id, telegram_message_id) of jobs currently queued or in flight --
         # keeps periodic recovery scans from piling duplicate jobs onto a backed-up
         # queue. A job dropped by a full queue is deliberately NOT marked here, so
         # the next scan gets another chance at it (issue #81).
         self._pending_keys: set[tuple[int, int]] = set()
+        # (chat_id, telegram_message_id) -> monotonic deadline until which the
+        # recovery scan must not re-enqueue that message after a released attempt.
+        self._cooldown_until: dict[tuple[int, int], float] = {}
+        self._queue_full_suppressed = 0
+        self._queue_full_last_log_at = 0.0
         self._workers: list[asyncio.Task[None]] = []
         self._recovery_task: asyncio.Task[None] | None = None
         self._closed = False
@@ -98,25 +128,78 @@ class DailySummaryTranscriptionQueue:
         self._workers = []
         self._recovery_task = None
 
-    def enqueue(self, job: TranscriptionJob) -> None:
-        if self._closed:
+    @staticmethod
+    def _job_key(job: TranscriptionJob) -> tuple[int, int]:
+        return (job.chat_id, job.telegram_message_id)
+
+    def _is_cooling_down(self, key: tuple[int, int]) -> bool:
+        deadline = self._cooldown_until.get(key)
+        if deadline is None:
+            return False
+        if deadline <= time.monotonic():
+            del self._cooldown_until[key]
+            return False
+        return True
+
+    def _start_retry_cooldown(self, job: TranscriptionJob) -> None:
+        """Back off from re-processing a message whose attempt just failed and
+        released its DB claim. Bounds the retry rate of permanently failing
+        messages to one attempt per cooldown instead of one per scan interval.
+        """
+        if self._retry_cooldown_seconds <= 0:
             return
-        key = (job.chat_id, job.telegram_message_id)
+        now = time.monotonic()
+        # Opportunistically drop expired entries so the mapping cannot grow
+        # without bound in a long-running process.
+        for key in [key for key, deadline in self._cooldown_until.items() if deadline <= now]:
+            del self._cooldown_until[key]
+        self._cooldown_until[self._job_key(job)] = now + self._retry_cooldown_seconds
+
+    def enqueue(self, job: TranscriptionJob) -> bool:
+        """Queue a job unless it is already queued/in flight or cooling down.
+
+        Returns True only when the job was actually put on the queue, so the
+        recovery scan can report real insertions instead of attempts.
+        """
+        if self._closed:
+            return False
+        key = self._job_key(job)
         if key in self._pending_keys:
-            return  # already queued or being worked on -- a recovery scan must not duplicate it
+            return False  # already queued or being worked on -- a recovery scan must not duplicate it
+        if self._is_cooling_down(key):
+            # A previous attempt failed and released its claim; the periodic scan
+            # must not immediately re-download/re-transcribe it again.
+            return False
         try:
             self._queue.put_nowait(job)
         except asyncio.QueueFull:
             # Deliberately not marked as pending: the periodic recovery scan will
             # re-discover this message from the archive table once capacity frees
             # up, so a full queue is a delay, not a permanent loss.
-            logger.warning(
-                "daily summary STT queue full, leaving job chat_id=%s message_id=%s to the recovery scan",
-                job.chat_id,
-                job.telegram_message_id,
-            )
-            return
+            self._log_queue_full(job)
+            return False
         self._pending_keys.add(key)
+        return True
+
+    def _log_queue_full(self, job: TranscriptionJob) -> None:
+        """Rate-limit the queue-full warning: a full queue makes the scan repeat
+        the same dropped jobs on every pass, which would otherwise be one warning
+        line per candidate per minute, forever."""
+        self._queue_full_suppressed += 1
+        now = time.monotonic()
+        if now - self._queue_full_last_log_at < _QUEUE_FULL_LOG_INTERVAL_SECONDS:
+            return
+        suppressed = max(0, self._queue_full_suppressed - 1)
+        self._queue_full_suppressed = 0
+        self._queue_full_last_log_at = now
+        logger.warning(
+            "daily summary STT queue full, leaving job chat_id=%s message_id=%s to the recovery scan "
+            "(%s further drops suppressed in the last %ss)",
+            job.chat_id,
+            job.telegram_message_id,
+            suppressed,
+            int(_QUEUE_FULL_LOG_INTERVAL_SECONDS),
+        )
 
     async def _worker_loop(self) -> None:
         while True:
@@ -164,7 +247,7 @@ class DailySummaryTranscriptionQueue:
                 job.chat_id,
                 job.telegram_message_id,
             )
-            await self._release(archive_row_id)
+            await self._release(job, archive_row_id)
             return
 
         try:
@@ -180,7 +263,7 @@ class DailySummaryTranscriptionQueue:
                 job.telegram_message_id,
                 exc_info=True,
             )
-            await self._release(archive_row_id)
+            await self._release(job, archive_row_id)
             return
 
         try:
@@ -192,7 +275,7 @@ class DailySummaryTranscriptionQueue:
                 job.telegram_message_id,
                 exc_info=True,
             )
-            await self._release(archive_row_id)
+            await self._release(job, archive_row_id)
             return
 
         completed_at = datetime.now(timezone.utc)
@@ -241,11 +324,15 @@ class DailySummaryTranscriptionQueue:
         )
         return None
 
-    async def _release(self, archive_row_id: int) -> None:
+    async def _release(self, job: TranscriptionJob, archive_row_id: int) -> None:
+        """Release the DB claim after a failed/skipped attempt and start the
+        retry cooldown so the next recovery scan does not immediately repeat the
+        same (possibly permanently failing) work."""
         async with self._session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
             await repo.release_transcription_claim(archive_row_id=archive_row_id)
             await session.commit()
+        self._start_retry_cooldown(job)
 
     async def _recovery_loop(self) -> None:
         """Run the recovery scan periodically, forever (until cancelled by close()).
@@ -272,16 +359,18 @@ class DailySummaryTranscriptionQueue:
         never got a transcript -- a live job's in-memory `asyncio.Queue` does not
         survive a process restart, and a full one drops jobs outright. Safe to run
         at any frequency: candidates with a live claim are excluded by
-        `list_pending_voice_transcription_candidates`, already-known jobs are
-        deduplicated by `enqueue`, and the DB claim makes any remaining race pay
-        for at most one STT call."""
+        `list_pending_voice_transcription_candidates`, already-known jobs and
+        messages inside their retry cooldown are skipped by `enqueue`, and the DB
+        claim makes any remaining race pay for at most one STT call."""
         try:
             since = datetime.now(timezone.utc) - timedelta(hours=_RECOVERY_LOOKBACK_HOURS)
             async with self._session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
                 candidates = await repo.list_pending_voice_transcription_candidates(since=since)
 
-            requeued = 0
+            queued = 0
+            skipped = 0
+            unbuildable = 0
             for candidate in candidates:
                 job = build_job_from_raw_message(
                     chat_id=candidate.chat_id,
@@ -289,11 +378,32 @@ class DailySummaryTranscriptionQueue:
                     message_type=candidate.message_type,
                     raw_message_json=candidate.raw_message_json,
                 )
-                if job is not None:
-                    self.enqueue(job)
-                    requeued += 1
-            if requeued:
-                logger.info("daily summary STT: recovery scan re-queued %s message(s)", requeued)
+                if job is None:
+                    # The row has no usable file_id (e.g. a redacted/legacy
+                    # snapshot) and can never become a job, yet it stays a
+                    # candidate forever and occupies one of the LIMIT slots on
+                    # every pass -- surface it instead of skipping silently.
+                    unbuildable += 1
+                    logger.warning(
+                        "daily summary STT: recovery scan cannot build a job from archived message "
+                        "chat_id=%s message_id=%s type=%s",
+                        candidate.chat_id,
+                        candidate.telegram_message_id,
+                        candidate.message_type,
+                    )
+                    continue
+                if self.enqueue(job):
+                    queued += 1
+                else:
+                    skipped += 1
+            if queued or skipped or unbuildable:
+                logger.info(
+                    "daily summary STT: recovery scan queued %s message(s), skipped %s "
+                    "(queued/in flight or in retry cooldown), unbuildable %s",
+                    queued,
+                    skipped,
+                    unbuildable,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
