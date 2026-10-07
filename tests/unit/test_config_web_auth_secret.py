@@ -18,8 +18,9 @@ def _kwargs(**extra) -> dict:
 
 @pytest.fixture
 def no_fallback_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    # tests/conftest.py opts the whole suite into the fallback via the OS
-    # environment; these tests need the strict, no-opt-in baseline instead.
+    # tests/conftest.py gives the whole suite a dedicated WEB_AUTH_SECRET;
+    # these tests need the strict no-secret, no-opt-in baseline instead.
+    monkeypatch.delenv("WEB_AUTH_SECRET", raising=False)
     monkeypatch.delenv(OPT_IN_ENV, raising=False)
 
 
@@ -35,21 +36,21 @@ def test_dev_app_env_alone_does_not_enable_fallback(no_fallback_opt_in) -> None:
         Settings(**_kwargs(APP_ENV="dev"))
 
 
-def test_fallback_requires_explicit_opt_in_flag() -> None:
+def test_fallback_requires_explicit_opt_in_flag(no_fallback_opt_in) -> None:
     assert Settings.model_fields["web_auth_allow_bot_token_fallback"].default is False
 
     with pytest.raises(ValidationError, match="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"):
         Settings(**_kwargs(**{OPT_IN_ENV: "false"}))
 
 
-def test_opt_in_enables_fallback_with_warning() -> None:
+def test_opt_in_enables_fallback_with_warning(no_fallback_opt_in) -> None:
     with pytest.warns(UserWarning, match="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"):
         settings = Settings(**_kwargs(**{OPT_IN_ENV: "true"}))
 
     assert settings.resolved_web_auth_secret == "123456:TESTTOKEN"
 
 
-def test_opt_in_works_regardless_of_app_env() -> None:
+def test_opt_in_works_regardless_of_app_env(no_fallback_opt_in) -> None:
     # APP_ENV plays no role anymore: the explicit flag is the only opt-in, so
     # a production deploy that really wants the fallback must say so itself.
     with pytest.warns(UserWarning, match="WEB_AUTH_SECRET"):
@@ -90,7 +91,7 @@ def test_web_disabled_starts_without_secret(no_fallback_opt_in) -> None:
         _ = settings.resolved_web_auth_secret
 
 
-def test_web_disabled_property_fails_closed_without_opt_in() -> None:
+def test_web_disabled_property_fails_closed_without_opt_in(no_fallback_opt_in) -> None:
     settings = Settings(**_kwargs(WEB_ENABLED="false", **{OPT_IN_ENV: "false"}))
 
     with pytest.raises(RuntimeError, match="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"):
@@ -117,13 +118,37 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 
 
 def test_get_settings_fails_closed_without_secret_or_opt_in(no_fallback_opt_in, isolated_env) -> None:
-    # tests/conftest.py makes every test construct Settings with the fallback
-    # opt-in, so nothing else exercises the production entry point: the bot and
-    # the web panel call get_settings() at startup and must fail closed there.
+    # tests/conftest.py gives every test a dedicated WEB_AUTH_SECRET, so
+    # nothing else exercises the production entry point: the bot and the web
+    # panel call get_settings() at startup and must fail closed there.
     with pytest.raises(ValidationError, match="WEB_AUTH_SECRET"):
         get_settings()
 
     assert get_settings.cache_info().currsize == 0
+
+
+def test_startup_validation_error_hides_secret_inputs(no_fallback_opt_in) -> None:
+    # #71 review: get_settings() runs before logging is configured, so the raw
+    # ValidationError traceback lands on stderr. By default pydantic embeds the
+    # whole input dict ("input_value") in that text -- including BOT_TOKEN and
+    # database credentials -- so Settings enables hide_input_in_errors and the
+    # startup failure must not print any control secret.
+    bot_token = "123456:CANARY-BOT-TOKEN"
+    db_password = "CANARY-DB-PASSWORD"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            **_kwargs(
+                BOT_TOKEN=bot_token,
+                DATABASE_URL=f"postgresql://selara:{db_password}@db.internal:5432/selara",
+            )
+        )
+
+    error_text = str(excinfo.value)
+    # The failure itself stays diagnosable...
+    assert "WEB_AUTH_SECRET" in error_text
+    # ...but none of the control secrets appear anywhere in it.
+    assert bot_token not in error_text
+    assert db_password not in error_text
 
 
 def test_bot_token_rotation_keeps_web_hmac_domain() -> None:

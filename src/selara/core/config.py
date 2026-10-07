@@ -16,6 +16,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # #71: get_settings() runs before logging is configured, so a failed
+        # validation dumps its raw traceback straight to stderr. By default
+        # pydantic embeds the whole input dict ("input_value") in that text --
+        # including BOT_TOKEN, WEB_AUTH_SECRET and database credentials --
+        # so the input must stay hidden and only the error text is printed.
+        hide_input_in_errors=True,
     )
 
     bot_token: str = Field(..., validation_alias="BOT_TOKEN")
