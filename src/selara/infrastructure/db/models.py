@@ -119,6 +119,54 @@ class UserEntitlementModel(Base):
     )
 
 
+class EntitlementGrantModel(Base):
+    """Immutable journal of owner-made subscription grants and revocations.
+
+    No foreign keys on purpose: the journal must outlive the chat or the user it describes. Payments stay in
+    ``selara_ai_payments`` so revenue and refunds are never mixed with gifts.
+    """
+
+    __tablename__ = "entitlement_grants"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+    target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    delta_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    valid_until_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_before: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status_after: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    notified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_entitlement_grants_idempotency_key"),
+        CheckConstraint("scope IN ('chat', 'user')", name="ck_entitlement_grants_scope"),
+        CheckConstraint(
+            "(scope = 'chat' AND target_chat_id IS NOT NULL AND target_user_id IS NULL"
+            " AND product_key = 'selara_ai_monthly')"
+            " OR (scope = 'user' AND target_user_id IS NOT NULL AND target_chat_id IS NULL"
+            " AND product_key = 'selara_personal_monthly')",
+            name="ck_entitlement_grants_target",
+        ),
+        CheckConstraint("action IN ('grant', 'extend', 'revoke', 'shorten')", name="ck_entitlement_grants_action"),
+        CheckConstraint("delta_seconds >= 0", name="ck_entitlement_grants_delta"),
+        CheckConstraint("status_after IN ('active', 'revoked')", name="ck_entitlement_grants_status"),
+        CheckConstraint("source IN ('miniapp', 'command', 'admin_panel')", name="ck_entitlement_grants_source"),
+        CheckConstraint("length(reason) BETWEEN 1 AND 300", name="ck_entitlement_grants_reason"),
+        Index("idx_entitlement_grants_user", "target_user_id", "created_at"),
+        Index("idx_entitlement_grants_chat", "target_chat_id", "created_at"),
+        Index("idx_entitlement_grants_created", "created_at"),
+    )
+
+
 class SelaraAiPurchaseIntentModel(Base):
     """Server-side invoice context; the payload itself contains only its UUID."""
 

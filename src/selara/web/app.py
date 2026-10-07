@@ -678,6 +678,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         except Exception:
             return {"status": "down", "latency_ms": None, "detail": "Telegram Bot API не ответил на проверку."}
 
+    async def _send_owner_grant_notice(chat_id: int, text: str) -> bool:
+        """Best-effort notice for a granted or revoked subscription: a DM to the user or a message in the chat."""
+        try:
+            await (await _get_game_bot()).send_message(chat_id, text)
+        except Exception:
+            logger.warning("Subscription notice was not delivered chat_id=%s", chat_id)
+            return False
+        return True
+
     async def _close_game_bot() -> None:
         nonlocal game_bot
         for task in tuple(miniapp_broadcast_tasks.values()):
@@ -11333,6 +11342,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
+            send_notice=_send_owner_grant_notice,
         )
     )
     app.include_router(

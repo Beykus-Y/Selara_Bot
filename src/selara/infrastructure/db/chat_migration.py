@@ -26,6 +26,7 @@ from selara.infrastructure.db.models import (
     ChatAiCharacterModel,
     ChatMemberAiMessageModel,
     ChatEntitlementModel,
+    EntitlementGrantModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
@@ -121,6 +122,13 @@ async def _migrate_selara_ai_purchases(
         update(SelaraAiPurchaseIntentModel)
         .where(SelaraAiPurchaseIntentModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
+    )
+
+    # The grant journal follows the chat; it has no foreign keys, so nothing else keeps it attached.
+    await session.execute(
+        update(EntitlementGrantModel)
+        .where(EntitlementGrantModel.target_chat_id == old_chat_id)
+        .values(target_chat_id=new_chat_id)
     )
 
     products = list(

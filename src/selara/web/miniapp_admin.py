@@ -27,6 +27,7 @@ from selara.application.personal_config import (
 from selara.application.personal_models import ail_activation_problems, format_ail, profile_options
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
+from selara.web.admin_grants import build_admin_grants_router
 from selara.web.admin_models import build_admin_models_router
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
@@ -106,6 +107,7 @@ def build_miniapp_admin_router(
     broadcast_start_handler: BroadcastStart,
     broadcast_status_handler: BroadcastStatus,
     telegram_bot_probe: TelegramBotProbe,
+    send_notice: Callable[[int, str], Awaitable[bool]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/miniapp/admin", tags=["miniapp-admin"])
 
@@ -1127,5 +1129,8 @@ def build_miniapp_admin_router(
 
     router.include_router(build_admin_models_router(
         settings=settings, session_factory=session_factory, require_admin=require_admin,
+    ))
+    router.include_router(build_admin_grants_router(
+        settings=settings, session_factory=session_factory, require_admin=require_admin, send_notice=send_notice,
     ))
     return router

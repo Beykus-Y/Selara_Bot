@@ -489,7 +489,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert member_actions.down_revision == feature_routes.revision
     pets_default = _load_migration("0096_pets_on_by_default.py")
     assert pets_default.down_revision == member_actions.revision
-    assert revisions - parents == {pets_default.revision}
+    grants = _load_migration("0097_entitlement_grants.py")
+    assert grants.down_revision == pets_default.revision
+    assert revisions - parents == {grants.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32
