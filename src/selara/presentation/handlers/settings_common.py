@@ -11,6 +11,7 @@ from selara.core.chat_settings import (
 )
 
 CFG_BOOL_KEYS: set[str] = {
+    "instant_stt_enabled",
     "llm_enabled",
     "text_commands_enabled",
     "leaderboard_hybrid_buttons_enabled",
@@ -65,6 +66,11 @@ class SettingMeta:
 
 
 SETTING_META: dict[str, SettingMeta] = {
+    "instant_stt_enabled": SettingMeta(
+        title_ru="Автоматическая расшифровка голосовых и кружков", short_ru="Мгновенная расшифровка",
+        description_ru="Отвечать расшифровкой на голосовые и видео-кружки в этом чате. Нужен подключённый STT. Расшифровка для итогов дня настраивается отдельно.",
+        value_hint_ru="true/false; по умолчанию true.",
+    ),
     "llm_enabled": SettingMeta(
         title_ru="AI-ассистент в группе", short_ru="AI в группе",
         description_ru="Разрешить групповые обращения ? и ?? к AI-ассистенту. Нужны глобально подключённая модель и права пользователя.",
@@ -581,6 +587,7 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("AI и итоги дня", (
+        "instant_stt_enabled",
         "llm_enabled", "llm_context_threshold", "daily_summary_enabled", "daily_summary_hour",
         "daily_summary_min_messages", "daily_summary_style", "daily_summary_include_voice",
         "daily_summary_include_video_notes",
@@ -692,6 +699,7 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "daily_summary_style": value.daily_summary_style,
         "daily_summary_include_voice": value.daily_summary_include_voice,
         "daily_summary_include_video_notes": value.daily_summary_include_video_notes,
+        "instant_stt_enabled": value.instant_stt_enabled,
     }
 
 

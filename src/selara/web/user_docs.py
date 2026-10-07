@@ -546,6 +546,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 f"Автоматические итоги работают только с Selara AI. Час — `daily_summary_hour` (по умолчанию {_SUMMARY_HOUR}, время бота), стиль — neutral, lively или snarky.",
                 f"Нужны включённый `save_message` и не меньше {_SUMMARY_MIN_MESSAGES} сообщений за сутки (порог — `daily_summary_min_messages`).",
                 "`daily_summary_include_voice` и `daily_summary_include_video_notes` добавляют в итоги расшифровку голосовых и кружков.",
+                "`/setcfg instant_stt_enabled false` отключает автоматические ответы расшифровкой в этом чате; расшифровка для итогов дня настраивается отдельно.",
                 "`/autocfg` работает в личке: выберите группу и опишите, что изменить. Черновик живёт 24 часа и применяется только после сводки и кнопки «Сохранить»; `/autocfgcancel` его отменяет. Лимиты подписки не тратятся.",
             ),
         ),

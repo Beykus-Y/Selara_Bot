@@ -84,6 +84,7 @@ class ChatSettings:
     daily_summary_include_video_notes: bool = False
     pets_enabled: bool = True
     pets_spontaneous_enabled: bool = False
+    instant_stt_enabled: bool = True
 
 
 PERSONA_DISPLAY_MODE_IMAGE_ONLY = "image_only"
@@ -179,6 +180,7 @@ CHAT_SETTINGS_KEYS: tuple[str, ...] = (
     # Appended last: private-panel buttons address settings by index.
     "pets_enabled",
     "pets_spontaneous_enabled",
+    "instant_stt_enabled",
 )
 
 
@@ -364,6 +366,7 @@ def parse_chat_setting_value(key: str, raw_value: str) -> Any:
         "daily_summary_include_video_notes",
         "pets_enabled",
         "pets_spontaneous_enabled",
+        "instant_stt_enabled",
     }:
         lowered = value.lower()
         if lowered in {"true", "1", "yes", "on"}:

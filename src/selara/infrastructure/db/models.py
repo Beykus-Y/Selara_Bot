@@ -1109,6 +1109,7 @@ class ChatSettingsModel(Base):
     daily_summary_min_messages: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50, server_default="50")
     daily_summary_style: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral", server_default="neutral")
     daily_summary_include_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    instant_stt_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     daily_summary_include_video_notes: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
