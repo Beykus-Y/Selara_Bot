@@ -24,7 +24,7 @@ export function AdminFeatureRoutesSection() {
     finally { setBusyKey(null) }
   }
 
-  return <section className="admin-section admin-models" aria-labelledby="admin-feature-routes-title">
+  return <section className="admin-section admin-feature-routes" aria-labelledby="admin-feature-routes-title">
     <div className="admin-section__title-row"><h2 id="admin-feature-routes-title">Модели для групп</h2><SectionRetry busy={state.isFetching} onRetry={() => void state.refetch()} /></div>
     {state.isPending ? <SectionSkeleton rows={3} /> : state.isError && !data ? (
       <SectionError message={state.error.message} busy={state.isFetching} onRetry={() => void state.refetch()} />
