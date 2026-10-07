@@ -9228,7 +9228,11 @@ class SqlAlchemyEconomyRepository:
         if normalized_delta < 0:
             raise ValueError("Cannot subtract missing inventory item")
         # Missing row: atomic upsert so concurrent first inserts cannot collide
-        # on the primary key or lose an increment.
+        # on the primary key or lose an increment. The negative-delta guard above
+        # rejects a subtract on a missing row, so `quantity + delta >= 0` holds by
+        # construction here; unlike the conditional UPDATE, the upsert needs no
+        # inline non-negative check because it only ever adds a non-negative delta
+        # to an existing row (or inserts that same non-negative delta).
         upsert_quantity = await self._upsert_inventory_quantity(
             account_id=account_id,
             item_code=item_code,
@@ -9257,18 +9261,9 @@ class SqlAlchemyEconomyRepository:
                 "updated_at": changed_at,
             },
         )
-        new_quantity = (
-            (await self._session.execute(stmt.returning(EconomyInventoryModel.quantity))).scalar_one_or_none()
+        return int(
+            (await self._session.execute(stmt.returning(EconomyInventoryModel.quantity))).scalar_one()
         )
-        if new_quantity is None:
-            # SQLite RETURNING skips rows modified by ON CONFLICT DO UPDATE.
-            new_quantity = await self._session.scalar(
-                select(EconomyInventoryModel.quantity).where(
-                    EconomyInventoryModel.account_id == account_id,
-                    EconomyInventoryModel.item_code == item_code,
-                )
-            )
-        return int(new_quantity)
 
     async def _finish_inventory_change(self, *, account_id: int, item_code: str, quantity: int) -> InventoryItem:
         if quantity == 0:
