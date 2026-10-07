@@ -28,6 +28,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[dependency-groups]
+build = ["setuptools==84.0.0", "wheel==0.48.0"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"

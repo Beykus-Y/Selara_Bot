@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_gacha_image_declares_non_root_after_dependency_installation():
     dockerfile = (ROOT / "gacha/Dockerfile").read_text(encoding="utf-8")
     assert "USER 10001:10001" in dockerfile
-    assert dockerfile.index("USER 10001:10001") > dockerfile.index("pip install .")
+    assert dockerfile.index("USER 10001:10001") > dockerfile.index("uv sync --locked")
     assert "chown gacha:gacha /data" in dockerfile
 
 

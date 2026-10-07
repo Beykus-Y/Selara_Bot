@@ -54,11 +54,26 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Python dependencies
-        run: python -m pip install -e ".[dev]" -e "./gacha[dev]" pip-audit
+      - name: Set up locked Python resolver
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.33"
+          enable-cache: true
+
+      - name: Check Python lock matches manifests
+        run: uv lock --check
+
+      - name: Install locked Python dependencies
+        run: |
+          uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
+          uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Audit Python dependencies
         run: pip-audit --progress-spinner off
+
+      - name: Verify installed CI graph matches lock
+        run: python scripts/check_locked_python_runtime.py uv.lock selara
 
       - name: Install snapshot fonts
         timeout-minutes: 10
@@ -85,6 +100,9 @@ jobs:
       - name: Verify hardened gacha container runtime
         run: |
           docker build -f gacha/Dockerfile -t selara-gacha:ci .
+          docker run --rm --read-only --tmpfs /tmp --entrypoint python \
+            -v "$PWD/scripts:/checks:ro" selara-gacha:ci \
+            /checks/check_locked_python_runtime.py /app/uv.lock selara-gacha
           docker run --rm --network host --read-only --cap-drop ALL \
             --security-opt no-new-privileges --memory 1g --cpus 1 --pids-limit 256 \
             --tmpfs /tmp:rw,noexec,nosuid,size=536870912,mode=1777 \
@@ -92,6 +110,13 @@ jobs:
             -v /data \
             -v "$PWD/scripts:/checks:ro" --entrypoint sh selara-gacha:ci \
             -ec 'alembic upgrade head && python /checks/check_gacha_container_runtime.py'
+
+      - name: Verify locked production app image
+        run: |
+          docker build -f Dockerfile -t selara:ci .
+          docker run --rm --read-only --tmpfs /tmp --entrypoint python \
+            -v "$PWD/scripts:/checks:ro" selara:ci \
+            /checks/check_locked_python_runtime.py /app/uv.lock selara
 
       - name: Compile Python sources
         run: python -m compileall -q src gacha/src
@@ -134,13 +159,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright browser test runtime
-        run: |
-          python -m pip install "playwright==1.55.0"
-          python -m playwright install --with-deps chromium
+      - name: Set up locked Python resolver for browser tooling
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.33"
+          enable-cache: true
 
-      - name: Install server UI fixture renderer
-        run: python -m pip install "Jinja2>=3.1.4,<4"
+      - name: Install locked Playwright and Jinja2 browser tooling
+        working-directory: .
+        run: |
+          uv sync --locked --only-group browser --no-build
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install browser from locked Playwright version
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Lint frontend
         env:
