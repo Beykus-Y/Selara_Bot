@@ -12,7 +12,7 @@ from selara.application.model_catalog import (
     CatalogModel, CatalogSnapshot, ModelCapabilities, ModelConfigurationConflict, ModelProfile,
 )
 from selara.application.model_router import DefaultModelRouter
-from selara.application.llm_routes import ROUTE_TITLES
+from selara.application.llm_routes import ROUTE_TITLES, TOOL_ROUTES
 from selara.infrastructure.db.llm_routes import build_feature_routes
 from selara.infrastructure.db.model_catalog import build_model_catalog
 
@@ -179,7 +179,8 @@ def build_admin_models_router(*, settings, session_factory, require_admin) -> AP
         items = []
         for key, title in ROUTE_TITLES.items():
             profile_key = stored.get(key)
-            resolved = await resolver.resolve(profile_key=profile_key)
+            required = ModelCapabilities(supports_tools=key in TOOL_ROUTES)
+            resolved = await resolver.resolve(profile_key=profile_key, required=required)
             effective = snapshot.models_by_id.get(resolved.model_id)
             items.append({"route_key": key, "title": title, "profile_key": profile_key,
                           "effective_model_id": resolved.model_id, "is_fallback": resolved.is_fallback,

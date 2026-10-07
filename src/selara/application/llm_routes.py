@@ -7,6 +7,7 @@ the catalog, so a change applies without restarting the bot.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Awaitable, Callable, Mapping
@@ -28,6 +29,8 @@ ROUTE_TITLES: Mapping[str, str] = {
     ROUTE_PETS: "AI-питомцы (разговор и реплики)",
 }
 ROUTE_KEYS = tuple(ROUTE_TITLES)
+# Routes whose calls offer tools: a model without tool support falls back to LLM_MODEL at runtime.
+TOOL_ROUTES = frozenset({ROUTE_GROUP_ASK, ROUTE_GROUP_MEMBER})
 
 # Features whose model follows a route. Summaries, autoconfig, Personal and the internal
 # extraction/compression operations keep their own routing on purpose.
@@ -61,20 +64,24 @@ class CachedFeatureRoutes:
         self._clock = clock
         self._cached: Mapping[str, str | None] = {}
         self._expires_at = 0.0
+        self._lock = asyncio.Lock()
 
     def invalidate(self) -> None:
         self._expires_at = 0.0
 
     async def get(self) -> Mapping[str, str | None]:
-        now = self._clock()
-        if now < self._expires_at:
+        if self._clock() < self._expires_at:
             return self._cached
-        try:
-            self._cached = dict(await self._load())
-        except Exception:
-            logger.exception("Feature model routes unavailable; keeping the last known values")
-        self._expires_at = now + self._ttl
-        return self._cached
+        async with self._lock:  # single flight: one load per expiry, the rest reuse it
+            now = self._clock()
+            if now < self._expires_at:
+                return self._cached
+            try:
+                self._cached = dict(await self._load())
+            except Exception:
+                logger.exception("Feature model routes unavailable; keeping the last known values")
+            self._expires_at = now + self._ttl
+            return self._cached
 
     async def profile_for_feature(self, feature: str | None) -> str | None:
         route = FEATURE_ROUTES.get(feature or "")

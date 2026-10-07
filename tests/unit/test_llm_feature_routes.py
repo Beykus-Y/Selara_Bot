@@ -165,3 +165,33 @@ async def test_admin_api_reads_and_saves_routes(api):
     assert (await client.put(f"{url}/pets", json={"profile_key": None})).json()["item"]["profile_key"] is None
     assert (await client.put(f"{url}/pets", json={"profile_key": "bogus"})).status_code == 422
     assert (await client.put(f"{url}/nope", json={"profile_key": None})).status_code == 422
+
+
+async def test_concurrent_expired_reads_load_once():
+    import asyncio
+
+    calls = {"n": 0}
+
+    async def load():
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return {ROUTE_GROUP_ASK: "basic"}
+
+    routes = CachedFeatureRoutes(load)
+    results = await asyncio.gather(*(routes.profile_for_feature("llm_admin") for _ in range(10)))
+    assert results == ["basic"] * 10 and calls["n"] == 1
+
+
+async def test_admin_preview_flags_tool_route_with_model_without_tools(api):
+    client, factory = api
+    from selara.infrastructure.db.model_catalog import build_model_catalog
+
+    _, catalog_store = build_model_catalog(factory)
+    await catalog_store.save_model(CatalogModel("plain", "provider/plain", "Plain"), expected_revision=0)
+    await catalog_store.save_profile(ModelProfile("fast", "Быстрая", "plain"))
+    url = "/api/miniapp/admin/ai/feature-routes"
+    for route in ("group_ask", "pets"):
+        await client.put(f"{url}/{route}", json={"profile_key": "fast"})
+    items = {i["route_key"]: i for i in (await client.get(url)).json()["items"]}
+    assert items["group_ask"]["is_fallback"] is True  # tools required, model has none
+    assert items["pets"]["is_fallback"] is False
