@@ -2,6 +2,31 @@ import pytest
 
 
 @pytest.fixture
+def login_limiter_stub(monkeypatch):
+    """HTTP route tests inject admission; shared Redis behavior is tested in CI."""
+    from uuid import uuid4
+    from selara.web import app
+
+    class Limiter:
+        def __init__(self, *, limit, **kwargs):
+            self.limit = limit
+            self.attempts = {}
+
+        async def reserve(self, key):
+            attempts = self.attempts.setdefault(key, set())
+            if len(attempts) >= self.limit:
+                return None
+            token = uuid4().hex
+            attempts.add(token)
+            return token
+
+        async def release(self, key, token):
+            self.attempts[key].discard(token)
+
+    monkeypatch.setattr(app, "RedisLoginAttemptLimiter", Limiter)
+
+
+@pytest.fixture
 def stt_cooldown_stub(monkeypatch):
     """Handler tests inject admission; the real Redis contract is tested separately."""
     from selara.presentation.handlers import voice

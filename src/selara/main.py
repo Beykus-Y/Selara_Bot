@@ -268,6 +268,8 @@ async def _run_web_panel(settings, session_factory) -> None:
         app,
         host=settings.web_host,
         port=settings.web_port,
+        proxy_headers=True,
+        forwarded_allow_ips=settings.web_forwarded_allow_ips,
         log_level=settings.log_level.lower(),
     )
     server = uvicorn.Server(config)

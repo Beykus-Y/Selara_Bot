@@ -10,7 +10,7 @@ import logging
 import re
 import secrets
 import xml.etree.ElementTree as ElementTree
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from html import escape, unescape
 from importlib import import_module
@@ -49,6 +49,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from selara.web.login_limiter import LoginLimiterUnavailable, RedisLoginAttemptLimiter
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.feature_access import FeatureAccessService
@@ -652,7 +653,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
-    failed_attempts: dict[str, deque[datetime]] = defaultdict(deque)
+    login_limiter = RedisLoginAttemptLimiter(
+        redis_url=settings.redis_url, limit=settings.web_login_attempt_limit,
+        window_seconds=max(1, settings.web_login_attempt_window_minutes) * 60,
+    )
     chat_settings_defaults = default_chat_settings(settings)
     bot_username = (settings.bot_username or settings.bot_name or "selara_ru_bot").lstrip("@")
     game_bot: Bot | None = None
@@ -1178,6 +1182,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        if exc.status_code == 503 and request.url.path in {"/login", "/app/admin/login", "/api/admin/login"} and (
+            request.url.path == "/api/admin/login" or _prefers_json(request)
+        ):
+            return _json_result(ok=False, message=str(exc.detail), status_code=503)
         if request.url.path.startswith(_ADMIN_API_PREFIXES):
             detail = exc.detail.get("message") if isinstance(exc.detail, dict) else exc.detail
             message = detail if isinstance(detail, str) and detail else "Сервер отклонил запрос."
@@ -1281,15 +1289,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             payload["field"] = field
         return JSONResponse(content=payload, status_code=status_code)
 
-    def _check_rate_limit(host: str, now: datetime) -> bool:
-        attempts = failed_attempts[host]
-        window = timedelta(minutes=max(1, settings.web_login_attempt_window_minutes))
-        while attempts and attempts[0] <= now - window:
-            attempts.popleft()
-        return len(attempts) >= max(1, settings.web_login_attempt_limit)
-
-    def _register_failed_attempt(host: str, now: datetime) -> None:
-        failed_attempts[host].append(now)
+    async def _reserve_login_attempt(key: str) -> str | None:
+        try:
+            return await login_limiter.reserve(key)
+        except LoginLimiterUnavailable as error:
+            raise StarletteHTTPException(status_code=503, detail=str(error)) from None
 
     def _admin_password_matches(candidate: str) -> bool:
         configured = settings.admin_password
@@ -4620,7 +4624,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"web:{host}"
         prefers_json = _prefers_json(request)
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             redirect_path = _with_message(
                 "/login",
                 key="error",
@@ -4638,7 +4643,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         form = await _parse_form(request)
         code = normalize_login_code(form.get("code"))
         if len(code) != 6:
-            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/login", key="error", text="Введите корректный шестизначный код.")
             if prefers_json:
                 return _json_result(
@@ -4658,7 +4662,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if user is None:
                 await session.commit()
-                _register_failed_attempt(rate_limit_key, now)
                 redirect_path = _with_message(
                     "/login",
                     key="error",
@@ -4675,7 +4678,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             token = await _create_user_session(auth_repo, user=user, now=now)
             await session.commit()
-            failed_attempts.pop(rate_limit_key, None)
+            await login_limiter.release(rate_limit_key, attempt_token)
 
         redirect_path = _with_message("/app", key="flash", text="Вход выполнен.")
         response = (
@@ -8939,7 +8942,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"admin:{host}"
         prefers_json = _prefers_json(request)
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             redirect_path = _with_message(
                 "/app/admin/login",
                 key="error",
@@ -8958,7 +8962,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         password = form.get("password", "")
 
         if not _admin_password_matches(password):
-            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/app/admin/login", key="error", text="Неверный пароль.")
             if prefers_json:
                 return _json_result(ok=False, message="Неверный пароль.", status_code=401, redirect=redirect_path)
@@ -8986,7 +8989,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 now=now,
             )
             await session.commit()
-        failed_attempts.pop(rate_limit_key, None)
+        await login_limiter.release(rate_limit_key, attempt_token)
 
         redirect_path = _with_message("/app/admin", key="flash", text="Вход выполнен.")
         response = (
@@ -10534,7 +10537,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         now = _now_utc()
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"admin:{host}"
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             return _json_result(
                 ok=False,
                 message="Слишком много попыток. Попробуйте позже.",
@@ -10545,7 +10549,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         password = form.get("password", "")
 
         if not _admin_password_matches(password):
-            _register_failed_attempt(rate_limit_key, now)
             return _json_result(ok=False, message="Неверный пароль.", status_code=401)
 
         if settings.admin_user_id is None:
@@ -10566,7 +10569,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 now=now,
             )
             await session.commit()
-        failed_attempts.pop(rate_limit_key, None)
+        await login_limiter.release(rate_limit_key, attempt_token)
 
         response = _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect="/app/admin")
         response.set_cookie(

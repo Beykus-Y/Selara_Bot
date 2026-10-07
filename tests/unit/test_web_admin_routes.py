@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
+pytestmark = pytest.mark.usefixtures("login_limiter_stub")
+
 from selara.core.config import Settings
 from selara.core.web_auth import digest_admin_session_token
 from selara.infrastructure.db.models import (
