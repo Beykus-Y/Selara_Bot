@@ -94,6 +94,8 @@ runs:
             exit 0
           fi
           echo "apt attempt $attempt failed" >&2
+          # timeout only stops sudo; stop the apt it started so the next try can take the dpkg lock.
+          sudo pkill -x apt-get || true
           sleep 5
         done
         exit 1

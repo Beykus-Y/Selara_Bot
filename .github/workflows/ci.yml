@@ -176,8 +176,9 @@ jobs:
         id: chromium-deps
         run: |
           # Ask Playwright which apt packages it wants; empty means "use --with-deps".
-          pkgs=$(python -m playwright install-deps --dry-run chromium 2>/dev/null \
-            | grep -o 'no-install-recommends [^"]*' | head -1 | sed 's/^no-install-recommends //')
+          python -m playwright install-deps --dry-run chromium > "$RUNNER_TEMP/pw-deps.txt" 2>&1 || true
+          echo "--- install-deps --dry-run output ---"; cat "$RUNNER_TEMP/pw-deps.txt"; echo "---"
+          pkgs=$(grep -o 'no-install-recommends [^"]*' "$RUNNER_TEMP/pw-deps.txt" | head -1 | sed 's/^no-install-recommends //')
           echo "packages=$pkgs" >> "$GITHUB_OUTPUT"
           echo "Chromium packages: ${pkgs:-<none found>}"
 
@@ -198,6 +199,9 @@ jobs:
               exit 0
             fi
             echo "playwright install attempt $attempt failed" >&2
+            # timeout only stops playwright; stop the apt it started so the next try can take the dpkg lock.
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
             sleep 5
           done
           exit 1
