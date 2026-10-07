@@ -115,6 +115,7 @@ class Settings(BaseSettings):
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
+    backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
     # to BOT_TOKEN. Defaults to false so a fresh production install (including
