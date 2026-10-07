@@ -15,7 +15,7 @@ export type BroadcastPreview = {
 
 export type BroadcastProgress = {
   broadcast_id: number
-  status: 'sending' | 'completed' | 'interrupted'
+  status: 'sending' | 'completed' | 'interrupted' | 'cancelled'
   target_count: number
   sent_count: number
   failed_count: number
@@ -90,4 +90,20 @@ export async function startAdminBroadcast(payload: {
 export async function getAdminBroadcastProgress(id: number, signal?: AbortSignal) {
   const { data } = await http.get<BroadcastProgress>(`/miniapp/admin/broadcast/${id}`, { signal })
   return data
+}
+
+export async function resumeAdminBroadcast(id: number) {
+  return postData<{ broadcast_id: number; resumed: boolean; status: BroadcastProgress['status'] }>(
+    `/miniapp/admin/broadcast/${id}/resume`,
+    {},
+    'Не удалось продолжить рассылку.',
+  )
+}
+
+export async function cancelAdminBroadcast(id: number) {
+  return postData<{ broadcast_id: number; cancelled_count: number; status: BroadcastProgress['status'] }>(
+    `/miniapp/admin/broadcast/${id}/cancel`,
+    {},
+    'Не удалось отменить рассылку.',
+  )
 }

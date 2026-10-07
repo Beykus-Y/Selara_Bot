@@ -56,8 +56,9 @@ if (backupForm instanceof HTMLFormElement) {
     })
       .then(async (response) => {
         const data = await response.json().catch(() => null);
-        if (data && data.ok) {
-          window.location.reload();
+        if (response.status === 202 || response.status === 409) {
+          // admin-backup-status.js follows the running job from here.
+          backupForm.dispatchEvent(new CustomEvent("backup-accepted", { detail: submitButton }));
           return;
         }
         if (response.status === 401 && data && data.redirect) {

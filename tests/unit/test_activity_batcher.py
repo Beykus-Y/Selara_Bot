@@ -5,13 +5,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.achievements import AchievementCatalogService
-from selara.infrastructure.db import activity_batcher as activity_batcher_module
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
-from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.models import ActivityEventInboxModel, MessageArchiveModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, reason="aiosqlite is not installed")
@@ -19,6 +19,34 @@ pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, r
 
 def _catalog() -> AchievementCatalogService:
     return AchievementCatalogService.load(Path("src/selara/core/achievements.json"))
+
+
+def _archived_message(*, chat_id: int, user_id: int, message_id: int) -> dict[str, object]:
+    sent_at = datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc)
+    return {
+        "chat_id": chat_id,
+        "chat_type": "group",
+        "chat_title": "Recovery",
+        "user_id": user_id,
+        "username": "erin",
+        "first_name": "Erin",
+        "last_name": None,
+        "is_bot": False,
+        "event_at": sent_at,
+        "telegram_message_id": message_id,
+        "snapshot_kind": "created",
+        "snapshot_at": sent_at,
+        "sent_at": sent_at,
+        "message_type": "text",
+        "text": f"message {message_id}",
+        "raw_message_json": {"message_id": message_id, "text": f"message {message_id}"},
+        "snapshot_hash": f"hash-{message_id}",
+    }
+
+
+async def _count(session_factory, model) -> int:
+    async with session_factory() as session:
+        return int((await session.execute(select(func.count()).select_from(model))).scalar_one())
 
 
 @pytest.mark.asyncio
@@ -124,10 +152,150 @@ async def test_activity_batcher_retries_failed_flush_without_losing_events(monke
 
 
 @pytest.mark.asyncio
-async def test_activity_batcher_applies_backpressure_at_capacity(monkeypatch) -> None:
+async def test_events_enqueued_before_a_crash_are_flushed_by_the_next_process() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # The first batcher never reaches start() or close(): the process dies after enqueue and before any flush.
+    crashed = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    for message_id in range(1, 6):
+        await crashed.enqueue_message(
+            chat_id=5005,
+            chat_type="group",
+            chat_title="Crash",
+            user_id=901,
+            username="dave",
+            first_name="Dave",
+            last_name=None,
+            is_bot=False,
+            event_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            telegram_message_id=message_id,
+            snapshot_kind="created",
+            snapshot_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            sent_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            message_type="text",
+            text=f"message {message_id}",
+            raw_message_json={"message_id": message_id, "text": f"message {message_id}"},
+            snapshot_hash=f"hash-{message_id}",
+        )
+    del crashed
+
+    restarted = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    await restarted.start()
+    await restarted.close()
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        stats = await repo.get_user_stats(chat_id=5005, user_id=901)
+        archived_rows = (
+            await session.execute(
+                select(func.count()).select_from(MessageArchiveModel).where(MessageArchiveModel.chat_id == 5005)
+            )
+        ).scalar_one()
+
+    assert stats is not None
+    assert stats.message_count == 5
+    assert archived_rows == 5
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_stays_in_the_inbox_and_is_applied_once_after_restart(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    original = SqlAlchemyActivityRepository.flush_activity_batch
+
+    async def _crash_before_commit(self, events):
+        # Stage the real writes, then fail before the batch transaction commits.
+        await original(self, events)
+        raise RuntimeError("simulated crash before commit")
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", _crash_before_commit)
+
+    interrupted = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    for message_id in range(1, 4):
+        await interrupted.enqueue_message(**_archived_message(chat_id=6006, user_id=902, message_id=message_id))
+    await interrupted.start()
+    await interrupted.close()
+
+    assert await _count(session_factory, ActivityEventInboxModel) == 3
+    assert await _count(session_factory, MessageArchiveModel) == 0
+    async with session_factory() as session:
+        assert await SqlAlchemyActivityRepository(session).get_user_stats(chat_id=6006, user_id=902) is None
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", original)
+    restarted = ActivityBatcher(session_factory=session_factory, catalog=_catalog(), flush_seconds=60, max_events=1000)
+    await restarted.start()
+    await restarted.close()
+
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    assert await _count(session_factory, MessageArchiveModel) == 3
+    async with session_factory() as session:
+        stats = await SqlAlchemyActivityRepository(session).get_user_stats(chat_id=6006, user_id=902)
+    assert stats is not None
+    assert stats.message_count == 3
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_deliveries_of_one_message_are_applied_once() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    batcher = ActivityBatcher(session_factory=session_factory, catalog=_catalog(), flush_seconds=60, max_events=1000)
+    # Two inbox rows for the same Telegram message, as after a redelivered update.
+    for _ in range(2):
+        await batcher.enqueue_message(**_archived_message(chat_id=7007, user_id=903, message_id=9))
+    await batcher.start()
+    await batcher.close()
+
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    assert await _count(session_factory, MessageArchiveModel) == 1
+    async with session_factory() as session:
+        stats = await SqlAlchemyActivityRepository(session).get_user_stats(chat_id=7007, user_id=903)
+    assert stats is not None
+    assert stats.message_count == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_batcher_limits_concurrent_inbox_writes() -> None:
+    release = asyncio.Event()
+    commits_started = 0
+
     class FakeSession:
+        def add_all(self, rows) -> None:
+            _ = rows
+
         async def commit(self) -> None:
-            return None
+            nonlocal commits_started
+            commits_started += 1
+            await release.wait()
 
     class FakeSessionFactory:
         def __call__(self):
@@ -140,22 +308,12 @@ async def test_activity_batcher_applies_backpressure_at_capacity(monkeypatch) ->
 
             return Manager()
 
-    class FakeRepo:
-        def __init__(self, session) -> None:
-            _ = session
-
-        async def flush_activity_batch(self, batch):
-            _ = batch
-            return ActivityBatchFlushResult()
-
-    monkeypatch.setattr(activity_batcher_module, "SqlAlchemyActivityRepository", FakeRepo)
-
     batcher = ActivityBatcher(
         session_factory=FakeSessionFactory(),
         catalog=_catalog(),
         flush_seconds=60,
         max_events=10,
-        max_pending_events=1,
+        max_inflight_writes=1,
     )
     event = {
         "chat_id": 3003,
@@ -168,16 +326,66 @@ async def test_activity_batcher_applies_backpressure_at_capacity(monkeypatch) ->
         "is_bot": False,
         "event_at": datetime(2026, 3, 13, 14, 0, tzinfo=timezone.utc),
     }
-    await batcher.enqueue_message(**event, telegram_message_id=1)
-    blocked_enqueue = asyncio.create_task(
-        batcher.enqueue_message(**event, telegram_message_id=2)
-    )
+    first = asyncio.create_task(batcher.enqueue_message(**event, telegram_message_id=1))
+    second = asyncio.create_task(batcher.enqueue_message(**event, telegram_message_id=2))
     await asyncio.sleep(0)
-    assert not blocked_enqueue.done()
+    assert commits_started == 1
+    assert not second.done()
 
-    first_batch = await batcher._drain_pending()
-    assert await batcher._flush_batch(first_batch)
-    await asyncio.wait_for(blocked_enqueue, timeout=1)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+    assert commits_started == 2
 
-    second_batch = await batcher._drain_pending()
-    assert await batcher._flush_batch(second_batch)
+
+@pytest.mark.asyncio
+async def test_enqueue_after_close_is_rejected() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    batcher = ActivityBatcher(session_factory=session_factory, catalog=_catalog(), flush_seconds=60, max_events=10)
+    await batcher.start()
+    await batcher.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await batcher.enqueue_message(**_archived_message(chat_id=8008, user_id=904, message_id=1))
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_with_the_request_session_takes_no_second_connection_and_follows_its_commit() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    class NoSecondConnectionFactory:
+        def __call__(self):
+            raise AssertionError("enqueue must reuse the request session, not open a second pooled connection")
+
+    batcher = ActivityBatcher(
+        session_factory=NoSecondConnectionFactory(),
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    async with session_factory() as request_session:
+        await batcher.enqueue_message(
+            **_archived_message(chat_id=9009, user_id=905, message_id=1),
+            session=request_session,
+        )
+        await request_session.rollback()
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+
+    async with session_factory() as request_session:
+        await batcher.enqueue_message(
+            **_archived_message(chat_id=9009, user_id=905, message_id=2),
+            session=request_session,
+        )
+        await request_session.commit()
+    assert await _count(session_factory, ActivityEventInboxModel) == 1
+    await engine.dispose()

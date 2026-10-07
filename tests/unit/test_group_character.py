@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+from contextlib import asynccontextmanager
 from datetime import datetime as _dt
 from datetime import timezone as _tz
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from selara.application.feature_access import (
 )
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot
+from selara.infrastructure.db.ai_turn_leases import AiTurnLeaseLostError
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository, GroupCharacterError
 from selara.infrastructure.db.chat_migration import migrate_chat_id
@@ -407,6 +409,7 @@ async def member_db(monkeypatch):
     monkeypatch.setattr(group_character, "chat_has_selara_ai", AsyncMock(return_value=False))
     group_character._state_cache.clear()
     group_character._hint_sent_at.clear()
+    group_character._busy_reply_sent_at.clear()
     async with factory() as session:
         session.add(ChatModel(telegram_chat_id=_CHAT, type="supergroup", title="Chat"))
         await session.commit()
@@ -686,3 +689,100 @@ async def test_a_pet_cannot_take_a_call_name():
                 )
     finally:
         await engine.dispose()
+
+
+# ----- durable turn lease -----------------------------------------------------
+
+
+def _recording_lease(events: list[str]):
+    class _Lease:
+        async def confirm(self) -> None:
+            events.append("confirm")
+
+    @asynccontextmanager
+    async def lease(**_kwargs):
+        events.append("lease")
+        yield _Lease()
+        events.append("released")
+
+    return lease
+
+
+def _lease_lost_after(llm: _Llm, *, model_calls: int):
+    class _Lease:
+        async def confirm(self) -> None:
+            if len(llm.requests) >= model_calls:
+                raise AiTurnLeaseLostError("group_member_turn:-100")
+
+    @asynccontextmanager
+    async def lease(**_kwargs):
+        yield _Lease()
+
+    return lease
+
+
+class _EventsLlm(_Llm):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    async def chat_with_tools(self, messages, tools, **kwargs):
+        self._events.append("model")
+        return await super().chat_with_tools(messages, tools, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_busy_chat_turn_gets_one_note_and_runs_nothing(member_db, monkeypatch):
+    @asynccontextmanager
+    async def busy_lease(**_kwargs):
+        yield None
+
+    monkeypatch.setattr(group_character, "ai_turn_lease", busy_lease)
+    llm = _Llm()
+    first = _member_message("Селя, который час?", message_id=801)
+    second = _member_message("Селя, ответь!", message_id=802, user_id=_MEMBER + 1)
+    await _ask(member_db, first, llm)
+    await _ask(member_db, second, llm)
+
+    assert llm.requests == [] and _Access.reservations == []
+    first.reply.assert_awaited_once_with(group_character._BUSY_TEXT)
+    # One note per window: the second question in the same window stays silent.
+    second.reply.assert_not_awaited()
+    assert (await member_db.scalars(select(ChatMemberAiMessageModel))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_every_model_round_and_tool_call_is_fenced_before_it_runs(member_db, monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(group_character, "ai_turn_lease", _recording_lease(events))
+    await _ask(member_db, _member_message("Селя, который час?", message_id=831), _EventsLlm(events))
+
+    # Each model round and each tool call passes a check first; the check after the answer comes before it is saved.
+    assert events == ["lease", "confirm", "model", "confirm", "confirm", "confirm", "model", "confirm", "released"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_loses_its_lease_before_the_model_saves_and_sends_nothing(member_db, monkeypatch):
+    llm = _Llm()
+    monkeypatch.setattr(group_character, "ai_turn_lease", _lease_lost_after(llm, model_calls=0))
+    message = _member_message("Селя, который час?", message_id=841)
+    await _ask(member_db, message, llm)
+
+    assert llm.requests == []
+    message.reply.assert_awaited_once_with(group_character._LEASE_LOST_TEXT)
+    rows = (await member_db.scalars(select(ChatMemberAiMessageModel))).all()
+    assert [(row.role, row.status) for row in rows] == [("user", "failed")]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_loses_its_lease_after_the_model_answered_sends_no_answer(member_db, monkeypatch):
+    llm = _Llm()
+    # Both model rounds pass their checks; the check after the answer is the one that fails.
+    monkeypatch.setattr(group_character, "ai_turn_lease", _lease_lost_after(llm, model_calls=2))
+    message = _member_message("Селя, который час?", message_id=851)
+    await _ask(member_db, message, llm)
+
+    assert len(llm.requests) == 2
+    message.reply.assert_awaited_once_with(group_character._LEASE_LOST_TEXT)
+    rows = (await member_db.scalars(select(ChatMemberAiMessageModel))).all()
+    assert [(row.role, row.status) for row in rows] == [("user", "failed")]

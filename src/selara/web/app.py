@@ -112,8 +112,28 @@ from selara.domain.entities import (
 )
 from selara.domain.reactions import normalize_telegram_reaction_emoji
 from selara.domain.value_objects import display_name_from_parts
-from selara.infrastructure.backup import send_daily_backup
+from selara.infrastructure.backup import (
+    BackupAlreadyRunningError,
+    read_manual_backup_status,
+    start_manual_backup,
+    stop_manual_backups,
+)
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
+from selara.infrastructure.db.admin_broadcast_jobs import (
+    ADMIN_BROADCAST_INTERRUPTED,
+    ADMIN_BROADCAST_LEASE_SECONDS,
+    ADMIN_BROADCAST_PHOTO_UNAVAILABLE,
+    admin_broadcast_is_leased,
+    cancel_admin_broadcast,
+    claim_next_admin_broadcast_delivery,
+    delivery_is_still_claimed,
+    fail_pending_admin_broadcast_deliveries,
+    load_admin_broadcast_send_job,
+    new_admin_broadcast_owner_token,
+    release_admin_broadcast_lease,
+    renew_admin_broadcast_lease,
+    try_acquire_admin_broadcast_lease,
+)
 from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
@@ -705,6 +725,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if miniapp_broadcast_tasks:
             await asyncio.gather(*miniapp_broadcast_tasks.values(), return_exceptions=True)
         miniapp_broadcast_tasks.clear()
+        # Manual backups send through game_bot, so stop them before its session closes.
+        await stop_manual_backups(session_factory=session_factory)
         if game_bot is not None:
             await game_bot.session.close()
             game_bot = None
@@ -8547,91 +8569,156 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         )
         return mode, status
 
-    async def _deliver_admin_broadcast(
-        *,
-        bot: Bot,
-        broadcast,
-        deliveries,
-        parsed: ParsedBroadcast,
-        photo_content: bytes | None,
-        photo_filename: str | None,
-    ) -> tuple[int, int]:
+    async def _deliver_admin_broadcast(*, bot: Bot, broadcast_id: int, owner_token: str) -> tuple[int, int]:
+        """Send the pending deliveries of a broadcast while this owner holds its lease.
+
+        Each delivery is claimed before its Telegram call, so two workers never send the same one. A send that was in
+        flight when the worker stopped has no known outcome, so it is recorded as failed instead of being repeated.
+        """
         sent_count = 0
         failed_count = 0
-        reusable_photo_file_id: str | None = broadcast.media_file_id
-        for delivery in deliveries:
-            reaction_mode, member_status = await _resolve_admin_broadcast_delivery_mode(
-                bot,
-                chat_id=delivery.chat_id,
-                parsed=parsed,
-            )
-            reply_markup = (
-                build_inline_keyboard(delivery_id=delivery.id, options=parsed.options)
-                if reaction_mode == "inline"
-                else None
-            )
-            try:
-                if broadcast.media_type == "photo":
-                    photo = reusable_photo_file_id
-                    if photo is None:
-                        if photo_content is None:
-                            raise RuntimeError("photo_content_unavailable")
-                        photo = BufferedInputFile(photo_content, filename=photo_filename or "broadcast.jpg")
-                    sent_message = await bot.send_photo(
-                        chat_id=delivery.chat_id,
-                        photo=photo,
-                        caption=parsed.rendered_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
-                else:
-                    sent_message = await bot.send_message(
-                        chat_id=delivery.chat_id,
-                        text=parsed.rendered_text,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                        reply_markup=reply_markup,
-                    )
-            except Exception as exc:
-                failed_count += 1
-                logger.exception(
-                    "Admin broadcast send failed",
-                    extra={"broadcast_id": broadcast.id, "chat_id": delivery.chat_id},
+        in_flight_delivery_id: int | None = None
+        try:
+            job = await load_admin_broadcast_send_job(session_factory=session_factory, broadcast_id=broadcast_id)
+            if job is None:
+                return sent_count, failed_count
+            if job.media_type == "photo" and job.media_file_id is None and job.media_content is None:
+                # Created before the photo was stored, so there is nothing left to upload.
+                failed_count += await fail_pending_admin_broadcast_deliveries(
+                    session_factory=session_factory,
+                    broadcast_id=broadcast_id,
+                    error_text=ADMIN_BROADCAST_PHOTO_UNAVAILABLE,
                 )
+                return sent_count, failed_count
+            parsed = parse_broadcast_source(job.body)
+            reusable_photo_file_id: str | None = job.media_file_id
+            while True:
+                if not await renew_admin_broadcast_lease(
+                    session_factory=session_factory,
+                    broadcast_id=broadcast_id,
+                    owner_token=owner_token,
+                ):
+                    logger.warning("Admin broadcast lease was taken over", extra={"broadcast_id": broadcast_id})
+                    break
+                delivery = await claim_next_admin_broadcast_delivery(
+                    session_factory=session_factory,
+                    broadcast_id=broadcast_id,
+                    owner_token=owner_token,
+                )
+                if delivery is None:
+                    break
+                in_flight_delivery_id = delivery.id
+                reaction_mode, member_status = await _resolve_admin_broadcast_delivery_mode(
+                    bot,
+                    chat_id=delivery.chat_id,
+                    parsed=parsed,
+                )
+                reply_markup = (
+                    build_inline_keyboard(delivery_id=delivery.id, options=parsed.options)
+                    if reaction_mode == "inline"
+                    else None
+                )
+                if not await delivery_is_still_claimed(
+                    session_factory=session_factory,
+                    delivery_id=delivery.id,
+                    owner_token=owner_token,
+                ):
+                    # Cancelled during the preflight, or its claim expired and was swept: it must not be sent now.
+                    in_flight_delivery_id = None
+                    continue
+                try:
+                    if job.media_type == "photo":
+                        photo = reusable_photo_file_id
+                        if photo is None:
+                            if job.media_content is None:
+                                raise RuntimeError("photo_content_unavailable")
+                            photo = BufferedInputFile(job.media_content, filename=job.media_filename or "broadcast.jpg")
+                        sent_message = await bot.send_photo(
+                            chat_id=delivery.chat_id,
+                            photo=photo,
+                            caption=parsed.rendered_text,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+                    else:
+                        sent_message = await bot.send_message(
+                            chat_id=delivery.chat_id,
+                            text=parsed.rendered_text,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True,
+                            reply_markup=reply_markup,
+                        )
+                except Exception as exc:
+                    failed_count += 1
+                    logger.exception(
+                        "Admin broadcast send failed",
+                        extra={"broadcast_id": broadcast_id, "chat_id": delivery.chat_id},
+                    )
+                    async with session_factory() as session:
+                        repo = SqlAlchemyActivityRepository(session)
+                        await repo.mark_admin_broadcast_delivery_failed(
+                            delivery_id=delivery.id,
+                            error_text=str(exc) or exc.__class__.__name__,
+                        )
+                        await session.commit()
+                    in_flight_delivery_id = None
+                    continue
+
+                sent_count += 1
+                sent_at = getattr(sent_message, "date", None) or _now_utc()
+                photo_unique_id: str | None = None
+                if job.media_type == "photo" and reusable_photo_file_id is None:
+                    sent_photos = list(getattr(sent_message, "photo", None) or [])
+                    if sent_photos:
+                        reusable_photo_file_id = str(sent_photos[-1].file_id)
+                        photo_unique_id = str(getattr(sent_photos[-1], "file_unique_id", "") or "") or None
                 async with session_factory() as session:
                     repo = SqlAlchemyActivityRepository(session)
-                    await repo.mark_admin_broadcast_delivery_failed(
+                    await repo.mark_admin_broadcast_delivery_sent(
                         delivery_id=delivery.id,
-                        error_text=str(exc) or exc.__class__.__name__,
+                        telegram_message_id=int(sent_message.message_id),
+                        reaction_mode=reaction_mode,
+                        bot_member_status=member_status,
+                        sent_at=sent_at,
                     )
+                    if reusable_photo_file_id is not None and job.media_type == "photo":
+                        await repo.set_admin_broadcast_media_file(
+                            broadcast_id=broadcast_id,
+                            file_id=reusable_photo_file_id,
+                            file_unique_id=photo_unique_id,
+                        )
                     await session.commit()
-                continue
+                in_flight_delivery_id = None
+        finally:
+            if in_flight_delivery_id is not None:
+                await _record_interrupted_admin_broadcast_delivery(in_flight_delivery_id)
+            await _release_admin_broadcast_lease(broadcast_id, owner_token)
+        return sent_count, failed_count
 
-            sent_count += 1
-            sent_at = getattr(sent_message, "date", None) or _now_utc()
-            photo_unique_id: str | None = None
-            if broadcast.media_type == "photo" and reusable_photo_file_id is None:
-                sent_photos = list(getattr(sent_message, "photo", None) or [])
-                if sent_photos:
-                    reusable_photo_file_id = str(sent_photos[-1].file_id)
-                    photo_unique_id = str(getattr(sent_photos[-1], "file_unique_id", "") or "") or None
+    async def _record_interrupted_admin_broadcast_delivery(delivery_id: int) -> None:
+        try:
             async with session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
-                await repo.mark_admin_broadcast_delivery_sent(
-                    delivery_id=delivery.id,
-                    telegram_message_id=int(sent_message.message_id),
-                    reaction_mode=reaction_mode,
-                    bot_member_status=member_status,
-                    sent_at=sent_at,
+                await repo.mark_admin_broadcast_delivery_failed(
+                    delivery_id=delivery_id,
+                    error_text=ADMIN_BROADCAST_INTERRUPTED,
                 )
-                if reusable_photo_file_id is not None and broadcast.media_type == "photo":
-                    await repo.set_admin_broadcast_media_file(
-                        broadcast_id=broadcast.id,
-                        file_id=reusable_photo_file_id,
-                        file_unique_id=photo_unique_id,
-                    )
                 await session.commit()
-        return sent_count, failed_count
+        except Exception:
+            logger.exception(
+                "Could not record an interrupted admin broadcast delivery",
+                extra={"delivery_id": delivery_id},
+            )
+
+    async def _release_admin_broadcast_lease(broadcast_id: int, owner_token: str) -> None:
+        try:
+            await release_admin_broadcast_lease(
+                session_factory=session_factory,
+                broadcast_id=broadcast_id,
+                owner_token=owner_token,
+            )
+        except Exception:
+            logger.exception("Could not release the admin broadcast lease", extra={"broadcast_id": broadcast_id})
 
     async def _execute_admin_broadcast(
         request: Request,
@@ -8681,6 +8768,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             for raw_value in form_lists.get("chat_ids", [])
             if raw_value.lstrip("-").isdigit()
         }
+        # This request sends the broadcast itself, so it starts out holding the lease.
+        owner_token = new_admin_broadcast_owner_token()
         async with session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
             targets = await repo.list_recent_active_group_chats(since=active_since)
@@ -8696,6 +8785,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     for option in parsed.options
                 ],
                 media_type="photo" if media_mode == "photo" else None,
+                media_filename=photo_filename if media_mode == "photo" else None,
+                media_content=photo_content if media_mode == "photo" else None,
+                lease_owner_token=owner_token,
+                lease_expires_at=_now_utc() + timedelta(seconds=ADMIN_BROADCAST_LEASE_SECONDS),
                 active_since_days=_ADMIN_BROADCAST_ACTIVE_DAYS,
                 created_by_user_id=admin_user_id,
             )
@@ -8707,11 +8800,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         sent_count, failed_count = await _deliver_admin_broadcast(
             bot=await _get_game_bot(),
-            broadcast=broadcast,
-            deliveries=deliveries,
-            parsed=parsed,
-            photo_content=photo_content,
-            photo_filename=photo_filename,
+            broadcast_id=broadcast.id,
+            owner_token=owner_token,
         )
         logger.info(
             "Admin broadcast completed",
@@ -8896,6 +8986,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ],
             extra_scripts=[
                 "admin-overview.js",
+                "admin-backup-status.js",
                 "admin-feedback.js",
                 "admin-broadcast.js",
                 "admin-table-search.js",
@@ -9111,17 +9202,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _redirect("/app/admin/login")
 
         try:
-            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+            await start_manual_backup(bot=await _get_game_bot(), settings=settings, session_factory=session_factory)
+        except BackupAlreadyRunningError:
+            redirect_path = _with_message("/app/admin", key="error", text="Backup уже выполняется.")
+            if prefers_json:
+                return _json_result(ok=False, message="Backup уже выполняется.", status_code=409, redirect=redirect_path)
+            return _redirect(redirect_path)
         except Exception:
             logger.exception("Admin backup request failed")
-            redirect_path = _with_message("/app/admin", key="error", text="Не удалось отправить backup. Проверьте логи и конфиг.")
+            redirect_path = _with_message("/app/admin", key="error", text="Не удалось запустить backup. Проверьте логи и конфиг.")
             if prefers_json:
-                return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500, redirect=redirect_path)
+                return _json_result(ok=False, message="Не удалось запустить backup. Проверьте логи и конфиг.", status_code=500, redirect=redirect_path)
             return _redirect(redirect_path)
 
-        redirect_path = _with_message("/app/admin", key="flash", text="Backup отправлен в Telegram.")
+        redirect_path = _with_message("/app/admin", key="flash", text="Backup запущен. Архив придёт в Telegram, когда будет готов.")
         if prefers_json:
-            return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
+            return _json_result(ok=True, message="Backup запущен.", status_code=202, redirect=redirect_path)
         return _redirect(redirect_path)
 
     @app.post("/app/admin/error-alerts")
@@ -10696,12 +10792,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         try:
-            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+            await start_manual_backup(bot=await _get_game_bot(), settings=settings, session_factory=session_factory)
+        except BackupAlreadyRunningError:
+            return _json_result(ok=False, message="Backup уже выполняется.", status_code=409)
         except Exception:
             logger.exception("Admin backup request failed")
-            return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500)
+            return _json_result(ok=False, message="Не удалось запустить backup. Проверьте логи и конфиг.", status_code=500)
 
-        return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200)
+        return _json_result(ok=True, message="Backup запущен.", status_code=202)
+
+    @app.get("/api/admin/backup-status")
+    async def admin_backup_status_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=False)
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
+
+        backup = await read_manual_backup_status(session_factory=session_factory)
+        return JSONResponse(content={"ok": True, "message": "", "backup": backup}, status_code=200)
 
     @app.post("/api/admin/broadcasts/send")
     async def admin_send_broadcast_api(request: Request):
@@ -11370,6 +11479,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         photo_content = payload.get("photo_content") if isinstance(payload.get("photo_content"), bytes) else None
         media_mode = str(payload.get("media_mode") or ("photo" if photo_content else "text"))
         photo_digest = hashlib.sha256(photo_content).hexdigest() if photo_content else ""
+        photo_filename = str(payload.get("photo_filename") or "") or None
         days_raw = payload.get("active_since_days", _ADMIN_BROADCAST_ACTIVE_DAYS)
         try:
             days = max(1, min(int(days_raw), 90))
@@ -11397,6 +11507,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             raise StarletteHTTPException(status_code=409, detail="Preview содержит некорректную аудиторию.")
         if not target_chat_ids:
             raise StarletteHTTPException(status_code=422, detail="В выбранной аудитории нет активных групп.")
+        owner_token = new_admin_broadcast_owner_token()
         async with session_factory() as session:
             existing = await session.scalar(
                 select(AdminBroadcastModel).where(AdminBroadcastModel.idempotency_key == idempotency_key)
@@ -11441,6 +11552,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         for option in parse_broadcast_source(body).options
                     ],
                     media_type="photo" if media_mode == "photo" else None,
+                    media_filename=photo_filename if media_mode == "photo" else None,
+                    media_content=photo_content if media_mode == "photo" else None,
+                    lease_owner_token=owner_token,
+                    lease_expires_at=_now_utc() + timedelta(seconds=ADMIN_BROADCAST_LEASE_SECONDS),
                     request_fingerprint=request_fingerprint,
                     active_since_days=days,
                     created_by_user_id=admin_user_id,
@@ -11457,43 +11572,48 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 if existing.request_fingerprint != request_fingerprint:
                     raise StarletteHTTPException(status_code=409, detail="Ключ уже использован для другой рассылки.")
                 return {"ok": True, "broadcast_id": int(existing.id), "status": "sending", "duplicate": True}
-        parsed = parse_broadcast_source(body)
-        task = asyncio.create_task(
-            _run_miniapp_broadcast(
-                broadcast_id=broadcast.id,
-                parsed=parsed,
-                photo_content=photo_content,
-                photo_filename=str(payload.get("photo_filename") or "") or None,
-            ),
-            name=f"miniapp-broadcast-{broadcast.id}",
-        )
-        miniapp_broadcast_tasks[broadcast.id] = task
-        task.add_done_callback(lambda completed, bid=broadcast.id: miniapp_broadcast_tasks.pop(bid, None))
+        _spawn_admin_broadcast_worker(broadcast_id=broadcast.id, owner_token=owner_token)
         logger.info("Mini App broadcast started", extra={"broadcast_id": broadcast.id, "targets": len(deliveries)})
         return {"ok": True, "broadcast_id": broadcast.id, "status": "sending", "target_count": len(deliveries)}
 
-    async def _run_miniapp_broadcast(
-        *, broadcast_id: int, parsed: ParsedBroadcast, photo_content: bytes | None, photo_filename: str | None
-    ) -> None:
+    def _spawn_admin_broadcast_worker(*, broadcast_id: int, owner_token: str) -> None:
+        task = asyncio.create_task(
+            _run_admin_broadcast_worker(broadcast_id=broadcast_id, owner_token=owner_token),
+            name=f"miniapp-broadcast-{broadcast_id}",
+        )
+        miniapp_broadcast_tasks[broadcast_id] = task
+        task.add_done_callback(lambda completed, bid=broadcast_id: _forget_admin_broadcast_task(bid, completed))
+
+    def _forget_admin_broadcast_task(broadcast_id: int, completed: asyncio.Task) -> None:
+        # Only forget the task that finished; a newer worker for the same broadcast may already be registered.
+        if miniapp_broadcast_tasks.get(broadcast_id) is completed:
+            del miniapp_broadcast_tasks[broadcast_id]
+
+    async def _run_admin_broadcast_worker(*, broadcast_id: int, owner_token: str) -> None:
         try:
-            async with session_factory() as session:
-                repo = SqlAlchemyActivityRepository(session)
-                broadcast = await repo.get_admin_broadcast(broadcast_id=broadcast_id)
-                deliveries = await repo.list_admin_broadcast_deliveries(broadcast_id=broadcast_id)
-            if broadcast is None:
-                return
             await _deliver_admin_broadcast(
                 bot=await _get_game_bot(),
-                broadcast=broadcast,
-                deliveries=deliveries,
-                parsed=parsed,
-                photo_content=photo_content,
-                photo_filename=photo_filename,
+                broadcast_id=broadcast_id,
+                owner_token=owner_token,
             )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Mini App broadcast worker failed", extra={"broadcast_id": broadcast_id})
+
+    async def _start_admin_broadcast_worker_if_free(broadcast_id: int) -> bool:
+        if broadcast_id in miniapp_broadcast_tasks:
+            return False
+        owner_token = new_admin_broadcast_owner_token()
+        acquired = await try_acquire_admin_broadcast_lease(
+            session_factory=session_factory,
+            broadcast_id=broadcast_id,
+            owner_token=owner_token,
+        )
+        if not acquired:
+            return False
+        _spawn_admin_broadcast_worker(broadcast_id=broadcast_id, owner_token=owner_token)
+        return True
 
     async def _miniapp_broadcast_status(session: AsyncSession, broadcast_id: int) -> dict[str, object]:
         broadcast = await session.get(AdminBroadcastModel, broadcast_id)
@@ -11510,8 +11630,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         sent = int(counts.get("sent", 0))
         failed = int(counts.get("failed", 0))
         pending = int(counts.get("pending", 0))
-        active = broadcast_id in miniapp_broadcast_tasks
-        status = "sending" if active else "completed" if pending == 0 else "interrupted"
+        if await admin_broadcast_is_leased(session, broadcast_id=broadcast_id):
+            status = "sending"
+        elif broadcast.cancelled_at is not None:
+            status = "cancelled"
+        elif pending:
+            status = "interrupted"
+        else:
+            status = "completed"
         last_delivery_at = await session.scalar(
             select(func.max(AdminBroadcastDeliveryModel.updated_at)).where(
                 AdminBroadcastDeliveryModel.broadcast_id == broadcast_id
@@ -11536,6 +11662,32 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "duration_seconds": duration_seconds,
             "created_at": broadcast.created_at.isoformat(),
         }
+
+    async def _admin_broadcast_status_snapshot(broadcast_id: int) -> dict[str, object]:
+        async with session_factory() as session:
+            return await _miniapp_broadcast_status(session, broadcast_id)
+
+    async def _miniapp_broadcast_resume(session: AsyncSession, broadcast_id: int) -> dict[str, object]:
+        current = await _miniapp_broadcast_status(session, broadcast_id)
+        if current["status"] in {"completed", "cancelled"}:
+            raise StarletteHTTPException(status_code=409, detail="Рассылка уже завершена или отменена.")
+        resumed = False
+        if current["status"] == "interrupted":
+            resumed = await _start_admin_broadcast_worker_if_free(broadcast_id)
+            current = await _admin_broadcast_status_snapshot(broadcast_id)
+        return {"broadcast_id": broadcast_id, "resumed": resumed, "status": current["status"]}
+
+    async def _miniapp_broadcast_cancel(session: AsyncSession, broadcast_id: int) -> dict[str, object]:
+        if await session.get(AdminBroadcastModel, broadcast_id) is None:
+            raise StarletteHTTPException(status_code=404, detail="Рассылка не найдена.")
+        stopped = await cancel_admin_broadcast(session_factory=session_factory, broadcast_id=broadcast_id)
+        if stopped == 0:
+            raise StarletteHTTPException(
+                status_code=409,
+                detail="Отменять нечего: все сообщения уже отправлены или отправляются.",
+            )
+        current = await _admin_broadcast_status_snapshot(broadcast_id)
+        return {"broadcast_id": broadcast_id, "cancelled_count": stopped, "status": current["status"]}
 
     # --- AI settings of the owner in the server-rendered /app/admin --------------------------------------------
     # The same endpoints and services as the Mini App admin (build_miniapp_admin_router), mounted a second time
@@ -11650,6 +11802,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_preview_handler=_miniapp_broadcast_preview,
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
+            broadcast_resume_handler=_miniapp_broadcast_resume,
+            broadcast_cancel_handler=_miniapp_broadcast_cancel,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
             send_notice=_send_owner_grant_notice,
             prefix="/" + "app/admin/api",
@@ -11666,6 +11820,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_preview_handler=_miniapp_broadcast_preview,
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
+            broadcast_resume_handler=_miniapp_broadcast_resume,
+            broadcast_cancel_handler=_miniapp_broadcast_cancel,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
             send_notice=_send_owner_grant_notice,
         )

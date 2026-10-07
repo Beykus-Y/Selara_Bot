@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
     activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")
     activity_batch_max_events: int = Field(default=1000, validation_alias="ACTIVITY_BATCH_MAX_EVENTS")
+    # How long shutdown waits for the activity inbox to drain. Keep it well under Docker's default 10 s stop timeout.
+    activity_batch_close_grace_seconds: float = Field(
+        default=5.0, gt=0, le=60, validation_alias="ACTIVITY_BATCH_CLOSE_GRACE_SECONDS"
+    )
+    # Archived group messages (text, raw JSON, transcripts) and parked dead letters older than this many days are
+    # deleted for good. 0 (the default) keeps everything. Enabling it cannot be undone, so back up first.
+    # See docs/MESSAGE_ARCHIVE_RETENTION.md.
+    message_archive_retention_days: int = Field(default=0, ge=0, validation_alias="MESSAGE_ARCHIVE_RETENTION_DAYS")
     achievements_catalog_path: str = Field(
         default="src/selara/core/achievements.json",
         validation_alias="ACHIEVEMENTS_CATALOG_PATH",
@@ -119,6 +127,15 @@ class Settings(BaseSettings):
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
+    # Restore drill: each dump is restored into a scratch database on the bot's PostgreSQL server before it is encrypted.
+    # Opt-in: it needs CREATEDB and free disk for a copy of the database, and a failure stops every backup.
+    backup_restore_drill_enabled: bool = Field(default=False, validation_alias="BACKUP_RESTORE_DRILL_ENABLED")
+    backup_restore_drill_timeout_seconds: float = Field(
+        default=1800.0,
+        validation_alias="BACKUP_RESTORE_DRILL_TIMEOUT_SECONDS",
+    )
+    # Public half of the X25519 backup key (base64). Only this key lives on the bot host; the private key stays with the operator.
+    backup_encryption_public_key: str | None = Field(default=None, validation_alias="BACKUP_ENCRYPTION_PUBLIC_KEY")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
     # to BOT_TOKEN. Defaults to false so a fresh production install (including
@@ -275,6 +292,15 @@ class Settings(BaseSettings):
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_message_archive_retention(self):
+        # The daily summary and its tools read the last day or two of the archive, so a shorter window would
+        # delete data they still need.
+        days = self.message_archive_retention_days
+        if 0 < days < 7:
+            raise ValueError("MESSAGE_ARCHIVE_RETENTION_DAYS must be 0 (off) or at least 7")
+        return self
 
     @model_validator(mode="after")
     def _check_trusted_web_proxies(self):

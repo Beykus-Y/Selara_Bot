@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -19,18 +19,39 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
-from sqlalchemy.engine import make_url
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.core.config import Settings
+from selara.infrastructure.backup_encryption import (
+    ENCRYPTED_SUFFIX,
+    ENCRYPTION_FORMAT,
+    BackupCryptoError,
+    encrypt_file,
+    parse_public_key,
+    public_key_fingerprint,
+)
+from selara.infrastructure.backup_drill import (
+    GACHA_DATABASE_TARGET,
+    MAIN_DATABASE_TARGET,
+    drill_postgres_dump,
+    drill_sqlite_snapshot,
+    libpq_url,
+    read_live_schema_head,
+)
 from selara.infrastructure.db.backup_claims import (
     BACKUP_SLOT_COMPLETED,
     BACKUP_SLOT_FAILED,
+    BACKUP_SLOT_RUNNING,
+    MANUAL_BACKUP_SLOT_KEY,
     finish_backup_slot,
+    read_backup_slot,
     read_backup_slot_status,
     renew_backup_slot_lease,
     try_claim_backup_slot,
+    try_claim_manual_backup,
 )
 from selara.infrastructure.http.gacha_client import GachaClientError, HttpGachaClient
 
@@ -67,6 +88,14 @@ _BACKUP_FAILURE_REASON_MAX_CHARS = 500
 
 class BackupJobError(RuntimeError):
     pass
+
+
+class BackupAlreadyRunningError(BackupJobError):
+    pass
+
+
+# Manual backup jobs are not owned by any request, so keep them (by job id) until they finish.
+_manual_backup_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 @dataclass(slots=True)
@@ -247,11 +276,181 @@ async def _stop_task(task: asyncio.Task[None]) -> None:
         await task
 
 
+async def start_manual_backup(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Start an admin-requested backup in the background and return its job id.
+
+    The request only claims the single manual slot. The dump runs in its own task, so
+    a dropped browser connection cannot cancel it. Only one manual backup may run at a
+    time across bot instances; a second request raises BackupAlreadyRunningError.
+    """
+    if settings.admin_user_id is None:
+        raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
+
+    # Fail before claiming the slot if the archives could not be encrypted.
+    _resolve_backup_recipient(settings)
+
+    job_id = uuid4().hex
+    claimed = await try_claim_manual_backup(
+        session_factory=session_factory,
+        owner_token=job_id,
+        lease_seconds=_BACKUP_LEASE_SECONDS,
+    )
+    if not claimed:
+        raise BackupAlreadyRunningError("Backup уже выполняется.")
+
+    task = asyncio.create_task(
+        _run_manual_backup(
+            bot=bot,
+            settings=settings,
+            session_factory=session_factory,
+            job_id=job_id,
+        ),
+        name="manual-backup-job",
+    )
+    _manual_backup_tasks[job_id] = task
+    task.add_done_callback(lambda _done, jid=job_id: _manual_backup_tasks.pop(jid, None))
+    return job_id
+
+
+async def _run_manual_backup(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    job_id: str,
+) -> None:
+    lease_lost = asyncio.Event()
+    job = asyncio.create_task(send_daily_backup(bot=bot, settings=settings), name="manual-backup-dump")
+    lease = asyncio.create_task(
+        _keep_backup_lease_alive(
+            session_factory=session_factory,
+            slot_key=MANUAL_BACKUP_SLOT_KEY,
+            owner_token=job_id,
+            on_lost=lambda: _abort_lost_backup(job, lease_lost),
+        ),
+        name="manual-backup-lease",
+    )
+    try:
+        await job
+    except asyncio.CancelledError:
+        await _stop_task(lease)
+        if lease_lost.is_set():
+            logger.error("Manual backup stopped after losing its lease", extra={"job_id": job_id})
+            return
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
+        raise
+    except Exception as exc:
+        await _stop_task(lease)
+        logger.exception("Manual Selara backup failed", extra={"job_id": job_id})
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error=str(exc),
+        )
+        try:
+            await _notify_backup_failure(bot=bot, settings=settings, reason=str(exc))
+        except Exception:
+            logger.exception("Could not notify admin about manual backup failure")
+        return
+
+    await _stop_task(lease)
+    await _record_manual_backup_result(
+        session_factory=session_factory,
+        job_id=job_id,
+        status=BACKUP_SLOT_COMPLETED,
+    )
+
+
+async def _record_manual_backup_result(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    job_id: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    # A failed status write must not hide the outcome from the admin: the caller still notifies.
+    try:
+        await finish_backup_slot(
+            session_factory=session_factory,
+            slot_key=MANUAL_BACKUP_SLOT_KEY,
+            owner_token=job_id,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        logger.exception("Could not record manual backup result", extra={"job_id": job_id, "status": status})
+
+
+async def stop_manual_backups(*, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Cancel manual backups still running and record each as failed; call before their bot session closes.
+
+    A job cancelled before it first runs never reaches its own failure path, so the
+    record is written here. finish_backup_slot only updates a row that is still running,
+    so a job that already finished keeps its result.
+    """
+    jobs = tuple(_manual_backup_tasks.items())
+    for _job_id, task in jobs:
+        task.cancel()
+    if jobs:
+        await asyncio.gather(*(task for _job_id, task in jobs), return_exceptions=True)
+    for job_id, _task in jobs:
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
+
+
+async def read_manual_backup_status(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    now: datetime | None = None,
+) -> dict[str, str | None]:
+    """Describe the latest manual backup: idle, running, completed, failed or interrupted.
+
+    A running row whose lease has expired means its process died mid-job; the next
+    request may take the slot over, so it is reported as interrupted rather than running.
+    """
+    snapshot = await read_backup_slot(session_factory=session_factory, slot_key=MANUAL_BACKUP_SLOT_KEY)
+    if snapshot is None:
+        return {"status": "idle", "started_at": None, "finished_at": None, "error": None}
+
+    status = snapshot.status
+    error = snapshot.last_error
+    if status == BACKUP_SLOT_RUNNING and _as_utc(now) > _as_utc(snapshot.lease_expires_at):
+        status = "interrupted"
+        error = "Backup прервался до завершения. Запросите его снова."
+    finished_at = snapshot.finished_at
+    return {
+        "status": status,
+        "started_at": _as_utc(snapshot.claimed_at).isoformat(),
+        "finished_at": _as_utc(finished_at).isoformat() if finished_at is not None else None,
+        "error": error,
+    }
+
+
 async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
-    """Send a backup now. Manual admin requests call this directly and do not claim a scheduled slot."""
+    """Send an encrypted backup now. Admin requests reach it through start_manual_backup; it claims no scheduled slot.
+
+    Every archive is encrypted to BACKUP_ENCRYPTION_PUBLIC_KEY before it is split or
+    sent. If encryption cannot be set up or fails, nothing is sent at all.
+    """
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
+    recipient = _resolve_backup_recipient(settings)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="selara-daily-backup-"))
     try:
@@ -271,12 +470,27 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
             settings=settings,
         )
 
+        # Restore both dumps into scratch databases before anything is encrypted or
+        # sent: a dump that parses offline can still fail to restore.
+        if settings.backup_restore_drill_enabled:
+            await _drill_bot_database_dump(dump_path=bot_dump.path, settings=settings)
+            await _drill_gacha_dump(dump_path=gacha_dump.path, settings=settings)
+        else:
+            logger.warning("Backup restore drill is disabled; dumps are sent without a restore check")
+
+        # Encrypt both archives before the first upload, so a failure here cannot
+        # leave a partial backup set in Telegram.
+        encrypted_files = [
+            await asyncio.to_thread(_encrypt_backup_file, backup_file, recipient)
+            for backup_file in (bot_dump, gacha_dump)
+        ]
+
         created_at = _backup_timestamp()
         manifest_files: list[dict[str, object]] = []
-        for backup_file in (bot_dump, gacha_dump):
+        for encrypted_file in encrypted_files:
             parts, manifest_entry = await asyncio.to_thread(
                 _split_backup_file,
-                backup_file,
+                encrypted_file,
                 temp_dir,
                 BACKUP_CHUNK_SIZE_BYTES,
             )
@@ -297,6 +511,10 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
             created_at=created_at,
             chunk_size_bytes=BACKUP_CHUNK_SIZE_BYTES,
             files=manifest_files,
+            encryption={
+                "format": ENCRYPTION_FORMAT,
+                "recipient_sha256": public_key_fingerprint(recipient),
+            },
         )
         await bot.send_document(
             chat_id=admin_user_id,
@@ -307,7 +525,7 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
         await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
 
-async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> BackupFile:
+def _bot_database_url(settings: Settings) -> URL:
     try:
         database_url = make_url(settings.database_url)
     except ArgumentError as exc:
@@ -315,6 +533,30 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
 
     if database_url.get_backend_name() != "postgresql":
         raise BackupJobError("Daily backup currently supports only PostgreSQL for the main bot.")
+    return database_url
+
+
+async def _stop_pg_dump_process(process: asyncio.subprocess.Process) -> None:
+    """Stop a pg_dump child whose backup job was cancelled, and reap it before the temp directory is removed.
+
+    The child is asked to exit with SIGTERM and given a bounded time to do so; one that ignores it is killed.
+    """
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+    try:
+        await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+    except TimeoutError:  # pragma: no cover - a killed child must exit
+        logger.warning("pg_dump process did not exit after being killed")
+
+
+async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> BackupFile:
+    database_url = _bot_database_url(settings)
 
     output_path = temp_dir / "bot_pg_dump.dump"
     command = [
@@ -324,7 +566,8 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
         "--no-owner",
         "--no-privileges",
         f"--file={output_path}",
-        f"--dbname={database_url.set(drivername='postgresql', password=None).render_as_string(hide_password=False)}",
+        # The password travels in PGPASSWORD below: argv is readable by every local user through /proc.
+        f"--dbname={libpq_url(database_url, database_url.database)}",
     ]
     env = os.environ.copy()
     if database_url.password is not None:
@@ -342,7 +585,12 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
             f"Backup command '{settings.backup_pg_dump_path}' is not available in the main bot runtime."
         ) from exc
 
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        # Shutdown and a lost backup lease both cancel this job; pg_dump must not keep running after it.
+        await _stop_pg_dump_process(process)
+        raise
     if process.returncode != 0:
         detail = _last_line(stderr)
         if detail:
@@ -544,6 +792,48 @@ async def _kill_verification_process(process: asyncio.subprocess.Process) -> Non
         logger.warning("Backup restore verification process did not exit after being killed")
 
 
+async def _drill_bot_database_dump(*, dump_path: Path, settings: Settings) -> None:
+    """Restore the main bot dump into a scratch database and require the live schema head.
+
+    The live head is read first, so a dump of a schema other than the one the running bot
+    uses fails the drill instead of being sent.
+    """
+    database_url = _bot_database_url(settings)
+    async with _BACKUP_VERIFICATION_LOCK:
+        live_head = await read_live_schema_head(database_url, label=MAIN_DATABASE_TARGET.label)
+        await drill_postgres_dump(
+            admin_url=database_url,
+            dump_path=dump_path,
+            target=replace(MAIN_DATABASE_TARGET, expected_head=live_head),
+            pg_restore_path=settings.backup_pg_restore_path,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
+
+
+async def _drill_gacha_dump(*, dump_path: Path, settings: Settings) -> None:
+    """Restore the gacha dump into a scratch database on the bot's own PostgreSQL server.
+
+    The bot holds no gacha database credentials, but a logical dump restores anywhere,
+    so the copy made here tests the same archive that is about to be sent.
+    """
+    if dump_path.suffix.lower() == ".sqlite3":
+        await asyncio.to_thread(
+            drill_sqlite_snapshot,
+            snapshot_path=dump_path,
+            target=GACHA_DATABASE_TARGET,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
+        return
+    async with _BACKUP_VERIFICATION_LOCK:
+        await drill_postgres_dump(
+            admin_url=_bot_database_url(settings),
+            dump_path=dump_path,
+            target=GACHA_DATABASE_TARGET,
+            pg_restore_path=settings.backup_pg_restore_path,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
+
+
 def _split_backup_file(
     backup_file: BackupFile,
     temp_dir: Path,
@@ -594,17 +884,40 @@ def _split_backup_file(
     return parts, manifest_entry
 
 
+def _resolve_backup_recipient(settings: Settings) -> X25519PublicKey:
+    encoded = (settings.backup_encryption_public_key or "").strip()
+    if not encoded:
+        raise BackupJobError("BACKUP_ENCRYPTION_PUBLIC_KEY is not configured, backup archive cannot be encrypted.")
+    try:
+        return parse_public_key(encoded)
+    except BackupCryptoError as exc:
+        raise BackupJobError(f"BACKUP_ENCRYPTION_PUBLIC_KEY is invalid: {exc}") from exc
+
+
+def _encrypt_backup_file(backup_file: BackupFile, recipient: X25519PublicKey) -> BackupFile:
+    """Replace a plaintext archive with its encrypted copy; the plaintext never leaves the host."""
+    encrypted_path = backup_file.path.with_name(backup_file.path.name + ENCRYPTED_SUFFIX)
+    try:
+        encrypt_file(source=backup_file.path, destination=encrypted_path, recipient=recipient)
+    except (BackupCryptoError, OSError) as exc:
+        raise BackupJobError(f"Backup encryption failed for {backup_file.archive_name}: {exc}") from exc
+    backup_file.path.unlink()
+    return BackupFile(path=encrypted_path, archive_name=encrypted_path.name)
+
+
 def _write_backup_manifest(
     *,
     temp_dir: Path,
     created_at: str,
     chunk_size_bytes: int,
     files: list[dict[str, object]],
+    encryption: dict[str, object],
 ) -> Path:
     manifest_path = temp_dir / f"selara-daily-backup-{created_at}.manifest.json"
     payload = {
         "created_at": created_at,
         "chunk_size_bytes": chunk_size_bytes,
+        "encryption": encryption,
         "files": files,
     }
     manifest_path.write_text(

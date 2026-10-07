@@ -415,6 +415,19 @@
   display: none;
 }
 
+.admin-backup-status {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 12px;
+  color: var(--muted-strong);
+  font-size: 0.86rem;
+}
+
+.admin-backup-status[hidden] {
+  display: none;
+}
+
 .admin-backup-actions {
   display: flex;
   gap: 10px;

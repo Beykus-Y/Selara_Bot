@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.common import (
+    account_lock_key,
     auction_lock_key,
     get_account_or_error,
     lock_economy_resources,
@@ -44,6 +45,12 @@ async def execute(
         )
 
     scope = scope_from_snapshot(chat_id=auction.chat_id, scope_id=auction.scope_id, scope_type=auction.scope_type)
+    # The auction lock is held, so the leader cannot change under us. Lock the bidder and the
+    # leader it refunds in one sorted call, the same order market trades use.
+    account_keys = [account_lock_key(scope=scope, user_id=bidder_user_id)]
+    if auction.highest_bid_user_id is not None and auction.current_bid > 0:
+        account_keys.append(account_lock_key(scope=scope, user_id=auction.highest_bid_user_id))
+    await lock_economy_resources(repo, *account_keys)
     bidder_account, _ = await get_account_or_error(repo, scope=scope, user_id=bidder_user_id)
     if bidder_account.balance < bid_amount:
         return AuctionBidResult(accepted=False, reason="Недостаточно монет для этой ставки.", auction=auction)

@@ -127,6 +127,7 @@ from selara.infrastructure.db.models import (
     ChatCommandAccessRuleModel,
     ChatCustomSocialActionModel,
     ChatGlobalBoostModel,
+    ChatInterestingFactDeliveryModel,
     ChatInterestingFactStateModel,
     ChatModel,
     ChatRoleDefinitionModel,
@@ -2522,6 +2523,76 @@ class SqlAlchemyActivityRepository:
         if state is None:
             raise RuntimeError("Failed to load interesting fact state after upsert")
         return state
+
+    async def lock_chat_interesting_fact_dispatch(self, *, chat_id: int) -> None:
+        # Transaction-scoped, so it serializes claims for one chat across bot replicas until commit.
+        await _lock_resources(self._session, f"interesting_fact_dispatch:{int(chat_id)}")
+
+    async def abandon_expired_interesting_fact_claims(self, *, chat_id: int, now: datetime) -> int:
+        normalized_now = _coerce_utc_datetime(now)
+        stmt = (
+            update(ChatInterestingFactDeliveryModel)
+            .where(
+                ChatInterestingFactDeliveryModel.chat_id == chat_id,
+                ChatInterestingFactDeliveryModel.status == "claimed",
+                ChatInterestingFactDeliveryModel.lease_until <= normalized_now,
+            )
+            .values(status="abandoned", finished_at=normalized_now, error_summary="lease_expired")
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)
+
+    async def get_latest_interesting_fact_claim_at(self, *, chat_id: int, statuses: Sequence[str]) -> datetime | None:
+        stmt = select(func.max(ChatInterestingFactDeliveryModel.claimed_at)).where(
+            ChatInterestingFactDeliveryModel.chat_id == chat_id,
+            ChatInterestingFactDeliveryModel.status.in_(tuple(statuses)),
+        )
+        value = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _normalize_optional_datetime(value)
+
+    async def create_interesting_fact_claim(
+        self,
+        *,
+        chat_id: int,
+        fact_id: str,
+        claimed_at: datetime,
+        lease_until: datetime,
+    ) -> int:
+        row = ChatInterestingFactDeliveryModel(
+            chat_id=chat_id,
+            fact_id=fact_id,
+            status="claimed",
+            claimed_at=_coerce_utc_datetime(claimed_at),
+            lease_until=_coerce_utc_datetime(lease_until),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return int(row.id)
+
+    async def finish_interesting_fact_claim(
+        self,
+        *,
+        claim_id: int,
+        status: str,
+        finished_at: datetime,
+        telegram_message_id: int | None = None,
+        error_summary: str | None = None,
+    ) -> bool:
+        stmt = (
+            update(ChatInterestingFactDeliveryModel)
+            .where(
+                ChatInterestingFactDeliveryModel.id == claim_id,
+                ChatInterestingFactDeliveryModel.status == "claimed",
+            )
+            .values(
+                status=status,
+                finished_at=_coerce_utc_datetime(finished_at),
+                telegram_message_id=telegram_message_id,
+                error_summary=error_summary[:255] if error_summary else None,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return bool(result.rowcount)
 
     @staticmethod
     def _to_daily_summary_run(row: DailySummaryRunModel) -> DailySummaryRun:
@@ -6399,6 +6470,10 @@ class SqlAlchemyActivityRepository:
         media_type: str | None = None,
         media_file_id: str | None = None,
         media_file_unique_id: str | None = None,
+        media_filename: str | None = None,
+        media_content: bytes | None = None,
+        lease_owner_token: str | None = None,
+        lease_expires_at: datetime | None = None,
         request_fingerprint: str | None = None,
         active_since_days: int,
         created_by_user_id: int | None,
@@ -6412,6 +6487,10 @@ class SqlAlchemyActivityRepository:
             media_type=media_type,
             media_file_id=media_file_id,
             media_file_unique_id=media_file_unique_id,
+            media_filename=media_filename,
+            media_content=media_content,
+            lease_owner_token=lease_owner_token,
+            lease_expires_at=_normalize_optional_datetime(lease_expires_at),
             active_since_days=max(1, int(active_since_days)),
             created_by_user_id=int(created_by_user_id) if created_by_user_id is not None else None,
         )
@@ -6458,6 +6537,8 @@ class SqlAlchemyActivityRepository:
         row.bot_member_status = (bot_member_status or "").strip()[:32] or None
         row.error_text = None
         row.sent_at = _coerce_utc_datetime(sent_at)
+        row.claim_token = None
+        row.claim_expires_at = None
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
@@ -6850,6 +6931,8 @@ class SqlAlchemyActivityRepository:
             return False
         row.status = "failed"
         row.error_text = " ".join((error_text or "").split())[:1000] or "send_failed"
+        row.claim_token = None
+        row.claim_expires_at = None
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
@@ -6866,6 +6949,9 @@ class SqlAlchemyActivityRepository:
             return False
         row.media_file_id = (file_id or "").strip() or None
         row.media_file_unique_id = (file_unique_id or "").strip() or None
+        # Telegram now holds the photo, so the stored copy is no longer needed.
+        row.media_content = None
+        row.media_filename = None
         await self._session.flush()
         return row.media_file_id is not None
 
@@ -9551,6 +9637,53 @@ class SqlAlchemyEconomyRepository:
         if row is None:
             return None
         return self._to_market_listing(row)
+
+    async def get_market_listing_owner(self, *, listing_id: int) -> tuple[EconomyScope, int] | None:
+        # Column select on purpose: it must not load the listing into the session, so the
+        # locked get_market_listing that follows is the first read and sees committed state.
+        stmt = select(
+            EconomyMarketListingModel.scope_id,
+            EconomyMarketListingModel.scope_type,
+            EconomyMarketListingModel.chat_id,
+            EconomyMarketListingModel.seller_user_id,
+        ).where(EconomyMarketListingModel.id == listing_id)
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        scope = EconomyScope(
+            scope_id=row.scope_id,
+            scope_type=row.scope_type,  # type: ignore[arg-type]
+            chat_id=int(row.chat_id) if row.chat_id is not None else None,
+        )
+        return scope, int(row.seller_user_id)
+
+    async def list_market_listing_ids_due_for_settlement(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[tuple[int, str]]:
+        # Open listings past expiry, plus expired listings that still hold escrow (rows the
+        # pre-fix code left behind). Returns (listing_id, status) as read here.
+        stmt = (
+            select(EconomyMarketListingModel.id, EconomyMarketListingModel.status)
+            .where(
+                or_(
+                    and_(
+                        EconomyMarketListingModel.status == "open",
+                        EconomyMarketListingModel.expires_at <= now,
+                    ),
+                    and_(
+                        EconomyMarketListingModel.status == "expired",
+                        EconomyMarketListingModel.qty_left > 0,
+                    ),
+                )
+            )
+            .order_by(EconomyMarketListingModel.id)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(int(row.id), str(row.status)) for row in rows]
 
     async def update_market_listing_qty_and_status(
         self,

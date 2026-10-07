@@ -8,14 +8,24 @@ from contextlib import asynccontextmanager
 import pytest
 
 
+class _GrantedTurnLease:
+    """Stands in for a lease the test holds: every checkpoint passes and no loss is ever reported."""
+
+    lost = False
+
+    async def confirm(self) -> None:
+        return None
+
+
 @asynccontextmanager
-async def _granted_turn_lease(**_kwargs) -> AsyncIterator[bool]:
-    yield True
+async def _granted_turn_lease(**_kwargs) -> AsyncIterator[_GrantedTurnLease]:
+    yield _GrantedTurnLease()
 
 
 @pytest.fixture(autouse=True)
 def _grant_ai_turn_lease(monkeypatch: pytest.MonkeyPatch) -> None:
-    from selara.presentation.handlers import llm_admin, personal_ai
+    from selara.presentation.handlers import group_character, llm_admin, personal_ai
 
     monkeypatch.setattr(personal_ai, "ai_turn_lease", _granted_turn_lease)
     monkeypatch.setattr(llm_admin, "ai_turn_lease", _granted_turn_lease)
+    monkeypatch.setattr(group_character, "ai_turn_lease", _granted_turn_lease)

@@ -147,6 +147,8 @@ class EconomyRepository(Protocol):
 
     async def get_market_listing(self, *, listing_id: int) -> MarketListing | None: ...
 
+    async def get_market_listing_owner(self, *, listing_id: int) -> tuple[EconomyScope, int] | None: ...
+
     async def update_market_listing_qty_and_status(
         self,
         *,

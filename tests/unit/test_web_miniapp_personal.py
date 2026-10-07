@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -499,6 +500,25 @@ async def test_forget_all_waits_for_a_running_turn_and_releases_its_lock(env):
 
     done = await env.client.post("/api/miniapp/personal/forget-all", headers=headers, json={"confirm": True})
     assert done.status_code == 200
+    assert 1 not in personal_ai._inflight_users
+
+
+async def test_forget_all_reports_busy_when_a_turn_holds_the_durable_lease(env, monkeypatch):
+    # Another bot instance can run the turn: only the durable lease sees it, not _inflight_users.
+    await _add_fact(env, 1, "факт")
+    headers = {**JSON, **env.as_user(1)}
+    lease_keys: list[str] = []
+
+    @asynccontextmanager
+    async def busy_lease(*, session_factory, lease_key, **_kwargs):
+        lease_keys.append(lease_key)
+        yield False
+
+    monkeypatch.setattr(personal_ai, "ai_turn_lease", busy_lease)
+    busy = await env.client.post("/api/miniapp/personal/forget-all", headers=headers, json={"confirm": True})
+    assert busy.status_code == 409
+    assert lease_keys == ["personal_ai:1"]
+    assert await _count(env, PersonalAiMemoryModel, user_id=1) == 1
     assert 1 not in personal_ai._inflight_users
 
 
