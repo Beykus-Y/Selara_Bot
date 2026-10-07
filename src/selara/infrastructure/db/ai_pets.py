@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character.group import normalize_call_name
 from selara.application.ai_pets import mechanics as m
+from selara.application.ai_pets import custom_action as ca
 from selara.application.ai_pets import personality as personality
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
 from selara.domain.entities import ChatSnapshot, UserSnapshot
@@ -43,6 +44,7 @@ ResultStatus = Literal[
     "cooldown",
     "blocked",
     "unavailable",
+    "refused",
     "item_unavailable",
     "level_too_low",
     "insufficient_funds",
@@ -656,6 +658,84 @@ class AiPetService:
             today=today,
             now=now,
             extra={},
+        )
+
+    async def custom_action_gate(
+        self, *, pet_id: int, chat_id: int, actor_user_id: int, now: datetime, day_start: datetime, daily_limit: int
+    ) -> tuple[str, str]:
+        """Read-only pre-check before a model line is paid for: ``("ok" | "unavailable" | "cooldown" | "limit", message)``."""
+        row = await self._session.get(AiPetModel, pet_id)
+        if row is None or row.status != "active" or row.current_chat_id != chat_id:
+            return "unavailable", "Этого питомца здесь нет или он спит."
+        custom_types = [ca.event_type(key) for key in ca.CLASS_KEYS]
+        last = await self._session.scalar(
+            select(func.max(AiPetEventModel.created_at)).where(
+                AiPetEventModel.pet_id == pet_id,
+                AiPetEventModel.actor_user_id == actor_user_id,
+                AiPetEventModel.event_type.in_(custom_types),
+            )
+        )
+        left = m.cooldown_left(_as_utc(last) if last is not None else None, ca.CUSTOM_COOLDOWN, now)
+        if left is not None:
+            return "cooldown", f"{row.name} ещё не готов(а) к новому. Попробуйте через {m.format_duration(left)}."
+        today = await self._session.scalar(
+            select(func.count()).where(
+                AiPetEventModel.pet_id == pet_id,
+                AiPetEventModel.actor_user_id == actor_user_id,
+                AiPetEventModel.event_type.in_(custom_types),
+                AiPetEventModel.created_at >= day_start,
+            )
+        )
+        if int(today or 0) >= daily_limit:
+            return "limit", f"На сегодня хватит: {row.name} уже наобщался(ась) с вами своими затеями. Завтра придумаем новое."
+        return "ok", ""
+
+    async def perform_custom_action(
+        self,
+        *,
+        pet_id: int,
+        chat_id: int,
+        actor_user_id: int,
+        class_key: str,
+        narration: str,
+        action_text: str,
+        idempotency_key: str,
+        today: date,
+        now: datetime,
+    ) -> ActionResult:
+        """Apply a classified custom action: the effect comes from the class table, never from the model's text."""
+        row = await self._locked_pet_here(pet_id=pet_id, chat_id=chat_id, now=now)
+        if row is None:
+            return ActionResult(status="unavailable", message="Этого питомца здесь нет или он спит.")
+        if await self._event_exists(idempotency_key):
+            return ActionResult(status="duplicate", pet=_view(row))
+        extra = {"class": class_key, "action": action_text[: ca.ACTION_TEXT_MAX_LEN]}
+        action_class = ca.CLASSES.get(class_key)
+        if action_class is None:
+            # A refusal is journaled so it counts against the person's daily cap and replays are no-ops.
+            self._session.add(
+                AiPetEventModel(
+                    pet_id=row.id, chat_id=chat_id, actor_user_id=actor_user_id,
+                    event_type=ca.event_type(ca.REFUSE_CLASS), effects=extra, idempotency_key=idempotency_key, created_at=now,
+                )
+            )
+            await self._session.flush()
+            return ActionResult(status="refused", pet=_view(row))
+        stats = _stats(row)
+        if stats.energy < action_class.min_energy:
+            return ActionResult(status="blocked", pet=_view(row), message=f"{row.name} слишком устал(а) — пусть отдохнёт.")
+        if action_class.blocked_when_full and stats.satiety >= m.FOOD_FULL_AT:
+            return ActionResult(status="blocked", pet=_view(row), message=f"{row.name} не голоден(на).")
+        return await self._apply(
+            row,
+            chat_id=chat_id,
+            actor_user_id=actor_user_id,
+            event_type=ca.event_type(class_key),
+            effect=action_class.effect,
+            idempotency_key=idempotency_key,
+            today=today,
+            now=now,
+            extra=extra,
         )
 
     async def use_item(

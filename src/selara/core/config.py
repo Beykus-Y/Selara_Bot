@@ -209,6 +209,11 @@ class Settings(BaseSettings):
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
     # In AI Limits mode a pet's model line reserves this many AIL (the per-request cap), then settles at its real cost.
     pet_request_ail_cap: Decimal = Field(default=Decimal("3"), gt=0, le=Decimal("50"), validation_alias="PET_REQUEST_AIL_CAP")
+    # Custom pet actions («/pet_do ...»): per person per day, the owner and everyone else; the owner's AIL pays.
+    pet_custom_actions_daily_limit: int = Field(default=10, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_DAILY_LIMIT")
+    pet_custom_actions_guest_daily_limit: int = Field(
+        default=5, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_GUEST_DAILY_LIMIT"
+    )
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,

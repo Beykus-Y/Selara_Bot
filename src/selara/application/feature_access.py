@@ -77,7 +77,7 @@ GROUP_MEMBER_POOL_KEY = "group_member_daily"
 PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
 # A pet's model lines are paid by its owner. In AI Limits mode they spend the owner's Selara Personal AIL
 # balance (one shared balance with the personal chat); otherwise the legacy per-request ``pet_daily`` pool.
-PET_FEATURES = frozenset({AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT})
+PET_FEATURES = frozenset({AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT, AiFeature.PET_ACTION})
 # What a personal request draws from the pool in requests mode: 5/150 are requests, not weighted units.
 PERSONAL_REQUEST_COST = QuotaCost(Decimal("1"))
 

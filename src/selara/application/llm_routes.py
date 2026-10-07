@@ -39,6 +39,7 @@ FEATURE_ROUTES: Mapping[str, str] = {
     AiFeature.GROUP_MEMBER.value: ROUTE_GROUP_MEMBER,
     AiFeature.PET_TALK.value: ROUTE_PETS,
     AiFeature.PET_EVENT_TEXT.value: ROUTE_PETS,
+    AiFeature.PET_ACTION.value: ROUTE_PETS,
 }
 
 

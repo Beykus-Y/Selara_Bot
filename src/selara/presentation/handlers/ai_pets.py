@@ -26,6 +26,7 @@ from selara.infrastructure.db.ai_pet_dialogue import AiPetDialogueRepository
 from selara.infrastructure.db.ai_pets import ActionResult, AiPetService, PetDomainError, PetView
 from selara.presentation.auth import has_command_access, has_permission
 from selara.presentation.formatters import format_user_link
+from selara.presentation.handlers.ai_pet_actions import handle_pet_custom_action
 from selara.presentation.handlers.ai_pet_talk import invalidate_pet_names
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,35 @@ async def pet_memory_command(message: Message, db_session, economy_repo, activit
         lines.append("Пока ничего особенного.")
     lines.append("Стереть память о разговорах: /pet_forget.")
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("pet_do"))
+async def pet_do_command(
+    message: Message,
+    command: CommandObject,
+    activity_repo,
+    db_session,
+    economy_repo,
+    chat_settings: ChatSettings,
+    settings: Settings | None = None,
+    session_factory=None,
+    personal_config=None,
+    llm_client=None,
+) -> None:
+    """A custom action in the person's own words: the model narrates, code decides the effect."""
+    if message.from_user is None or settings is None or session_factory is None or not await _pets_allowed(message, chat_settings):
+        return
+    await handle_pet_custom_action(
+        message,
+        raw_args=command.args or "",
+        activity_repo=activity_repo,
+        db_session=db_session,
+        economy_repo=economy_repo,
+        settings=settings,
+        session_factory=session_factory,
+        personal_config=personal_config,
+        llm_client=llm_client,
+    )
 
 
 @router.message(Command("pet_character"))
