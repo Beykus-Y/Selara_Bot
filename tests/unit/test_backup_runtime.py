@@ -403,6 +403,35 @@ def test_resolve_backup_restore_target_rejects_production_database() -> None:
         backup._resolve_backup_restore_target(settings)
 
 
+@pytest.mark.parametrize("override", ["host", "hostaddr", "port", "dbname", "service"])
+def test_resolve_backup_restore_target_rejects_connection_override_query(override: str) -> None:
+    # libpq applies a connection URI's query parameters on top of its addressing
+    # components, so "?host=db.internal" would point the --clean drill at the
+    # live database even though the URI host differs (see #69 review).
+    settings = _make_settings(
+        backup_restore_database_url=(
+            "postgresql://restore_user:restore_pass@restore-db.internal:5433/selara_restore"
+            f"?{override}=db.internal"
+        ),
+    )
+
+    with pytest.raises(backup.BackupJobError, match="must not override connection addressing"):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_production_guard_compares_effective_libpq_endpoints() -> None:
+    # The production DATABASE_URL can carry the same kind of overrides: the
+    # guard must compare the addresses libpq would actually dial, not the URI
+    # authority alone (see #69 review).
+    settings = _make_settings(
+        database_url="postgresql://bot_user:bot_pass@proxy.internal:6432/selara?host=db.internal",
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:6432/selara",
+    )
+
+    with pytest.raises(backup.BackupJobError, match="must not point at the production DATABASE_URL"):
+        backup._resolve_backup_restore_target(settings)
+
+
 def test_resolve_backup_restore_target_ignores_production_guard_for_other_hosts() -> None:
     settings = _make_settings(
         backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/other_database",

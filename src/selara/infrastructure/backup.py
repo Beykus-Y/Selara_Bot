@@ -39,6 +39,12 @@ _SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
 # killing it wait only this long for the event loop to reap it.
 _PROCESS_REAP_TIMEOUT_SECONDS = 10.0
 
+# libpq connection URI query parameters that can override where a connection
+# actually goes (host, port, database or even a pg_service.conf entry). The
+# restore drill must not accept them, or a query string could redirect the
+# --clean restore onto the production database behind the guard's back.
+_LIBPQ_CONNECTION_TARGET_KEYS = frozenset({"host", "hostaddr", "port", "dbname", "service"})
+
 # Telegram messages are bounded; keep the failure reason useful but short so a
 # verbose pg_restore error cannot turn the notification into a wall of text.
 _BACKUP_FAILURE_REASON_MAX_CHARS = 500
@@ -312,6 +318,7 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
             "Backup restore drill supports only PostgreSQL for BACKUP_RESTORE_DATABASE_URL."
         )
 
+    _reject_restore_target_connection_overrides(database_url)
     _reject_production_restore_target(settings, database_url)
 
     # Keep libpq options such as sslmode so the drill connects the same way
@@ -327,6 +334,26 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
         query=query,
     ).render_as_string(hide_password=False)
     return rendered_url, database_url.password
+
+
+def _reject_restore_target_connection_overrides(restore_url: URL) -> None:
+    """Refuse query parameters that redirect the drill to another connection.
+
+    libpq applies query parameters of a connection URI on top of its addressing
+    components: ``postgresql://scratch.internal/db?host=db.internal`` connects
+    to ``db.internal``, not to the host in the URI. A drill URL that smuggles
+    such an override in would restore with ``--clean`` against the database the
+    production guard just compared against, so connection addressing must only
+    ever come from the URI itself.
+    """
+    query_keys = {key.lower() for key in restore_url.query}
+    overrides = sorted(_LIBPQ_CONNECTION_TARGET_KEYS & query_keys)
+    if overrides:
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL must not override connection addressing via query "
+            f"parameters ({', '.join(overrides)}): libpq applies them over the URI host, port "
+            "and database, which defeats the production database guard."
+        )
 
 
 def _reject_production_restore_target(settings: Settings, restore_url: URL) -> None:
@@ -350,11 +377,24 @@ def _reject_production_restore_target(settings: Settings, restore_url: URL) -> N
 
 
 def _postgres_endpoint(url: URL) -> tuple[str, int, str]:
-    return (
-        (url.host or "").lower(),
-        url.port if url.port is not None else 5432,
-        url.database or "",
-    )
+    # Compare on the connection parameters libpq will actually use: a URI
+    # query such as ``?host=...`` or ``?port=...`` overrides the addressing
+    # components, so a plain host/port/database comparison would miss an
+    # aliased production target (see the drill URL rejection above).
+    query = {key.lower(): value for key, value in url.query.items()}
+    host = query.get("host") or query.get("hostaddr") or url.host or ""
+    port = _parse_query_port(query.get("port")) or url.port or 5432
+    database = query.get("dbname") or url.database or ""
+    return (host.lower(), port, database)
+
+
+def _parse_query_port(raw: object) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return int(str(raw))
+    except ValueError:
+        return None
 
 
 def _verify_sqlite_dump_restorable(dump_path: Path, label: str) -> None:
