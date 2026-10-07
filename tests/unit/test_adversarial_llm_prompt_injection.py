@@ -116,6 +116,8 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
     bot = AsyncMock()
     activity_repo = MagicMock()
     db_session = MagicMock()
+    # _handle commits the turn inside the durable lease, so the session needs an awaitable commit.
+    db_session.commit = AsyncMock()
 
     message = AsyncMock(spec=Message)
     message.message_id = 100

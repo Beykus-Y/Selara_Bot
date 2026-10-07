@@ -884,6 +884,8 @@ async def personal_chat_handler(
     _inflight_users.add(user_id)
     try:
         # The set above only sees this process; the durable lease also stops a turn on another bot instance.
+        # End this request's transaction first: the lease takes its own connection, and a small pool would wait on ours.
+        await db_session.commit()
         async with ai_turn_lease(session_factory=session_factory, lease_key=f"personal_ai:{user_id}") as acquired:
             if not acquired:
                 await message.answer(_BUSY_TEXT)
