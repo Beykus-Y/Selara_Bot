@@ -11,6 +11,7 @@ import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 import { useChatAiAccess } from './lib/use-chat-ai-access'
 import { SelaraAiPanel } from './ui/SelaraAiPanel'
+import { SelaraCharacterPanel } from './ui/SelaraCharacterPanel'
 
 function modeLabel(mode: ChatLeaderboardMode) {
   if (mode === 'activity') {
@@ -110,6 +111,8 @@ export function ChatPage() {
       </section>
 
       <SelaraAiPanel chatId={chatId} />
+
+      <SelaraCharacterPanel chatId={chatId} />
 
       <section className="miniapp-stat-strip">
         {summaryItems.map((item) => (

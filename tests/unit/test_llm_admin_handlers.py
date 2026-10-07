@@ -17,6 +17,8 @@ from selara.presentation.handlers.llm_admin import (
     _handle,
     llm_admin_context_handler,
     llm_admin_nocontext_handler,
+    llm_confirm_callback,
+    llm_reject_callback,
     llm_rollback_callback,
 )
 
@@ -544,3 +546,151 @@ async def test_rollback_callback_second_click_finds_already_claimed() -> None:
 
     activity_repo.apply_moderation_action.assert_not_awaited()
     llm_repo.clear_rollback_claim.assert_not_awaited()
+
+
+# --- #51: confirm/cancel clicks for pending high-impact tool calls ---
+
+
+def _pending_confirmation(**overrides) -> SimpleNamespace:
+    from datetime import datetime, timedelta, timezone
+
+    from selara.infrastructure.llm.tools import _confirmation_payload_hash
+
+    arguments = {"target": "@target", "reason": "abuse"}
+    row = SimpleNamespace(
+        token="tok123",
+        chat_id=-100123,
+        actor_user_id=111,
+        tool_name="ban_user",
+        arguments_json=arguments,
+        payload_hash=_confirmation_payload_hash("ban_user", arguments),
+        action_description="Бан @target: abuse",
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    for key, value in overrides.items():
+        setattr(row, key, value)
+    return row
+
+
+def _confirm_callback(user_id: int = 111, *, action: str = "llm_confirm:tok123") -> AsyncMock:
+    callback = AsyncMock()
+    callback.data = action
+    callback.from_user = SimpleNamespace(id=user_id, username="actor", first_name="Actor", last_name=None, is_bot=False)
+    callback.message = AsyncMock()
+    callback.message.chat = SimpleNamespace(id=-100123, type="supergroup")
+    callback.message.text = "⚠️ Требуется подтверждение действия"
+    return callback
+
+
+def _ban_activity_repo(*, actor_role: str = "senior_admin") -> SimpleNamespace:
+    return SimpleNamespace(
+        _session=SimpleNamespace(execute=AsyncMock(return_value=_target_row_result(222))),
+        find_chat_user_by_username=AsyncMock(
+            return_value=SimpleNamespace(
+                telegram_user_id=222, username="target", first_name="Target", last_name=None, is_bot=False,
+            )
+        ),
+        get_effective_role_definition=AsyncMock(
+            side_effect=lambda *, chat_id, user_id: (
+                _role(actor_role, 20, "moderate_users") if user_id == 111 else _role("participant", 0)
+            )
+        ),
+        apply_moderation_action=AsyncMock(return_value=SimpleNamespace(state=SimpleNamespace(warn_count=0))),
+    )
+
+
+def _confirmation_llm_repo(pending: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_tool_confirmation=AsyncMock(return_value=pending),
+        claim_tool_confirmation=AsyncMock(return_value=True),
+        release_tool_confirmation=AsyncMock(),
+        mark_tool_confirmation_expired=AsyncMock(),
+        add_admin_action=AsyncMock(return_value=SimpleNamespace(id=999)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmation_callback_executes_action_and_edits_message() -> None:
+    """#51: the initiator's confirm click routes the EXACT previewed payload
+    through execute_tool's gate (atomic claim + re-authorization) and reports
+    the real outcome by editing the preview message."""
+    llm_repo = _confirmation_llm_repo(_pending_confirmation())
+    activity_repo = _ban_activity_repo()
+    callback = _confirm_callback()
+
+    with patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo):
+        await llm_confirm_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=AsyncMock())
+
+    activity_repo.apply_moderation_action.assert_awaited_once()
+    assert activity_repo.apply_moderation_action.await_args.kwargs["action"] == "ban"
+    llm_repo.claim_tool_confirmation.assert_awaited_once_with(token="tok123", resolved_by_user_id=111)
+    callback.message.edit_text.assert_awaited_once()
+    assert "Выполнено" in callback.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_callback_actor_mismatch_is_refused() -> None:
+    """Only the initiating admin may approve: anyone else clicking gets an
+    alert and nothing executes or claims."""
+    llm_repo = _confirmation_llm_repo(_pending_confirmation())
+    activity_repo = _ban_activity_repo()
+    callback = _confirm_callback(user_id=999)
+
+    with patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo):
+        await llm_confirm_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=AsyncMock())
+
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    llm_repo.claim_tool_confirmation.assert_not_awaited()
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_confirmation_callback_second_click_is_refused() -> None:
+    """#51 double-click: once the row is not pending, further clicks never
+    reach the side effect."""
+    llm_repo = _confirmation_llm_repo(_pending_confirmation(status="confirmed"))
+    activity_repo = _ban_activity_repo()
+    callback = _confirm_callback()
+
+    with patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo):
+        await llm_confirm_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=AsyncMock())
+
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    llm_repo.claim_tool_confirmation.assert_not_awaited()
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_expired_confirmation_click_marks_expired_without_execution() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    llm_repo = _confirmation_llm_repo(
+        _pending_confirmation(expires_at=datetime.now(timezone.utc) - timedelta(seconds=5))
+    )
+    activity_repo = _ban_activity_repo()
+    callback = _confirm_callback()
+
+    with patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo):
+        await llm_confirm_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=AsyncMock())
+
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    llm_repo.mark_tool_confirmation_expired.assert_awaited_once_with(token="tok123")
+    assert "истёк" in callback.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_reject_callback_marks_rejected_without_execution() -> None:
+    llm_repo = _confirmation_llm_repo(_pending_confirmation())
+    activity_repo = _ban_activity_repo()
+    callback = _confirm_callback(action="llm_reject:tok123")
+
+    with patch("selara.presentation.handlers.llm_admin.LlmRepository", return_value=llm_repo):
+        await llm_reject_callback(callback, bot=MagicMock(), activity_repo=activity_repo, db_session=AsyncMock())
+
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    llm_repo.claim_tool_confirmation.assert_awaited_once_with(
+        token="tok123", resolved_by_user_id=111, new_status="rejected",
+    )
+    callback.message.edit_text.assert_awaited_once()
+    assert "отклонено" in callback.message.edit_text.await_args.args[0].lower()

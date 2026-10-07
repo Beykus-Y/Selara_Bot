@@ -119,7 +119,11 @@ async def test_live_concurrent_free_pulls_yield_single_winner() -> None:
 
     # Corroborate via history: exactly one PullHistory row must exist.
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
-        history = await client.get(f"/v1/gacha/users/{user_id}/history", params={"banner": "genshin", "limit": 20})
+        history = await client.get(
+            f"/v1/gacha/users/{user_id}/history",
+            params={"banner": "genshin", "limit": 20},
+            headers=_service_headers(),
+        )
     assert history.status_code == 200
     assert len(history.json()["entries"]) == 1
 
@@ -155,7 +159,9 @@ async def test_live_concurrent_paid_pulls_cannot_double_spend() -> None:
     assert "Недостаточно" in failed_responses[0].json()["detail"]
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
-        profile = await client.get(f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"})
+        profile = await client.get(
+            f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"}, headers=_service_headers()
+        )
     assert profile.status_code == 200
     assert profile.json()["player"]["total_primogems"] >= 0
 
@@ -242,35 +248,60 @@ async def test_live_cannot_sell_another_users_pull_idor() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Unauthenticated read of ANY user's balance / history / collection
+# 5. Per-user reads require the service token (fixed per issue #77)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_live_profile_history_collection_have_no_authentication() -> None:
-    """The GET /users/{user_id}/profile|history|collection endpoints require
-    neither the service token nor any per-caller identity check — the
-    user_id is taken straight from the URL. Anyone who can reach the
-    gacha-service's network port can read ANY player's currency balance,
-    full pull history and card collection, including the operator's own
-    account (GACHA_ADMIN_USER_ID). This is an information-disclosure /
-    IDOR finding on the read side, distinct from (and less severe than)
-    a money-moving bug, but still a real gap: the mutating endpoints are
-    gated by X-Gacha-Service-Token while these are not gated at all."""
+async def test_live_profile_history_collection_require_service_token() -> None:
+    """GET /users/{user_id}/profile|history|collection used to be fully
+    unauthenticated: the user_id came straight from the URL, Telegram user
+    ids are predictable/enumerable, and anyone who could reach the gacha
+    service's port could read ANY player's currency balance, pull history
+    and card collection. Since issue #77 these per-user reads are gated by
+    the same X-Gacha-Service-Token as the mutating endpoints; this test
+    pins that contract (403 without/with a wrong token, 200 with it)."""
     victim_id = _fresh_user_id()
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
         await _grant_currency(client, victim_id, 4242, idem=f"adversarial-read-setup-{victim_id}")
 
-        # No auth headers of any kind — plain unauthenticated GET.
+        # No auth headers of any kind — plain unauthenticated GET must fail.
         profile = await client.get(f"/v1/gacha/users/{victim_id}/profile", params={"banner": "genshin"})
         history = await client.get(f"/v1/gacha/users/{victim_id}/history", params={"banner": "genshin"})
         collection = await client.get(f"/v1/gacha/users/{victim_id}/collection", params={"banner": "genshin"})
 
-    assert profile.status_code == 200
-    assert profile.json()["player"]["total_primogems"] == 4242
-    assert history.status_code == 200
-    assert collection.status_code == 200
+    assert profile.status_code == 403
+    assert history.status_code == 403
+    assert collection.status_code == 403
+
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        wrong_token_profile = await client.get(
+            f"/v1/gacha/users/{victim_id}/profile",
+            params={"banner": "genshin"},
+            headers={"X-Gacha-Service-Token": "totally-wrong-token"},
+        )
+        allowed_profile = await client.get(
+            f"/v1/gacha/users/{victim_id}/profile",
+            params={"banner": "genshin"},
+            headers=_service_headers(),
+        )
+        allowed_history = await client.get(
+            f"/v1/gacha/users/{victim_id}/history",
+            params={"banner": "genshin"},
+            headers=_service_headers(),
+        )
+        allowed_collection = await client.get(
+            f"/v1/gacha/users/{victim_id}/collection",
+            params={"banner": "genshin"},
+            headers=_service_headers(),
+        )
+
+    assert wrong_token_profile.status_code == 403
+    assert allowed_profile.status_code == 200
+    assert allowed_profile.json()["player"]["total_primogems"] == 4242
+    assert allowed_history.status_code == 200
+    assert allowed_collection.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +364,9 @@ async def test_live_admin_endpoints_reject_missing_and_wrong_admin_token() -> No
     assert cooldown_reset_no_token.status_code == 403
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
-        profile = await client.get(f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"})
+        profile = await client.get(
+            f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"}, headers=_service_headers()
+        )
     assert profile.json()["player"]["total_primogems"] == 0, "no grant should have gone through"
 
 
@@ -355,7 +388,9 @@ async def test_live_admin_currency_grant_cannot_drive_balance_negative() -> None
     assert "Недостаточно" in over_debit.json()["detail"]
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
-        profile = await client.get(f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"})
+        profile = await client.get(
+            f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"}, headers=_service_headers()
+        )
     assert profile.json()["player"]["total_primogems"] == 100
 
 
@@ -440,6 +475,8 @@ async def test_live_admin_currency_grant_rejects_int32_overflow_instead_of_wrapp
         assert overflow.status_code == 500, overflow.text
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
-        profile = await client.get(f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"})
+        profile = await client.get(
+            f"/v1/gacha/users/{user_id}/profile", params={"banner": "genshin"}, headers=_service_headers()
+        )
     assert profile.status_code == 200
     assert profile.json()["player"]["total_primogems"] == 0, "overflowing grant must roll back cleanly, not partially apply"
