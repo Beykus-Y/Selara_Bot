@@ -289,11 +289,14 @@ async def test_concurrent_daily_claims_grant_single_ticket_on_streak_cap() -> No
 @pytest.mark.parametrize("action", ["tap", "growth"])
 @pytest.mark.parametrize("scope_id", ["global", "chat:-100"])
 async def test_concurrent_cooldown_actions_mutate_state_and_reward_once(monkeypatch, action, scope_id):
+    from importlib import import_module
+
     repo = LockingFakeEconomyRepo()
     repo.scope = EconomyScope(scope_id, "global" if scope_id == "global" else "chat", None if scope_id == "global" else -100)
     now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(f"selara.application.use_cases.economy.{action}.random.random", lambda: 1.0)
-    monkeypatch.setattr(f"selara.application.use_cases.economy.{action}.random.randint", lambda low, high: low)
+    action_module = import_module(f"selara.application.use_cases.economy.{action}")
+    monkeypatch.setattr(action_module.random, "random", lambda: 1.0)
+    monkeypatch.setattr(action_module.random, "randint", lambda low, high: low)
 
     async def invoke():
         try:
