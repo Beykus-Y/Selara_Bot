@@ -2269,6 +2269,16 @@ class BackupJobClaimModel(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class AiTurnLeaseModel(Base):
+    """Short durable lease that lets one AI turn per key (user or admin scope) run at a time across instances."""
+
+    __tablename__ = "ai_turn_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class GlobalMetricsModel(Base):
     __tablename__ = "global_metrics"
 
