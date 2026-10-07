@@ -557,6 +557,8 @@ class MessageArchiveModel(Base):
         CheckConstraint("snapshot_kind IN ('created', 'edited')", name="ck_messages_snapshot_kind"),
         UniqueConstraint("chat_id", "telegram_message_id", "snapshot_hash", name="uq_messages_chat_message_snapshot"),
         Index("idx_messages_chat_reply_to", "chat_id", "reply_to_telegram_message_id"),
+        # Retention deletes rows older than a cutoff in batches (migration 0107).
+        Index("idx_messages_snapshot_at", "snapshot_at"),
     )
 
 
