@@ -330,3 +330,27 @@ async def test_redis_outage_at_startup_degrades_and_claims_once_redis_answers(
         assert shared.owner == store._writer_token
     finally:
         await store.close()
+
+
+class _HangingRepo(_FakeGameRepo):
+    """Redis accepts the call and never answers the lease claim."""
+
+    async def claim_writer_lease(self, *, ttl_ms: int, known_epoch: int | None) -> tuple[int, int]:
+        await asyncio.Event().wait()
+        raise AssertionError("the claim is cancelled by its timeout")
+
+
+@pytest.mark.asyncio
+async def test_a_hung_lease_call_degrades_startup_instead_of_blocking_it() -> None:
+    shared = _SharedRedis()
+    store = _store_on(shared)
+    store._state_repo = _HangingRepo(shared, store._writer_token)  # type: ignore[assignment]
+    store._writer_claim_timeout_seconds = 0.01
+    store._recovery_retry_seconds = 3600
+    try:
+        await asyncio.wait_for(store.start_writer_lease(), timeout=5)
+
+        assert store.redis_recovery_state == "degraded"
+        assert shared.owner is None
+    finally:
+        await store.close()

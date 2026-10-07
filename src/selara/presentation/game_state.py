@@ -6040,6 +6040,9 @@ class RuntimeGameStore:
     # A crashed predecessor keeps its lease until the TTL runs out, so a new
     # process waits slightly longer than that before refusing to start.
     _WRITER_START_TIMEOUT_SECONDS = 35.0
+    # A lease call that gets no answer in time counts as a Redis outage. It stays
+    # well inside the TTL and the recovery retry interval.
+    _WRITER_CLAIM_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, backend: InMemoryGameStore | None = None) -> None:
         self._backend = backend or InMemoryGameStore()
@@ -6094,6 +6097,7 @@ class RuntimeGameStore:
         self._writer_heartbeat_seconds = self._WRITER_HEARTBEAT_SECONDS
         self._writer_start_retry_seconds = self._WRITER_START_RETRY_SECONDS
         self._writer_start_timeout_seconds = self._WRITER_START_TIMEOUT_SECONDS
+        self._writer_claim_timeout_seconds = self._WRITER_CLAIM_TIMEOUT_SECONDS
 
     @staticmethod
     def _is_redis_error(exc: Exception) -> bool:
@@ -6201,7 +6205,8 @@ class RuntimeGameStore:
         if self._state_repo is not None and self._writer_lease_enabled:
             # Hand the lease over at once so a successor does not wait out the TTL.
             try:
-                await self._state_repo.release_writer_lease()
+                async with asyncio.timeout(self._writer_claim_timeout_seconds):
+                    await self._state_repo.release_writer_lease()
             except Exception:
                 logger.debug("Failed to release the game writer lease on shutdown", exc_info=True)
         self._writer_lease_enabled = False
@@ -6430,7 +6435,7 @@ class RuntimeGameStore:
                     raise
                 await asyncio.sleep(self._writer_start_retry_seconds)
             except Exception as exc:
-                if not self._is_redis_error(exc):
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
                     raise
                 self._degrade_to_in_memory(stage="writer-lease:start", exc=exc)
                 break
@@ -6439,19 +6444,20 @@ class RuntimeGameStore:
     async def watch_writer_lease(self) -> None:
         """Block until this process stops being the writer, then raise to end it.
 
-        Run it inside the process's task group: the raised error cancels the bot
-        and the web panel, so a lost lease never leaves a second writer running
-        next to the instance that took over.
+        Run it beside the process's services (``selara.main._run_services``): the
+        raised error cancels them, so a lost lease never leaves a second writer
+        running next to the instance that took over.
         """
         await self._writer_fatal_event.wait()
         if self._writer_fatal is not None:
             raise self._writer_fatal
 
     async def _claim_writer_lease(self, repo: RedisGameStateRepository) -> None:
-        status, counter = await repo.claim_writer_lease(
-            ttl_ms=self._writer_lease_ttl_ms,
-            known_epoch=self._writer_epoch,
-        )
+        async with asyncio.timeout(self._writer_claim_timeout_seconds):
+            status, counter = await repo.claim_writer_lease(
+                ttl_ms=self._writer_lease_ttl_ms,
+                known_epoch=self._writer_epoch,
+            )
         if status == 0:
             raise GameWriterLeaseHeldError("another instance holds the game writer lease")
         if status == 3:
@@ -6488,10 +6494,13 @@ class RuntimeGameStore:
                 self._fail_writer(exc)
                 return
             except Exception as exc:
-                if not self._is_redis_error(exc):
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
                     self._fail_writer(exc)
                     return
-                self._degrade_to_in_memory(stage="writer-lease:heartbeat", exc=exc)
+                if self._state_repo is repo:
+                    # A recovery may have installed a fresh runtime while this claim was
+                    # in flight: the failure is about the runtime the claim was made on.
+                    self._degrade_to_in_memory(stage="writer-lease:heartbeat", exc=exc)
 
     def _fail_writer(self, exc: Exception) -> None:
         if self._writer_fatal is None:
