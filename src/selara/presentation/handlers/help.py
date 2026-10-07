@@ -6,7 +6,17 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from selara.application.ai_character.group import (
+    MAX_GROUP_CUSTOM_LENGTH,
+    FREE_CALL_NAMES,
+    MAX_MEMBER_TEXT_LENGTH,
+    PAID_CALL_NAMES,
+)
+from selara.application.feature_access import resolve_feature_policy
+from selara.application.model_catalog import PROFILE_DESCRIPTIONS, PROFILE_EMOJI, PROFILE_NAMES, PROFILE_ORDER
+from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
+from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.commands.command_catalog import GAME_RULES_RU, get_command_spec
 
 router = Router(name="help")
@@ -18,6 +28,9 @@ _HELP_SECTIONS_ORDER: tuple[tuple[str, str], ...] = (
     ("relationships", "💞 Отношения"),
     ("social", "🤝 Социальное"),
     ("pets", "🐾 Питомцы"),
+    ("ai", "🤖 AI в группе"),
+    ("ai_plus", "💎 Подписка и итоги"),
+    ("models", "🧠 Модели и лимиты"),
     ("moderation", "🛡 Модерация"),
     ("settings", "⚙️ Настройки"),
 )
@@ -106,9 +119,11 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('pets_core'))}\n"
         "• Без /: <code>пет</code>, <code>петы</code>, <code>пет погладить Мурка</code>, <code>пет покормить</code>\n"
         "• Поговорить: <code>Мурка, как дела?</code> или ответ на реплику питомца (лимит Selara Personal хозяина)\n"
+        "• <code>/pet_do чешу за ухом</code> — своё действие словами: модель отвечает по характеру, а эффект берёт код (платит хозяин с Selara Personal)\n"
+        "• Черты складываются сами из того, как с питомцем обращаются (<code>/pet_traits</code>); он помнит отношение к людям и чату (<code>/pet_memory</code>) и у него есть «настроение дня»\n"
         "• <code>/pet_bag</code> — рюкзак и гардероб: еда и игрушки в запас, косметика (📦 в магазине)\n"
-        "• С 10 уровня: <code>/pet_travel</code> в другом чате — взять питомца в гости, <code>/pet_home</code> — сделать чат домом\n"
-        "• Питомцы работают в чатах с <code>pets_enabled</code>; завести — с Selara Personal\n"
+        "• С 10 уровня (нужен Selara Personal): <code>/pet_travel</code> в другом чате — взять питомца в гости, <code>/pet_home</code> — сделать чат домом\n"
+        "• Питомцы включены в чатах по умолчанию (админ может выключить: <code>pets_enabled</code>); завести и ухаживать можно бесплатно\n"
         "• Ролевое «стать питомцем» — <code>/bepet</code>"
     ),
     "moderation": (
@@ -136,6 +151,133 @@ _HELP_SECTION_TEXT: dict[str, str] = {
     ),
 }
 
+
+
+def _summary_defaults() -> tuple[int, int]:
+    fields = ChatSettings.__dataclass_fields__
+    return fields["daily_summary_hour"].default, fields["daily_summary_min_messages"].default
+
+
+def _policy_limit(feature: AiFeature, trigger: str) -> int:
+    policy = resolve_feature_policy(feature=feature, trigger=trigger)
+    assert policy is not None  # these two features have an explicit free quota
+    return policy.limit
+
+
+def _ai_help_text(settings: Settings) -> str:
+    """AI-in-group guide; limits come from the same policy/settings the handlers enforce."""
+    admin_limit = _policy_limit(AiFeature.LLM_ADMIN, "telegram_message")
+    return (
+        "<b>AI в группе</b>\n"
+        "\n"
+        "<b>Ассистент админов: ? и ??</b>\n"
+        "• <code>? вопрос</code> — запрос с чистого листа, без памяти прошлых запросов\n"
+        "• <code>?? вопрос</code> — с контекстом прошлых <code>??</code> в этом чате\n"
+        "• <code>?reset</code> — сбросить накопленный контекст (нужно право модерации)\n"
+        "• Работает, если в чате включено <code>llm_enabled</code> (по умолчанию выключено)\n"
+        "• Кто может: senior_admin и выше или кастомная роль с правом AI-ассистента\n"
+        "• Умеет: топы и статистика, участники, журнал модерации, словарь чата, поиск в интернете (если включён у бота); "
+        "действия (варн, бан, роли) — только если право есть у спрашивающего\n"
+        f"• Лимит: {admin_limit} запросов в сутки на весь чат (сутки по времени бота), "
+        "Selara AI этот лимит не меняет; пауза между запросами одного человека "
+        f"{settings.llm_cooldown_seconds:g} сек.\n"
+        "• Когда лимит исчерпан, бот пишет, сколько использовано и когда он обновится\n"
+        "\n"
+        "<b>Обращение по кличке</b>\n"
+        "• Любой участник: <code>Селя, кто самый активный?</code> — кличка должна стоять в самом начале сообщения; "
+        "ответ на реплику Selara продолжает разговор\n"
+        "• <code>/selara</code> — текущие настройки, <code>/selara помощь</code> — все команды\n"
+        "• Админ с правом настройки чата: <code>/selara кличка Селя</code>, <code>/selara убрать Селя</code>, "
+        "<code>/selara основная Селя</code>\n"
+        "• <code>/selara участники вкл</code> — включить ответы участникам (по умолчанию выключено)\n"
+        f"• <code>/selara характер</code> — пресеты, <code>/selara характер свой текст</code> — свой (до {MAX_GROUP_CUSTOM_LENGTH} символов)\n"
+        "• <code>/selara история вкл</code> — разрешить читать недавние сообщения чата (нужен <code>save_message true</code>); "
+        "<code>/selara действия вкл|выкл</code> — Selara сама может обнять и т.п.; "
+        "<code>/selara сброс</code> — забыть разговор\n"
+        f"• Кличек: {FREE_CALL_NAMES} без Selara AI, до {PAID_CALL_NAMES} с ним; вопрос до {MAX_MEMBER_TEXT_LENGTH} символов\n"
+        f"• Лимит обращений в сутки: {settings.group_member_free_daily_limit} на чат и "
+        f"{settings.group_member_free_per_user_daily_limit} на участника, с Selara AI — "
+        f"{settings.group_member_paid_daily_limit} и {settings.group_member_paid_per_user_daily_limit}\n"
+        "\n"
+        "<b>Питомцы в группе</b>\n"
+        "• Питомец отвечает на <code>Мурка, как дела?</code> или на ответ на его реплику; "
+        "сам пишет только при включённом <code>pets_spontaneous_enabled</code> (по умолчанию выключено, ночью молчит); подробности — в разделе «Питомцы»\n"
+        "• Разговоры и свои действия (<code>/pet_do</code>) оплачивает хозяин из Selara Personal, не чат: "
+        f"{settings.pet_talk_daily_limit} AI-реплик в сутки на питомца (разговоры и самостоятельные сообщения расходуют один лимит), из них гостям — "
+        f"{settings.pet_talk_guests_daily_limit} всего и {settings.pet_talk_guest_daily_limit} на человека; "
+        f"<code>/pet_do</code>: пауза 10 минут у каждого человека; хозяину до {settings.pet_custom_actions_daily_limit} в сутки, "
+        f"каждому гостю до {settings.pet_custom_actions_guest_daily_limit} в сутки, всем гостям вместе до "
+        f"{settings.pet_custom_actions_guests_daily_limit} в сутки\n"
+        "• В режиме AI Limits реплики питомца списываются из общего суточного бюджета хозяина по фактической стоимости\n"
+        "• Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без AI-лимита (у ухода свои кулдауны)"
+    )
+
+
+def _ai_plus_help_text(settings: Settings) -> str:
+    manual_limit = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
+    summary_hour, summary_min = _summary_defaults()
+    return (
+        "<b>Подписка, итоги и AI-настройка</b>\n"
+        "\n"
+        "<b>Selara AI для чата</b>\n"
+        "• <code>/premium</code> в личке с ботом — выбрать чат и оплатить Telegram Stars\n"
+        f"• Даёт: до {PAID_CALL_NAMES} кличек, лимит обращений по кличке "
+        f"{settings.group_member_paid_daily_limit}/{settings.group_member_paid_per_user_daily_limit} в сутки, "
+        "автоматические итоги дня\n"
+        "• Не меняет: <code>?</code>/<code>??</code> и ручной <code>/summary</code>; "
+        "питомцы идут по Selara Personal хозяина\n"
+        "• Когда подписка закончилась: лимиты возвращаются к бесплатным, лишние клички перестают работать "
+        "(не удаляются, основная работает), автоматические итоги прекращаются; настройки сохраняются\n"
+        "• Условия и помощь с оплатой: <code>/terms</code>, <code>/paysupport</code>\n"
+        "• Владелец бота может подарить подписку (Personal или группе): тогда в <code>/premium</code> написано "
+        "«выдана администратором», а вы получите сообщение о выдаче и об отзыве\n"
+        "\n"
+        "<b>Итоги дня</b>\n"
+        f"• <code>/summary</code> — собрать итоги сейчас (право настройки чата), {manual_limit} раз в месяц на чат\n"
+        "• Автоматические: <code>/setcfg daily_summary_enabled true</code>, только с Selara AI; "
+        f"час — <code>daily_summary_hour</code> (по умолчанию {summary_hour}, время бота), "
+        "стиль — <code>daily_summary_style</code> (neutral, lively, snarky)\n"
+        f"• Нужны <code>save_message true</code> и не меньше {summary_min} сообщений за сутки "
+        "(порог — <code>daily_summary_min_messages</code>)\n"
+        "• <code>daily_summary_include_voice</code> и <code>daily_summary_include_video_notes</code> — "
+        "учитывать голосовые и кружки\n"
+        "\n"
+        "<b>AI-настройка группы</b>\n"
+        "• <code>/autocfg</code> в личке: выберите группу и опишите словами, что изменить; "
+        "<code>/autocfgcancel</code> — отменить черновик\n"
+        "• Черновик живёт 24 часа, изменения применяются только после сводки и кнопки «Сохранить»\n"
+        "• Нужно право настройки чата; лимиты подписки не тратятся"
+    )
+
+
+def _models_help_text(settings: Settings) -> str:
+    """Model profiles and limit modes; request counts come from the bot settings, the mode is the owner's."""
+    profiles = "\n".join(
+        f"• {PROFILE_EMOJI[key]} {PROFILE_NAMES[key]} — {PROFILE_DESCRIPTIONS[key].lower()}" for key in PROFILE_ORDER
+    )
+    return (
+        "<b>Модели и лимиты</b>\n"
+        "\n"
+        "<b>Личный AI в личке с ботом</b>\n"
+        "• <code>/ai</code> — меню: характер, поведение, память, модель; остаток на сегодня виден там же\n"
+        "• Профили модели (владелец бота сам назначает модели и цены):\n"
+        f"{profiles}\n"
+        "• Если профиль недоступен, отвечает Базовая; в режиме запросов профили не различаются, отвечает модель по умолчанию\n"
+        "\n"
+        "<b>Два режима лимитов (выбирает владелец бота)</b>\n"
+        "• Запросы: фиксированное число запросов в сутки (бесплатно и с Selara Personal), любой профиль считается "
+        "как один запрос; сколько осталось сегодня — в <code>/ai</code>\n"
+        "• AI Limits: суточный бюджет в AIL; разные профили стоят по-разному, а списывается столько, "
+        "сколько ответ стоил на самом деле (короткий дешевле, длинный дороже). "
+        "Для старта нужен резерв профиля: не хватает AIL — запрос не уходит и ничего не списывается\n"
+        "• Тот же бюджет тратят реплики питомцев хозяина\n"
+        "\n"
+        "<b>Группы</b>\n"
+        "• Модель для групповых функций выбирает владелец бота, участники её не меняют\n"
+        "• У <code>?</code>/<code>??</code>, обращений по кличке и итогов дня свои лимиты на чат: смотрите «AI в группе» "
+        "и «Подписка и итоги»\n"
+        "• Подписка: <code>/premium</code> в личке; подарочная подписка помечена «выдана администратором»"
+    )
 
 
 def _help_callback_data(*, section: str, owner_user_id: int | None) -> str:
@@ -167,7 +309,7 @@ def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> I
     if section is None:
         for key, title in _HELP_SECTIONS_ORDER:
             builder.button(text=title, callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id))
-        builder.adjust(2, 2, 2, 1)
+        builder.adjust(2, 2, 2, 2, 2, 1)
         return builder.as_markup()
 
     if section == "games":
@@ -200,7 +342,7 @@ def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> I
             callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id),
         )
     builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
-    builder.adjust(2, 2, 2, 1, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2)
     return builder.as_markup()
 
 
@@ -220,7 +362,14 @@ def _section_help_text(settings: Settings, section: str) -> str:
             return _main_help_text(settings)
         return f"<b>{settings.bot_name}</b>\n\n{game_text}"
 
-    body = _HELP_SECTION_TEXT.get(section)
+    if section == "ai":
+        body: str | None = _ai_help_text(settings)
+    elif section == "ai_plus":
+        body = _ai_plus_help_text(settings)
+    elif section == "models":
+        body = _models_help_text(settings)
+    else:
+        body = _HELP_SECTION_TEXT.get(section)
     if body is None:
         return _main_help_text(settings)
     return f"<b>{settings.bot_name}</b>\n\n{body}"

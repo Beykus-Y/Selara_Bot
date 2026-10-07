@@ -701,3 +701,86 @@ async def test_a_failed_turn_with_an_unpriced_response_keeps_the_reservation(mon
     await run(_message("привет"), session, _SettlingLlm(events, error=failed))
 
     assert events == ["chat"]
+
+
+# --- categories and tool switches (item 6a) ---------------------------------------------------
+
+
+def _buttons(query) -> list[str]:
+    markup = query.message.edit_text.await_args.kwargs["reply_markup"]
+    return [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+async def test_home_menu_is_split_into_categories(session):
+    stored = await PersonalAiRepository(session).get_or_create_profile(USER_ID)
+    keyboard = handler._main_keyboard(stored)
+    data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+    assert f"pai:cat:character:{stored.revision}" in data
+    assert f"pai:cat:behavior:{stored.revision}" in data
+    assert f"pai:cat:memory:{stored.revision}" in data
+    assert f"pai:models:{stored.revision}" in data
+    assert all(len(item.encode()) <= 64 for item in data)
+
+
+async def test_category_screen_applies_a_switch_and_stays_on_the_screen(session):
+    repo = PersonalAiRepository(session)
+    await repo.get_or_create_profile(USER_ID)
+
+    query = _callback("pai:sc:behavior:emoji:0:0")
+    await handler.ai_settings_callback(query, session)
+
+    assert (await repo.get_profile(USER_ID)).profile.emoji_enabled is False
+    assert "Поведение и настройки" in query.message.edit_text.await_args.args[0]
+    assert "pai:cat:tools:1" in _buttons(query)
+
+
+async def test_tools_are_off_by_default_and_need_personal_to_switch_on(monkeypatch, session):
+    repo = PersonalAiRepository(session)
+    stored = await repo.get_or_create_profile(USER_ID)
+    assert stored.tools_web_enabled is False and stored.tools_artifacts_enabled is False
+
+    async def free(user_id, deps):
+        return False
+
+    monkeypatch.setattr(handler, "_has_personal", free)
+    query = _callback("pai:sc:tools:tweb:1:0")
+    await handler.ai_settings_callback(query, session)
+
+    assert "Selara Personal" in query.answer.await_args.args[0]
+    stored = await repo.get_profile(USER_ID)
+    assert stored.tools_web_enabled is False and stored.revision == 0
+    assert "🔒" in handler._category_screen("tools", stored, handler._ToolsView())[1].inline_keyboard[0][0].text
+
+
+async def test_tools_switch_on_with_personal_and_off_without_it(monkeypatch, session):
+    repo = PersonalAiRepository(session)
+    await repo.get_or_create_profile(USER_ID)
+    state = {"personal": True}
+
+    async def has(user_id, deps):
+        return state["personal"]
+
+    monkeypatch.setattr(handler, "_has_personal", has)
+    await handler.ai_settings_callback(_callback("pai:sc:tools:tart:1:0"), session)
+    stored = await repo.get_profile(USER_ID)
+    assert stored.tools_artifacts_enabled is True
+
+    state["personal"] = False  # subscription ended: switching off still works
+    await handler.ai_settings_callback(_callback(f"pai:sc:tools:tart:0:{stored.revision}"), session)
+    assert (await repo.get_profile(USER_ID)).tools_artifacts_enabled is False
+
+
+async def test_tool_switch_rejects_unknown_values(monkeypatch, session):
+    repo = PersonalAiRepository(session)
+    await repo.get_or_create_profile(USER_ID)
+
+    async def has(user_id, deps):
+        return True
+
+    monkeypatch.setattr(handler, "_has_personal", has)
+    await handler.ai_settings_callback(_callback("pai:sc:tools:tweb:2:0"), session)
+    await handler.ai_settings_callback(_callback("pai:sc:nope:tweb:1:0"), session)
+    await handler.ai_settings_callback(_callback("pai:sc:tools:evil:1:0"), session)
+
+    stored = await repo.get_profile(USER_ID)
+    assert stored.tools_web_enabled is False and stored.revision == 0

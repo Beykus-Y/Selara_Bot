@@ -20,6 +20,7 @@ from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
 from selara.infrastructure.db.personal_config import build_personal_config
 from selara.infrastructure.db.model_catalog import build_model_catalog
+from selara.infrastructure.db.llm_routes import build_feature_routes
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -97,7 +98,8 @@ def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
         return None
     accounting = AiAccountingService(session_factory) if session_factory is not None else None
     catalog, _ = build_model_catalog(session_factory) if session_factory is not None else (None, None)
-    return LlmClient(config, accounting_service=accounting, model_catalog=catalog)
+    routes, _ = build_feature_routes(session_factory) if session_factory is not None else (None, None)
+    return LlmClient(config, accounting_service=accounting, model_catalog=catalog, feature_routes=routes)
 
 
 async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
@@ -152,6 +154,8 @@ async def _run_bot(settings, session_factory) -> None:
         enabled=settings.web_search_enabled,
         provider=settings.web_search_provider,
         base_url=settings.web_search_base_url,
+        api_key=settings.web_search_api_key,
+        searxng_url=settings.web_search_searxng_url,
         timeout_seconds=settings.web_search_timeout_seconds,
     )
     logger.info("Web search client: %s",

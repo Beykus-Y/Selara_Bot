@@ -483,7 +483,20 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert model_ail.down_revision == group_character.revision
     settlement = _load_migration("0093_ail_settlement.py")
     assert settlement.down_revision == model_ail.revision
-    assert revisions - parents == {settlement.revision}
+    feature_routes = _load_migration("0094_llm_feature_routes.py")
+    assert feature_routes.down_revision == settlement.revision
+    member_actions = _load_migration("0095_group_member_actions.py")
+    assert member_actions.down_revision == feature_routes.revision
+    tool_confirmations = _load_migration("0096_llm_tool_confirmations.py")
+    assert tool_confirmations.down_revision == member_actions.revision
+    pets_default = _load_migration("0097_pets_on_by_default.py")
+    assert pets_default.down_revision == tool_confirmations.revision
+    grants = _load_migration("0098_entitlement_grants.py")
+    assert grants.down_revision == pets_default.revision
+    personal_tools = _load_migration("0099_personal_ai_tools.py")
+    assert personal_tools.down_revision == grants.revision
+    assert revisions - parents == {personal_tools.revision}
+    assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32
     assert max(len(personal.revision), len(quota.revision)) <= 32

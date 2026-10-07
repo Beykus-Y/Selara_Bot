@@ -82,7 +82,7 @@ async def test_actor_with_only_readonly_permission_can_invoke_the_assistant(chat
 
     llm_client = AsyncMock()
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         message = SimpleNamespace(
             content="ok", tool_calls=None,
             model_dump=lambda exclude_none=True: {"role": "assistant", "content": "ok"},

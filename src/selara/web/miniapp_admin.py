@@ -27,6 +27,7 @@ from selara.application.personal_config import (
 from selara.application.personal_models import ail_activation_problems, format_ail, profile_options
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
+from selara.web.admin_grants import build_admin_grants_router
 from selara.web.admin_models import build_admin_models_router
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
@@ -106,14 +107,24 @@ def build_miniapp_admin_router(
     broadcast_start_handler: BroadcastStart,
     broadcast_status_handler: BroadcastStatus,
     telegram_bot_probe: TelegramBotProbe,
+    send_notice: Callable[[int, str], Awaitable[bool]] | None = None,
+    prefix: str = "/api/miniapp/admin",
+    ai_only: bool = False,
+    unauthorized_detail: str = "Mini App сессия истекла.",
+    mutation_guard: Callable[[Request], None] | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/miniapp/admin", tags=["miniapp-admin"])
+    """The owner API. The same router is mounted for the Mini App and, with ``ai_only`` and its own ``load_user``
+    (the /app/admin web session), as the AI settings API of the server-rendered admin: one set of endpoints and
+    services, two ways to authenticate. ``mutation_guard`` may refuse a request before any work is done."""
+    router = APIRouter(prefix=prefix, tags=["miniapp-admin"])
 
     async def require_admin(request: Request):
+        if mutation_guard is not None:
+            mutation_guard(request)
         async with session_factory() as session:
             user = await load_user(session, request)
             if user is None:
-                raise HTTPException(status_code=401, detail="Mini App сессия истекла.")
+                raise HTTPException(status_code=401, detail=unauthorized_detail)
             if settings.admin_user_id is None or user.telegram_user_id != settings.admin_user_id:
                 raise HTTPException(status_code=403, detail="Недостаточно прав.")
             yield session
@@ -743,9 +754,11 @@ def build_miniapp_admin_router(
         profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
         ail_rows = await repository.ail_breakdown(window_from=window_from, window_to=window_to)
+        chats = await repository.chat_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
             "period_days": period_days,
+            "chats": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in chats],
             "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
             "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
             "unattributed_provider_calls": marker_only_calls,
@@ -1123,7 +1136,16 @@ def build_miniapp_admin_router(
             "checks": checks,
         }
 
+    if ai_only:
+        # AI and monetization settings only: feedback, logs, broadcasts and the audience stay Mini App routes.
+        # Filter before including the sub-routers: newer FastAPI keeps them as path-less include objects.
+        keep = (f"{prefix}/ai", f"{prefix}/monetization")
+        router.routes[:] = [route for route in router.routes if getattr(route, "path", "").startswith(keep)]
     router.include_router(build_admin_models_router(
         settings=settings, session_factory=session_factory, require_admin=require_admin,
+    ))
+    router.include_router(build_admin_grants_router(
+        settings=settings, session_factory=session_factory, require_admin=require_admin, send_notice=send_notice,
+        source="admin_panel" if ai_only else "miniapp",
     ))
     return router

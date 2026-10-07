@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from selara.application.ai_character.group import LAST_ROUND_NOTICE
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
 from selara.infrastructure.llm.tools import ToolResult
@@ -31,13 +32,13 @@ def top_result():
         'top': [{'user_id': 1, 'username': '@one', 'messages': 436, 'karma': 2}]}), 'Получен топ по карме')
 
 
-async def run(responses, execute=None):
+async def run(responses, execute=None, save_error=None):
     settings = Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:')
     message = SimpleNamespace(text='?? Покажи таблицу и график топа', message_id=1, message_thread_id=None,
         chat=SimpleNamespace(id=-100123, type='supergroup', title='Чат'),
         from_user=SimpleNamespace(id=1, username='one', first_name='Один', last_name=None, is_bot=False),
         reply=AsyncMock(return_value=AsyncMock()))
-    client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=responses), chat_simple=AsyncMock())
+    client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=responses), chat_simple=AsyncMock(), placeholder=message.reply.return_value)
     repo = MagicMock()
     repo.get_last_user_message_at = AsyncMock(return_value=None)
     repo.search_glossary = AsyncMock(return_value=[])
@@ -56,7 +57,7 @@ async def run(responses, execute=None):
          patch.object(handler, 'execute_tool', execute), \
          patch.object(handler, '_send_formatted_answer', AsyncMock()) as sent, \
          patch.object(handler, '_send_dm_summary', AsyncMock()) as summary, \
-         patch.object(handler, 'save_interaction', AsyncMock()) as saved:
+         patch.object(handler, 'save_interaction', AsyncMock(side_effect=save_error)) as saved:
         await handler._handle(message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True), client,
             AsyncMock(), with_context=False, settings=settings, session_factory=object())
     return client, execute, sent, summary, saved
@@ -102,9 +103,65 @@ async def test_recovered_artifact_delivery_is_terminal_and_not_repeated():
 
 
 async def test_empty_recovery_stays_inside_total_round_budget():
-    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * handler._MAX_TOOL_ROUNDS)
-    assert c.chat_with_tools.await_count == handler._MAX_TOOL_ROUNDS
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 4)
+    assert c.chat_with_tools.await_count == 4
     assert 'полученные данные' in sent.call_args.args[2]
+
+
+async def test_last_round_offers_no_tools_tells_the_model_and_caps_tokens():
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 3 + [response('Итог без документов')])
+    assert c.chat_with_tools.await_count == 4 and execute.await_count == 3
+    last = c.chat_with_tools.await_args_list[-1].kwargs
+    assert last['tools'] == [] and last['messages'][-1]['content'] == LAST_ROUND_NOTICE
+    assert all(call_.kwargs['tools'] for call_ in c.chat_with_tools.await_args_list[:-1])
+    assert all(call_.kwargs['max_tokens'] == 800 for call_ in c.chat_with_tools.await_args_list)
+    assert sent.call_args.args[2] == 'Итог без документов'
+
+
+def skill_call(skill):
+    return SimpleNamespace(id='read_skill', function=SimpleNamespace(name='read_skill', arguments=json.dumps({'name': skill})))
+
+
+async def test_cap_is_raised_only_after_the_artifacts_skill_was_read():
+    execute = AsyncMock(return_value=ToolResult('read_skill', 'read_skill', '{}', 'Навык прочитан'))
+    c, _, _, _, _ = await run([
+        response(calls=[skill_call('artifacts')]), response(calls=[skill_call('other')]),
+        response('Готово')], execute)
+    caps = [call_.kwargs['max_tokens'] for call_ in c.chat_with_tools.await_args_list]
+    assert caps == [800, 4000, 4000]
+
+
+async def test_failure_after_the_answer_was_sent_does_not_replace_it():
+    client, execute, sent, _, saved = await run([response('Готовый ответ')], save_error=RuntimeError('db down'))
+    assert sent.call_args.args[2] == 'Готовый ответ'
+    # The placeholder edit with an error text must not have happened after the answer went out.
+    client.placeholder.edit_text.assert_not_awaited()
+
+
+async def test_truncated_tool_arguments_become_a_tool_error_not_a_crash():
+    broken = SimpleNamespace(id='create_artifact', function=SimpleNamespace(name='create_artifact', arguments='{"title": "x", "pages": ["<div'))
+    c, execute, sent, _, _ = await run([response(calls=[broken], finish='length'), response('Ответ без артефакта')])
+    execute.assert_not_awaited()
+    tool_msg = [m for m in c.chat_with_tools.await_args_list[-1].kwargs['messages'] if m['role'] == 'tool'][0]
+    assert 'Некорректные аргументы' in tool_msg['content']
+    assert sent.call_args.args[2] == 'Ответ без артефакта'
+
+
+async def test_final_answer_cut_by_the_token_cap_is_marked():
+    c, execute, sent, _, _ = await run([response('Длинный ответ', finish='length')])
+    assert sent.call_args.args[2].startswith('Длинный ответ') and 'обрезан' in sent.call_args.args[2]
+
+
+async def test_stray_tool_call_on_the_last_round_is_not_executed():
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 4)
+    assert execute.await_count == 3
+
+
+async def test_subscribed_chat_gets_eight_rounds():
+    with patch.object(handler, 'chat_has_selara_ai', AsyncMock(return_value=True)):
+        c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 7 + [response('Итог')])
+    assert c.chat_with_tools.await_count == 8 and execute.await_count == 7
+    assert c.chat_with_tools.await_args_list[-1].kwargs['tools'] == []
 
 
 async def test_private_summary_does_not_invent_delivery_or_call_a_model():
@@ -173,14 +230,14 @@ async def test_malformed_tool_json_finalizes_invocation_after_provider_usage():
          )), \
          patch.object(handler, 'LlmRepository', return_value=repo), \
          patch.object(handler, 'save_interaction', AsyncMock()):
-        with pytest.raises(json.JSONDecodeError):
-            await handler._handle(
-                message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
-                llm_client, AsyncMock(), with_context=False, settings=settings, session_factory=object(),
-            )
+        await handler._handle(
+            message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
+            llm_client, AsyncMock(), with_context=False, settings=settings, session_factory=object(),
+        )
 
-    accounting.report_provider_attempt.assert_awaited_once()
+    # Broken arguments go back to the model as a tool error; every provider attempt is accounted and the
+    # invocation is finalized instead of crashing the handler.
+    assert accounting.report_provider_attempt.await_count == 4
     accounting.create_invocation.assert_not_awaited()
-    accounting.finish_invocation_outcome.assert_awaited_once_with(
-        invocation_id=41, status='failed', error_category='handler_error',
-    )
+    accounting.finish_invocation_outcome.assert_awaited_once()
+    assert accounting.finish_invocation_outcome.await_args.kwargs['invocation_id'] == 41

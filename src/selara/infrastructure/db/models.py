@@ -119,6 +119,54 @@ class UserEntitlementModel(Base):
     )
 
 
+class EntitlementGrantModel(Base):
+    """Immutable journal of owner-made subscription grants and revocations.
+
+    No foreign keys on purpose: the journal must outlive the chat or the user it describes. Payments stay in
+    ``selara_ai_payments`` so revenue and refunds are never mixed with gifts.
+    """
+
+    __tablename__ = "entitlement_grants"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+    target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    delta_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    valid_until_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_before: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status_after: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    notified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_entitlement_grants_idempotency_key"),
+        CheckConstraint("scope IN ('chat', 'user')", name="ck_entitlement_grants_scope"),
+        CheckConstraint(
+            "(scope = 'chat' AND target_chat_id IS NOT NULL AND target_user_id IS NULL"
+            " AND product_key = 'selara_ai_monthly')"
+            " OR (scope = 'user' AND target_user_id IS NOT NULL AND target_chat_id IS NULL"
+            " AND product_key = 'selara_personal_monthly')",
+            name="ck_entitlement_grants_target",
+        ),
+        CheckConstraint("action IN ('grant', 'extend', 'revoke', 'shorten')", name="ck_entitlement_grants_action"),
+        CheckConstraint("delta_seconds >= 0", name="ck_entitlement_grants_delta"),
+        CheckConstraint("status_after IN ('active', 'revoked')", name="ck_entitlement_grants_status"),
+        CheckConstraint("source IN ('miniapp', 'command', 'admin_panel')", name="ck_entitlement_grants_source"),
+        CheckConstraint("length(reason) BETWEEN 1 AND 300", name="ck_entitlement_grants_reason"),
+        Index("idx_entitlement_grants_user", "target_user_id", "created_at"),
+        Index("idx_entitlement_grants_chat", "target_chat_id", "created_at"),
+        Index("idx_entitlement_grants_created", "created_at"),
+    )
+
+
 class SelaraAiPurchaseIntentModel(Base):
     """Server-side invoice context; the payload itself contains only its UUID."""
 
@@ -1026,8 +1074,8 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
-    # Permission for AI pets to live in this chat; not a subscription.
-    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Permission for AI pets to live in this chat; not a subscription. On unless an admin turns it off.
+    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # Lets pets post rare spontaneous lines here; paid by each pet's owner, off by default.
     pets_spontaneous_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
@@ -1987,6 +2035,23 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class LlmFeatureRouteModel(Base):
+    """Owner-chosen model profile of a group of AI features; no row / NULL means the legacy model."""
+
+    __tablename__ = "llm_feature_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "profile_key IS NULL OR profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+            name="ck_llm_feature_routes_profile",
+        ),
+    )
+
+    route_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    profile_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class SelaraPersonalConfigModel(Base):
     """Singleton row of Selara Personal overrides edited at runtime; NULL falls back to .env."""
 
@@ -2409,6 +2474,52 @@ class LlmAdminActionModel(Base):
     )
 
 
+class LlmToolConfirmationModel(Base):
+    """Pending admin confirmation for a high-impact LLM tool call (#51).
+
+    A preview phase stores the EXACT payload the model proposed (arguments +
+    payload_hash) and the initiating admin; the side effect runs only after
+    that same admin approves via the chat button. `payload_hash` is checked at
+    confirm time so a tampered arguments_json can never be executed, and the
+    status claim (pending -> resolved) is a single UPDATE for idempotency.
+    """
+
+    __tablename__ = "llm_tool_confirmations"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    arguments_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'confirmed', 'rejected', 'expired')", name="ck_llm_tool_confirmations_status"),
+        Index("idx_llm_tool_confirmations_chat_status", "chat_id", "status"),
+    )
+
+
 class GachaAnimationVariantModel(Base):
     """Cached reel-animation clips for the animated gacha pull mode (see
     docs/GACHA_MODERNIZATION_TODO.md, Этап 3). Purely a presentation-layer
@@ -2711,6 +2822,12 @@ class PersonalAiProfileModel(Base):
     model_profile_key: Mapped[str] = mapped_column(
         String(64), nullable=False, default="basic", server_default="basic"
     )
+    # Tools of the private assistant: off for everyone until the user switches them on (and only Selara Personal
+    # actually gets them: the flags stay stored when a subscription ends, the tools just stop being offered).
+    tools_web_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    tools_artifacts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Optimistic lock for the settings wizard (and the future Mini App).
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2746,6 +2863,8 @@ class PersonalAiMessageModel(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # The answer was written with untrusted web content in view: it never re-enters the context as a trusted turn.
+    web_tainted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -3087,6 +3206,8 @@ class ChatAiCharacterModel(Base):
     character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
     member_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     member_history_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Selara may do harmless social (RP) actions like a regular participant; admins can switch it off.
+    member_actions_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     updated_by_user_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
     )

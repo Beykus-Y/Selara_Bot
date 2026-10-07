@@ -319,3 +319,13 @@ def test_user_docs_template_renders_command_lists() -> None:
     assert "docs-card-label" in html
     assert ">группа<" in html
     assert ">г<" not in html
+
+
+def test_user_docs_cover_group_ai_guide() -> None:
+    context = build_user_docs_context(chat=None)
+    section = next(section for section in context["docs_sections"] if section["anchor"] == "user-docs-ai")
+    payload = _flatten_payload([section])
+
+    for fragment in ("?reset", "/selara кличка", "/autocfg", "/autocfgcancel", "/summary", "/premium", "pets_enabled", "llm_enabled"):
+        assert fragment in payload, fragment
+    assert _find_item(context, title="Ассистент админов: ? и ??")["anchor"].startswith("user-docs-ai-item-")

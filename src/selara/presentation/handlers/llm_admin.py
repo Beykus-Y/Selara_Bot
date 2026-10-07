@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.application.ai_character.group import group_character_block
+from selara.application.ai_character.group import LAST_ROUND_NOTICE, group_character_block, group_tool_rounds
 from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
@@ -40,7 +40,10 @@ from selara.infrastructure.llm.prompts import (
     ADMIN_SYSTEM_PROMPT,
 )
 from selara.infrastructure.llm.tools import (
+    DIRECT_ADMIN_CONFIRMATION,
+    TOOL_CONFIRMATION_TTL_SECONDS,
     ToolCall,
+    ToolConfirmationGrant,
     ToolResult,
     _untrusted,
     build_rollback_call,
@@ -54,14 +57,13 @@ from selara.infrastructure.llm.web_tools import (
     restrict_tools_after_web,
 )
 from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.handlers.group_character import chat_has_selara_ai
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
 
 router = Router(name="llm_admin")
-
-_MAX_TOOL_ROUNDS = 8
 
 
 @router.message(
@@ -366,6 +368,9 @@ async def _handle(
         ]
 
         tool_results: list[ToolResult] = []
+        # #51: tool calls parked as pending admin confirmations (ban_user,
+        # set_rank) -- the chat gets preview + buttons for each of them.
+        pending_confirmations: list[ToolResult] = []
         tool_messages: list[dict] = []
         final_answer = ""
         empty_completions = 0
@@ -402,8 +407,15 @@ async def _handle(
         # trusted context (see save_interaction below).
         web_tainted = False
         web_withdrawal = False
+        artifacts_skill_read = False
 
-        for _round in range(_MAX_TOOL_ROUNDS):
+        # 4 model turns without a group subscription, 8 with one; the last turn offers no tools and says so.
+        has_ai = await chat_has_selara_ai(session_factory, chat_id=message.chat.id, settings=settings)
+        total_rounds = group_tool_rounds(settings, has_subscription=has_ai)
+        for _round in range(total_rounds):
+            is_last_round = _round == total_rounds - 1
+            if is_last_round:
+                messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
             # Allowlist snapshot for THIS round: every tool call in the batch
             # is checked against the same set the provider was offered, so a
             # withdrawal triggered by an earlier call in the batch cannot
@@ -417,7 +429,17 @@ async def _handle(
             except Exception:
                 pass
             try:
-                request_kwargs: dict[str, Any] = {"messages": messages, "tools": available_tools}
+                request_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "tools": [] if is_last_round else available_tools,
+                }
+                # Plain answers are capped; only after the artifacts skill was read (the model is about to
+                # write long create_artifact arguments, which a cut-off would break) the ceiling is higher.
+                request_kwargs["max_tokens"] = (
+                    _ARTIFACT_MAX_TOKENS
+                    if artifacts_skill_read and not is_last_round
+                    else settings.llm_admin_max_tokens
+                )
                 # `tools` is always passed, [] included: LlmClient normalizes
                 # it to tools=None / tool_choice=None (a required positional
                 # -- omitting the key would raise TypeError on the real
@@ -462,9 +484,12 @@ async def _handle(
 
             # Some compatible providers report stop even with executable tool calls.
             # Actual calls take precedence over that metadata.
-            if not msg.tool_calls:
+            if not msg.tool_calls or is_last_round:
+                # On the last round tools were not offered: a stray call is ignored, the text is the answer.
                 if (msg.content or "").strip():
                     final_answer = msg.content
+                    if choice.finish_reason == "length":
+                        final_answer = final_answer.rstrip() + _TRUNCATED_MARK
                     break
                 log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
                     choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
@@ -479,9 +504,31 @@ async def _handle(
 
             messages.append(msg.model_dump(exclude_none=True))
             for tc in msg.tool_calls:
+                try:
+                    parsed_arguments = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(parsed_arguments, dict):
+                        raise ValueError("arguments must be an object")
+                except ValueError:
+                    # Cut-off or malformed arguments: tell the model instead of failing the whole request.
+                    result = ToolResult(
+                        call_id=tc.id,
+                        name=tc.function.name,
+                        result_text=json.dumps(
+                            {"error": "Некорректные аргументы инструмента (JSON повреждён или обрезан). "
+                                      "Повтори вызов короче или ответь текстом."},
+                            ensure_ascii=False,
+                        ),
+                        action_description="",
+                        success=False,
+                    )
+                    tool_results.append(result)
+                    bad_msg = {"role": "tool", "tool_call_id": result.call_id, "content": result.result_text}
+                    messages.append(bad_msg)
+                    tool_messages.append(bad_msg)
+                    continue
                 call = ToolCall(
                     name=tc.function.name,
-                    arguments=json.loads(tc.function.arguments),
+                    arguments=parsed_arguments,
                     call_id=tc.id,
                 )
                 status = get_tool_status(call.name, call.arguments)
@@ -510,6 +557,15 @@ async def _handle(
                 else:
                     result = await execute_tool(call, **tool_ctx)
                 tool_results.append(result)
+                if result.pending_confirmation_token is not None:
+                    # #51: persist the pending confirmation NOW (same #22
+                    # reasoning as committing completed actions): the buttons
+                    # go out with this answer, but the click arrives in a
+                    # different request with its own DB session.
+                    pending_confirmations.append(result)
+                    await db_session.commit()
+                if call.name == "read_skill" and result.success and call.arguments.get("name") == "artifacts":
+                    artifacts_skill_read = True
                 if result.success and result.db_action_id is not None:
                     # #22: commit immediately so a crash on a *later* round can
                     # no longer roll back an already-completed action's DB state
@@ -554,6 +610,11 @@ async def _handle(
         else:
             final_answer = final_answer.strip() or _verified_fallback(tool_results)
             await _send_formatted_answer(message, thinking_msg, final_answer)
+        for pending in pending_confirmations:
+            # #51: the approval decision lives in a deterministic preview with
+            # buttons, not in the model's prose.
+            await _send_confirmation_request(message, pending)
+        outcome["answer_sent"] = True
         chat_answer = final_answer
         if artifact_context.sent_artifacts:
             final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
@@ -602,6 +663,20 @@ async def _handle(
 
     try:
         await _run_invocation()
+    except Exception:
+        # Never leave the «Думаю...» placeholder hanging when something unexpected breaks the loop.
+        log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)
+        outcome["status"] = "failed"
+        outcome["error_category"] = "handler_error"
+        if outcome.get("answer_sent"):
+            # The answer already reached the chat; only post-processing failed, so keep the answer as is.
+            outcome["error_category"] = "post_answer_error"
+        else:
+            error_text = "⚠️ Ошибка AI-ассистента: не удалось завершить запрос. Попробуйте позже."
+            try:
+                await thinking_msg.edit_text(error_text)
+            except Exception:
+                pass
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
@@ -620,6 +695,38 @@ async def _handle(
                 )
             except Exception:
                 log.exception("Could not finalize llm_admin invocation id=%s", invocation_id)
+
+
+_ARTIFACT_MAX_TOKENS = 4000
+_TRUNCATED_MARK = "\n\n…(ответ обрезан по длине)"
+
+
+def _confirmation_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"llm_confirm:{token}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"llm_reject:{token}"),
+    ]])
+
+
+async def _send_confirmation_request(message: Message, pending: ToolResult) -> None:
+    try:
+        data = json.loads(pending.result_text)
+        description = str(data.get("description") or pending.action_description)
+    except (ValueError, AttributeError):
+        description = pending.action_description
+    text = (
+        "⚠️ Требуется подтверждение действия\n"
+        f"{description}\n"
+        "Действие выполнится только после нажатия «Подтвердить» "
+        f"(запрос действителен {TOOL_CONFIRMATION_TTL_SECONDS // 60} мин)."
+    )
+    try:
+        await message.reply(
+            text,
+            reply_markup=_confirmation_keyboard(pending.pending_confirmation_token or ""),
+        )
+    except Exception:
+        log.warning("llm_admin: не удалось отправить запрос подтверждения", exc_info=True)
 
 
 def _empty_answer_recovery() -> dict:
@@ -705,6 +812,9 @@ async def _send_dm_summary(
             lines.append(f"Ошибка {tr.name}: {str(error)[:700]}")
     if not tool_results:
         lines.append("Инструменты не выполнялись.")
+    pending = [tr for tr in tool_results if tr.pending_confirmation_token is not None]
+    for tr in pending:
+        lines.append(f"Ожидает вашего подтверждения в чате (кнопки): {tr.action_description}")
     if sent_artifacts or any(tr.name in {"read_skill", "create_artifact", "send_artifact"} for tr in tool_results):
         lines.append(f"Подтверждённо отправлено артефактов: {len(sent_artifacts or [])}.")
         if not sent_artifacts:
@@ -858,9 +968,136 @@ async def _execute_rollback(
 
     return await execute_tool(
         call,
+        # #51: the DM rollback click IS the admin's explicit approval for
+        # this exact undo (a set_rank rollback would otherwise be parked as
+        # another pending confirmation); regular authorization still runs.
+        confirmation=DIRECT_ADMIN_CONFIRMATION,
         chat_snapshot=chat_snapshot,
         actor_snapshot=rollback_actor,
         activity_repo=activity_repo,
         llm_repo=llm_repo,
         bot=bot,
     )
+
+
+@router.callback_query(F.data.startswith("llm_confirm:"))
+async def llm_confirm_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    activity_repo: Any,
+    db_session: AsyncSession,
+) -> None:
+    await _handle_confirmation_callback(callback, bot, activity_repo, db_session, approve=True)
+
+
+@router.callback_query(F.data.startswith("llm_reject:"))
+async def llm_reject_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    activity_repo: Any,
+    db_session: AsyncSession,
+) -> None:
+    await _handle_confirmation_callback(callback, bot, activity_repo, db_session, approve=False)
+
+
+async def _handle_confirmation_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    activity_repo: Any,
+    db_session: AsyncSession,
+    *,
+    approve: bool,
+) -> None:
+    """#51: the approve/cancel click for a pending high-impact tool call.
+    The approval is bound to the initiating admin, the chat, the exact
+    previewed payload and a TTL; the authoritative re-verification and the
+    atomic single-execution claim live inside execute_tool's gate."""
+    await callback.answer()
+
+    if callback.from_user is None or callback.message is None:
+        return
+
+    parts = (callback.data or "").split(":", 1)
+    if len(parts) != 2 or not parts[1]:
+        return
+    token = parts[1]
+
+    llm_repo = LlmRepository(db_session)
+    pending = await llm_repo.get_tool_confirmation(token=token)
+    if pending is None:
+        await callback.answer("Запрос подтверждения не найден.", show_alert=True)
+        return
+    if pending.actor_user_id != callback.from_user.id:
+        await callback.answer("Запрос может подтвердить или отклонить только его инициатор.", show_alert=True)
+        return
+    if pending.chat_id != callback.message.chat.id:
+        await callback.answer("Этот запрос относится к другому чату.", show_alert=True)
+        return
+    if pending.status != "pending":
+        await callback.answer("Этот запрос уже обработан.", show_alert=True)
+        return
+
+    expires_at = pending.expires_at if pending.expires_at.tzinfo else pending.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        await llm_repo.mark_tool_confirmation_expired(token=token)
+        await db_session.commit()
+        await callback.answer("Срок подтверждения истёк.", show_alert=True)
+        await _edit_confirmation_message(callback, "\n\n⌛ Срок подтверждения истёк — действие не выполнено.")
+        return
+
+    if not approve:
+        claimed = await llm_repo.claim_tool_confirmation(
+            token=token, resolved_by_user_id=callback.from_user.id, new_status="rejected",
+        )
+        if not claimed:
+            await callback.answer("Этот запрос уже обработан.", show_alert=True)
+            return
+        await db_session.commit()
+        await _edit_confirmation_message(callback, "\n\n❌ Действие отклонено инициатором.")
+        return
+
+    actor = UserSnapshot(
+        telegram_user_id=callback.from_user.id,
+        username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+        last_name=callback.from_user.last_name,
+        is_bot=bool(callback.from_user.is_bot),
+    )
+    chat_snapshot = ChatSnapshot(
+        telegram_chat_id=pending.chat_id,
+        chat_type="supergroup",
+        title=None,
+    )
+    call = ToolCall(
+        name=pending.tool_name,
+        arguments=dict(pending.arguments_json or {}),
+        call_id=f"confirm:{token[:16]}",
+    )
+    result = await execute_tool(
+        call,
+        confirmation=ToolConfirmationGrant(token=token),
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor,
+        activity_repo=activity_repo,
+        llm_repo=llm_repo,
+        bot=bot,
+    )
+    await db_session.commit()
+
+    if result.success:
+        await _edit_confirmation_message(callback, f"\n\n✅ Выполнено: {result.action_description}")
+        return
+    try:
+        error_text = json.loads(result.result_text).get("error", result.result_text)
+    except (ValueError, AttributeError):
+        error_text = result.result_text
+    await callback.answer(f"Не выполнено: {str(error_text)[:200]}", show_alert=True)
+    await _edit_confirmation_message(callback, f"\n\n❌ Не выполнено: {str(error_text)[:300]}")
+
+
+async def _edit_confirmation_message(callback: CallbackQuery, suffix: str) -> None:
+    try:
+        base_text = callback.message.text or ""
+        await callback.message.edit_text(base_text + suffix, reply_markup=None)
+    except Exception:
+        log.warning("llm_admin: не удалось обновить сообщение подтверждения", exc_info=True)

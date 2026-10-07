@@ -27,6 +27,7 @@ def _chat_settings(**overrides):
         text_commands_enabled=True,
         custom_rp_enabled=False,
         smart_triggers_enabled=False,
+        pets_enabled=False,
     )
     return replace(base, **overrides)
 

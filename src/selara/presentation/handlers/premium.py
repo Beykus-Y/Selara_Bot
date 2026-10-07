@@ -36,7 +36,13 @@ from selara.infrastructure.db.telegram_stars import (
     PurchaseIntentRateLimited,
     SqlAlchemyTelegramStarsRepository,
 )
+from selara.infrastructure.db.entitlement_grants import EntitlementGrantService
 from selara.infrastructure.llm.runtime import llm_runtime_config
+from selara.presentation.handlers.admin_grants import (
+    grant_subscription_command,
+    list_grants_command,
+    revoke_subscription_command,
+)
 from selara.presentation.auth import (
     is_telegram_chat_admin,
     resolve_owner_admin_exemption,
@@ -208,6 +214,18 @@ def _format_date(value: datetime, timezone_name: str) -> str:
     except ZoneInfoNotFoundError:
         zone = ZoneInfo("UTC")
     return value.astimezone(zone).strftime("%d.%m.%Y %H:%M")
+
+
+async def _admin_grant_line(session_factory, *, scope: str, target_id: int, active: datetime | None) -> str:
+    """One line when the running subscription was last extended by the owner rather than paid for."""
+    if active is None:
+        return ""
+    try:
+        granted = await EntitlementGrantService(session_factory).granted_by_admin(scope=scope, target_id=target_id)
+    except Exception:
+        logger.warning("Could not read the grant mark scope=%s", scope)
+        return ""
+    return "🎁 Подписка выдана администратором.\n" if granted else ""
 
 
 def _selection_keyboard(chats) -> InlineKeyboardMarkup:
@@ -416,12 +434,14 @@ async def show_personal_offer(
         if entitlement is not None and entitlement.status == "active" and entitlement.valid_until > now
         else None
     )
+    gift = await _admin_grant_line(session_factory, scope="user", target_id=query.from_user.id, active=active_until)
     if config.ail_enabled and config.ail_limits is not None:
         # AI Limits mode: the budget is the config's, not a request count fixed at purchase.
         ail = config.ail_limits
         status = (
             f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
+            + gift
+            + f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
             if active_until is not None
             else f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
         )
@@ -440,7 +460,8 @@ async def show_personal_offer(
         text = (
             f"<b>{escape(product.title)}</b>\n"
             f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Сейчас ваш лимит — {current_limit} запросов в сутки.\n"
+            + gift
+            + f"Сейчас ваш лимит — {current_limit} запросов в сутки.\n"
             f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>; "
             f"лимит будет {renewed_limit} (больший из текущего и предлагаемого {config.limits.paid_daily}), "
             "оплаченные дни не урезаются.\n"
@@ -632,11 +653,13 @@ async def select_premium_chat(
         else None
     )
     label = escape(_chat_label(await repository.get_chat_title(chat_id=chat_id), chat_id))
+    gift = await _admin_grant_line(session_factory, scope="chat", target_id=chat_id, active=active_until)
     if active_until is not None:
         text = (
             f"<b>{label}</b>\n"
             f"Selara AI уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — "
+            + gift
+            + f"Новая покупка продлит срок ещё на {product.duration_label} — "
             f"<b>{product.price_stars} ⭐</b>.\n"
             "Перед оплатой нужно подтвердить принятие условий покупки."
         )
@@ -1233,5 +1256,8 @@ def build_payment_router() -> Router:
     payment_router = Router(name="selara_ai_payments")
     payment_router.pre_checkout_query.register(selara_ai_pre_checkout)
     payment_router.message.register(refund_rejected_stars_payment, Command("stars_refund"))
+    payment_router.message.register(grant_subscription_command, Command("grant_sub"))
+    payment_router.message.register(revoke_subscription_command, Command("revoke_sub"))
+    payment_router.message.register(list_grants_command, Command("grants"))
     payment_router.message.register(selara_ai_successful_payment, F.successful_payment)
     return payment_router

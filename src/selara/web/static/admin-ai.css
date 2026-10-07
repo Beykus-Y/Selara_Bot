@@ -1,0 +1,99 @@
+.admin-ai-grid {
+  display: grid;
+  gap: var(--gap);
+}
+
+.admin-ai-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 16px 18px;
+}
+
+.admin-ai-section h3 {
+  margin: 0 0 12px;
+}
+
+.admin-ai-body {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-ai-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.admin-ai-row:first-child {
+  border-top: 0;
+}
+
+.admin-ai-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.admin-ai-field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.admin-ai-field input[type="text"],
+.admin-ai-field input[type="number"],
+.admin-ai-field select,
+.admin-ai-field textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.admin-ai-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.admin-ai-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.admin-ai-status {
+  font-size: 13px;
+  min-height: 1.2em;
+}
+
+.admin-ai-status.is-error {
+  color: var(--danger, #ff7a7a);
+}
+
+.admin-ai-status.is-ok {
+  color: var(--ok, #7be3a0);
+}
+
+.admin-ai-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-ai-table th,
+.admin-ai-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.admin-ai-muted {
+  color: var(--muted);
+  font-size: 13px;
+}

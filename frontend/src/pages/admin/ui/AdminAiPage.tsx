@@ -25,6 +25,8 @@ import {
   refundLabels,
 } from '../lib/format'
 import { AdminModelsSection } from './AdminModelsSection'
+import { AdminFeatureRoutesSection } from './AdminFeatureRoutesSection'
+import { AdminGrantsSection } from './AdminGrantsSection'
 import { AdminQuotaModeSection } from './AdminQuotaModeSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
@@ -180,6 +182,25 @@ function BreakdownSection({ periodDays }: { periodDays: number }) {
                 </li>
               ))}
             </ul>
+          )}
+          {(data.chats ?? []).length > 0 && (
+            <>
+              <h3 className="admin-subheading">По чатам</h3>
+              <ul className="admin-rows">
+                {(data.chats ?? []).map((row) => (
+                  <li key={row.chat_id}>
+                    <div className="admin-rows__main">
+                      <strong className="admin-rows__name">{row.title ?? row.chat_id}</strong>
+                      <span>{formatUsd(row.known_cost_usd)}</span>
+                    </div>
+                    <small>
+                      {formatCount(row.invocations)} запросов · «?»: {formatCount(row.question_calls)} · кличка: {formatCount(row.nickname_calls)} вызовов
+                      {row.unknown_cost_calls > 0 ? ` · без цены: ${formatCount(row.unknown_cost_calls)}` : ''}
+                    </small>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
           <h3 className="admin-subheading">По моделям</h3>
           {data.models.length === 0 ? <p className="admin-empty">Использованных моделей нет.</p> : (
@@ -523,12 +544,14 @@ export function AdminAiPage() {
       </header>
       <ReadinessSection />
       <AdminModelsSection />
+      <AdminFeatureRoutesSection />
       <AdminQuotaModeSection />
       <PeriodSwitch value={periodDays} onChange={setPeriodDays} />
       <AiSummarySection periodDays={periodDays} />
       <BreakdownSection periodDays={periodDays} />
       <StarsSection periodDays={periodDays} />
       <EntitlementsSection />
+      <AdminGrantsSection />
       <PaymentsSection />
     </section>
   )

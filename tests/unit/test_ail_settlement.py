@@ -119,6 +119,19 @@ def test_request_options_are_added_only_when_asked_for():
     assert routed["extra_body"] == {"custom": 1, "usage": {"include": False}, "provider": {"max_price": {"prompt": 1}}}
 
 
+def test_group_provider_preferences_apply_only_to_group_features():
+    plain = {"model": "m", "messages": []}
+    client = _client(
+        provider_preferences={"max_price": {"prompt": 1}},
+        group_provider_preferences={"order": ["DeepInfra"], "allow_fallbacks": False},
+    )
+    group = client._with_provider_options(plain, route=False, group_route=True)
+    assert group["extra_body"] == {"provider": {"order": ["DeepInfra"], "allow_fallbacks": False}}
+    personal = client._with_provider_options(plain, route=True)
+    assert personal["extra_body"] == {"provider": {"max_price": {"prompt": 1}}}
+    assert client._with_provider_options(plain, route=False) is plain
+
+
 def test_runtime_detects_openrouter_and_validates_preferences(monkeypatch):
     base = dict(_env_file=None, bot_token="1:x", database_url="sqlite:///", llm_enabled=True, llm_api_key="k")
     config, problem = llm_runtime_problem(Settings(**base, llm_base_url="https://openrouter.ai/api/v1"))
@@ -217,3 +230,16 @@ def test_provider_preferences_only_route_the_personal_chat_turn():
     assert "provider" in client._with_provider_options(plain)["extra_body"]
     other = client._with_provider_options(plain, route=False)["extra_body"]
     assert other == {"usage": {"include": True}}
+
+
+async def test_a_tool_turn_is_never_charged_above_its_reservation():
+    access = SimpleNamespace(adjust=AsyncMock())
+    config = PersonalConfig(None, 30, PersonalQuotaLimits(5, 50), quota_mode="ail",
+                            ail_limits=PersonalQuotaLimits(10, 100, unit="ail"))
+
+    await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.05")], user_id=5,
+                            max_units=Decimal("3"))
+    await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.0005")], user_id=5,
+                            max_units=Decimal("3"))
+
+    assert [call.kwargs["actual_units"] for call in access.adjust.await_args_list] == [Decimal("3"), Decimal("1.00")]

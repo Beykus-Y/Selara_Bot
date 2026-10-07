@@ -133,7 +133,7 @@ async def test_handle_marks_group_chat_title_as_untrusted_in_system_role_message
 
     llm_client = AsyncMock()
 
-    async def fake_chat_with_tools(*, messages, tools):
+    async def fake_chat_with_tools(*, messages, tools, **_kwargs):
         captured_messages.append(list(messages))
         choice = SimpleNamespace(
             finish_reason="stop",

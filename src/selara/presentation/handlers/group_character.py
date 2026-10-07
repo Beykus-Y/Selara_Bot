@@ -27,7 +27,8 @@ from selara.application.ai_character.group import (
     GROUP_PRESETS,
     MAX_MEMBER_TEXT_LENGTH,
     MEMBER_RECENT_MESSAGES,
-    MEMBER_REPLY_MAX_TOKENS,
+    LAST_ROUND_NOTICE,
+    group_tool_rounds,
     CallName,
     MemberTurn,
     active_call_names,
@@ -57,9 +58,14 @@ from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallResult
 from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.group_member_tools import execute_member_tool, member_tool_definitions
 from selara.infrastructure.llm.tools import ToolCall
-from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.auth import has_permission, resolve_owner_private_exemption
 from selara.presentation.commands.catalog import match_builtin_command
 from selara.presentation.feature_access_messages import quota_exhausted_message
+from selara.presentation.handlers.member_actions import (
+    ACTION_TOOL_NAME,
+    action_tool_definition,
+    perform_member_action,
+)
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
 
 log = logging.getLogger(__name__)
@@ -69,7 +75,6 @@ router = Router(name="group_character")
 _GROUP_TYPES = {"group", "supergroup"}
 _STATE_TTL_SECONDS = 30.0
 _HINT_INTERVAL_SECONDS = 3600.0
-_MAX_TOOL_ROUNDS = 4
 
 # chat_id -> (expires_at, member_mode_enabled, active names): checked on every group message.
 _state_cache: dict[int, tuple[float, bool, list[CallName]]] = {}
@@ -245,7 +250,8 @@ async def handle_group_call(
         entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory, group_member_limits=limits),
         group_member_limits=limits,
     )
-    owner_exempt = await resolve_owner_admin_exemption(bot=bot, chat_id=chat_id, admin_user_id=settings.admin_user_id)
+    # Only the bot owner personally is exempt here (identity, not chat admin status), so other members keep their limits.
+    owner_exempt = resolve_owner_private_exemption(user_id=user.id, admin_user_id=settings.admin_user_id)
     try:
         decision = await access_service.reserve_feature_usage(
             feature=AiFeature.GROUP_MEMBER,
@@ -303,8 +309,13 @@ async def handle_group_call(
     )
     outcome = {"status": "failed", "error_category": "handler_error"}
     try:
+        has_ai = await chat_has_selara_ai(session_factory, chat_id=chat_id, settings=settings)
         answer = await _run_member_dialogue(
             message,
+            actions_enabled=character.member_actions_enabled,
+            actor_label=primary,
+            total_rounds=group_tool_rounds(settings, has_subscription=has_ai),
+            max_tokens=settings.group_member_max_tokens,
             bot=bot,
             messages=build_member_messages(
                 character=character,
@@ -368,6 +379,10 @@ async def _run_member_dialogue(
     llm_client: LlmClient,
     call_context: LlmAccountingContext | None,
     outcome: dict,
+    total_rounds: int,
+    max_tokens: int,
+    actions_enabled: bool = False,
+    actor_label: str | None = None,
 ) -> str:
     chat_snapshot = ChatSnapshot(
         telegram_chat_id=message.chat.id, chat_type=message.chat.type, title=message.chat.title
@@ -381,14 +396,20 @@ async def _run_member_dialogue(
         is_bot=bool(user.is_bot),
     )
     tools = member_tool_definitions(history_access=history_access)
-    for round_index in range(_MAX_TOOL_ROUNDS + 1):
+    if actions_enabled:
+        tools = [*tools, action_tool_definition()]
+    action_done = False
+    for round_index in range(total_rounds):
         try:
             await bot.send_chat_action(message.chat.id, "typing")
         except Exception:
             pass
-        # The last round offers no tools, so the model has to answer with what it already has.
-        request: dict = {"messages": messages, "tools": tools if round_index < _MAX_TOOL_ROUNDS else []}
-        request["max_tokens"] = MEMBER_REPLY_MAX_TOKENS
+        # The last round offers no tools and says so, so the model answers with what it already has.
+        is_last = round_index == total_rounds - 1
+        if is_last:
+            messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
+        request: dict = {"messages": messages, "tools": [] if is_last else tools}
+        request["max_tokens"] = max_tokens
         if call_context is not None:
             request["accounting_context"] = call_context
         try:
@@ -404,8 +425,11 @@ async def _run_member_dialogue(
         if not response or not response.choices:
             return ""
         msg = response.choices[0].message
-        if not msg.tool_calls:
-            return (msg.content or "").strip()
+        if not msg.tool_calls or is_last:
+            text = (msg.content or "").strip()
+            if text and getattr(response.choices[0], "finish_reason", None) == "length":
+                text += "…"
+            return text
         messages.append(msg.model_dump(exclude_none=True))
         for tool_call in msg.tool_calls:
             try:
@@ -414,6 +438,19 @@ async def _run_member_dialogue(
                     raise ValueError("arguments must be an object")
             except ValueError:
                 arguments = {}
+            if tool_call.function.name == ACTION_TOOL_NAME:
+                if not actions_enabled:
+                    text, ok = "Действия в этом чате выключены администраторами.", False
+                elif action_done:
+                    text, ok = "Одно действие за ответ уже выполнено.", False
+                else:
+                    text, ok = await perform_member_action(
+                        message=message, bot=bot, activity_repo=activity_repo,
+                        arguments=arguments, actor_label=actor_label,
+                    )
+                    action_done = action_done or ok
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": text})
+                continue
             result = await execute_member_tool(
                 ToolCall(name=tool_call.function.name, arguments=arguments, call_id=tool_call.id),
                 history_access=history_access,
@@ -440,6 +477,7 @@ _PRIMARY = {"основная", "главная", "primary", "main"}
 _CHARACTER = {"характер", "character"}
 _MEMBERS = {"участники", "members", "режим"}
 _HISTORY = {"история", "history"}
+_ACTIONS = {"действия", "actions"}
 _RESET = {"сброс", "reset"}
 
 HELP_TEXT = (
@@ -450,6 +488,7 @@ HELP_TEXT = (
     "<code>/selara характер</code> — пресеты; <code>/selara характер свой текст</code> — свой (до 500 символов)\n"
     "<code>/selara участники вкл|выкл</code> — отвечать участникам по кличке\n"
     "<code>/selara история вкл|выкл</code> — разрешить читать недавние сообщения чата\n"
+    "<code>/selara действия вкл|выкл</code> — Selara может сама совершать безобидные действия (обнять и т.п.)\n"
     "<code>/selara сброс</code> — забыть разговор с участниками\n"
     "Менять настройки могут админы с правом настройки чата."
 )
@@ -527,6 +566,7 @@ def _status_text(character, names: list[CallName], *, paid: bool, settings: Sett
         f"Характер: {char_line}\n"
         f"Ответы участникам по кличке: {'включены' if character.member_mode_enabled else 'выключены'}\n"
         f"Чтение недавних сообщений: {'разрешено' if character.member_history_access else 'запрещено'}\n"
+        f"Действия от имени Selara: {'разрешены' if character.member_actions_enabled else 'запрещены'}\n"
         f"Лимит: {daily} обращений в сутки на чат, {per_actor} на участника"
         + (" (Selara AI)" if paid else " (бесплатно)")
         + "\n\n<code>/selara помощь</code> — все команды"
@@ -610,15 +650,25 @@ async def selara_command(
             text = f"Основная кличка — «{escape(primary.name_display)}»." if primary else "Такой клички нет."
         elif verb in _CHARACTER:
             text = await _character_command(repo, chat_id=chat_id, actor_id=actor_id, rest=rest)
-        elif verb in _MEMBERS or verb in _HISTORY:
+        elif verb in _MEMBERS or verb in _HISTORY or verb in _ACTIONS:
             enabled = _switch(rest)
             if enabled is None:
                 await message.answer(f"Формат: <code>/selara {escape(verb)} вкл|выкл</code>", parse_mode="HTML")
                 return
-            field = "member_mode_enabled" if verb in _MEMBERS else "member_history_access"
+            field = (
+                "member_mode_enabled" if verb in _MEMBERS
+                else "member_actions_enabled" if verb in _ACTIONS
+                else "member_history_access"
+            )
             await repo.update_character(chat_id=chat_id, actor_user_id=actor_id, **{field: enabled})
             await repo.commit()
-            if field == "member_mode_enabled":
+            if field == "member_actions_enabled":
+                text = (
+                    "Selara может сама совершать безобидные действия (обнять, дать пять и т.п.)."
+                    if enabled
+                    else "Selara больше не совершает действий сама."
+                )
+            elif field == "member_mode_enabled":
                 text = "Selara отвечает участникам по кличке." if enabled else "Selara больше не отвечает участникам по кличке."
             else:
                 text = (

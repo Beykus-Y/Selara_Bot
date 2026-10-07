@@ -75,6 +75,9 @@ DEFAULT_PET_TALK_DAILY_LIMIT = 60
 GROUP_MEMBER_POOL_KEY = "group_member_daily"
 # Features the personal config may price; group features never read its weights.
 PERSONAL_FEATURES = frozenset({AiFeature.PERSONAL_CHAT, AiFeature.PERSONAL_MEMORY_EXTRACT})
+# A pet's model lines are paid by its owner. In AI Limits mode they spend the owner's Selara Personal AIL
+# balance (one shared balance with the personal chat); otherwise the legacy per-request ``pet_daily`` pool.
+PET_FEATURES = frozenset({AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT, AiFeature.PET_ACTION})
 # What a personal request draws from the pool in requests mode: 5/150 are requests, not weighted units.
 PERSONAL_REQUEST_COST = QuotaCost(Decimal("1"))
 
@@ -395,8 +398,17 @@ def resolve_feature_policy(
             pool_key=GROUP_MEMBER_POOL_KEY,
             per_actor_limit=group_member_limits.free_per_actor,
         )
-    if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
-        # Without the owner's Selara Personal a pet cannot talk or post events (its mechanics still work).
+    if feature in PET_FEATURES:
+        # Without the owner's Selara Personal a pet gets no model lines (its mechanics and template lines stay free).
+        if personal_limits is not None and personal_limits.unit == AIL_UNIT:
+            return FeatureQuotaPolicy(
+                feature,
+                f"{feature.value}_free_daily_ail_v1",
+                0,
+                QuotaPeriod.DAY,
+                pool_key=PERSONAL_AIL_POOL_KEY,
+                unit=AIL_UNIT,
+            )
         return FeatureQuotaPolicy(feature, f"{feature.value}_free_daily_v1", 0, QuotaPeriod.DAY, pool_key=PET_POOL_KEY)
     # /autocfg and internal operations (memory extraction, context compression) are
     # accounted for cost but never spend a user's or chat's commercial quota.
@@ -435,9 +447,23 @@ def paid_group_member_policy(limits: GroupMemberQuotaLimits) -> FeatureQuotaPoli
 
 
 def paid_pet_policy(
-    daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT, feature: AiFeature = AiFeature.PET_TALK
+    daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT,
+    feature: AiFeature = AiFeature.PET_TALK,
+    personal_limits: PersonalQuotaLimits | None = None,
 ) -> FeatureQuotaPolicy:
-    """Selara Personal gives the owner's pet ``daily_limit`` AI units a day, shared by talk and events."""
+    """Selara Personal gives the owner's pet ``daily_limit`` AI units a day, shared by talk and events.
+
+    In AI Limits mode (``personal_limits`` counts AIL) the pet draws from the owner's Personal AIL balance.
+    """
+    if personal_limits is not None and personal_limits.unit == AIL_UNIT:
+        return FeatureQuotaPolicy(
+            feature,
+            f"{feature.value}_paid_daily_ail_v1",
+            personal_limits.paid_daily,
+            QuotaPeriod.DAY,
+            pool_key=PERSONAL_AIL_POOL_KEY,
+            unit=AIL_UNIT,
+        )
     return FeatureQuotaPolicy(
         feature,
         f"{feature.value}_paid_daily_v1",
@@ -520,6 +546,11 @@ class FeatureAccessService:
             if units is None:
                 # Fail closed: an AIL reservation without a resolved model cost must not run.
                 raise ValueError("AIL reservations need the resolved model profile cost")
+            return QuotaCost(validate_ail_units(units))
+        if feature in PET_FEATURES and policy.unit == AIL_UNIT:
+            if units is None:
+                # Fail closed: a pet's AIL reservation needs its per-request cap as the reserved amount.
+                raise ValueError("AIL pet reservations need the per-request AIL cap")
             return QuotaCost(validate_ail_units(units))
         return self._pricer.price(feature=feature, model_key=None, operation=trigger)
 
@@ -896,6 +927,8 @@ class FeatureAccessService:
                 # The AIL budget is not sold per subscription: take it from the same config snapshot
                 # as the free policy, so a mode switch between two reads cannot demote a subscriber.
                 paid_policy = paid_personal_policy(personal_limits)
+            elif feature in PET_FEATURES and personal_limits is not None and policy.unit == AIL_UNIT:
+                paid_policy = paid_pet_policy(personal_limits=personal_limits, feature=feature)
             if paid_policy.feature != feature:
                 raise ValueError("Paid entitlement supplied a quota policy for another feature")
             if paid_policy.pool != policy.pool or paid_policy.unit != policy.unit:

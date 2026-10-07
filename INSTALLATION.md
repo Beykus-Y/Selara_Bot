@@ -88,11 +88,12 @@ LLM_COOLDOWN_SECONDS=5
 
 Инструменты `web_search` (поиск) и `fetch_page` (чтение страницы) доступны
 ассистенту `?`/`??` во всех чатах, где он включён. По умолчанию включены
-(`WEB_SEARCH_ENABLED=true`) и работают через DuckDuckGo без API-ключа.
+(`WEB_SEARCH_ENABLED=true`). По умолчанию (`auto`) используется SearXNG из
+docker-compose, а если он не запущен или недоступен — DuckDuckGo без ключа.
 
 ```env
 WEB_SEARCH_ENABLED=true
-WEB_SEARCH_PROVIDER=duckduckgo
+WEB_SEARCH_PROVIDER=auto   # auto|searxng|duckduckgo|tavily|brave
 WEB_SEARCH_TIMEOUT_SECONDS=15
 WEB_SEARCH_MAX_RESULTS=5
 ```
@@ -106,6 +107,16 @@ WEB_SEARCH_MAX_RESULTS=5
 свой шлюз через `WEB_SEARCH_BASE_URL`. При блокировке ассистент корректно
 отвечает, что поиск временно недоступен. Чтобы полностью отключить поиск,
 выставьте `WEB_SEARCH_ENABLED=false`.
+
+DuckDuckGo с датацентровых IP часто отвечает анти-бот страницей (HTTP 202/403).
+**SearXNG (рекомендуется):** задайте `SELARA_SEARXNG_SECRET` (`openssl rand -hex 32`) в `.env`
+и выполните `docker compose up -d searxng`. Сервис не публикует портов и доступен
+только приложению по `http://searxng:8080` (`WEB_SEARCH_SEARXNG_URL`). Если в `.env`
+явно стоит `WEB_SEARCH_PROVIDER=duckduckgo`, смените на `auto`. Деплой-workflow
+searxng не запускает.
+
+Альтернатива — ключевой провайдер: задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
+`WEB_SEARCH_API_KEY`; при сбое такого провайдера бот пробует DuckDuckGo.
 
 ---
 
@@ -135,6 +146,58 @@ curl -i http://127.0.0.1:8080/healthz
 
 ```bash
 docker network create edge
+```
+
+### 4.4 Non-root app-контейнер и том `selara_gacha_reel_cache`
+
+Контейнер `app` работает под непривилегированным пользователем `10001:10001`
+с read-only корневой ФС. Запись возможна только в `/tmp` (tmpfs: бэкапы,
+ffmpeg, профили Chromium, кэши matplotlib/fontconfig) и в том
+`selara_gacha_reel_cache` (кэш MP4-анимаций гачи, регенерируется автоматически).
+
+Том объявлен с явным `name: selara_gacha_reel_cache`, поэтому compose не
+добавляет к имени префикс проекта. Образ создаёт точку монтирования
+`/data/gacha_reel_cache` с владельцем `10001:10001`, и новый (в том числе
+пересозданный) том наследует этого владельца — отдельный `chown` не нужен.
+
+Обновление уже работающего деплоя: раньше том назывался с префиксом проекта
+(`<project>_selara_gacha_reel_cache`, обычно `<каталог>_selara_gacha_reel_cache`).
+Теперь он не монтируется, приложение получает новый пустой том с правами на
+запись и заново генерирует кэш по запросу; старый том можно удалить, чтобы
+освободить место:
+
+```bash
+docker volume ls | grep gacha_reel_cache
+docker volume rm <project>_selara_gacha_reel_cache
+```
+
+Если том всё же остался root-owned и его нужно один раз исправить, делайте это
+отдельным контейнером: `cap_drop: [ALL]` у `app` убирает `CAP_CHOWN` даже у
+root, поэтому `docker compose run app ... chown` не сработает.
+
+```bash
+docker compose stop app
+docker run --rm -v selara_gacha_reel_cache:/data alpine chown -R 10001:10001 /data
+docker compose up -d app
+```
+
+### 4.5 Ресурсные лимиты app-контейнера
+
+Для `app` заданы `mem_limit: 4g`, `cpus: 2.0`, `pids_limit: 512`, tmpfs `/tmp`
+размером 1g и `init: true`. 4g покрывают пик одного рендера гача-рила
+(~1.2–1.4 ГБ), Chromium в том же процессе и страницы tmpfs, которые
+учитываются в том же cgroup; `pids_limit` считает потоки (Chromium, ffmpeg,
+пул потоков asyncio); `init` пожинает осиротевшие дочерние процессы Chromium.
+Превышение `mem_limit` приводит к OOM-kill всего контейнера (bot + web) и
+циклу перезапуска из-за `restart: unless-stopped`.
+
+Лимиты действуют только на пересобранном образе, поэтому перед тем как
+полагаться на них, соберите образ и прогоните smoke-тест:
+
+```bash
+docker compose build app
+docker compose up -d postgres redis app
+docker compose logs -f app
 ```
 
 ---

@@ -83,12 +83,11 @@ async def _create(db, name: str = "Мурка", owner: int = OWNER, chat_id: int
     return await AiPetService(db).create_pet(owner=_user(owner), chat=_chat(chat_id), species_raw="кот", name_raw=name, now=NOW)
 
 
-async def test_creation_requires_an_active_personal_subscription(session) -> None:
-    with pytest.raises(PetDomainError, match="Selara Personal"):
-        await _create(session)
-    await _grant_personal(session, valid_until=NOW - timedelta(seconds=1))
-    with pytest.raises(PetDomainError, match="Selara Personal"):
-        await _create(session)
+async def test_creation_is_free_and_needs_no_subscription(session) -> None:
+    pet = await _create(session)
+    assert pet.name == "Мурка" and pet.level == 1
+    await _grant_personal(session, GUEST, valid_until=NOW - timedelta(seconds=1))
+    assert (await _create(session, name="Барсик", owner=GUEST)).owner_user_id == GUEST
 
 
 async def test_create_pet_and_one_pet_per_owner_and_unique_name_per_chat(session) -> None:
@@ -241,3 +240,48 @@ async def test_group_upgrade_moves_pets_relationships_and_events(session) -> Non
     assert relation is not None
     events = (await session.scalars(select(AiPetEventModel.chat_id).where(AiPetEventModel.pet_id == pet.id))).all()
     assert set(events) == {-1009}
+
+
+async def test_pets_are_enabled_by_default_and_an_explicit_off_is_kept(session) -> None:
+    activity = SqlAlchemyActivityRepository(session)
+    fresh = await activity.upsert_chat_settings(chat=_chat(-1003), values={"vote_daily_limit": 5})
+    assert fresh.pets_enabled is True  # a new chat row never switches pets off by itself
+    off = await activity.upsert_chat_settings(chat=_chat(-1003), values={"pets_enabled": False})
+    assert off.pets_enabled is False
+    again = await activity.upsert_chat_settings(chat=_chat(-1003), values={"vote_daily_limit": 6})
+    assert again.pets_enabled is False  # unrelated updates do not overwrite an explicit off
+    from selara.core.chat_settings import ChatSettings
+
+    assert ChatSettings.__dataclass_fields__["pets_enabled"].default is True
+    assert ChatSettings.__dataclass_fields__["pets_spontaneous_enabled"].default is False
+
+
+async def test_traits_form_from_how_the_pet_is_treated_and_nobody_sets_them(session) -> None:
+    pet = await _create(session)
+    service = AiPetService(session)
+    assert not hasattr(service, "set_traits")
+    assert pet.traits == ()
+
+    async def pat(index: int):
+        return await service.perform_action(
+            pet_id=pet.id, chat_id=CHAT, actor_user_id=GUEST, action_key="pat", idempotency_key=f"t{index}",
+            today=TODAY, now=NOW + timedelta(minutes=15 * index),
+        )
+
+    for index in range(9):
+        assert (await pat(index)).status == "ok"
+    assert (await service.get_pet(pet.id)).traits == ()  # too little history yet
+    for index in range(9, 12):
+        result = await pat(index)
+    assert result.pet.traits == ("affectionate",)
+    assert (await service.get_pet(pet.id)).traits == ("affectionate",)
+
+
+async def test_attitude_to_the_chat_comes_from_everyone_the_pet_met(session) -> None:
+    pet = await _create(session)
+    service = AiPetService(session)
+    assert await service.chat_relations(pet_id=pet.id, chat_id=CHAT) == []
+    await service.perform_action(
+        pet_id=pet.id, chat_id=CHAT, actor_user_id=GUEST, action_key="pat", idempotency_key="r1", today=TODAY, now=NOW
+    )
+    assert await service.chat_relations(pet_id=pet.id, chat_id=CHAT) == [(m.ACTIONS["pat"].affinity, 1)]

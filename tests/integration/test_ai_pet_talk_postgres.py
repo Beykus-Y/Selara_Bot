@@ -152,3 +152,47 @@ async def test_bot_owner_pet_talks_without_personal_and_nobody_else_does(factory
     assert allowed.allowed and allowed.access_tier == AccessTier.OWNER_INTERNAL
     denied = await reserve(other, False)
     assert not denied.allowed and denied.access_tier == AccessTier.FREE
+
+
+async def test_pet_talk_in_ail_mode_spends_the_owners_shared_personal_balance(factory) -> None:
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from selara.application.feature_access import PersonalQuotaLimits
+
+    settings = Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///")
+    base = config_from_settings(settings)
+    config = StaticPersonalConfigProvider(
+        replace(base, quota_mode="ail", ail_limits=PersonalQuotaLimits(free_daily=4, paid_daily=10, unit="ail"))
+    )
+    service = FeatureAccessService(
+        SqlAlchemyFeatureQuotaRepository(factory),
+        user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(factory, config),
+        personal_config=config,
+    )
+
+    async def reserve(owner: int, key: str, units: str, feature: AiFeature = AiFeature.PET_TALK):
+        return await service.reserve_feature_usage(
+            feature=feature, chat_id=CHAT, chat_type="supergroup", chat_title="Pets",
+            scope=QuotaScope.user(owner), actor_user_id=GUESTS[0], trigger="telegram_message",
+            timezone_name="UTC", idempotency_key=key, source_message_id=None, units=Decimal(units),
+            mode=None, model_profile=None,
+        )
+
+    first = await reserve(OWNER, "ail:1", "3")
+    second = await reserve(OWNER, "ail:2", "3")
+    assert first.allowed and second.allowed and first.quota_unit == "ail" and first.quota_limit == 10
+    # The same balance pays the personal chat: 6 spent, 3 more fit, a fourth pet line (3) does not.
+    chat = await reserve(OWNER, "ail:chat", "3", AiFeature.PERSONAL_CHAT)
+    assert chat.allowed
+    over = await reserve(OWNER, "ail:3", "3")
+    assert not over.allowed and over.reason == AccessReason.QUOTA_EXHAUSTED
+
+    # Settling at the real (cheaper) cost gives AIL back: the pet can talk again.
+    settlement = await service.adjust(invocation_id=first.invocation_id, actual_units=Decimal("0.5"))
+    assert settlement is not None and settlement.settled and settlement.units == Decimal("0.5")
+    assert (await reserve(OWNER, "ail:4", "3")).allowed
+
+    # An owner without Selara Personal still has a zero pet pool in AIL mode.
+    free = await reserve(GUESTS[1], "ail:free", "3")
+    assert not free.allowed and free.access_tier == AccessTier.FREE and free.quota_limit == 0

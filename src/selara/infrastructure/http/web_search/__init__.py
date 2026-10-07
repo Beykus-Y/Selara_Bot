@@ -5,13 +5,14 @@ from selara.infrastructure.http.web_search.models import (
     SearchResultItem,
     WebSearchError,
 )
-from selara.infrastructure.http.web_search.providers import DuckDuckGoProvider, SearchProvider
+from selara.infrastructure.http.web_search.providers import DuckDuckGoProvider, SearchProvider, SearxngProvider
 
 __all__ = [
     "DuckDuckGoProvider",
     "PageContent",
     "SearchProvider",
     "SearchResultItem",
+    "SearxngProvider",
     "WebSearchClient",
     "WebSearchError",
     "build_web_search_client",

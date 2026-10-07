@@ -162,10 +162,12 @@ class Settings(BaseSettings):
     llm_cooldown_seconds: float = Field(default=5.0, validation_alias="LLM_COOLDOWN_SECONDS")
 
     # Web search tools (web_search / fetch_page) for the ?/?? assistant. The
-    # default duckduckgo provider needs no API key; api_key/base_url are
-    # reserved for key-based providers added later.
+    # default "auto" uses SearXNG (compose) then DuckDuckGo, no key needed;
+    # web_search_api_key is for tavily/brave, web_search_base_url is the
+    # DuckDuckGo gateway only, web_search_searxng_url is the SearXNG address.
     web_search_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
-    web_search_provider: str = Field(default="duckduckgo", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_provider: str = Field(default="auto", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_searxng_url: str = Field(default="http://searxng:8080", validation_alias="WEB_SEARCH_SEARXNG_URL")
     web_search_api_key: str = Field(default="", validation_alias="WEB_SEARCH_API_KEY")
     web_search_base_url: str = Field(default="", validation_alias="WEB_SEARCH_BASE_URL")
     web_search_timeout_seconds: float = Field(
@@ -205,6 +207,25 @@ class Settings(BaseSettings):
     personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
     # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
+    # In AI Limits mode a pet's model line reserves this many AIL (the per-request cap), then settles at its real cost.
+    # Tools of the private assistant (Selara Personal only, switched on per user): model turns per request
+    # (the last one offers no tools), internet calls and page size, and how many times the profile's AIL cost is
+    # reserved for a request that may use tools (the charge never exceeds that reservation).
+    personal_tool_rounds: int = Field(default=6, ge=2, le=12, validation_alias="PERSONAL_TOOL_ROUNDS")
+    personal_web_max_calls: int = Field(default=3, ge=1, le=10, validation_alias="PERSONAL_WEB_MAX_CALLS")
+    personal_web_page_chars: int = Field(default=6000, ge=500, le=20_000, validation_alias="PERSONAL_WEB_PAGE_CHARS")
+    personal_tools_reserve_factor: Decimal = Field(
+        default=Decimal("3"), ge=Decimal("1"), le=Decimal("10"), validation_alias="PERSONAL_TOOLS_RESERVE_FACTOR"
+    )
+    pet_request_ail_cap: Decimal = Field(default=Decimal("3"), gt=0, le=Decimal("50"), validation_alias="PET_REQUEST_AIL_CAP")
+    # Custom pet actions («/pet_do ...»): per person per day, the owner and everyone else; the owner's AIL pays.
+    pet_custom_actions_daily_limit: int = Field(default=10, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_DAILY_LIMIT")
+    pet_custom_actions_guest_daily_limit: int = Field(
+        default=5, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_GUEST_DAILY_LIMIT"
+    )
+    pet_custom_actions_guests_daily_limit: int = Field(
+        default=20, ge=0, le=10_000, validation_alias="PET_CUSTOM_ACTIONS_GUESTS_DAILY_LIMIT"
+    )
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,
@@ -222,10 +243,17 @@ class Settings(BaseSettings):
     group_member_free_per_user_daily_limit: int = Field(
         default=5, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_PER_USER_DAILY_LIMIT"
     )
-    group_member_paid_daily_limit: int = Field(default=300, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
+    group_member_paid_daily_limit: int = Field(default=100, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
     group_member_paid_per_user_daily_limit: int = Field(
         default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_PER_USER_DAILY_LIMIT"
     )
+    # Model turns (tool rounds incl. the last, tool-free answer round) for «?»/«??» and the group nickname.
+    group_tool_rounds_free: int = Field(default=4, ge=1, le=20, validation_alias="GROUP_TOOL_ROUNDS_FREE")
+    group_tool_rounds_paid: int = Field(default=8, ge=1, le=20, validation_alias="GROUP_TOOL_ROUNDS_PAID")
+    llm_admin_max_tokens: int = Field(default=800, ge=64, le=8_000, validation_alias="LLM_ADMIN_MAX_TOKENS")
+    group_member_max_tokens: int = Field(default=500, ge=64, le=8_000, validation_alias="GROUP_MEMBER_MAX_TOKENS")
+    # OpenRouter `provider` object for group features (?, nickname), e.g. {"order": ["DeepInfra"], "allow_fallbacks": false}.
+    llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
@@ -247,6 +275,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Group member limits must satisfy per member <= per chat and free < paid (per member: free <= paid)"
             )
+        if self.group_tool_rounds_paid < self.group_tool_rounds_free:
+            raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
     @property

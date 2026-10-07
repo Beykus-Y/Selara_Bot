@@ -23,10 +23,17 @@ from selara.infrastructure.http.web_search.dns_pinning import PinnedDnsTransport
 from selara.infrastructure.http.web_search.htmlutil import extract_text, extract_title
 from selara.infrastructure.http.web_search.models import PageContent, SearchResultItem, WebSearchError
 from selara.infrastructure.http.web_search.providers import (
+    DEFAULT_BRAVE_BASE_URL,
     DEFAULT_DUCKDUCKGO_BASE_URL,
+    DEFAULT_SEARXNG_URL,
+    DEFAULT_TAVILY_BASE_URL,
     USER_AGENT,
+    BraveProvider,
     DuckDuckGoProvider,
+    FallbackProvider,
     SearchProvider,
+    SearxngProvider,
+    TavilyProvider,
 )
 
 log = logging.getLogger(__name__)
@@ -140,7 +147,16 @@ class WebSearchClient:
         clean_query = query.strip()
         if not clean_query:
             raise WebSearchError("Пустой поисковый запрос.")
-        return await self._provider.search(clean_query, max_results=max_results)
+        # httpx timeouts are per phase; one overall deadline bounds the whole
+        # provider chain (retries + fallbacks) so a group `?` cannot hang.
+        try:
+            return await asyncio.wait_for(
+                self._provider.search(clean_query, max_results=max_results),
+                timeout=self._timeout_seconds * 2,
+            )
+        except asyncio.TimeoutError as exc:
+            raise WebSearchError("Поиск не ответил вовремя. Попробуй позже или переформулируй запрос.",
+                                 is_timeout=True) from exc
 
     async def fetch_page(self, url: str, *, max_chars: int) -> PageContent:
         current = _validate_public_http_url(url)
@@ -242,17 +258,44 @@ def build_web_search_client(
     enabled: bool,
     provider: str,
     base_url: str = "",
+    api_key: str = "",
+    searxng_url: str = "",
     timeout_seconds: float = 15.0,
 ) -> WebSearchClient | None:
-    """Composition-root factory: None means web tools stay disabled."""
+    """Composition-root factory: None means web tools stay disabled.
+
+    - auto (default): self-hosted SearXNG first, DuckDuckGo as fallback. Without a
+      reachable SearXNG the bot just uses DuckDuckGo (no crash, no extra latency
+      after the first failure).
+    - searxng: same chain, explicit.
+    - tavily/brave: need WEB_SEARCH_API_KEY; fall back to DuckDuckGo.
+    - duckduckgo: DuckDuckGo only.
+    """
     if not enabled:
         return None
-    normalized = (provider or "").strip().lower()
+    normalized = (provider or "auto").strip().lower() or "auto"
+    # WEB_SEARCH_BASE_URL is the DuckDuckGo gateway only (also for the fallback).
+    # Keyed providers always use their own fixed hosts so an API key never goes
+    # to a gateway; SearXNG has its own WEB_SEARCH_SEARXNG_URL.
+    ddg = DuckDuckGoProvider(base_url=base_url or DEFAULT_DUCKDUCKGO_BASE_URL, timeout_seconds=timeout_seconds)
+    search_provider: SearchProvider
     if normalized == "duckduckgo":
-        search_provider: SearchProvider = DuckDuckGoProvider(
-            base_url=base_url or DEFAULT_DUCKDUCKGO_BASE_URL,
-            timeout_seconds=timeout_seconds,
-        )
+        search_provider = ddg
+    elif normalized in ("auto", "searxng"):
+        searxng = SearxngProvider(base_url=searxng_url or DEFAULT_SEARXNG_URL,
+                                  timeout_seconds=min(timeout_seconds, 8.0))
+        search_provider = FallbackProvider([searxng, ddg])
+    elif normalized in ("tavily", "brave"):
+        if not api_key.strip():
+            log.warning("WEB_SEARCH: для провайдера %s нужен WEB_SEARCH_API_KEY — используется duckduckgo.", normalized)
+            search_provider = ddg
+        else:
+            keyed_cls, fixed_url = (
+                (TavilyProvider, DEFAULT_TAVILY_BASE_URL) if normalized == "tavily"
+                else (BraveProvider, DEFAULT_BRAVE_BASE_URL)
+            )
+            keyed = keyed_cls(api_key=api_key.strip(), base_url=fixed_url, timeout_seconds=timeout_seconds)
+            search_provider = FallbackProvider([keyed, ddg])
     else:
         log.warning("WEB_SEARCH: неизвестный провайдер %r — поиск отключён.", provider)
         return None

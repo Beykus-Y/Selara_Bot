@@ -26,6 +26,9 @@ export type PersonalProfile = {
   memory_enabled: boolean
   auto_memory_enabled: boolean
   auto_memory_available: boolean
+  tools_web_enabled: boolean
+  tools_artifacts_enabled: boolean
+  tools_available: boolean
   display_name: string | null
   mode: 'assistant' | 'roleplay'
 }
@@ -73,7 +76,9 @@ export type PersonalOverview = {
   }
 }
 
-export type PersonalSettingsPatch = Partial<Pick<PersonalProfile, 'memory_enabled' | 'auto_memory_enabled'>>
+export type PersonalSettingsPatch = Partial<
+  Pick<PersonalProfile, 'memory_enabled' | 'auto_memory_enabled' | 'tools_web_enabled' | 'tools_artifacts_enabled'>
+>
 
 export type ForgetAllResult = {
   memories: number

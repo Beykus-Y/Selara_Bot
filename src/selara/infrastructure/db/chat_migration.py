@@ -26,6 +26,7 @@ from selara.infrastructure.db.models import (
     ChatAiCharacterModel,
     ChatMemberAiMessageModel,
     ChatEntitlementModel,
+    EntitlementGrantModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
@@ -121,6 +122,13 @@ async def _migrate_selara_ai_purchases(
         update(SelaraAiPurchaseIntentModel)
         .where(SelaraAiPurchaseIntentModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
+    )
+
+    # The grant journal follows the chat; it has no foreign keys, so nothing else keeps it attached.
+    await session.execute(
+        update(EntitlementGrantModel)
+        .where(EntitlementGrantModel.target_chat_id == old_chat_id)
+        .values(target_chat_id=new_chat_id)
     )
 
     products = list(
@@ -368,11 +376,13 @@ async def _merge_group_character(session: AsyncSession, *, old_chat_id: int, new
             session.expire(old_character)
         else:
             history_access = bool(old_character.member_history_access) and bool(new_character.member_history_access)
+            actions_enabled = bool(old_character.member_actions_enabled) and bool(new_character.member_actions_enabled)
             epoch = datetime.min.replace(tzinfo=timezone.utc)
             if _as_utc(old_character.updated_at or epoch) > _as_utc(new_character.updated_at or epoch):
                 for field in ("character_preset", "character_custom", "member_mode_enabled", "updated_by_user_id", "updated_at"):
                     setattr(new_character, field, getattr(old_character, field))
             new_character.member_history_access = history_access
+            new_character.member_actions_enabled = actions_enabled
             await session.delete(old_character)
 
     # Member dialogue has no chat-keyed uniqueness: a plain move keeps the conversation.

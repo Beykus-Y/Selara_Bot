@@ -5,7 +5,6 @@ import base64
 from collections.abc import Awaitable, Callable
 import hashlib
 from dataclasses import dataclass, field
-from importlib.resources import files
 from io import BytesIO
 from uuid import uuid4
 
@@ -17,10 +16,11 @@ from PIL import Image
 from selara.application.artifact_content import reject_copied_prose
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
 from selara.infrastructure.llm.artifact_rendering import validate_source, MAX_IMAGE_BYTES
+from selara.infrastructure.llm.skill_catalog import load_catalog
 from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, register_tool
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
-SKILL_VERSION = 3
+SKILL_VERSION = 4  # the artifacts skill file version (skills/artifacts/SKILL.md)
 SKILLS = {"artifacts": "Инфографика, таблицы, графики и схемы как фото в Telegram, дополняющие текст."}
 
 
@@ -39,6 +39,8 @@ class ArtifactRequestContext:
     created_artifacts: list[str] = field(default_factory=list)
     accompanying_text: str = ""
     summary_run_id: int | None = None
+    # Set once untrusted web content is in the request: stored on the artifact source (no migration needed).
+    web_tainted: bool = False
 
 
 def _schema(description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -55,11 +57,12 @@ async def list_skills(call: ToolCall, **_) -> ToolResult:
     {"name": {"type": "string", "enum": list(SKILLS)}}, ["name"]), "Читаю навык {name}...")
 async def read_skill(call: ToolCall, *, artifact_context: ArtifactRequestContext | None = None, **_) -> ToolResult:
     name = call.arguments.get("name")
-    if name not in SKILLS or artifact_context is None:
+    skill = load_catalog().get(name)
+    # Groups only know the skills listed in SKILLS; the wider catalog is offered by the Personal tool set itself.
+    if name not in SKILLS or skill is None or artifact_context is None:
         return _err(call.call_id, call.name, "Навык недоступен.")
-    content = files("selara.infrastructure.llm").joinpath("skills", name, "SKILL.md").read_text(encoding="utf-8")
     artifact_context.loaded_skills.add(name)
-    return _ok(call.call_id, call.name, {"name": name, "version": SKILL_VERSION, "content": content}, "Навык прочитан")
+    return _ok(call.call_id, call.name, {"name": name, "version": skill.version, "content": skill.body}, "Навык прочитан")
 
 
 @register_tool("create_artifact", _schema(
@@ -113,7 +116,7 @@ async def create_artifact(call: ToolCall, *, artifact_context: ArtifactRequestCo
             dimensions.append({"width": width, "height": height, "bytes": len(png)})
         row = await ctx.repository.create(chat_id=ctx.chat_id, thread_id=ctx.thread_id, creator_id=ctx.creator_id,
             title=title.strip(), pages=images, source={"pages": pages, "css": css, "skill_version": SKILL_VERSION,
-                "summary_run_id": ctx.summary_run_id})
+                "summary_run_id": ctx.summary_run_id, "web_tainted": ctx.web_tainted})
         await ctx.repository.session.commit()
     except (ValueError, KeyError, TypeError, httpx.HTTPError) as exc:
         return _err(call.call_id, call.name, str(exc)[:700] +
