@@ -108,14 +108,23 @@ def build_miniapp_admin_router(
     broadcast_status_handler: BroadcastStatus,
     telegram_bot_probe: TelegramBotProbe,
     send_notice: Callable[[int, str], Awaitable[bool]] | None = None,
+    prefix: str = "/api/miniapp/admin",
+    ai_only: bool = False,
+    unauthorized_detail: str = "Mini App сессия истекла.",
+    mutation_guard: Callable[[Request], None] | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/miniapp/admin", tags=["miniapp-admin"])
+    """The owner API. The same router is mounted for the Mini App and, with ``ai_only`` and its own ``load_user``
+    (the /app/admin web session), as the AI settings API of the server-rendered admin: one set of endpoints and
+    services, two ways to authenticate. ``mutation_guard`` may refuse a request before any work is done."""
+    router = APIRouter(prefix=prefix, tags=["miniapp-admin"])
 
     async def require_admin(request: Request):
+        if mutation_guard is not None:
+            mutation_guard(request)
         async with session_factory() as session:
             user = await load_user(session, request)
             if user is None:
-                raise HTTPException(status_code=401, detail="Mini App сессия истекла.")
+                raise HTTPException(status_code=401, detail=unauthorized_detail)
             if settings.admin_user_id is None or user.telegram_user_id != settings.admin_user_id:
                 raise HTTPException(status_code=403, detail="Недостаточно прав.")
             yield session
@@ -1133,4 +1142,8 @@ def build_miniapp_admin_router(
     router.include_router(build_admin_grants_router(
         settings=settings, session_factory=session_factory, require_admin=require_admin, send_notice=send_notice,
     ))
+    if ai_only:
+        # AI and monetization settings only: feedback, logs, broadcasts and the audience stay Mini App routes.
+        keep = (f"{prefix}/ai", f"{prefix}/monetization")
+        router.routes[:] = [route for route in router.routes if getattr(route, "path", "").startswith(keep)]
     return router

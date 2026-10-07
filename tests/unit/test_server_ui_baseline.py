@@ -31,6 +31,7 @@ EXPECTED_TEMPLATES = {
     "_macros.html",
     "achievements.html",
     "admin.html",
+    "admin_ai.html",
     "admin_broadcast_detail.html",
     "admin_docs.html",
     "admin_edit.html",
