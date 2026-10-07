@@ -161,7 +161,11 @@ jobs:
         timeout-minutes: 10
         run: |
           for attempt in 1 2 3; do
-            if timeout 240 python -m playwright install --with-deps chromium; then
+            if [ "$attempt" = "3" ]; then
+              sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
+                /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            fi
+            if timeout 150 python -m playwright install --with-deps chromium; then
               exit 0
             fi
             echo "playwright install attempt $attempt failed" >&2
