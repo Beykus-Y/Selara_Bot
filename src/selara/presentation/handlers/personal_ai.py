@@ -50,7 +50,7 @@ from selara.application.personal_models import (
     profile_options,
 )
 from selara.core.config import Settings
-from selara.infrastructure.db.ai_turn_leases import ai_turn_lease
+from selara.infrastructure.db.ai_turn_leases import AiTurnLease, AiTurnLeaseLostError, ai_turn_lease
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
@@ -859,6 +859,7 @@ async def _notify_fallback_once(message: Message, user_id: int, choice: Personal
 # pass the cooldown, spend quota and generate from the same stale history.
 _inflight_users: set[int] = set()
 _BUSY_TEXT = "⏳ Я ещё отвечаю на предыдущее сообщение. Подожди немного. Квота не потрачена."
+_LEASE_LOST_TEXT = "⚠️ Ответ прерван: обработку перехватил другой экземпляр бота. Если ответа не будет, отправь сообщение ещё раз."
 
 
 @chat_router.message(PersonalChatFilter())
@@ -886,13 +887,23 @@ async def personal_chat_handler(
         # The set above only sees this process; the durable lease also stops a turn on another bot instance.
         # End this request's transaction first: the lease takes its own connection, and a small pool would wait on ours.
         await db_session.commit()
-        async with ai_turn_lease(session_factory=session_factory, lease_key=f"personal_ai:{user_id}") as acquired:
-            if not acquired:
+        async with ai_turn_lease(session_factory=session_factory, lease_key=f"personal_ai:{user_id}") as lease:
+            if not lease:
                 await message.answer(_BUSY_TEXT)
                 return
-            await _handle_personal_chat(
-                message, db_session, session_factory, settings, personal_config, llm_client, web_search_client
-            )
+            try:
+                await lease.run(
+                    _handle_personal_chat(
+                        message, db_session, session_factory, settings, personal_config, llm_client, web_search_client,
+                        turn_lease=lease,
+                    )
+                )
+            except AiTurnLeaseLostError:
+                # Another instance took the key while this turn was stalled. The turn was stopped, and whatever it had
+                # not committed is rolled back.
+                log.warning("personal_ai: turn stopped after its AI turn lease was lost user_id=%s", user_id)
+                await db_session.rollback()
+                await message.answer(_LEASE_LOST_TEXT)
     finally:
         _inflight_users.discard(user_id)
 
@@ -905,6 +916,8 @@ async def _handle_personal_chat(
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None,
     web_search_client=None,
+    *,
+    turn_lease: AiTurnLease,
 ) -> None:
     user = message.from_user
     text = (message.text or "").strip()
@@ -1116,7 +1129,9 @@ async def _handle_personal_chat(
         await repo.add_message(
             user_id=user.id, thread=thread, role="assistant", content=answer, web_tainted=web_tainted
         )
-        # Persist the turn now and give the connection back before delivery and compression.
+        # Persist the turn now and give the connection back before delivery and compression. The check comes first: a
+        # turn that lost its lease must not save its reply over the new owner's turn.
+        await turn_lease.confirm()
         await db_session.commit()
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
