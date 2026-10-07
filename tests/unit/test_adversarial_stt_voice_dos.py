@@ -27,6 +27,8 @@ from aiogram import F
 from selara.core.config import Settings
 from selara.presentation.handlers.voice import voice_message_handler
 
+pytestmark = pytest.mark.usefixtures("stt_cooldown_stub")
+
 
 def test_voice_router_filter_has_no_permission_or_group_restriction():
     """The only registered filter on the voice handler is `F.voice` - it fires for
@@ -71,7 +73,6 @@ async def test_rapid_repeated_voice_messages_are_throttled_by_cooldown():
     """#3 fix: the same user spamming N voice messages back-to-back (within
     the cooldown window) now only reaches the billed STT call once -- the
     rest are dropped by the per-(chat, user) cooldown."""
-    from selara.presentation.handlers import voice as voice_module
 
     stt_client = AsyncMock()
     stt_client.transcribe_with_retry = AsyncMock(return_value="привет")
@@ -86,7 +87,6 @@ async def test_rapid_repeated_voice_messages_are_throttled_by_cooldown():
     bot.download_file = AsyncMock(return_value=_FakeBuf())
     settings = Settings(stt_cooldown_seconds=60.0)
 
-    voice_module._last_request_at.clear()
     attempted_calls = 20
     for i in range(attempted_calls):
         message = AsyncMock()
@@ -105,7 +105,6 @@ async def test_rapid_repeated_voice_messages_are_throttled_by_cooldown():
 async def test_voice_cooldown_is_scoped_per_chat_and_user():
     """A different user, or the same user in a different chat, must not be
     blocked by someone else's cooldown."""
-    from selara.presentation.handlers import voice as voice_module
 
     stt_client = AsyncMock()
     stt_client.transcribe_with_retry = AsyncMock(return_value="привет")
@@ -120,7 +119,6 @@ async def test_voice_cooldown_is_scoped_per_chat_and_user():
     bot.download_file = AsyncMock(return_value=_FakeBuf())
     settings = Settings(stt_cooldown_seconds=60.0)
 
-    voice_module._last_request_at.clear()
 
     async def _send(chat_id: int, user_id: int) -> None:
         message = AsyncMock()
