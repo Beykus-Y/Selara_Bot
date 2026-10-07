@@ -501,7 +501,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert instant_stt.down_revision == stt_budget.revision
     backup_claims = _load_migration("0102_backup_job_claims.py")
     assert backup_claims.down_revision == instant_stt.revision
-    assert revisions - parents == {backup_claims.revision}
+    turn_leases = _load_migration("0103_ai_turn_leases.py")
+    assert turn_leases.down_revision == backup_claims.revision
+    assert revisions - parents == {turn_leases.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32
