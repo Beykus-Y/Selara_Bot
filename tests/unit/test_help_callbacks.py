@@ -105,8 +105,8 @@ def test_every_help_section_renders_non_empty_command_text() -> None:
 
 def test_help_ai_sections_are_reachable_and_fit_a_telegram_message() -> None:
     keys = {key for key, _title in _HELP_SECTIONS_ORDER}
-    assert {"ai", "ai_plus"} <= keys
-    for key in ("ai", "ai_plus"):
+    assert {"ai", "ai_plus", "models"} <= keys
+    for key in ("ai", "ai_plus", "models"):
         text, keyboard = _resolve_help_payload(_settings(), section=key, owner_user_id=5)
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
         assert f"help:{key}:u5" in callbacks
@@ -127,3 +127,24 @@ def test_help_ai_plus_section_documents_subscription_summary_and_autocfg() -> No
     text, _ = _resolve_help_payload(_settings(), section="ai_plus")
     for fragment in ("/premium", "/summary", "daily_summary_enabled", "/autocfg", "/autocfgcancel", f"{_policy_limit(AiFeature.DAILY_SUMMARY, 'manual')} раз в месяц"):
         assert fragment in text, fragment
+
+
+def test_help_models_section_lists_profiles_limit_modes_and_grants() -> None:
+    settings = _settings()
+    text, _ = _resolve_help_payload(settings, section="models")
+    for fragment in ("/ai", "Базовая", "Аналитик", "Быстрая", "AI Limits", "AIL",
+                     f"{settings.personal_free_daily_limit} в сутки бесплатно", f"{settings.personal_paid_daily_limit}"):
+        assert fragment in text, fragment
+    assert len(text) < 4096
+
+
+def test_help_pets_and_subscription_sections_cover_custom_actions_and_grants() -> None:
+    settings = _settings()
+    pets, _ = _resolve_help_payload(settings, section="pets")
+    assert "/pet_do" in pets and "/pet_traits" in pets and "/pet_memory" in pets
+    group, _ = _resolve_help_payload(settings, section="ai")
+    assert f"{settings.pet_custom_actions_daily_limit} в сутки" in group
+    plus, _ = _resolve_help_payload(settings, section="ai_plus")
+    assert "выдана администратором" in plus
+    for text in (pets, group, plus):
+        assert len(text) < 4096
