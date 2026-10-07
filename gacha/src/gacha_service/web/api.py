@@ -475,7 +475,11 @@ def build_router(session_factory):
 
         return _pull_response_from_result(result=result, request=request, fallback_banner=payload.banner)
 
-    @router.get("/users/{user_id}/profile", response_model=ProfileResponse)
+    @router.get(
+        "/users/{user_id}/profile",
+        response_model=ProfileResponse,
+        dependencies=[Depends(_service_token_dependency)],
+    )
     async def profile(
         user_id: int,
         banner: str = settings.default_banner,
@@ -530,7 +534,11 @@ def build_router(session_factory):
             recent_pulls=history_payload,
         )
 
-    @router.get("/users/{user_id}/history", response_model=HistoryResponse)
+    @router.get(
+        "/users/{user_id}/history",
+        response_model=HistoryResponse,
+        dependencies=[Depends(_service_token_dependency)],
+    )
     async def history(
         user_id: int,
         banner: str = settings.default_banner,
@@ -598,7 +606,11 @@ def build_router(session_factory):
         response.headers["ETag"] = etag
         return BannerCardsResponse(status="ok", banner=banner, cards=payload_cards)
 
-    @router.get("/users/{user_id}/collection", response_model=CollectionResponse)
+    @router.get(
+        "/users/{user_id}/collection",
+        response_model=CollectionResponse,
+        dependencies=[Depends(_service_token_dependency)],
+    )
     async def collection(
         user_id: int,
         banner: str = settings.default_banner,

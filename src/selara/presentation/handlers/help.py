@@ -188,6 +188,7 @@ def _ai_help_text(settings: Settings) -> str:
         "• <code>/selara участники вкл</code> — включить ответы участникам (по умолчанию выключено)\n"
         f"• <code>/selara характер</code> — пресеты, <code>/selara характер свой текст</code> — свой (до {MAX_GROUP_CUSTOM_LENGTH} символов)\n"
         "• <code>/selara история вкл</code> — разрешить читать недавние сообщения чата (нужен <code>save_message true</code>); "
+        "<code>/selara действия вкл|выкл</code> — Selara сама может обнять и т.п.; "
         "<code>/selara сброс</code> — забыть разговор\n"
         f"• Кличек: {FREE_CALL_NAMES} без Selara AI, до {PAID_CALL_NAMES} с ним; вопрос до {MAX_MEMBER_TEXT_LENGTH} символов\n"
         f"• Лимит обращений в сутки: {settings.group_member_free_daily_limit} на чат и "
