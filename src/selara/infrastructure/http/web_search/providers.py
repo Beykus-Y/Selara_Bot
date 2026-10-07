@@ -227,7 +227,10 @@ class SearxngProvider(_KeyedJsonProvider):
 
 
 class FallbackProvider:
-    """Try providers in order; the first one that answers wins.
+    """Try providers in order; the first one that returns results wins.
+
+    An empty result moves on to the next provider; if none has results the
+    answer is an empty list (not an error) unless every provider failed.
 
     A provider that failed is skipped for ``cooldown_seconds`` so a missing or
     down primary (e.g. no SearXNG container) does not add latency to every query.
@@ -246,6 +249,7 @@ class FallbackProvider:
         if not candidates:
             candidates = list(self._providers)
         last_error: WebSearchError | None = None
+        got_empty = False
         for provider in candidates:
             try:
                 result = await provider.search(query, max_results=max_results)
@@ -255,7 +259,14 @@ class FallbackProvider:
                 last_error = exc
                 continue
             self._down_until.pop(id(provider), None)
-            return result
+            if result:
+                return result
+            # An empty list is not a failure (no cooldown) but the next provider
+            # may still find something, e.g. SearXNG engines all rate-limited.
+            log.info("web search provider %s returned no results, trying next", provider.name)
+            got_empty = True
+        if got_empty:
+            return []
         if last_error is None:
             raise WebSearchError("Поисковый сервис не настроен.")
         raise last_error
