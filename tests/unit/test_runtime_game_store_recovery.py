@@ -898,6 +898,49 @@ class _GatedFakeRedisClient:
     def pipeline(self) -> _GatedFakeRedisPipeline:
         return _GatedFakeRedisPipeline(self)
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Emulates the fenced game writes (issue #87) through this fake's own commands.
+
+        The effects and their order match the Lua scripts, and the payload SET
+        still goes through ``_hold_if_requested``, so the gate and the hung GET
+        keep modelling the same interleavings as the plain SET/GET did.
+        """
+        keys, args = list(keys_and_args[:numkeys]), list(keys_and_args[numkeys:])
+        if script == game_state_module._FENCED_SAVE_GAME_LUA:
+            return await self._fenced_save(keys, args)
+        if script == game_state_module._FENCED_SET_ACTIVE_LUA:
+            return await self._fenced_set_active(keys, args)
+        raise AssertionError("the gated fake only emulates the fenced game writes")
+
+    async def _fenced_save(self, keys: list[str], args: list[str]) -> int:
+        lease, game_key, active_key, *recent_keys = keys
+        token, payload, _ttl, game_id, is_active, finished, score = args
+        if self.data.get(lease) != token:
+            return 0
+        await self._hold_if_requested(payload)
+        self.data[game_key] = payload
+        if is_active == "1" and finished == "0":
+            self.data[active_key] = game_id
+            return 1
+        if await self.get(active_key) == game_id:
+            self.data.pop(active_key, None)
+        if finished == "0":
+            return 1
+        for recent_key in recent_keys:
+            self.zsets.setdefault(recent_key, {})[game_id] = float(score)
+        return 1
+
+    async def _fenced_set_active(self, keys: list[str], args: list[str]) -> int:
+        lease, active_key = keys
+        token, game_id, _ttl = args
+        if self.data.get(lease) != token:
+            return 0
+        if game_id == "":
+            await self.delete(active_key)
+        else:
+            await self.set(active_key, game_id)
+        return 1
+
 
 @pytest.mark.asyncio
 async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
@@ -926,7 +969,9 @@ async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
         client=client,
         codec=game_state_module.GameStateCodec(),
         ttl=timedelta(hours=1),
+        writer_token="unit-writer",
     )
+    client.data[repo._WRITER_LEASE_KEY] = "unit-writer"
     broker = _RecordingBroker()
     # Hold exactly the writes made by the recovery attempt once the live repo
     # is wired in: the second pass. Pass one (repo not yet wired) applies.
@@ -1038,7 +1083,7 @@ async def test_reconfigure_during_second_pass_keeps_new_runtime(
     monkeypatch.setattr(
         game_state_module.RedisGameStateRepository,
         "from_url",
-        classmethod(lambda cls, *, redis_url, codec, ttl: new_repo),
+        classmethod(lambda cls, *, redis_url, codec, ttl, writer_token: new_repo),
     )
     monkeypatch.setattr(
         game_state_module.RedisLiveEventBroker,
@@ -1127,12 +1172,15 @@ async def _stale_set_then_hang_schedule(
     """Drive the PR #101 review HIGH schedule up to the hung recovery GET.
 
     1. Pass one succeeds; the second pass serializes started G and parks
-       inside its SET.
-    2. A handler finishes G (in memory) and starts its own sync.
-    3. The delayed started-SET lands. G is finished in memory by now, so the
-       recovery's ``save_game`` continues on the finished branch ...
-    4. ... and hangs on the GET of the chat's active key: the repair SET
-       never comes. The caller then times out / closes the attempt.
+       inside its SET, holding the chat's write lock.
+    2. A handler finishes G (in memory) and starts its own sync. That write
+       queues behind the parked SET on the chat lock.
+    3. The delayed started-SET lands and releases the lock. The handler's
+       finished write goes next. The recovery sees G changed while its write
+       was in flight, so it writes G again from memory (finished) before its
+       next GET hangs.
+    4. The caller then times out / closes the hung attempt, and the finished
+       payload must still be what Redis holds.
     """
     monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
     store = RuntimeGameStore(backend=GameStore())
@@ -1150,7 +1198,9 @@ async def _stale_set_then_hang_schedule(
         client=client,
         codec=game_state_module.GameStateCodec(),
         ttl=timedelta(hours=1),
+        writer_token="unit-writer",
     )
+    client.data[repo._WRITER_LEASE_KEY] = "unit-writer"
     broker = _RecordingBroker()
     attempt: dict[str, asyncio.Task[None]] = {}
 
@@ -1176,12 +1226,14 @@ async def _stale_set_then_hang_schedule(
     for _ in range(10):
         await asyncio.sleep(0)
     assert game.status == "finished"
+    # Queued on the chat lock behind the parked started-SET.
+    assert not finish_task.done()
 
     client.release_gate.set()
     await asyncio.wait_for(client.get_hung.wait(), timeout=5)
-    # The stale started payload has landed and the repair never came.
-    stale = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
-    assert stale.status == "started"
+    # The finished payload is what Redis holds, even though the recovery hung.
+    saved = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
+    assert saved.status == "finished"
     return store, game, client, repo, broker, task, finish_task
 
 
@@ -1221,8 +1273,8 @@ async def test_stale_second_pass_set_then_timeout_keeps_confirmed_finish(
 ) -> None:
     """PR #101 third review HIGH, timeout variant.
 
-    The stale second-pass SET already landed and the recovery hangs on the
-    next GET of its own ``save_game`` before any repair SET; the second-pass
+    The stale second-pass SET lands after the handler's finish mutated G, the
+    recovery rewrites G from memory and then hangs on a GET; the second-pass
     timeout fails the attempt. The handler's finish must still end up in
     Redis (its write is ordered after the stale one), and a restart must
     hydrate G as finished -- by id and through the recent-games index.
@@ -1230,8 +1282,6 @@ async def test_stale_second_pass_set_then_timeout_keeps_confirmed_finish(
     store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
         monkeypatch, chat_id=611, attempt_timeout=0.5
     )
-    # The handler's write is ordered behind the in-flight recovery write.
-    assert not finish_task.done()
 
     # The second-pass timeout fires while the recovery hangs on the GET.
     with pytest.raises(TimeoutError):
@@ -1262,7 +1312,6 @@ async def test_stale_second_pass_set_then_close_keeps_confirmed_finish(
     store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
         monkeypatch, chat_id=612, attempt_timeout=3600
     )
-    assert not finish_task.done()
 
     await store.close()
     assert task.done()

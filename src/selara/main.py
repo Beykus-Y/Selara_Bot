@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
 from aiogram import Bot
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
@@ -309,6 +311,20 @@ async def _run_web_panel(settings, session_factory) -> None:
         raise
 
 
+async def _run_services(*services: Coroutine[Any, Any, None], lease_watch: Coroutine[Any, Any, None]) -> None:
+    """Run the services until they have all ended, or until the game writer lease is lost.
+
+    A lost lease raises out of ``lease_watch``, which cancels the services. The
+    watch never ends on its own, so it is cancelled once the services are done:
+    a clean shutdown must not wait for it.
+    """
+    async with asyncio.TaskGroup() as tg:
+        tasks = [tg.create_task(service) for service in services]
+        watch = tg.create_task(lease_watch, name="game-store-writer-lease")
+        await asyncio.wait(tasks)
+        watch.cancel()
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings)
@@ -323,10 +339,16 @@ async def run() -> None:
     renderer_service = PlaywrightRendererService.get_instance()
 
     try:
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(run_message_event_backfill(session_factory))
-            tg.create_task(_run_bot(settings, session_factory))
-            tg.create_task(_run_web_panel(settings, session_factory))
+        # Only one instance may write game state to Redis. A process that cannot
+        # claim the writer lease fails here, before it serves any update, and a
+        # process that loses the lease later stops through the task group.
+        await GAME_STORE.start_writer_lease()
+        await _run_services(
+            run_message_event_backfill(session_factory),
+            _run_bot(settings, session_factory),
+            _run_web_panel(settings, session_factory),
+            lease_watch=GAME_STORE.watch_writer_lease(),
+        )
     finally:
         await renderer_service.stop()
         await GAME_STORE.close()

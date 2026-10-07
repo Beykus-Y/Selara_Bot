@@ -5586,24 +5586,109 @@ class GameStateCodec:
         }
 
 
+class GameWriterFencedError(Exception):
+    """A Redis game write was rejected because this process no longer holds the writer lease."""
+
+
+class GameWriterLeaseHeldError(Exception):
+    """Another instance holds the game writer lease, or took it over since this process last held it."""
+
+
+# Single-writer lease, see `RuntimeGameStore.start_writer_lease`. KEYS[1] is the
+# lease, KEYS[2] the epoch counter (bumped by every acquisition). ARGV[1] is the
+# owner token, ARGV[2] the TTL in ms, ARGV[3] the epoch this owner last saw ('' before
+# its first claim). Returns {status, counter}, counter being the epoch before the call:
+#   0 = held by another owner, 1 = renewed by this owner, 2 = acquired now,
+#   3 = free, but the epoch moved since ARGV[3]: another owner acquired it in between,
+#       so it is not taken silently (the lease stays free for that owner's successor).
+_CLAIM_WRITER_LEASE_LUA = """
+local owner = redis.call('GET', KEYS[1])
+local counter = tonumber(redis.call('GET', KEYS[2]) or '0')
+if owner == ARGV[1] then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return {1, counter}
+end
+if owner then
+  return {0, counter}
+end
+if ARGV[3] ~= '' and tonumber(ARGV[3]) ~= counter then
+  return {3, counter}
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('INCR', KEYS[2])
+return {2, counter}
+"""
+
+# A game write is one script: the lease check and the writes are atomic, so a
+# process that lost the lease cannot land a payload or pointer after its successor
+# has written. KEYS: lease, game payload, chat active pointer, then one recent-games
+# sorted set per player of a finished game. ARGV: owner token, payload, TTL seconds,
+# game id, is_active flag, finished flag, finish score. Returns 0 when fenced.
+_FENCED_SAVE_GAME_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+if ARGV[5] == '1' and ARGV[6] == '0' then
+  redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[3])
+  return 1
+end
+if redis.call('GET', KEYS[3]) == ARGV[4] then
+  redis.call('DEL', KEYS[3])
+end
+if ARGV[6] == '0' then
+  return 1
+end
+for i = 4, #KEYS do
+  redis.call('ZADD', KEYS[i], ARGV[7], ARGV[4])
+  redis.call('EXPIRE', KEYS[i], ARGV[3])
+end
+return 1
+"""
+
+# KEYS: lease, chat active pointer. ARGV: owner token, game id ('' clears the
+# pointer), TTL seconds. Returns 0 when fenced.
+_FENCED_SET_ACTIVE_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if ARGV[2] == '' then
+  redis.call('DEL', KEYS[2])
+else
+  redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+end
+return 1
+"""
+
+
 class RedisGameStateRepository:
     _GAME_KEY_PREFIX = "selara:game"
     _ACTIVE_KEY_PREFIX = "selara:chat_active"
     _RECENT_KEY_PREFIX = "selara:user_recent_games"
+    _WRITER_LEASE_KEY = "selara:game_writer"
+    _WRITER_EPOCH_KEY = "selara:game_writer_epoch"
 
-    def __init__(self, *, client, codec: GameStateCodec, ttl: timedelta) -> None:
+    def __init__(self, *, client, codec: GameStateCodec, ttl: timedelta, writer_token: str) -> None:
         self._client = client
         self._codec = codec
         self._ttl = max(timedelta(minutes=5), ttl)
+        self._writer_token = writer_token
 
     @classmethod
-    def from_url(cls, *, redis_url: str, codec: GameStateCodec, ttl: timedelta) -> "RedisGameStateRepository":
+    def from_url(
+        cls,
+        *,
+        redis_url: str,
+        codec: GameStateCodec,
+        ttl: timedelta,
+        writer_token: str,
+    ) -> "RedisGameStateRepository":
         try:
             from redis.asyncio import Redis
         except ModuleNotFoundError as exc:
             raise RuntimeError("Redis support requires the `redis` package to be installed.") from exc
         client = Redis.from_url(redis_url, decode_responses=True)
-        return cls(client=client, codec=codec, ttl=ttl)
+        return cls(client=client, codec=codec, ttl=ttl, writer_token=writer_token)
 
     @property
     def ttl_seconds(self) -> int:
@@ -5630,26 +5715,30 @@ class RedisGameStateRepository:
         return game
 
     async def save_game(self, game: GroupGame, *, is_active: bool) -> None:
-        await self._client.set(self._game_key(game.game_id), self._codec.dumps(game), ex=self.ttl_seconds)
-        active_key = self._active_key(game.chat_id)
-        if is_active and game.status != "finished":
-            await self._client.set(active_key, game.game_id, ex=self.ttl_seconds)
-            return
+        """Write the game payload and its pointers, fenced by the writer lease.
 
-        current_active = await self._client.get(active_key)
-        if current_active == game.game_id:
-            await self._client.delete(active_key)
-
-        if game.status != "finished":
-            return
-
-        score = int((game.started_at or game.created_at).timestamp())
-        pipe = self._client.pipeline()
-        for user_id in game.players:
-            recent_key = self._recent_key(user_id)
-            pipe.zadd(recent_key, {game.game_id: score})
-            pipe.expire(recent_key, self.ttl_seconds)
-        await pipe.execute()
+        The whole write is one script that lands only while this process still
+        holds the lease, so a stale writer can never overwrite its successor.
+        """
+        finished = game.status == "finished"
+        keys = [self._WRITER_LEASE_KEY, self._game_key(game.game_id), self._active_key(game.chat_id)]
+        score = 0
+        if finished:
+            keys.extend(self._recent_key(user_id) for user_id in game.players)
+            score = int((game.started_at or game.created_at).timestamp())
+        await self._run_fenced(
+            _FENCED_SAVE_GAME_LUA,
+            keys,
+            [
+                self._writer_token,
+                self._codec.dumps(game),
+                str(self.ttl_seconds),
+                game.game_id,
+                "1" if is_active else "0",
+                "1" if finished else "0",
+                str(score),
+            ],
+        )
 
     async def load_active_game_id(self, chat_id: int) -> str | None:
         value = await self._client.get(self._active_key(chat_id))
@@ -5664,11 +5753,33 @@ class RedisGameStateRepository:
         never resurrect a game this process has already finished or replaced.
         Passing `game_id=None` clears the key.
         """
-        active_key = self._active_key(chat_id)
-        if game_id is None:
-            await self._client.delete(active_key)
-            return
-        await self._client.set(active_key, game_id, ex=self.ttl_seconds)
+        await self._run_fenced(
+            _FENCED_SET_ACTIVE_LUA,
+            [self._WRITER_LEASE_KEY, self._active_key(chat_id)],
+            [self._writer_token, game_id or "", str(self.ttl_seconds)],
+        )
+
+    async def claim_writer_lease(self, *, ttl_ms: int, known_epoch: int | None) -> tuple[int, int]:
+        """Acquire or renew the single-writer lease; returns (status, epoch counter before the call).
+
+        ``known_epoch`` is the epoch this process last held the lease at, or None
+        before its first claim. See `_CLAIM_WRITER_LEASE_LUA` for the statuses.
+        """
+        status, counter = await self._client.eval(
+            _CLAIM_WRITER_LEASE_LUA,
+            2,
+            self._WRITER_LEASE_KEY,
+            self._WRITER_EPOCH_KEY,
+            self._writer_token,
+            str(ttl_ms),
+            "" if known_epoch is None else str(known_epoch),
+        )
+        return int(status), int(counter)
+
+    async def _run_fenced(self, script: str, keys: list[str], args: list[str]) -> None:
+        applied = await self._client.eval(script, len(keys), *keys, *args)
+        if int(applied) != 1:
+            raise GameWriterFencedError("this process no longer holds the game writer lease")
 
     async def list_active_game_ids(self, *, chat_ids: set[int] | None = None) -> list[str]:
         if chat_ids:
@@ -5892,6 +6003,14 @@ class RuntimeGameStore:
       half-open Redis can never pin the single recovery task forever.
     * ``close()`` is terminal: it cancels the recovery loop, sets ``_closed``
       and no later Redis error can re-arm recovery or start a new task.
+    * Single writer (issue #87): only the holder of the Redis writer lease
+      (``start_writer_lease``) persists game state. The heartbeat renews the
+      lease, and every game write is a script that checks the lease atomically,
+      so a stale writer is fenced off instead of overwriting its successor. A
+      second instance never becomes a writer, and a lease taken over by another
+      instance ends this process (``watch_writer_lease``). A lease that merely
+      lapsed while Redis was unreachable is re-claimed by recovery, and only
+      when no other instance acquired it in between (epoch check).
 
     Lock order across layers: a game lock (``GameStore._lock_game``) may take
     ``GameStore._registry_lock`` and nothing else, and no game lock is ever
@@ -5903,6 +6022,15 @@ class RuntimeGameStore:
 
     _RECOVERY_RETRY_SECONDS = 15.0
     _RECOVERY_ATTEMPT_TIMEOUT_SECONDS = 30.0
+    _WRITER_LEASE_TTL_MS = 30_000
+    _WRITER_HEARTBEAT_SECONDS = 10.0
+    _WRITER_START_RETRY_SECONDS = 1.0
+    # A crashed predecessor keeps its lease until the TTL runs out, so a new
+    # process waits slightly longer than that before refusing to start.
+    _WRITER_START_TIMEOUT_SECONDS = 35.0
+    # A lease call that gets no answer in time counts as a Redis outage. It stays
+    # well inside the TTL and the recovery retry interval.
+    _WRITER_CLAIM_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, backend: InMemoryGameStore | None = None) -> None:
         self._backend = backend or InMemoryGameStore()
@@ -5944,9 +6072,30 @@ class RuntimeGameStore:
         self._recovery_attempt_timeout_seconds = self._RECOVERY_ATTEMPT_TIMEOUT_SECONDS
         self._degraded_owned_chats: set[int] = set()
         self._closed = False
+        # Single-writer lease (see `start_writer_lease`). The token identifies
+        # this process; the epoch is the lease's acquisition counter as this
+        # process last saw it, so a re-claim can prove nobody else acquired it.
+        self._writer_token = uuid4().hex
+        self._writer_epoch: int | None = None
+        # The repo the lease was last claimed through: the heartbeat renews it, and
+        # during a recovery attempt that is the candidate, not yet the live repo.
+        self._lease_repo: RedisGameStateRepository | None = None
+        self._writer_lease_enabled = False
+        self._writer_heartbeat_task: asyncio.Task[None] | None = None
+        self._writer_fatal: Exception | None = None
+        self._writer_fatal_event = asyncio.Event()
+        self._writer_lease_ttl_ms = self._WRITER_LEASE_TTL_MS
+        self._writer_heartbeat_seconds = self._WRITER_HEARTBEAT_SECONDS
+        self._writer_start_retry_seconds = self._WRITER_START_RETRY_SECONDS
+        self._writer_start_timeout_seconds = self._WRITER_START_TIMEOUT_SECONDS
+        self._writer_claim_timeout_seconds = self._WRITER_CLAIM_TIMEOUT_SECONDS
 
     @staticmethod
     def _is_redis_error(exc: Exception) -> bool:
+        # A fenced write means Redis answers but the lease moved: this process
+        # can no longer write, so it degrades exactly like during an outage.
+        if isinstance(exc, GameWriterFencedError):
+            return True
         return _RedisError is not None and isinstance(exc, _RedisError)
 
     def _degrade_to_in_memory(self, *, stage: str, exc: Exception) -> None:
@@ -5990,13 +6139,19 @@ class RuntimeGameStore:
     def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
         ttl = timedelta(hours=max(1, ttl_hours))
         self._backend = InMemoryGameStore()
-        self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
+        self._state_repo = RedisGameStateRepository.from_url(
+            redis_url=redis_url, codec=self._codec, ttl=ttl, writer_token=self._writer_token,
+        )
         self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
         self._redis_url = redis_url
         self._redis_ttl = ttl
         self._redis_degraded = False
         self._degraded_owned_chats = set()
         self._closed = False
+        self._writer_lease_enabled = False
+        self._writer_epoch = None
+        self._lease_repo = None
+        self._stop_writer_heartbeat()
         self._game_revisions = {}
         self._chat_write_locks = {}
         self._finished_games_to_evict.clear()
@@ -6011,6 +6166,10 @@ class RuntimeGameStore:
         self._state_repo = None
         self._broker = None
         self._redis_url = None
+        self._writer_lease_enabled = False
+        self._writer_epoch = None
+        self._lease_repo = None
+        self._stop_writer_heartbeat()
         self._redis_degraded = False
         self._degraded_owned_chats = set()
         self._game_revisions = {}
@@ -6035,6 +6194,10 @@ class RuntimeGameStore:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._stop_writer_heartbeat()
+        # Not released here: a release would fence writes still in flight at
+        # shutdown. The lease runs out on its TTL and a successor waits for it.
+        self._writer_lease_enabled = False
         if self._broker is not None:
             await self._broker.close()
         if self._state_repo is not None:
@@ -6074,6 +6237,11 @@ class RuntimeGameStore:
                     break
                 try:
                     await self._attempt_recovery()
+                except GameWriterLeaseHeldError as exc:
+                    # Another instance is the writer now. Retrying would only
+                    # create a second one, so this process stops instead.
+                    self._fail_writer(exc)
+                    return
                 except Exception as exc:
                     # A timed-out attempt is an ordinary failed attempt: the
                     # candidates were closed, the store stays degraded and the
@@ -6089,7 +6257,12 @@ class RuntimeGameStore:
     def _build_redis_runtime(self) -> tuple[RedisGameStateRepository, RedisLiveEventBroker]:
         assert self._redis_url is not None
         return (
-            RedisGameStateRepository.from_url(redis_url=self._redis_url, codec=self._codec, ttl=self._redis_ttl),
+            RedisGameStateRepository.from_url(
+                redis_url=self._redis_url,
+                codec=self._codec,
+                ttl=self._redis_ttl,
+                writer_token=self._writer_token,
+            ),
             RedisLiveEventBroker.from_url(redis_url=self._redis_url),
         )
 
@@ -6166,6 +6339,11 @@ class RuntimeGameStore:
             try:
                 async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
                     await repo.ping()
+                    if self._writer_lease_enabled:
+                        # Re-claim before reconciling: the candidate's writes must be
+                        # fenced like any other writer's, and a lease held by another
+                        # instance (or taken over) makes this attempt fail.
+                        await self._claim_writer_lease(repo)
                     synced_games = await self._reconcile_degraded_state(repo)
             except asyncio.CancelledError:
                 await self._discard_components(repo, broker)
@@ -6218,6 +6396,111 @@ class RuntimeGameStore:
             )
         finally:
             self._recovery_in_progress = False
+
+    async def start_writer_lease(self) -> None:
+        """Claim the single-writer lease before the process serves any update.
+
+        Only the lease holder writes game state to Redis, so two instances that
+        share one Redis can never both persist the same game (issue #87). A second
+        instance waits for a predecessor's lease to expire and then fails with
+        ``GameWriterLeaseHeldError``, so it never becomes a writer. A Redis outage
+        at startup degrades to memory like any other outage; the recovery loop
+        claims the lease once Redis answers. The heartbeat renews the lease while
+        the process runs.
+        """
+        repo = self._state_repo
+        if repo is None:
+            return
+        self._writer_lease_enabled = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._writer_start_timeout_seconds
+        while True:
+            try:
+                await self._claim_writer_lease(repo)
+                break
+            except GameWriterLeaseHeldError:
+                if loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(self._writer_start_retry_seconds)
+            except Exception as exc:
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
+                    raise
+                self._degrade_to_in_memory(stage="writer-lease:start", exc=exc)
+                break
+        self._start_writer_heartbeat()
+
+    async def watch_writer_lease(self) -> None:
+        """Block until this process stops being the writer, then raise to end it.
+
+        Run it beside the process's services (``selara.main._run_services``): the
+        raised error cancels them, so a lost lease never leaves a second writer
+        running next to the instance that took over.
+        """
+        await self._writer_fatal_event.wait()
+        if self._writer_fatal is not None:
+            raise self._writer_fatal
+
+    async def _claim_writer_lease(self, repo: RedisGameStateRepository) -> None:
+        self._lease_repo = repo
+        async with asyncio.timeout(self._writer_claim_timeout_seconds):
+            status, counter = await repo.claim_writer_lease(
+                ttl_ms=self._writer_lease_ttl_ms,
+                known_epoch=self._writer_epoch,
+            )
+        if status == 0:
+            raise GameWriterLeaseHeldError("another instance holds the game writer lease")
+        if status == 3:
+            # Another instance acquired (and released) the lease since this process
+            # last held it, so its writes may be newer than this process's memory.
+            raise GameWriterLeaseHeldError("the game writer lease was taken over by another instance")
+        self._writer_epoch = counter + 1 if status == 2 else counter
+
+    def _start_writer_heartbeat(self) -> None:
+        task = self._writer_heartbeat_task
+        if task is not None and not task.done():
+            return
+        self._writer_heartbeat_task = asyncio.get_running_loop().create_task(
+            self._writer_heartbeat_loop(),
+            name="game-store-writer-heartbeat",
+        )
+
+    def _stop_writer_heartbeat(self) -> None:
+        task = self._writer_heartbeat_task
+        self._writer_heartbeat_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _writer_heartbeat_loop(self) -> None:
+        while self._writer_lease_enabled and not self._closed:
+            await asyncio.sleep(self._writer_heartbeat_seconds)
+            # Renew through the repo the lease was last claimed on, so the lease is
+            # kept alive while a recovery attempt reconciles on its candidate repo.
+            repo = self._lease_repo
+            if repo is None or not self._writer_lease_enabled or self._closed:
+                continue
+            try:
+                await self._claim_writer_lease(repo)
+            except GameWriterLeaseHeldError as exc:
+                self._fail_writer(exc)
+                return
+            except Exception as exc:
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
+                    self._fail_writer(exc)
+                    return
+                if self._state_repo is repo:
+                    # A recovery may have installed a fresh runtime while this claim was
+                    # in flight: the failure is about the runtime the claim was made on.
+                    self._degrade_to_in_memory(stage="writer-lease:heartbeat", exc=exc)
+
+    def _fail_writer(self, exc: Exception) -> None:
+        if self._writer_fatal is None:
+            self._writer_fatal = exc
+            logger.critical(
+                "Game store writer lease was lost to another instance; stopping this process "
+                "so that only one instance writes game state. Error: %s",
+                exc,
+            )
+        self._writer_fatal_event.set()
 
     async def _reconcile_degraded_state(self, repo: RedisGameStateRepository) -> int:
         """Push the in-memory view over the stale Redis snapshot.
