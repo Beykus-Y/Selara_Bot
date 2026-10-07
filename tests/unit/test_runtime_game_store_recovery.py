@@ -8,6 +8,8 @@ never resurrect a stale phase or a game finished during the degradation.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from datetime import timedelta
 
 import pytest
 
@@ -801,6 +803,281 @@ async def test_recovery_loop_retries_after_second_pass_timeout(
     while store._recovery_task is not None:
         assert loop.time() < deadline, "recovery loop did not stop after recovery"
         await asyncio.sleep(0.01)
+
+    await store.close()
+
+
+class _GatedFakeRedisPipeline:
+    """Pipeline stand-in collecting zadds until ``execute``."""
+
+    def __init__(self, client: _GatedFakeRedisClient) -> None:
+        self._client = client
+        self._zadds: list[tuple[str, dict[str, float]]] = []
+
+    def zadd(self, key: str, mapping: dict[str, float]) -> None:
+        self._zadds.append((key, mapping))
+
+    def expire(self, key: str, ttl: int) -> None:
+        return None
+
+    async def execute(self) -> list[bool]:
+        for key, mapping in self._zadds:
+            self._client.zsets.setdefault(key, {}).update(mapping)
+        return [True] * len(self._zadds)
+
+
+class _GatedFakeRedisClient:
+    """Minimal async redis client backing a real ``RedisGameStateRepository``.
+
+    SETs for which ``hold_when`` returns true are parked on ``release_gate``
+    instead of being applied, modelling a command that was serialized and
+    sent but only lands in Redis later (the review's delayed second-pass
+    SET); everything else applies immediately, like another connection.
+    """
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+        self.zsets: dict[str, dict[str, float]] = {}
+        self.held_sets: list[str] = []
+        self.gate_entered = asyncio.Event()
+        self.release_gate = asyncio.Event()
+        self.hold_when: Callable[[], bool] | None = None
+
+    async def _hold_if_requested(self, value: str) -> None:
+        if self.hold_when is None or not self.hold_when():
+            return
+        self.held_sets.append(value)
+        self.gate_entered.set()
+        await self.release_gate.wait()
+
+    async def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        await self._hold_if_requested(value)
+        self.data[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        return key in self.data or key in self.zsets
+
+    def pipeline(self) -> _GatedFakeRedisPipeline:
+        return _GatedFakeRedisPipeline(self)
+
+
+@pytest.mark.asyncio
+async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 review HIGH: the second pass's delayed SET must not win.
+
+    Schedule from the review: the second pass serializes the started game G
+    and parks inside its Redis SET; a concurrent handler finishes G (its own
+    sync persists the finished payload through another connection, clears
+    the pointer and returns successfully); then the delayed started-SET
+    lands and must not overwrite the confirmed finished state, or a restart
+    resurrects the finished game as active.
+    """
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 3600
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    game = await _make_started_game(store, chat_id=601)
+    assert store._state_repo is None
+
+    client = _GatedFakeRedisClient()
+    repo = game_state_module.RedisGameStateRepository(
+        client=client,
+        codec=game_state_module.GameStateCodec(),
+        ttl=timedelta(hours=1),
+    )
+    broker = _RecordingBroker()
+    # Hold exactly the writes made by the recovery attempt once the live repo
+    # is wired in: the second pass. Pass one (repo not yet wired) applies.
+    attempt: dict[str, asyncio.Task[None]] = {}
+    client.hold_when = lambda: asyncio.current_task() is attempt.get("task") and store._state_repo is repo
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    attempt["task"] = task
+    await asyncio.wait_for(client.gate_entered.wait(), timeout=5)
+
+    # The parked write is the second pass's started serialization of G.
+    assert len(client.held_sets) == 1
+    held = game_state_module.GameStateCodec().loads(client.held_sets[0])
+    assert held.game_id == game.game_id
+    assert held.status == "started"
+
+    # Step 2 of the schedule: the handler's own sync confirms the finish.
+    await store.finish(game_id=game.game_id, winner_text="u1 wins")
+    game_key = repo._game_key(game.game_id)
+    confirmed = game_state_module.GameStateCodec().loads(client.data[game_key])
+    assert confirmed.status == "finished"
+    assert confirmed.winner_text == "u1 wins"
+    assert client.data.get(repo._active_key(game.chat_id)) is None
+
+    # Step 3: let the delayed started-SET land on top of it.
+    client.release_gate.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert store.redis_recovery_state == "connected"
+    final = game_state_module.GameStateCodec().loads(client.data[game_key])
+    assert final.status == "finished"
+    assert final.winner_text == "u1 wins"
+    assert client.data.get(repo._active_key(game.chat_id)) is None
+
+    # Step 5: restart simulation -- the finished game must not resurrect.
+    restarted = RuntimeGameStore(backend=GameStore())
+    restarted._state_repo = repo  # type: ignore[assignment]
+    await restarted._hydrate_game(game.game_id)
+    restored = await restarted.backend.get_game(game.game_id)
+    assert restored is not None
+    assert restored.status == "finished"
+    assert restored.winner_text == "u1 wins"
+    active_after_restart = await restarted.backend.get_active_game_for_chat(chat_id=game.chat_id)
+    assert active_after_restart is None
+
+    await store.close()
+    await restarted.close()
+
+
+class _GatedSecondPassRepo(_RecordingRepo):
+    """Pass-one saves succeed; the second pass's first save blocks on a gate."""
+
+    def __init__(self, *, games_expected: int) -> None:
+        super().__init__()
+        self._pass_one_saves = games_expected
+        self._saves_since_ping = 0
+        self.gate_entered = asyncio.Event()
+        self.release_gate = asyncio.Event()
+
+    async def ping(self) -> None:
+        self._saves_since_ping = 0
+        await super().ping()
+
+    async def save_game(self, game, *, is_active: bool) -> None:
+        self._saves_since_ping += 1
+        if self._saves_since_ping > self._pass_one_saves:
+            self.gate_entered.set()
+            await self.release_gate.wait()
+        await super().save_game(game, is_active=is_active)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_during_second_pass_keeps_new_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 review MEDIUM: reconfigure vs a cancelled old recovery.
+
+    configure_runtime installs a fresh runtime while an old recovery attempt
+    is parked inside its second pass and cancels that attempt. The dying
+    attempt must close only its own candidates: an unconditional degrade
+    would null the new repo/broker, flip the fresh configuration back to
+    degraded, re-schedule recovery and leak the new clients -- all from a
+    stale generation.
+    """
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 3600
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    await _make_started_game(store, chat_id=701)
+    store._cancel_recovery_task()  # drop the idle background loop; the attempt below is driven directly
+
+    repo = _GatedSecondPassRepo(games_expected=1)
+    broker = _RecordingBroker()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    store._recovery_task = task  # type: ignore[assignment]
+    await asyncio.wait_for(repo.gate_entered.wait(), timeout=5)
+
+    # Reconfigure while the old attempt is suspended mid-second-pass.
+    new_repo = _RecordingRepo()
+    new_broker = _RecordingBroker()
+    monkeypatch.setattr(
+        game_state_module.RedisGameStateRepository,
+        "from_url",
+        classmethod(lambda cls, *, redis_url, codec, ttl: new_repo),
+    )
+    monkeypatch.setattr(
+        game_state_module.RedisLiveEventBroker,
+        "from_url",
+        classmethod(lambda cls, *, redis_url: new_broker),
+    )
+    store.configure_runtime(redis_url="redis://reconfigured", ttl_hours=24)
+
+    assert store._state_repo is new_repo
+    assert store._broker is new_broker
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The stale generation left the freshly configured runtime untouched ...
+    assert store._state_repo is new_repo
+    assert store._broker is new_broker
+    assert store._redis_degraded is False
+    assert store._degraded_owned_chats == set()
+    assert store.redis_recovery_state == "connected"
+    assert store._recovery_task is None
+    assert store._recovery_in_progress is False
+    # ... closed only its own candidates, and did not leak the new clients.
+    assert repo.closed is True
+    assert broker.closed is True
+    assert new_repo.closed is False
+    assert new_broker.closed is False
+
+    await store.close()
+    assert new_repo.closed is True
+    assert new_broker.closed is True
+
+
+@pytest.mark.asyncio
+async def test_use_in_memory_during_second_pass_keeps_memory_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 review MEDIUM: use_in_memory vs a cancelled old recovery.
+
+    Switching to memory-only while an old recovery attempt is parked in its
+    second pass must stay a clean switch: the dying attempt may not flip the
+    store to degraded -- a state a later configure_runtime would otherwise
+    inherit.
+    """
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 3600
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    await _make_started_game(store, chat_id=702)
+    store._cancel_recovery_task()  # drop the idle background loop; the attempt below is driven directly
+
+    repo = _GatedSecondPassRepo(games_expected=1)
+    broker = _RecordingBroker()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    store._recovery_task = task  # type: ignore[assignment]
+    await asyncio.wait_for(repo.gate_entered.wait(), timeout=5)
+
+    store.use_in_memory()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store._state_repo is None
+    assert store._broker is None
+    assert store._redis_url is None
+    assert store._redis_degraded is False
+    assert store.redis_recovery_state == "disabled"
+    assert store._recovery_task is None
+    assert repo.closed is True
+    assert broker.closed is True
 
     await store.close()
 
