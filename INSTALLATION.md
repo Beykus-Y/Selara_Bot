@@ -179,10 +179,13 @@ docker compose logs -f app
 ### 4.2 Проверка web health endpoint
 
 ```bash
-curl -i http://127.0.0.1:8080/healthz
+curl -i http://127.0.0.1:8080/livez
+curl -i http://127.0.0.1:8080/readyz
 ```
 
-Ожидается успешный HTTP-ответ.
+`/livez` показывает жизнь процесса. `/readyz` (и alias `/healthz`) проверяет
+БД, Redis и polling heartbeat; во время startup или outage отвечает 503.
+Подробности: [RUNTIME_READINESS.md](docs/RUNTIME_READINESS.md).
 
 ### 4.3 Важная особенность compose-конфига
 В `docker-compose.yml` используется внешняя сеть `edge`. На «чистом» сервере её нужно создать заранее:

@@ -40,7 +40,8 @@ Driver использует digest для `app`, `web`, `artifact-renderer`, з�
 локальную сборку (`--no-build`) и вторичную загрузку через mutable-теги
 (`--pull never`). Перед заменой контейнеров проверяет `RepoDigests` и OCI
 revision label app/web. После запуска проверяет `.Image` ID, `Config.Image`,
-running/health state и app `/healthz`, затем повторно проверяет все контейнеры.
+running/health state, app `/readyz` и public frontend route, затем повторно
+проверяет все контейнеры. См. [RUNTIME_READINESS.md](RUNTIME_READINESS.md).
 Два обновления на одном VPS сериализуются `flock`; workflow также имеет
 concurrency group. Gacha digest записан в manifest для отдельного сервиса,
 существующий app/web deployment workflow gacha не обновляет.

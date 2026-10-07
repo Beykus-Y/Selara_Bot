@@ -89,6 +89,7 @@ from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.bot_runtime import get_bot_polling_runtime_state
+from selara.web.readiness import database_ready, polling_ready, redis_ready
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
@@ -4528,15 +4529,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         return False, "Неизвестное действие."
 
-    @app.get("/healthz")
-    async def healthcheck() -> Response:
-        try:
-            async with session_factory() as session:
-                await session.execute(select(1))
-        except Exception:
-            logger.warning("Web readiness check failed", exc_info=True)
-            return JSONResponse(content={"status": "unavailable"}, status_code=503)
+    @app.get("/livez")
+    async def liveness() -> Response:
         return JSONResponse(content={"status": "ok"}, status_code=200)
+
+    @app.get("/healthz")
+    @app.get("/readyz")
+    async def readiness() -> Response:
+        database_ok, redis_ok = await asyncio.gather(database_ready(session_factory), redis_ready(settings.redis_url))
+        checks = {
+            "database": database_ok,
+            "redis": redis_ok and GAME_STORE.durable_runtime_ready,
+            "polling": polling_ready(get_bot_polling_runtime_state()),
+        }
+        ready = all(checks.values())
+        return JSONResponse(content={"status": "ok" if ready else "unavailable", "checks": checks},
+                            status_code=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):

@@ -47,7 +47,7 @@ server {
         proxy_redirect ~^(/.*)$ /miniapp$1;
     }
 
-    location = /miniapp/healthz {
+    location ~ ^/miniapp/(healthz|readyz|livez)$ {
         rewrite ^/miniapp(/.*)$ $1 break;
         proxy_pass http://${APP_UPSTREAM};
         proxy_http_version 1.1;
