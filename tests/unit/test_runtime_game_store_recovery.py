@@ -1083,7 +1083,7 @@ async def test_reconfigure_during_second_pass_keeps_new_runtime(
     monkeypatch.setattr(
         game_state_module.RedisGameStateRepository,
         "from_url",
-        classmethod(lambda cls, *, redis_url, codec, ttl: new_repo),
+        classmethod(lambda cls, *, redis_url, codec, ttl, writer_token: new_repo),
     )
     monkeypatch.setattr(
         game_state_module.RedisLiveEventBroker,
@@ -1172,12 +1172,15 @@ async def _stale_set_then_hang_schedule(
     """Drive the PR #101 review HIGH schedule up to the hung recovery GET.
 
     1. Pass one succeeds; the second pass serializes started G and parks
-       inside its SET.
-    2. A handler finishes G (in memory) and starts its own sync.
-    3. The delayed started-SET lands. G is finished in memory by now, so the
-       recovery's ``save_game`` continues on the finished branch ...
-    4. ... and hangs on the GET of the chat's active key: the repair SET
-       never comes. The caller then times out / closes the attempt.
+       inside its SET, holding the chat's write lock.
+    2. A handler finishes G (in memory) and starts its own sync. That write
+       queues behind the parked SET on the chat lock.
+    3. The delayed started-SET lands and releases the lock. The handler's
+       finished write goes next. The recovery sees G changed while its write
+       was in flight, so it writes G again from memory (finished) before its
+       next GET hangs.
+    4. The caller then times out / closes the hung attempt, and the finished
+       payload must still be what Redis holds.
     """
     monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
     store = RuntimeGameStore(backend=GameStore())
@@ -1223,12 +1226,14 @@ async def _stale_set_then_hang_schedule(
     for _ in range(10):
         await asyncio.sleep(0)
     assert game.status == "finished"
+    # Queued on the chat lock behind the parked started-SET.
+    assert not finish_task.done()
 
     client.release_gate.set()
     await asyncio.wait_for(client.get_hung.wait(), timeout=5)
-    # The stale started payload has landed and the repair never came.
-    stale = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
-    assert stale.status == "started"
+    # The finished payload is what Redis holds, even though the recovery hung.
+    saved = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
+    assert saved.status == "finished"
     return store, game, client, repo, broker, task, finish_task
 
 
@@ -1268,8 +1273,8 @@ async def test_stale_second_pass_set_then_timeout_keeps_confirmed_finish(
 ) -> None:
     """PR #101 third review HIGH, timeout variant.
 
-    The stale second-pass SET already landed and the recovery hangs on the
-    next GET of its own ``save_game`` before any repair SET; the second-pass
+    The stale second-pass SET lands after the handler's finish mutated G, the
+    recovery rewrites G from memory and then hangs on a GET; the second-pass
     timeout fails the attempt. The handler's finish must still end up in
     Redis (its write is ordered after the stale one), and a restart must
     hydrate G as finished -- by id and through the recent-games index.
@@ -1277,8 +1282,6 @@ async def test_stale_second_pass_set_then_timeout_keeps_confirmed_finish(
     store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
         monkeypatch, chat_id=611, attempt_timeout=0.5
     )
-    # The handler's write is ordered behind the in-flight recovery write.
-    assert not finish_task.done()
 
     # The second-pass timeout fires while the recovery hangs on the GET.
     with pytest.raises(TimeoutError):
@@ -1309,7 +1312,6 @@ async def test_stale_second_pass_set_then_close_keeps_confirmed_finish(
     store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
         monkeypatch, chat_id=612, attempt_timeout=3600
     )
-    assert not finish_task.done()
 
     await store.close()
     assert task.done()
