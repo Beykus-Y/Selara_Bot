@@ -10,7 +10,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.feature_access import AccessReason, AccessTier, FeatureAccessService
-from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY, get_selara_ai_product
+from selara.application.selara_ai_product import (
+    SELARA_AI_PRODUCT_KEY,
+    SELARA_PERSONAL_PRODUCT_KEY,
+    get_selara_ai_product,
+)
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
@@ -392,6 +396,68 @@ async def test_unprocessable_payment_is_dead_lettered_once_and_stays_refundable(
         assert payment.processing_state == "rejected"
         assert payment.processing_reason == "processing_failed"
         assert payment.amount_stars == 137
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_dead_letter_preserves_intent_scope_target_and_product():
+    engine, factory = await _database()
+    try:
+        chat_id = -100_751_030
+        await _seed_chats(factory, chat_id)
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+        chat_intent = await _intent(factory, chat_id=chat_id)
+        personal_product = get_selara_ai_product(
+            product_key=SELARA_PERSONAL_PRODUCT_KEY,
+            price_stars=99,
+            duration=timedelta(days=30),
+            paid_daily_limit=40,
+        )
+        personal_intent = await repository.create_personal_purchase_intent(
+            buyer_user_id=_BUYER,
+            product=personal_product,
+            terms_version="v1",
+            terms_accepted_at=_NOW,
+            now=_NOW,
+        )
+
+        chat_row_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER,
+            invoice_payload=chat_intent.invoice_payload,
+            telegram_payment_charge_id="stars-dead-letter-chat",
+            provider_payment_charge_id="",
+            amount_stars=137,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+        personal_row_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER,
+            invoice_payload=personal_intent.invoice_payload,
+            telegram_payment_charge_id="stars-dead-letter-personal",
+            provider_payment_charge_id="",
+            amount_stars=99,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+
+        assert chat_row_id is not None
+        assert personal_row_id is not None
+        async with factory() as session:
+            chat_row = await session.get(SelaraAiPaymentModel, chat_row_id)
+            personal_row = await session.get(SelaraAiPaymentModel, personal_row_id)
+        assert chat_row.target_scope == "chat"
+        assert chat_row.target_chat_id == chat_id
+        assert chat_row.target_user_id is None
+        assert chat_row.product_key == SELARA_AI_PRODUCT_KEY
+        assert chat_row.purchase_intent_id == chat_intent.id
+        assert personal_row.target_scope == "user"
+        assert personal_row.target_user_id == _BUYER
+        assert personal_row.target_chat_id is None
+        assert personal_row.product_key == SELARA_PERSONAL_PRODUCT_KEY
+        assert personal_row.purchase_intent_id == personal_intent.id
     finally:
         await engine.dispose()
 

@@ -776,15 +776,56 @@ class SqlAlchemyTelegramStarsRepository:
         The row reuses the rejected-payment audit (state ``rejected`` with reason
         ``processing_failed``) so the existing owner alerts and ``/stars_refund``
         stay usable even though the economic effect was never applied. Idempotent
-        on the charge id; returns the stored payment id, or ``None`` when even
-        this write failed (the caller must keep the update unacknowledged).
+        on the charge id; returns the stored payment id, or ``None`` when the row
+        could not be written (the caller must keep the update unacknowledged).
+
+        The charge id is the key Telegram accepts for refunds, so an id longer
+        than the audit column is refused instead of truncated: a truncated value
+        could both collide with another charge on the unique index and fail every
+        later ``/stars_refund``. Scope, target, and product are copied from the
+        resolvable intent so a failed personal purchase stays visible in the
+        user-scoped payment views instead of being filed as a chat purchase.
         """
-        charge_id = telegram_payment_charge_id[:255]
+        charge_id = telegram_payment_charge_id
+        if len(charge_id) > 255:
+            logger.error(
+                "Telegram Stars dead-letter refused: charge id exceeds the audit "
+                "column limit and cannot be stored verbatim length=%s",
+                len(charge_id),
+            )
+            return None
         paid_at = _as_utc(payment_at)
         async with self._session_factory() as session:
             async with session.begin():
                 _require_postgresql(session)
                 await _advisory_xact_lock(session, _payment_lock_key(charge_id))
+                intent = None
+                intent_id = parse_invoice_payload(invoice_payload)
+                if intent_id is not None:
+                    intent = await session.scalar(
+                        select(SelaraAiPurchaseIntentModel).where(
+                            SelaraAiPurchaseIntentModel.id == intent_id
+                        )
+                    )
+                    if intent is not None and intent.invoice_payload != invoice_payload:
+                        intent = None
+                # Copy the intent reference only when it satisfies the audit
+                # constraints; a broken intent row falls back to the scope-less
+                # defaults instead of blocking the dead-letter write.
+                target_scope = PRODUCT_SCOPE_CHAT
+                target_user_id = None
+                target_chat_id = None
+                source_chat_id = None
+                product_key = None
+                if intent is not None and _product_matches_scope(intent.product_key, intent.target_scope):
+                    if intent.target_scope == PRODUCT_SCOPE_USER and intent.target_user_id is not None:
+                        target_scope = PRODUCT_SCOPE_USER
+                        target_user_id = intent.target_user_id
+                        product_key = intent.product_key
+                    else:
+                        target_chat_id = intent.chat_id
+                        source_chat_id = intent.source_chat_id
+                        product_key = intent.product_key
                 stored_id = await session.scalar(
                     pg_insert(SelaraAiPaymentModel)
                     .values(
@@ -793,8 +834,13 @@ class SqlAlchemyTelegramStarsRepository:
                             provider_payment_charge_id[:255] if provider_payment_charge_id is not None else None
                         ),
                         invoice_payload=invoice_payload,
+                        purchase_intent_id=intent.id if intent is not None else None,
                         buyer_user_id=buyer_user_id,
-                        target_scope=PRODUCT_SCOPE_CHAT,
+                        source_chat_id=source_chat_id,
+                        target_chat_id=target_chat_id,
+                        target_scope=target_scope,
+                        target_user_id=target_user_id,
+                        product_key=product_key,
                         # Defensive bounds only: this row must survive a poison
                         # payload, and rejected rows never feed revenue totals.
                         amount_stars=max(int(amount_stars), 0),
