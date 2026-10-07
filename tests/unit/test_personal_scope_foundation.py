@@ -217,11 +217,23 @@ async def test_model_router_default_preserves_the_configured_model():
 
 
 @pytest.mark.asyncio
-async def test_adjust_is_an_interface_only_noop():
-    repository = SimpleNamespace()
+async def test_adjust_hands_the_validated_actual_units_to_the_repository():
+    settlement = SimpleNamespace(settled=True)
+    repository = SimpleNamespace(adjust_units=AsyncMock(return_value=settlement))
     service = FeatureAccessService(repository)
 
-    assert await service.adjust(invocation_id=1, actual_units=Decimal("3")) is None
+    assert await service.adjust(invocation_id=1, actual_units=Decimal("3")) is settlement
+    repository.adjust_units.assert_awaited_once_with(invocation_id=1, actual_units=Decimal("3"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [Decimal("0"), Decimal("1.234"), Decimal("NaN"), 3])
+async def test_adjust_refuses_units_the_column_cannot_store_before_touching_the_repository(bad):
+    repository = SimpleNamespace(adjust_units=AsyncMock())
+
+    with pytest.raises(ValueError):
+        await FeatureAccessService(repository).adjust(invocation_id=1, actual_units=bad)
+    repository.adjust_units.assert_not_awaited()
 
 
 # ----- FeatureAccessService with user scope ----------------------------------
@@ -469,8 +481,11 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert group_character.down_revision == web_tainted.revision
     model_ail = _load_migration("0092_personal_model_ail.py")
     assert model_ail.down_revision == group_character.revision
-    assert revisions - parents == {model_ail.revision}
+    settlement = _load_migration("0093_ail_settlement.py")
+    assert settlement.down_revision == model_ail.revision
+    assert revisions - parents == {settlement.revision}
     assert len(model_ail.revision) <= 32
+    assert len(settlement.revision) <= 32
     assert max(len(personal.revision), len(quota.revision)) <= 32
 
 

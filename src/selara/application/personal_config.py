@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Awaitable, Callable, Protocol
 
 from selara.application.feature_access import AIL_UNIT, PersonalQuotaLimits
@@ -35,6 +36,10 @@ QUOTA_MODE_REQUESTS = "requests"
 QUOTA_MODE_AIL = "ail"
 QUOTA_MODES = (QUOTA_MODE_REQUESTS, QUOTA_MODE_AIL)
 MAX_DAILY_AIL = 100_000
+AIL_BILLING_ACTUAL = "actual"
+AIL_BILLING_FIXED = "fixed"
+AIL_BILLING_MODES = (AIL_BILLING_ACTUAL, AIL_BILLING_FIXED)
+DEFAULT_AIL_USD_VALUE = Decimal("0.0005")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,13 +100,25 @@ class PersonalConfig:
     quota_mode: str = QUOTA_MODE_REQUESTS
     # Daily AI Limits budgets; required (and only used) when ``quota_mode == "ail"``.
     ail_limits: PersonalQuotaLimits | None = None
+    # "actual": every Personal request is settled at real cost / ``ail_usd_value``; "fixed": the profile multiplier.
+    ail_billing: str = AIL_BILLING_ACTUAL
+    # What one AIL is worth in USD of provider cost.
+    ail_usd_value: Decimal = DEFAULT_AIL_USD_VALUE
 
     def __post_init__(self) -> None:
         if self.quota_mode not in QUOTA_MODES:
             raise ValueError("quota_mode must be 'requests' or 'ail'")
+        if self.ail_billing not in AIL_BILLING_MODES:
+            raise ValueError("ail_billing must be 'actual' or 'fixed'")
+        if not isinstance(self.ail_usd_value, Decimal) or not self.ail_usd_value.is_finite() or self.ail_usd_value <= 0:
+            raise ValueError("ail_usd_value must be a positive Decimal")
         if self.quota_mode == QUOTA_MODE_AIL and self.ail_limits is None:
             # Fail closed: AIL without budgets would have no limit at all.
             raise ValueError("Сначала задайте Free/Paid AIL budget.")
+
+    @property
+    def ail_settles_actual_cost(self) -> bool:
+        return self.ail_enabled and self.ail_billing == AIL_BILLING_ACTUAL
 
     @property
     def ail_enabled(self) -> bool:
@@ -135,6 +152,8 @@ def config_from_settings(settings) -> PersonalConfig:
         memory_paid_limit=settings.personal_memory_paid_limit,
         memory_auto_extract=settings.personal_memory_auto_extract,
         memory_extract_every=settings.personal_memory_extract_every,
+        ail_billing=getattr(settings, "personal_ail_billing", AIL_BILLING_ACTUAL),
+        ail_usd_value=getattr(settings, "personal_ail_usd_value", DEFAULT_AIL_USD_VALUE),
     )
 
 

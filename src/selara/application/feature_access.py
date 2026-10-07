@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -86,6 +86,31 @@ def validate_ail_units(units: Decimal) -> Decimal:
     if units != units.quantize(AIL_UNITS_QUANTUM):
         raise ValueError("AIL cost supports at most 2 decimal places")
     return units
+
+
+def ail_units_from_cost_usd(cost_usd: Decimal, usd_per_ail: Decimal) -> Decimal:
+    """What a request that really cost ``cost_usd`` weighs in AIL: rounded up to 0.01, at least 0.01."""
+    if not isinstance(cost_usd, Decimal) or not cost_usd.is_finite() or cost_usd < 0:
+        raise ValueError("Request cost must be a non-negative finite Decimal")
+    if not isinstance(usd_per_ail, Decimal) or not usd_per_ail.is_finite() or usd_per_ail <= 0:
+        raise ValueError("The USD value of one AIL must be a positive finite Decimal")
+    units = (cost_usd / usd_per_ail).quantize(AIL_UNITS_QUANTUM, rounding=ROUND_CEILING)
+    if units > MAX_AIL_REQUEST_UNITS:
+        logger.warning(
+            "AIL request cost capped at %s AIL (real cost %s USD = %s AIL)", MAX_AIL_REQUEST_UNITS, cost_usd, units
+        )
+    return min(max(units, AIL_UNITS_QUANTUM), MAX_AIL_REQUEST_UNITS)
+
+
+@dataclass(frozen=True, slots=True)
+class AilSettlement:
+    """Outcome of settling one reservation at its actual cost."""
+
+    settled: bool
+    # ``units`` is what the request now counts for; ``reserved_units`` what it counted for before.
+    units: Decimal
+    reserved_units: Decimal
+    already_settled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +344,10 @@ class FeatureQuotaRepository(Protocol):
     ) -> FeatureUsageSummary: ...
 
     async def release_if_no_provider_attempts(self, *, invocation_id: int, reason: str) -> bool: ...
+
+    async def adjust_units(self, *, invocation_id: int, actual_units: Decimal) -> AilSettlement | None: ...
+
+    async def last_settled_units(self, *, scope: QuotaScope, pool_key: str) -> Decimal | None: ...
 
 
 def resolve_feature_policy(
@@ -761,14 +790,25 @@ class FeatureAccessService:
             )
         return decision
 
-    async def adjust(self, *, invocation_id: int, actual_units: Decimal) -> None:
-        """Interface only: correcting a reservation by actual cost arrives with AI Limits.
+    async def adjust(self, *, invocation_id: int, actual_units: Decimal) -> AilSettlement | None:
+        """Settle a consumed AIL reservation at the actual cost of the request.
 
-        Reservations are made from an estimate before the provider call. A later stage
-        will implement this to settle the difference; until then it deliberately does
-        nothing, so callers can already be written against the final shape.
+        The reservation is made from the profile multiplier before the provider call; once the
+        real cost is known the row's units become ``actual_units``. Cheaper than reserved gives
+        AIL back; dearer is charged in full even past the daily limit (the provider already
+        billed it), so the next reservation is the one that is refused. A reservation is settled
+        once: repeating the call changes nothing. ``None``: nothing to settle (released, free of
+        quota, or not an AIL pool).
         """
-        return None
+        return await self._repository.adjust_units(
+            invocation_id=invocation_id, actual_units=validate_ail_units(actual_units)
+        )
+
+    async def last_ail_charge(self, user_id: int) -> Decimal | None:
+        """What the user's latest settled Personal request cost in AIL (``None`` before the first)."""
+        return await self._repository.last_settled_units(
+            scope=QuotaScope.user(user_id), pool_key=PERSONAL_AIL_POOL_KEY
+        )
 
     async def get_usage_summary(
         self,

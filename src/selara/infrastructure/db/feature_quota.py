@@ -10,8 +10,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.feature_access import (
+    PERSONAL_AIL_POOL_KEY,
     AccessReason,
     AccessTier,
+    AilSettlement,
     FeatureAccessDecision,
     FeatureQuotaPolicy,
     FeatureUsageSummary,
@@ -556,6 +558,68 @@ class SqlAlchemyFeatureQuotaRepository:
                 feature, chat_id, invocation_id, reason,
             )
             return True
+
+    async def adjust_units(self, *, invocation_id: int, actual_units: Decimal) -> AilSettlement | None:
+        """Replace a consumed AIL reservation's units by the actual cost, once.
+
+        Takes the same locks as ``reserve`` and ``release_if_no_provider_attempts`` (idempotency key,
+        then the pool bucket), so a settlement and concurrent reservations of the same user never
+        interleave. The daily limit is deliberately not checked: the provider already billed the call.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                if session.bind is None or session.bind.dialect.name != "postgresql":
+                    raise RuntimeError("Feature quota settlement requires PostgreSQL")
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel).where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                )
+                if usage is None or usage.pool_key != PERSONAL_AIL_POOL_KEY or usage.owner_exempt:
+                    return None
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": feature_quota_idempotency_lock_key(idempotency_key=usage.idempotency_key)},
+                )
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": quota_usage_lock_key(usage)},
+                )
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel)
+                    .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                    .execution_options(populate_existing=True)
+                    .with_for_update()
+                )
+                if usage is None or usage.status != "consumed":
+                    return None
+                reserved = Decimal(usage.units)
+                if usage.settled_at is not None:
+                    return AilSettlement(settled=False, units=reserved, reserved_units=reserved, already_settled=True)
+                usage.units = actual_units
+                usage.settled_at = func.now()
+                feature, scope_id = usage.feature, usage.quota_scope_id
+            logger.info(
+                "AIL reservation settled feature=%s scope_id=%s invocation_id=%s reserved=%s actual=%s",
+                feature, scope_id, invocation_id, reserved, actual_units,
+            )
+            return AilSettlement(settled=True, units=actual_units, reserved_units=reserved)
+
+    async def last_settled_units(self, *, scope: QuotaScope, pool_key: str) -> Decimal | None:
+        """AIL the scope's most recent settled request cost (any day), or ``None``."""
+        async with self._session_factory() as session:
+            value = await session.scalar(
+                select(AiFeatureQuotaUsageModel.units)
+                .where(
+                    AiFeatureQuotaUsageModel.pool_key == pool_key,
+                    AiFeatureQuotaUsageModel.quota_scope_type == scope.scope_type.value,
+                    AiFeatureQuotaUsageModel.quota_scope_id == scope.scope_id,
+                    AiFeatureQuotaUsageModel.status == "consumed",
+                    AiFeatureQuotaUsageModel.owner_exempt.is_(False),
+                    AiFeatureQuotaUsageModel.settled_at.is_not(None),
+                )
+                .order_by(AiFeatureQuotaUsageModel.settled_at.desc(), AiFeatureQuotaUsageModel.id.desc())
+                .limit(1)
+            )
+            return Decimal(value) if value is not None else None
 
     @staticmethod
     async def _count_used(

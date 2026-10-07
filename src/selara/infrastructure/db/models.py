@@ -2567,6 +2567,8 @@ class AiFeatureQuotaUsageModel(Base):
     units: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("1"), server_default="1")
     # Model profile whose AIL multiplier priced this reservation (historical text, no FK).
     model_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set once when ``units`` was replaced by the actual cost of the request (AIL settlement).
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),

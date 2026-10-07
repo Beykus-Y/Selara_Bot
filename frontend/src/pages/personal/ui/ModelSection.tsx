@@ -17,9 +17,17 @@ export function ModelSection({ data }: { data: PersonalOverview }) {
         <h2 id="personal-model-title">Модель ответа</h2>
       </div>
       {model.selectable ? (
-        <p className="selara-ai__note">
-          Каждый запрос списывает из суточного бюджета столько AI Limits, сколько стоит модель. Сейчас: {model.effective_name}, {model.cost_ail} AIL за запрос.
-        </p>
+        model.billing === 'actual' ? (
+          <p className="selara-ai__note">
+            Каждый запрос списывает из суточного бюджета столько AI Limits, сколько он стоил на самом деле: короткий
+            ответ дешевле, длинный дороже. Сейчас: {model.effective_name}, резерв на запрос {model.cost_ail} AIL.
+            {model.last_charge_ail !== null && <> Последний запрос: {model.last_charge_ail} AIL.</>}
+          </p>
+        ) : (
+          <p className="selara-ai__note">
+            Каждый запрос списывает из суточного бюджета столько AI Limits, сколько стоит модель. Сейчас: {model.effective_name}, {model.cost_ail} AIL за запрос.
+          </p>
+        )
       ) : (
         <p className="selara-ai__note">
           Сейчас каждый запрос считается как один из суточного лимита, и отвечает базовая модель. Выбор моделей станет
@@ -47,7 +55,9 @@ export function ModelSection({ data }: { data: PersonalOverview }) {
                 <span className="personal-model__name">
                   {option.emoji} {option.display_name}
                 </span>
-                <span className="personal-model__cost">×{option.ail_multiplier} AIL</span>
+                <span className="personal-model__cost">
+                  {model.billing === 'actual' ? `резерв ${option.ail_multiplier} AIL` : `×${option.ail_multiplier} AIL`}
+                </span>
                 <small>{option.available ? option.description : 'Сейчас недоступна'}</small>
               </button>
             </li>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,13 +9,19 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from selara.application.feature_access import AccessReason, AccessTier, FeatureAccessDecision
+from selara.application.feature_access import (
+    AIL_UNIT,
+    AccessReason,
+    AccessTier,
+    FeatureAccessDecision,
+    PersonalQuotaLimits,
+)
 from selara.application.personal_config import StaticPersonalConfigProvider, config_from_settings
 from selara.core.config import Settings
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import UserModel
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository
-from selara.infrastructure.llm.client import LlmClientError
+from selara.infrastructure.llm.client import LlmCallUsage, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm import personal_ai as llm_personal_ai
 from selara.presentation.handlers import personal_ai as handler
@@ -564,3 +572,132 @@ async def test_blocked_bot_on_final_send_keeps_the_stored_turn(monkeypatch, sess
 
     rows = await PersonalAiRepository(session).recent_messages(user_id=USER_ID, thread="assistant", limit=10)
     assert len(rows) == 2
+
+
+# --- AIL settlement at the actual cost: when and what the handler settles ---------------------------
+
+
+def _priced(cost: str | None, *, status: str = "succeeded", category: str | None = None) -> LlmCallUsage:
+    return LlmCallUsage(
+        "c", "m", 1, 1, 2, None if cost is None else Decimal(cost), "known" if cost else "unknown", 1, status, category
+    )
+
+
+class _SettlingLlm(_FakeLlm):
+    """Chat turn costs $0.0005 (1 AIL); the compression call is far pricier and must never be charged."""
+
+    def __init__(self, events: list, *, answer: str = "Привет! Я здесь.", error=None, chat_usages=None) -> None:
+        super().__init__(answer=answer, error=error)
+        self.events = events
+        self.chat_usages = (_priced("0.0005"),) if chat_usages is None else chat_usages
+
+    async def chat_simple(self, messages, **kwargs):
+        self.events.append("chat")
+        result = await super().chat_simple(messages, **kwargs)
+        return SimpleNamespace(value=result.value, usages=self.chat_usages)
+
+    async def summarize(self, messages, **kwargs):
+        self.events.append("compress")
+        return SimpleNamespace(value="сжатое резюме", usages=(_priced("0.5"),))
+
+
+def _ail_run(monkeypatch, *, billing="actual", owner_exempt=False, quota_unit=AIL_UNIT):
+    events: list = []
+    settings = _settings(monkeypatch)
+    config = replace(
+        config_from_settings(settings),
+        quota_mode="ail",
+        ail_limits=PersonalQuotaLimits(60, 600, unit=AIL_UNIT),
+        ail_billing=billing,
+    )
+
+    async def adjust(self, *, invocation_id, actual_units):
+        events.append(("adjust", invocation_id, actual_units))
+
+    monkeypatch.setattr(_FakeAccess, "adjust", adjust, raising=False)
+    _FakeAccess.decision = _decision(invocation_id=7, quota_unit=quota_unit, owner_exempt=owner_exempt)
+
+    async def run(message, session, llm):
+        await handler.personal_chat_handler(
+            message,
+            db_session=session,
+            session_factory=MagicMock(),
+            settings=settings,
+            personal_config=StaticPersonalConfigProvider(config),
+            llm_client=llm,
+        )
+
+    return events, run
+
+
+async def _fill_history(session) -> None:
+    repo = PersonalAiRepository(session)
+    for i in range(llm_personal_ai.PERSONAL_CONTEXT_THRESHOLD):
+        await repo.add_message(
+            user_id=USER_ID, thread="assistant", role="user" if i % 2 == 0 else "assistant", content=f"m{i}"
+        )
+
+
+async def test_actual_billing_settles_only_the_chat_turn_before_compression(monkeypatch, session):
+    events, run = _ail_run(monkeypatch)
+    await _fill_history(session)
+
+    await run(_message("новое"), session, _SettlingLlm(events))
+
+    # Settled at the chat turn's own cost (1 AIL), strictly before the pricier compression ran.
+    assert events == ["chat", ("adjust", 7, Decimal("1.00")), "compress"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "ail_unit"),
+    [
+        ({"billing": "fixed"}, AIL_UNIT),
+        ({"owner_exempt": True}, AIL_UNIT),
+        ({}, "request"),
+    ],
+)
+async def test_nothing_is_settled_for_fixed_billing_owner_or_requests_mode(monkeypatch, session, kwargs, ail_unit):
+    events, run = _ail_run(monkeypatch, quota_unit=ail_unit, **kwargs)
+
+    await run(_message("привет"), session, _SettlingLlm(events))
+
+    assert events == ["chat"]
+
+
+async def test_an_empty_answer_is_charged_its_own_cost_not_the_reservation(monkeypatch, session):
+    events, run = _ail_run(monkeypatch)
+    message = _message("привет")
+
+    await run(message, session, _SettlingLlm(events, answer="  ", chat_usages=(_priced("0.001"),)))
+
+    assert events == ["chat", ("adjust", 7, Decimal("2.00"))]
+    assert "не дал ответа" in message.thinking.edit_text.await_args.args[0]
+
+
+@pytest.mark.parametrize("category", ["api_status", "timeout", "connection"])
+async def test_a_provider_failure_settles_at_the_minimum_instead_of_the_full_reservation(
+    monkeypatch, session, category
+):
+    events, run = _ail_run(monkeypatch)
+    failed = LlmClientError("boom", usages=(_priced(None, status="failed", category=category),))
+
+    await run(_message("привет"), session, _SettlingLlm(events, error=failed))
+
+    assert events == ["chat", ("adjust", 7, Decimal("0.01"))]
+
+
+async def test_a_failure_with_no_provider_attempt_is_left_to_the_release(monkeypatch, session):
+    events, run = _ail_run(monkeypatch)
+
+    await run(_message("привет"), session, _SettlingLlm(events, error=LlmClientError("boom", usages=())))
+
+    assert events == ["chat"]
+
+
+async def test_a_failed_turn_with_an_unpriced_response_keeps_the_reservation(monkeypatch, session):
+    events, run = _ail_run(monkeypatch)
+    failed = LlmClientError("boom", usages=(_priced(None, status="validation_failed"),))
+
+    await run(_message("привет"), session, _SettlingLlm(events, error=failed))
+
+    assert events == ["chat"]

@@ -57,8 +57,12 @@ async def generate_reply(
     accounting_context: LlmAccountingContext | None,
     use_memory: bool = False,
     resolved_model: ResolvedModel | None = None,
+    usage_sink: list | None = None,
 ) -> str:
-    """Ask the model for one reply. No tools are offered: a private chat can never act on groups."""
+    """Ask the model for one reply. No tools are offered: a private chat can never act on groups.
+
+    ``usage_sink`` receives the provider usages of this chat turn only (what AIL settlement prices).
+    """
     summary, recent = await load_history(repo, user_id=user_id, thread=profile.thread)
     memories: list[str] = []
     if use_memory:
@@ -79,6 +83,8 @@ async def generate_reply(
         # AIL mode: the model already priced by the quota reservation; never re-resolved here.
         kwargs["resolved_model"] = resolved_model
     result = await llm_client.chat_simple(messages, **kwargs)
+    if usage_sink is not None:
+        usage_sink.extend(getattr(result, "usages", ()) or ())
     value = result.value if hasattr(result, "value") else result
     return (value or "").strip()
 

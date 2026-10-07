@@ -1,5 +1,7 @@
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -147,6 +149,12 @@ class Settings(BaseSettings):
     # LlmClient.chat_structured (used by the daily summary pipeline's segment/merge
     # stages, docs/DAILY_SUMMARY_TODO.md).
     llm_supports_structured_output: bool = Field(default=False, validation_alias="LLM_SUPPORTS_STRUCTURED_OUTPUT")
+    # Ask the provider for the real cost of each request (OpenRouter ``usage: {include: true}``).
+    # ``None`` detects it from the base URL; the real cost is what Personal AIL billing settles against.
+    llm_include_usage_cost: bool | None = Field(default=None, validation_alias="LLM_INCLUDE_USAGE_COST")
+    # Optional OpenRouter ``provider`` preferences as a JSON object, e.g. {"max_price": {"prompt": 0.5}}.
+    # Empty keeps provider routing untouched.
+    llm_provider_preferences_json: str = Field(default="", validation_alias="LLM_PROVIDER_PREFERENCES_JSON")
     # #3: the `?`/`??` assistant is gated on moderate_users, but nothing
     # stops the same admin repeating it immediately -- a single invocation
     # can already fan out to ~10 billed calls (up to 8 tool rounds + DM
@@ -185,6 +193,12 @@ class Settings(BaseSettings):
     personal_paid_daily_limit: int = Field(default=150, gt=0, le=10_000, validation_alias="PERSONAL_PAID_DAILY_LIMIT")
     # Personal memory: fact limits per tier (technical guard against prompt bloat) and optional auto-extraction.
     # Extraction is off by default and only runs for Selara Personal users who also switched it on for themselves.
+    # AIL billing: "actual" settles each Personal request at its real cost / PERSONAL_AIL_USD_VALUE;
+    # "fixed" keeps charging the model profile multiplier.
+    personal_ail_billing: Literal["actual", "fixed"] = Field(default="actual", validation_alias="PERSONAL_AIL_BILLING")
+    personal_ail_usd_value: Decimal = Field(
+        default=Decimal("0.0005"), gt=0, le=Decimal("100"), validation_alias="PERSONAL_AIL_USD_VALUE"
+    )
     personal_memory_free_limit: int = Field(default=20, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_FREE_LIMIT")
     personal_memory_paid_limit: int = Field(default=200, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_PAID_LIMIT")
     personal_memory_auto_extract: bool = Field(default=False, validation_alias="PERSONAL_MEMORY_AUTO_EXTRACT")
