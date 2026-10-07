@@ -11,8 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from selara.infrastructure import backup
+from selara.infrastructure import backup, backup_encryption
 from selara.infrastructure.backup import BackupFile
+
+
+_PRIVATE_KEY_B64, _PUBLIC_KEY = backup_encryption.generate_keypair()
+_PRIVATE_KEY = backup_encryption.load_private_key(_PRIVATE_KEY_B64)
+_RECIPIENT = backup_encryption.parse_public_key(_PUBLIC_KEY)
 
 
 def test_seconds_until_next_backup_targets_next_local_midnight() -> None:
@@ -45,7 +50,7 @@ def _install_dump_verifier(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_send_daily_backup_downloads_gacha_and_sends_both_dumps_in_chunks(
+async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_originals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -54,19 +59,21 @@ async def test_send_daily_backup_downloads_gacha_and_sends_both_dumps_in_chunks(
     calls: list[str] = []
     sent: list[dict[str, object]] = []
     verified = _install_dump_verifier(monkeypatch)
+    bot_plaintext = b"BOT-PLAINTEXT-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    gacha_plaintext = b"GACHA-PLAINTEXT-0123"
 
     async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
         _ = settings
         calls.append("bot")
         path = temp_dir / "bot_pg_dump.dump"
-        path.write_bytes(b"ABCDEFGHIJKL")
+        path.write_bytes(bot_plaintext)
         return BackupFile(path=path, archive_name="bot_pg_dump.dump")
 
     async def fake_download_gacha_backup(*, settings, temp_dir: Path) -> BackupFile:
         _ = settings
         calls.append("gacha")
         path = temp_dir / "gacha_pg_dump.dump"
-        path.write_bytes(b"gacha!!")
+        path.write_bytes(gacha_plaintext)
         return BackupFile(path=path, archive_name="gacha_pg_dump.dump")
 
     async def fake_send_document(*, chat_id: int, document, caption: str) -> None:
@@ -83,7 +90,7 @@ async def test_send_daily_backup_downloads_gacha_and_sends_both_dumps_in_chunks(
     monkeypatch.setattr(backup.tempfile, "mkdtemp", lambda prefix: str(job_dir))
     monkeypatch.setattr(backup, "_create_bot_database_dump", fake_create_bot_database_dump)
     monkeypatch.setattr(backup, "_download_gacha_backup", fake_download_gacha_backup)
-    monkeypatch.setattr(backup, "BACKUP_CHUNK_SIZE_BYTES", 5)
+    monkeypatch.setattr(backup, "BACKUP_CHUNK_SIZE_BYTES", 64)
     monkeypatch.setattr(backup, "_backup_timestamp", lambda now=None: "20260315T000000Z")
     monkeypatch.setattr(backup, "FSInputFile", lambda path, filename=None: SimpleNamespace(path=path, filename=filename))
 
@@ -92,64 +99,150 @@ async def test_send_daily_backup_downloads_gacha_and_sends_both_dumps_in_chunks(
 
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42)
+    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     await backup.send_daily_backup(bot=bot_client, settings=settings)
 
     assert calls == ["bot", "gacha"]
     assert verified == ["main bot database dump", "gacha dump"]
-    assert [item["chat_id"] for item in sent] == [42] * 6
-    assert [item["filename"] for item in sent] == [
-        "bot_pg_dump.dump.part-001-of-003",
-        "bot_pg_dump.dump.part-002-of-003",
-        "bot_pg_dump.dump.part-003-of-003",
-        "gacha_pg_dump.dump.part-001-of-002",
-        "gacha_pg_dump.dump.part-002-of-002",
-        "selara-daily-backup-20260315T000000Z.manifest.json",
-    ]
-    assert [item["content"] for item in sent[:-1]] == [
-        b"ABCDE",
-        b"FGHIJ",
-        b"KL",
-        b"gacha",
-        b"!!",
-    ]
-    assert [item["caption"] for item in sent[:-1]] == [
-        "Selara daily backup: bot_pg_dump.dump (part 1/3)",
-        "Selara daily backup: bot_pg_dump.dump (part 2/3)",
-        "Selara daily backup: bot_pg_dump.dump (part 3/3)",
-        "Selara daily backup: gacha_pg_dump.dump (part 1/2)",
-        "Selara daily backup: gacha_pg_dump.dump (part 2/2)",
-    ]
+    assert [item["chat_id"] for item in sent] == [42] * len(sent)
+    assert all(item["caption"].startswith("Selara daily backup") for item in sent[:-1])
+
+    # Nothing plaintext may reach Telegram, neither in a part nor in a manifest.
+    for item in sent:
+        assert bot_plaintext not in item["content"]
+        assert gacha_plaintext not in item["content"]
 
     manifest = json.loads(sent[-1]["content"])
-    assert manifest == {
-        "created_at": "20260315T000000Z",
-        "chunk_size_bytes": 5,
-        "files": [
-            {
-                "filename": "bot_pg_dump.dump",
-                "size_bytes": 12,
-                "sha256": hashlib.sha256(b"ABCDEFGHIJKL").hexdigest(),
-                "parts": [
-                    {"filename": "bot_pg_dump.dump.part-001-of-003", "size_bytes": 5},
-                    {"filename": "bot_pg_dump.dump.part-002-of-003", "size_bytes": 5},
-                    {"filename": "bot_pg_dump.dump.part-003-of-003", "size_bytes": 2},
-                ],
-            },
-            {
-                "filename": "gacha_pg_dump.dump",
-                "size_bytes": 7,
-                "sha256": hashlib.sha256(b"gacha!!").hexdigest(),
-                "parts": [
-                    {"filename": "gacha_pg_dump.dump.part-001-of-002", "size_bytes": 5},
-                    {"filename": "gacha_pg_dump.dump.part-002-of-002", "size_bytes": 2},
-                ],
-            },
-        ],
+    assert manifest["encryption"] == {
+        "format": backup_encryption.ENCRYPTION_FORMAT,
+        "recipient_sha256": backup_encryption.public_key_fingerprint(_RECIPIENT),
     }
-    assert sent[-1]["caption"] == "Selara daily backup manifest"
+    assert [entry["filename"] for entry in manifest["files"]] == [
+        "bot_pg_dump.dump.enc",
+        "gacha_pg_dump.dump.enc",
+    ]
+    uploaded_parts = [(item["filename"], item["content"]) for item in sent[:-1]]
+    assert [name for name, _content in uploaded_parts] == [
+        part["filename"] for entry in manifest["files"] for part in entry["parts"]
+    ]
+    assert [entry["sha256"] for entry in manifest["files"]] == [
+        hashlib.sha256(
+            b"".join(content for name, content in uploaded_parts if name.startswith(entry["filename"] + ".part-"))
+        ).hexdigest()
+        for entry in manifest["files"]
+    ]
+
+    # Reassemble, decrypt and checksum exactly as the admin's restore procedure does.
+    restore_input = tmp_path / "restore-input"
+    restore_input.mkdir()
+    for name, content in uploaded_parts:
+        (restore_input / name).write_bytes(content)
+    manifest_path = restore_input / "manifest.json"
+    manifest_path.write_bytes(sent[-1]["content"])
+    restored = backup_encryption.restore_backup_set(
+        manifest_path=manifest_path,
+        parts_dir=restore_input,
+        identity=_PRIVATE_KEY,
+        output_dir=tmp_path / "restored",
+    )
+    restored_by_name = {path.name: path.read_bytes() for path in restored}
+    assert restored_by_name == {
+        "bot_pg_dump.dump": bot_plaintext,
+        "gacha_pg_dump.dump": gacha_plaintext,
+    }
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_send_daily_backup_sends_nothing_without_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    sent: list[object] = []
+
+    async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
+        calls.append("bot")
+        raise AssertionError("dump must not be created without an encryption key")
+
+    async def fake_send_document(**kwargs) -> None:
+        sent.append(kwargs)
+
+    monkeypatch.setattr(backup, "_create_bot_database_dump", fake_create_bot_database_dump)
+
+    for key in (None, "   "):
+        settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=key)
+        bot_client = SimpleNamespace(send_document=fake_send_document)
+        with pytest.raises(backup.BackupJobError, match="BACKUP_ENCRYPTION_PUBLIC_KEY is not configured"):
+            await backup.send_daily_backup(bot=bot_client, settings=settings)
+
+    assert calls == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_daily_backup_rejects_malformed_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[object] = []
+
+    async def fake_send_document(**kwargs) -> None:
+        sent.append(kwargs)
+
+    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key="not-a-key")
+    bot_client = SimpleNamespace(send_document=fake_send_document)
+
+    with pytest.raises(backup.BackupJobError, match="BACKUP_ENCRYPTION_PUBLIC_KEY is invalid"):
+        await backup.send_daily_backup(bot=bot_client, settings=settings)
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_daily_backup_sends_nothing_when_encryption_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    sent: list[object] = []
+    _install_dump_verifier(monkeypatch)
+
+    async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
+        _ = settings
+        path = temp_dir / "bot_pg_dump.dump"
+        path.write_bytes(b"BOT-PLAINTEXT")
+        return BackupFile(path=path, archive_name=path.name)
+
+    async def fake_download_gacha_backup(*, settings, temp_dir: Path) -> BackupFile:
+        _ = settings
+        path = temp_dir / "gacha_pg_dump.dump"
+        path.write_bytes(b"gacha-dump")
+        return BackupFile(path=path, archive_name=path.name)
+
+    def failing_encrypt_file(**kwargs) -> None:
+        raise backup_encryption.BackupCryptoError("disk full")
+
+    async def fake_send_document(**kwargs) -> None:
+        sent.append(kwargs)
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(backup.tempfile, "mkdtemp", lambda prefix: str(job_dir))
+    monkeypatch.setattr(backup, "_create_bot_database_dump", fake_create_bot_database_dump)
+    monkeypatch.setattr(backup, "_download_gacha_backup", fake_download_gacha_backup)
+    monkeypatch.setattr(backup, "encrypt_file", failing_encrypt_file)
+    monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
+
+    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
+    bot_client = SimpleNamespace(send_document=fake_send_document)
+
+    with pytest.raises(backup.BackupJobError, match="Backup encryption failed for bot_pg_dump.dump: disk full"):
+        await backup.send_daily_backup(bot=bot_client, settings=settings)
+
+    assert sent == []
     assert not job_dir.exists()
 
 
@@ -184,7 +277,7 @@ async def test_send_daily_backup_sends_nothing_when_gacha_download_fails(
     monkeypatch.setattr(backup, "_download_gacha_backup", fake_download_gacha_backup)
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42)
+    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     with pytest.raises(backup.BackupJobError, match="gacha unavailable"):
@@ -236,7 +329,7 @@ async def test_send_daily_backup_sends_nothing_when_dump_is_not_restorable(
     monkeypatch.setattr(backup, "_verify_dump_restorable", fake_verify_dump_restorable)
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42)
+    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     with pytest.raises(backup.BackupJobError, match="corrupt archive"):

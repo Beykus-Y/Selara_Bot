@@ -19,11 +19,20 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.core.config import Settings
+from selara.infrastructure.backup_encryption import (
+    ENCRYPTED_SUFFIX,
+    ENCRYPTION_FORMAT,
+    BackupCryptoError,
+    encrypt_file,
+    parse_public_key,
+    public_key_fingerprint,
+)
 from selara.infrastructure.db.backup_claims import (
     BACKUP_SLOT_COMPLETED,
     BACKUP_SLOT_FAILED,
@@ -274,6 +283,9 @@ async def start_manual_backup(
     if settings.admin_user_id is None:
         raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
 
+    # Fail before claiming the slot if the archives could not be encrypted.
+    _resolve_backup_recipient(settings)
+
     job_id = uuid4().hex
     claimed = await try_claim_manual_backup(
         session_factory=session_factory,
@@ -422,10 +434,15 @@ async def read_manual_backup_status(
 
 
 async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
-    """Send a backup now. Admin requests reach it through start_manual_backup; it claims no scheduled slot."""
+    """Send an encrypted backup now. Admin requests reach it through start_manual_backup; it claims no scheduled slot.
+
+    Every archive is encrypted to BACKUP_ENCRYPTION_PUBLIC_KEY before it is split or
+    sent. If encryption cannot be set up or fails, nothing is sent at all.
+    """
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
+    recipient = _resolve_backup_recipient(settings)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="selara-daily-backup-"))
     try:
@@ -445,12 +462,19 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
             settings=settings,
         )
 
+        # Encrypt both archives before the first upload, so a failure here cannot
+        # leave a partial backup set in Telegram.
+        encrypted_files = [
+            await asyncio.to_thread(_encrypt_backup_file, backup_file, recipient)
+            for backup_file in (bot_dump, gacha_dump)
+        ]
+
         created_at = _backup_timestamp()
         manifest_files: list[dict[str, object]] = []
-        for backup_file in (bot_dump, gacha_dump):
+        for encrypted_file in encrypted_files:
             parts, manifest_entry = await asyncio.to_thread(
                 _split_backup_file,
-                backup_file,
+                encrypted_file,
                 temp_dir,
                 BACKUP_CHUNK_SIZE_BYTES,
             )
@@ -471,6 +495,10 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
             created_at=created_at,
             chunk_size_bytes=BACKUP_CHUNK_SIZE_BYTES,
             files=manifest_files,
+            encryption={
+                "format": ENCRYPTION_FORMAT,
+                "recipient_sha256": public_key_fingerprint(recipient),
+            },
         )
         await bot.send_document(
             chat_id=admin_user_id,
@@ -768,17 +796,40 @@ def _split_backup_file(
     return parts, manifest_entry
 
 
+def _resolve_backup_recipient(settings: Settings) -> X25519PublicKey:
+    encoded = (settings.backup_encryption_public_key or "").strip()
+    if not encoded:
+        raise BackupJobError("BACKUP_ENCRYPTION_PUBLIC_KEY is not configured, backup archive cannot be encrypted.")
+    try:
+        return parse_public_key(encoded)
+    except BackupCryptoError as exc:
+        raise BackupJobError(f"BACKUP_ENCRYPTION_PUBLIC_KEY is invalid: {exc}") from exc
+
+
+def _encrypt_backup_file(backup_file: BackupFile, recipient: X25519PublicKey) -> BackupFile:
+    """Replace a plaintext archive with its encrypted copy; the plaintext never leaves the host."""
+    encrypted_path = backup_file.path.with_name(backup_file.path.name + ENCRYPTED_SUFFIX)
+    try:
+        encrypt_file(source=backup_file.path, destination=encrypted_path, recipient=recipient)
+    except (BackupCryptoError, OSError) as exc:
+        raise BackupJobError(f"Backup encryption failed for {backup_file.archive_name}: {exc}") from exc
+    backup_file.path.unlink()
+    return BackupFile(path=encrypted_path, archive_name=encrypted_path.name)
+
+
 def _write_backup_manifest(
     *,
     temp_dir: Path,
     created_at: str,
     chunk_size_bytes: int,
     files: list[dict[str, object]],
+    encryption: dict[str, object],
 ) -> Path:
     manifest_path = temp_dir / f"selara-daily-backup-{created_at}.manifest.json"
     payload = {
         "created_at": created_at,
         "chunk_size_bytes": chunk_size_bytes,
+        "encryption": encryption,
         "files": files,
     }
     manifest_path.write_text(
