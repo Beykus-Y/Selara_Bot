@@ -49,6 +49,22 @@ def _install_dump_verifier(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return verified
 
 
+def _install_restore_drill(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    drilled: list[str] = []
+
+    async def fake_drill_bot_database_dump(*, dump_path: Path, settings: SimpleNamespace) -> None:
+        _ = settings
+        drilled.append(dump_path.name)
+
+    async def fake_drill_gacha_dump(*, dump_path: Path, settings: SimpleNamespace) -> None:
+        _ = settings
+        drilled.append(dump_path.name)
+
+    monkeypatch.setattr(backup, "_drill_bot_database_dump", fake_drill_bot_database_dump)
+    monkeypatch.setattr(backup, "_drill_gacha_dump", fake_drill_gacha_dump)
+    return drilled
+
+
 @pytest.mark.asyncio
 async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_originals(
     monkeypatch: pytest.MonkeyPatch,
@@ -59,7 +75,8 @@ async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_origina
     calls: list[str] = []
     sent: list[dict[str, object]] = []
     verified = _install_dump_verifier(monkeypatch)
-    bot_plaintext = b"BOT-PLAINTEXT-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    drilled = _install_restore_drill(monkeypatch)
+    bot_plaintext =b"BOT-PLAINTEXT-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     gacha_plaintext = b"GACHA-PLAINTEXT-0123"
 
     async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
@@ -99,13 +116,18 @@ async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_origina
 
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
+    settings = SimpleNamespace(
+        admin_user_id=42,
+        backup_encryption_public_key=_PUBLIC_KEY,
+        backup_restore_drill_enabled=True,
+    )
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     await backup.send_daily_backup(bot=bot_client, settings=settings)
 
     assert calls == ["bot", "gacha"]
     assert verified == ["main bot database dump", "gacha dump"]
+    assert drilled == ["bot_pg_dump.dump", "gacha_pg_dump.dump"]
     assert [item["chat_id"] for item in sent] == [42] * len(sent)
     assert all(item["caption"].startswith("Selara daily backup") for item in sent[:-1])
 
