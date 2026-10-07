@@ -13,6 +13,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: read
 
 jobs:
   publish:
@@ -38,10 +39,25 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CI_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           echo "short_sha=${CI_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$CI_SHA" >> "$GITHUB_OUTPUT"
+
+          existing_manifest="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "release-manifest" and .expired == false) | .id')"
+          if [[ -n "$existing_manifest" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Reusing immutable release $GITHUB_RUN_ID (artifact $existing_manifest); not rebuilding images" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "No retained manifest for this rerun; start a new publisher run instead of changing a release identity" >&2
+            exit 1
+          fi
 
           if [[ "$EVENT_NAME" != "workflow_run" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -82,8 +98,10 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
+            type=raw,value=sha-${{ steps.freshness.outputs.commit_sha }}
 
       - name: Build and push app image
+        id: build_app
         if: steps.freshness.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
@@ -91,7 +109,9 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.meta_app.outputs.tags }}
-          labels: ${{ steps.meta_app.outputs.labels }}
+          labels: |
+            ${{ steps.meta_app.outputs.labels }}
+            org.opencontainers.image.revision=${{ steps.freshness.outputs.commit_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -104,8 +124,10 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
+            type=raw,value=sha-${{ steps.freshness.outputs.commit_sha }}
 
       - name: Build and push web image
+        id: build_web
         if: steps.freshness.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
@@ -115,7 +137,9 @@ jobs:
             VITE_APP_BASE_PATH=/miniapp/
           push: true
           tags: ${{ steps.meta_web.outputs.tags }}
-          labels: ${{ steps.meta_web.outputs.labels }}
+          labels: |
+            ${{ steps.meta_web.outputs.labels }}
+            org.opencontainers.image.revision=${{ steps.freshness.outputs.commit_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -128,8 +152,10 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=sha-${{ steps.freshness.outputs.short_sha }}
+            type=raw,value=sha-${{ steps.freshness.outputs.commit_sha }}
 
       - name: Build and push gacha image
+        id: build_gacha
         if: steps.freshness.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
@@ -137,6 +163,43 @@ jobs:
           file: ./gacha/Dockerfile
           push: true
           tags: ${{ steps.meta_gacha.outputs.tags }}
-          labels: ${{ steps.meta_gacha.outputs.labels }}
+          labels: |
+            ${{ steps.meta_gacha.outputs.labels }}
+            org.opencontainers.image.revision=${{ steps.freshness.outputs.commit_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Save complete release digest manifest
+        if: steps.freshness.outputs.publish == 'true'
+        env:
+          RELEASE_COMMIT: ${{ steps.freshness.outputs.commit_sha }}
+          IMAGE_OWNER: ${{ secrets.GHCR_USERNAME }}
+          APP_DIGEST: ${{ steps.build_app.outputs.digest }}
+          WEB_DIGEST: ${{ steps.build_web.outputs.digest }}
+          GACHA_DIGEST: ${{ steps.build_gacha.outputs.digest }}
+        run: python3 scripts/release_manifest.py build release/manifest.json
+
+      - name: Upload immutable release manifest
+        if: steps.freshness.outputs.publish == 'true'
+        id: release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: release/manifest.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+
+      - name: Report release identity
+        if: steps.freshness.outputs.publish == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.release.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.release.outputs.artifact-digest }}
+          RELEASE_COMMIT: ${{ steps.freshness.outputs.commit_sha }}
+        run: |
+          {
+            echo "Release input (publisher run ID): $GITHUB_RUN_ID"
+            echo "Commit: $RELEASE_COMMIT"
+            echo "Immutable artifact: $ARTIFACT_ID ($ARTIFACT_DIGEST)"
+            cat release/manifest.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
