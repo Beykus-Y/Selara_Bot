@@ -14,9 +14,10 @@
 
 ```bash
 cd gacha
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
+# uv 0.11.33; lock лежит в корне общего workspace.
+uv sync --locked --package selara-gacha --extra dev --group build --no-install-workspace --no-build
+uv sync --locked --package selara-gacha --extra dev --group build --no-build-isolation
+source ../.venv/bin/activate
 export GACHA_DATABASE_URL=postgresql+asyncpg://gacha:gacha@127.0.0.1:5432/gacha
 export GACHA_SERVICE_TOKEN="$(openssl rand -hex 32)"
 alembic upgrade head

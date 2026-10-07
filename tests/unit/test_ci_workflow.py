@@ -31,7 +31,7 @@ def test_ci_workflow_checks_backend_gacha_and_frontend() -> None:
         for step in jobs["backend"]["steps"]
     )
     assert "npm ci" in frontend_commands
-    assert "Jinja2" in frontend_commands
+    assert "uv sync --locked --only-group browser" in frontend_commands
     assert "npm run lint" in frontend_commands
     assert "npm run build" in frontend_commands
 

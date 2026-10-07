@@ -29,9 +29,10 @@
 git clone <URL_вашего_репозитория>
 cd Selara_Bot
 cp .env.example .env
-python -m venv .venv
+# Установите uv 0.11.33, затем используйте committed lock.
+uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
+uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
 source .venv/bin/activate
-pip install -e .[dev]
 docker compose up -d postgres redis
 alembic upgrade head
 python -m selara.main
@@ -40,6 +41,9 @@ python -m selara.main
 После запуска:
 - Telegram-бот работает в polling-режиме;
 - web-панель доступна по адресу `http://127.0.0.1:8080/login`.
+
+Обновление зависимостей и правила воспроизводимых Python builds:
+[PYTHON_DEPENDENCIES.md](docs/PYTHON_DEPENDENCIES.md).
 
 ---
 
