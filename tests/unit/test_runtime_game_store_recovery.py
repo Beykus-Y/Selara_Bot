@@ -668,6 +668,10 @@ async def test_final_pointer_pass_keeps_replacement_game_of_finished_game(
     handler finishes B and starts C in chat 402 (the store is already wired to
     the live repo, so those mutations persist themselves). The pass must not
     clear C's freshly persisted pointer from its stale snapshot.
+
+    The handlers' own syncs queue behind the in-flight write (chat write
+    locks), so they run as tasks: their in-memory mutations land while the
+    pass is suspended and their Redis writes are ordered after it.
     """
     store = _degraded_store(monkeypatch=monkeypatch)
 
@@ -685,11 +689,20 @@ async def test_final_pointer_pass_keeps_replacement_game_of_finished_game(
 
     # Fires while the final pass is suspended in `set_active_game_id` for
     # chat 401, exactly like a concurrent handler would.
-    await store.finish(game_id=game_b.game_id, winner_text="b done")
-    game_c = await _make_started_game(store, chat_id=402)
+    finish_task = asyncio.create_task(store.finish(game_id=game_b.game_id, winner_text="b done"))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while game_b.status != "finished":
+        assert loop.time() < deadline, "finish never reached the in-memory mutation"
+        await asyncio.sleep(0)
+    create_c_task = asyncio.create_task(_make_started_game(store, chat_id=402))
+    for _ in range(10):
+        await asyncio.sleep(0)
 
     repo.release_gate.set()
     await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(finish_task, timeout=5)
+    game_c = await asyncio.wait_for(create_c_task, timeout=5)
 
     assert store.redis_recovery_state == "connected"
     # C replaced the finished B and keeps its Redis pointer ...
@@ -842,6 +855,11 @@ class _GatedFakeRedisClient:
         self.gate_entered = asyncio.Event()
         self.release_gate = asyncio.Event()
         self.hold_when: Callable[[], bool] | None = None
+        # GETs for which ``hang_get_when`` returns true never answer, like a
+        # connection that went half-open after the previous command.
+        self.hang_get_when: Callable[[str], bool] | None = None
+        self.get_hung = asyncio.Event()
+        self.closed = False
 
     async def ping(self) -> None:
         # RedisGameStateRepository.ping() probes through client.ping().
@@ -855,7 +873,17 @@ class _GatedFakeRedisClient:
         await self.release_gate.wait()
 
     async def get(self, key: str) -> str | None:
+        if self.hang_get_when is not None and self.hang_get_when(key):
+            self.get_hung.set()
+            await asyncio.Event().wait()
         return self.data.get(key)
+
+    async def zrevrange(self, key: str, start: int, end: int) -> list[str]:
+        ranked = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1], reverse=True)
+        return [member for member, _ in ranked][start : end + 1]
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         await self._hold_if_requested(value)
@@ -916,17 +944,20 @@ async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
     assert held.game_id == game.game_id
     assert held.status == "started"
 
-    # Step 2 of the schedule: the handler's own sync confirms the finish.
-    await store.finish(game_id=game.game_id, winner_text="u1 wins")
-    game_key = repo._game_key(game.game_id)
-    confirmed = game_state_module.GameStateCodec().loads(client.data[game_key])
-    assert confirmed.status == "finished"
-    assert confirmed.winner_text == "u1 wins"
-    assert client.data.get(repo._active_key(game.chat_id)) is None
+    # Step 2 of the schedule: the handler finishes G. Its own sync is
+    # ordered behind the in-flight recovery write (chat write lock), so it
+    # cannot be confirmed before the delayed SET has landed.
+    finish_task = asyncio.create_task(store.finish(game_id=game.game_id, winner_text="u1 wins"))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert game.status == "finished"
+    assert not finish_task.done()
 
-    # Step 3: let the delayed started-SET land on top of it.
+    # Step 3: let the delayed started-SET land; the handler writes after it.
     client.release_gate.set()
     await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(finish_task, timeout=5)
+    game_key = repo._game_key(game.game_id)
 
     assert store.redis_recovery_state == "connected"
     final = game_state_module.GameStateCodec().loads(client.data[game_key])
@@ -1085,3 +1116,277 @@ async def test_use_in_memory_during_second_pass_keeps_memory_mode(
 
     await store.close()
 
+
+
+async def _stale_set_then_hang_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    chat_id: int,
+    attempt_timeout: float,
+) -> tuple[RuntimeGameStore, GroupGame, _GatedFakeRedisClient, game_state_module.RedisGameStateRepository, _RecordingBroker, asyncio.Task[None], asyncio.Task[object]]:
+    """Drive the PR #101 review HIGH schedule up to the hung recovery GET.
+
+    1. Pass one succeeds; the second pass serializes started G and parks
+       inside its SET.
+    2. A handler finishes G (in memory) and starts its own sync.
+    3. The delayed started-SET lands. G is finished in memory by now, so the
+       recovery's ``save_game`` continues on the finished branch ...
+    4. ... and hangs on the GET of the chat's active key: the repair SET
+       never comes. The caller then times out / closes the attempt.
+    """
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 3600
+    store._recovery_attempt_timeout_seconds = attempt_timeout
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    game = await _make_started_game(store, chat_id=chat_id)
+    assert store._state_repo is None
+    store._cancel_recovery_task()  # the attempt below is driven directly
+
+    client = _GatedFakeRedisClient()
+    repo = game_state_module.RedisGameStateRepository(
+        client=client,
+        codec=game_state_module.GameStateCodec(),
+        ttl=timedelta(hours=1),
+    )
+    broker = _RecordingBroker()
+    attempt: dict[str, asyncio.Task[None]] = {}
+
+    def _in_second_pass() -> bool:
+        return asyncio.current_task() is attempt.get("task") and store._state_repo is repo
+
+    client.hold_when = _in_second_pass
+    active_key = repo._active_key(game.chat_id)
+    client.hang_get_when = lambda key: key == active_key and _in_second_pass() and client.release_gate.is_set()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    attempt["task"] = task
+    store._recovery_task = task  # type: ignore[assignment]
+    await asyncio.wait_for(client.gate_entered.wait(), timeout=5)
+    held = game_state_module.GameStateCodec().loads(client.held_sets[0])
+    assert held.game_id == game.game_id
+    assert held.status == "started"
+
+    finish_task: asyncio.Task[object] = asyncio.create_task(
+        store.finish(game_id=game.game_id, winner_text="u1 wins")
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert game.status == "finished"
+
+    client.release_gate.set()
+    await asyncio.wait_for(client.get_hung.wait(), timeout=5)
+    # The stale started payload has landed and the repair never came.
+    stale = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
+    assert stale.status == "started"
+    return store, game, client, repo, broker, task, finish_task
+
+
+async def _assert_finished_survives_restart(
+    repo: game_state_module.RedisGameStateRepository,
+    client: _GatedFakeRedisClient,
+    game: GroupGame,
+) -> None:
+    client.hang_get_when = None
+    persisted = game_state_module.GameStateCodec().loads(client.data[repo._game_key(game.game_id)])
+    assert persisted.status == "finished"
+    assert persisted.winner_text == "u1 wins"
+    assert client.data.get(repo._active_key(game.chat_id)) is None
+
+    # Restart by game id ...
+    restarted = RuntimeGameStore(backend=GameStore())
+    restarted._state_repo = repo  # type: ignore[assignment]
+    await restarted._hydrate_game(game.game_id)
+    restored = await restarted.backend.get_game(game.game_id)
+    assert restored is not None
+    assert restored.status == "finished"
+    assert await restarted.backend.get_active_game_for_chat(chat_id=game.chat_id) is None
+
+    # ... and by the players' recent-games index.
+    restarted_recent = RuntimeGameStore(backend=GameStore())
+    restarted_recent._state_repo = repo  # type: ignore[assignment]
+    await restarted_recent._hydrate_recent_games_for_user(user_id=2)
+    restored_recent = await restarted_recent.backend.get_game(game.game_id)
+    assert restored_recent is not None
+    assert restored_recent.status == "finished"
+    assert await restarted_recent.backend.get_active_game_for_chat(chat_id=game.chat_id) is None
+
+
+@pytest.mark.asyncio
+async def test_stale_second_pass_set_then_timeout_keeps_confirmed_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 third review HIGH, timeout variant.
+
+    The stale second-pass SET already landed and the recovery hangs on the
+    next GET of its own ``save_game`` before any repair SET; the second-pass
+    timeout fails the attempt. The handler's finish must still end up in
+    Redis (its write is ordered after the stale one), and a restart must
+    hydrate G as finished -- by id and through the recent-games index.
+    """
+    store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
+        monkeypatch, chat_id=611, attempt_timeout=0.5
+    )
+    # The handler's write is ordered behind the in-flight recovery write.
+    assert not finish_task.done()
+
+    # The second-pass timeout fires while the recovery hangs on the GET.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, timeout=5)
+
+    await asyncio.wait_for(finish_task, timeout=5)
+    assert store.redis_recovery_state == "degraded"
+    assert store._state_repo is None
+    # The candidates are closed -- the repo only after the handler's sync
+    # that was still writing through it.
+    assert broker.closed is True
+    assert client.closed is True
+
+    await _assert_finished_survives_restart(repo, client, game)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_second_pass_set_then_close_keeps_confirmed_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 third review HIGH, shutdown variant.
+
+    Same schedule, but a regular ``close()`` cancels the recovery while it
+    hangs on the GET after the stale SET. The finish must survive in Redis
+    and after the restart.
+    """
+    store, game, client, repo, broker, task, finish_task = await _stale_set_then_hang_schedule(
+        monkeypatch, chat_id=612, attempt_timeout=3600
+    )
+    assert not finish_task.done()
+
+    await store.close()
+    assert task.done()
+    await asyncio.wait_for(finish_task, timeout=5)
+    assert broker.closed is True
+    assert client.closed is True
+
+    await _assert_finished_survives_restart(repo, client, game)
+
+
+class _FailingPublishBroker(_RecordingBroker):
+    """Broker whose connection breaks independently of the repo's."""
+
+    async def publish(self, event) -> None:
+        raise _FakeRedisError("broker connection reset")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_broker_degrade_during_second_pass_fails_attempt_and_closes_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #101 third review MEDIUM: parallel degradation during the second pass.
+
+    Recovery wires R1/B1 and parks in its second-pass write; another handler
+    calls ``publish_event`` and B1 fails on its own connection, which
+    degrades the store (repo/broker nulled, no extra task since the attempt
+    is registered). R1's remaining second-pass work then succeeds. The
+    attempt must not report success: R1 and B1 are closed, the store stays
+    degraded, and the next attempt recovers on a fresh R2/B2 pair.
+    """
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 3600
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    game = await _make_started_game(store, chat_id=801)
+    store._cancel_recovery_task()  # the attempts below are driven directly
+
+    repo_1 = _GatedSecondPassRepo(games_expected=1)
+    broker_1 = _FailingPublishBroker()
+    repo_2 = _RecordingRepo()
+    broker_2 = _RecordingBroker()
+    pairs = [(repo_1, broker_1), (repo_2, broker_2)]
+    store._build_redis_runtime = lambda: pairs.pop(0)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    store._recovery_task = task  # type: ignore[assignment]
+    await asyncio.wait_for(repo_1.gate_entered.wait(), timeout=5)
+    assert store._state_repo is repo_1
+    assert store._broker is broker_1
+
+    # Steps 2-3: an unrelated handler publishes through B1, which fails.
+    await store.publish_event(event_type="new_vote", scope="chat", chat_id=801)
+    assert store._state_repo is None
+    assert store._broker is None
+    assert store._redis_degraded is True
+    assert store._recovery_task is task
+
+    # Step 4: R1's own second-pass operations now succeed.
+    repo_1.release_gate.set()
+    with pytest.raises(game_state_module._RecoverySupersededError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert repo_1.closed is True
+    assert broker_1.closed is True
+    assert store._state_repo is None
+    assert store._broker is None
+    assert store.redis_recovery_state == "degraded"
+    assert store._recovery_in_progress is False
+
+    # Step 5: the next attempt recovers on a fresh pair.
+    store._recovery_task = None
+    await store._attempt_recovery()
+    assert store.redis_recovery_state == "connected"
+    assert store._state_repo is repo_2
+    assert store._broker is broker_2
+    assert repo_2.closed is False
+    assert broker_2.closed is False
+    saved_game, _ = _saved_by_id(repo_2)[game.game_id]
+    assert saved_game.status == "started"
+
+    await store.close()
+    assert repo_2.closed is True
+    assert broker_2.closed is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_loop_retries_after_superseded_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop treats a superseded attempt as an ordinary failed one."""
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 0.01
+    store._recovery_attempt_timeout_seconds = 5
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    repo_1 = _GatedSecondPassRepo(games_expected=1)
+    broker_1 = _FailingPublishBroker()
+    repo_2 = _RecordingRepo()
+    broker_2 = _RecordingBroker()
+    pairs = [(repo_1, broker_1), (repo_2, broker_2)]
+    store._build_redis_runtime = lambda: pairs.pop(0)  # type: ignore[method-assign]
+
+    await _make_started_game(store, chat_id=802)
+    loop_task = store._recovery_task
+    assert loop_task is not None
+    await asyncio.wait_for(repo_1.gate_entered.wait(), timeout=5)
+
+    await store.publish_event(event_type="new_vote", scope="chat", chat_id=802)
+    assert store._recovery_task is loop_task
+    repo_1.release_gate.set()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while store.redis_recovery_state != "connected":
+        assert loop.time() < deadline, "recovery loop did not retry after a superseded attempt"
+        await asyncio.sleep(0.01)
+
+    assert store._state_repo is repo_2
+    assert store._broker is broker_2
+    assert repo_1.closed is True
+    assert broker_1.closed is True
+
+    await store.close()
