@@ -1,3 +1,4 @@
+import warnings
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # #71: get_settings() runs before logging is configured, so a failed
+        # validation dumps its raw traceback straight to stderr. By default
+        # pydantic embeds the whole input dict ("input_value") in that text --
+        # including BOT_TOKEN, WEB_AUTH_SECRET and database credentials --
+        # so the input must stay hidden and only the error text is printed.
+        hide_input_in_errors=True,
     )
 
     bot_token: str = Field(..., validation_alias="BOT_TOKEN")
@@ -109,6 +116,13 @@ class Settings(BaseSettings):
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
+    # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
+    # to BOT_TOKEN. Defaults to false so a fresh production install (including
+    # one shipped from .env.example with the default APP_ENV=dev) fails closed
+    # instead of silently reusing the Telegram credential as the web auth key.
+    web_auth_allow_bot_token_fallback: bool = Field(
+        default=False, validation_alias="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"
+    )
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
     web_session_cookie_name: str = Field(default="selara_session", validation_alias="WEB_SESSION_COOKIE_NAME")
@@ -279,6 +293,47 @@ class Settings(BaseSettings):
             raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
+    @model_validator(mode="after")
+    def _check_web_auth_secret(self):
+        # #71: BOT_TOKEN doubles as the Telegram Bot API credential and, via
+        # the fallback below, the HMAC key for web login/session digests.
+        # Coupling the two security domains means rotating or leaking the bot
+        # token silently compromises web auth. The fallback never triggers by
+        # default -- it requires the explicit WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK
+        # opt-in, which is meant for local development only.
+        if not self.web_enabled:
+            return self
+        secret = (self.web_auth_secret or "").strip()
+        if not secret:
+            if not self.web_auth_allow_bot_token_fallback:
+                raise ValueError(
+                    "WEB_AUTH_SECRET is required while the web panel is enabled; set a separate "
+                    "random secret, or opt into the dev-only BOT_TOKEN fallback with "
+                    "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true"
+                )
+            warnings.warn(
+                "WEB_AUTH_SECRET is not set; falling back to BOT_TOKEN for web auth "
+                "(WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true). This couples the web auth HMAC "
+                "domain to the Telegram bot credential -- set a separate WEB_AUTH_SECRET.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self
+        if secret == (self.bot_token or "").strip():
+            if self.web_auth_allow_bot_token_fallback:
+                warnings.warn(
+                    "WEB_AUTH_SECRET equals BOT_TOKEN; web auth and the Telegram bot credential "
+                    "share one secret. Set a separate WEB_AUTH_SECRET.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return self
+            raise ValueError(
+                "WEB_AUTH_SECRET must differ from BOT_TOKEN; use a separate random secret "
+                "so the web auth and Telegram credentials can be rotated independently"
+            )
+        return self
+
     @property
     def supported_chat_types(self) -> set[str]:
         return {"private", "group", "supergroup"}
@@ -288,6 +343,16 @@ class Settings(BaseSettings):
         value = (self.web_auth_secret or "").strip()
         if value:
             return value
+        # Defense in depth (#71): Settings validation already rejects this
+        # state unless WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK is explicitly set,
+        # but any caller of this property is about to derive web auth HMAC
+        # keys from it, so fail closed here too instead of silently reusing
+        # the bot token.
+        if not self.web_auth_allow_bot_token_fallback:
+            raise RuntimeError(
+                "WEB_AUTH_SECRET is required; the BOT_TOKEN fallback needs the explicit "
+                "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true opt-in (development only)"
+            )
         return self.bot_token
 
     @property
