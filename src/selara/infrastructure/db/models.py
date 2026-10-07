@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -1833,6 +1834,13 @@ class AdminBroadcastModel(Base):
     media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     media_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The photo itself, kept until Telegram has returned a reusable file_id, so an interrupted photo broadcast can resume.
+    media_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    # Lease held by the worker that is sending this broadcast; cancelled_at stops it and any resume.
+    lease_owner_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -1861,6 +1869,9 @@ class AdminBroadcastDeliveryModel(Base):
     bot_member_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A pending delivery is claimed by the worker about to send it; an expired claim has no known outcome.
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -60,6 +60,8 @@ UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
 BroadcastPreview = Callable[[AsyncSession, dict[str, Any]], Awaitable[dict[str, Any]]]
 BroadcastStart = Callable[[int, dict[str, Any]], Awaitable[dict[str, Any]]]
 BroadcastStatus = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
+BroadcastResume = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
+BroadcastCancel = Callable[[AsyncSession, int], Awaitable[dict[str, Any]]]
 TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
 _PERIODS = {1, 7, 30, 90}
 _GROUP_TYPES = ("group", "supergroup")
@@ -112,6 +114,8 @@ def build_miniapp_admin_router(
     ai_only: bool = False,
     unauthorized_detail: str = "Mini App сессия истекла.",
     mutation_guard: Callable[[Request], None] | None = None,
+    broadcast_resume_handler: BroadcastResume | None = None,
+    broadcast_cancel_handler: BroadcastCancel | None = None,
 ) -> APIRouter:
     """The owner API. The same router is mounted for the Mini App and, with ``ai_only`` and its own ``load_user``
     (the /app/admin web session), as the AI settings API of the server-rendered admin: one set of endpoints and
@@ -396,6 +400,18 @@ def build_miniapp_admin_router(
     @router.get("/broadcast/{broadcast_id}")
     async def broadcast_status_route(broadcast_id: int, session: AsyncSession = AdminSession):
         return {"ok": True, **(await broadcast_status_handler(session, broadcast_id))}
+
+    @router.post("/broadcast/{broadcast_id}/resume")
+    async def broadcast_resume_route(broadcast_id: int, session: AsyncSession = AdminSession):
+        if broadcast_resume_handler is None:
+            raise HTTPException(status_code=404, detail="Не найдено.")
+        return {"ok": True, **(await broadcast_resume_handler(session, broadcast_id))}
+
+    @router.post("/broadcast/{broadcast_id}/cancel")
+    async def broadcast_cancel_route(broadcast_id: int, session: AsyncSession = AdminSession):
+        if broadcast_cancel_handler is None:
+            raise HTTPException(status_code=404, detail="Не найдено.")
+        return {"ok": True, **(await broadcast_cancel_handler(session, broadcast_id))}
 
     @router.get("/broadcasts")
     async def broadcast_history(

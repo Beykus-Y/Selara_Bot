@@ -3,7 +3,14 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { usePageTitle } from '@/shared/lib/use-page-title'
 
-import { getAdminBroadcastHistory, getAdminBroadcastProgress, previewAdminBroadcast, startAdminBroadcast } from '../api/admin-broadcast'
+import {
+  cancelAdminBroadcast,
+  getAdminBroadcastHistory,
+  getAdminBroadcastProgress,
+  previewAdminBroadcast,
+  resumeAdminBroadcast,
+  startAdminBroadcast,
+} from '../api/admin-broadcast'
 
 type Stage = 1 | 2 | 3 | 4 | 5 | 6
 
@@ -116,6 +123,19 @@ export function AdminBroadcastPage() {
     staleTime: 30_000,
   })
 
+  const refreshBroadcast = () => {
+    void queryClient.invalidateQueries({ queryKey: ['miniapp-admin-broadcast', broadcastId] })
+    void queryClient.invalidateQueries({ queryKey: ['miniapp-admin-broadcast-history'] })
+  }
+  const resume = useMutation({
+    mutationFn: () => resumeAdminBroadcast(broadcastId!),
+    onSuccess: refreshBroadcast,
+  })
+  const cancel = useMutation({
+    mutationFn: () => cancelAdminBroadcast(broadcastId!),
+    onSuccess: refreshBroadcast,
+  })
+
   const previewHtml = useMemo(() => ({ __html: previewData?.rendered_text ?? '' }), [previewData?.rendered_text])
   const photoUrl = useMemo(() => photo ? URL.createObjectURL(photo) : null, [photo])
   useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl) }, [photoUrl])
@@ -154,7 +174,7 @@ export function AdminBroadcastPage() {
           {history.isPending ? <div className="admin-skeleton-list"><i /><i /></div> : null}
           {history.isError ? <div className="admin-inline-error">Не удалось загрузить историю. <button type="button" onClick={() => void history.refetch()}>Повторить</button></div> : null}
           {history.data?.pages.flatMap((page) => page.items).map((item) => (
-            <article key={item.id}><strong>#{item.id} · {item.target_count} групп</strong><p>{item.body.slice(0, 130)}</p><small>{new Date(item.created_at).toLocaleString('ru-RU')} · успешно {item.sent_count} · ошибок {item.failed_count}{item.pending_count ? ` · в очереди ${item.pending_count}` : ''}</small></article>
+            <article key={item.id}><strong>#{item.id} · {item.target_count} групп</strong><p>{item.body.slice(0, 130)}</p><small>{new Date(item.created_at).toLocaleString('ru-RU')} · успешно {item.sent_count} · ошибок {item.failed_count}{item.pending_count ? ` · в очереди ${item.pending_count}` : ''}</small>{item.pending_count ? <button type="button" onClick={() => { setBroadcastId(item.id); setStage(5) }}>Открыть</button> : null}</article>
           ))}
           {history.hasNextPage ? <button className="admin-load-more" type="button" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? 'Загружаю…' : 'Загрузить ещё'}</button> : null}
         </section>
@@ -231,6 +251,8 @@ export function AdminBroadcastPage() {
           <progress max={Math.max(progress.data.target_count, 1)} value={progress.data.sent_count + progress.data.failed_count} />
           <p>Успешно {progress.data.sent_count} · ошибок {progress.data.failed_count} · осталось {progress.data.pending_count}</p>
           {progress.isError ? <button type="button" onClick={() => void progress.refetch()}>Обновить прогресс</button> : null}
+          <button type="button" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Отменяю…' : 'Отменить оставшиеся'}</button>
+          {cancel.isError ? <div className="admin-inline-error">{cancel.error.message}</div> : null}
         </div>
       ) : null}
 
@@ -240,10 +262,21 @@ export function AdminBroadcastPage() {
       {shownStage === 6 && progress.data ? (
         <div className="admin-broadcast-progress">
           <p className="admin-eyebrow">Рассылка #{progress.data.broadcast_id}</p>
-          <h2>{progress.data.status === 'completed' ? 'Готово' : 'Отправка остановлена'}</h2>
+          <h2>{progress.data.status === 'completed' ? 'Готово' : progress.data.status === 'cancelled' ? 'Рассылка отменена' : 'Отправка остановлена'}</h2>
           <dl><div><dt>Успешно</dt><dd>{progress.data.sent_count}</dd></div><div><dt>Ошибок</dt><dd>{progress.data.failed_count}</dd></div><div><dt>Пропущено</dt><dd>{progress.data.skipped_count}</dd></div></dl>
           {progress.data.duration_seconds !== null ? <p className="admin-footnote">Длительность: {progress.data.duration_seconds} сек.</p> : null}
-          {progress.data.status === 'interrupted' ? <p className="admin-footnote">Worker остановился до завершения. Автоматического повтора нет, чтобы не отправить дубли.</p> : null}
+          {progress.data.status === 'interrupted' ? (
+            <>
+              <p className="admin-footnote">Сообщения, отправленные до остановки, повторно не уйдут. Продолжение отправит только оставшиеся.</p>
+              <div className="admin-broadcast-actions">
+                <button className="admin-primary-action" type="button" disabled={resume.isPending} onClick={() => resume.mutate()}>{resume.isPending ? 'Продолжаю…' : 'Продолжить рассылку'}</button>
+                <button type="button" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Отменить оставшиеся</button>
+              </div>
+              {resume.isError ? <div className="admin-inline-error">{resume.error.message}</div> : null}
+              {cancel.isError ? <div className="admin-inline-error">{cancel.error.message}</div> : null}
+            </>
+          ) : null}
+          {progress.data.status === 'cancelled' ? <p className="admin-footnote">Оставшиеся сообщения не отправлены.</p> : null}
           <button className="admin-primary-action" type="button" onClick={() => { setStage(1); setBody(''); setPreviewData(null); setBroadcastId(null); setConfirmed(false); setPhoto(undefined); setMediaMode('text'); setSelectedIds([]); setSelectionMode('all'); setRequestKey(idempotencyKey()) }}>Новая рассылка</button>
         </div>
       ) : null}
