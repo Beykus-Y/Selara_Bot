@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.feature_access import AccessReason, AccessTier, FeatureAccessService, GroupMemberQuotaLimits
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.core.config import Settings
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository
 from selara.infrastructure.db.chat_migration import migrate_chat_id
@@ -28,6 +31,7 @@ from selara.infrastructure.db.models import (
 )
 from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.llm.features import AiFeature
+from selara.presentation.handlers import group_character
 
 pytestmark = [pytest.mark.integration]
 
@@ -204,3 +208,68 @@ async def test_chat_migration_collision_policy(factory) -> None:
         feature=AiFeature.GROUP_MEMBER, chat_id=new_id, trigger="telegram_message", timezone_name="UTC", now=NOW,
     )).quota_used
     assert used == 3
+
+
+class _HeldLlm:
+    """The first model call waits until ``release`` is set, so the chat's turn stays in flight while the test sends more."""
+
+    accounting_service = None
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def chat_with_tools(self, messages, tools, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            await self.release.wait()
+        message = SimpleNamespace(content=f"ответ {self.calls}", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+
+
+def _group_message(text: str, *, message_id: int, user_id: int, chat_id: int = CHAT) -> SimpleNamespace:
+    return SimpleNamespace(
+        text=text,
+        message_id=message_id,
+        chat=SimpleNamespace(id=chat_id, type="supergroup", title="Selara"),
+        from_user=SimpleNamespace(id=user_id, is_bot=False, username=None, first_name="Вася", last_name=None),
+        reply_to_message=None,
+        reply=AsyncMock(return_value=SimpleNamespace(message_id=message_id + 9000)),
+    )
+
+
+async def _call_group(sessions, message: SimpleNamespace, llm: _HeldLlm, text: str) -> None:
+    settings = Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", llm_cooldown_seconds=0)
+    async with sessions() as db:
+        await group_character.handle_group_call(
+            message,
+            text=text,
+            bot=SimpleNamespace(send_chat_action=AsyncMock()),
+            activity_repo=SimpleNamespace(get_chat_display_name=AsyncMock(return_value=None)),
+            db_session=db,
+            settings=settings,
+            session_factory=sessions,
+            llm_client=llm,
+        )
+
+
+async def test_a_second_call_in_the_chat_does_not_run_beside_the_running_turn(factory) -> None:
+    async with factory() as db:
+        db.add(ChatAiCharacterModel(chat_id=CHAT, member_mode_enabled=True))
+        db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селя", name_norm="селя", is_primary=True))
+        await db.commit()
+    llm = _HeldLlm()
+    first = asyncio.create_task(
+        _call_group(factory, _group_message("первый вопрос", message_id=1, user_id=MEMBERS[0]), llm, "первый вопрос")
+    )
+    await asyncio.wait_for(llm.started.wait(), timeout=10)
+    try:
+        # Another member asks while the first answer is still in flight: it must not start a model call beside it.
+        second = _group_message("второй вопрос", message_id=2, user_id=MEMBERS[1])
+        await asyncio.wait_for(_call_group(factory, second, llm, "второй вопрос"), timeout=10)
+        assert llm.calls == 1
+    finally:
+        llm.release.set()
+        await asyncio.wait_for(first, timeout=10)
