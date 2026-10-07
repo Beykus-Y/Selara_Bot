@@ -51,7 +51,6 @@ runs:
           sleep 5
         done
         exit 1
-      timeout-minutes: 10
 
     - name: Save font packages to cache
       if: ${{ steps.debs-cache.outputs.cache-hit != 'true' }}
