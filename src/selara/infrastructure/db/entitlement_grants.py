@@ -110,6 +110,10 @@ def _outcome(row: EntitlementGrantModel, *, duplicate: bool, paid_recently: bool
     )
 
 
+# The journal timestamp comes from the database clock, the period start from the app clock.
+_CLOCK_SLACK = timedelta(minutes=5)
+
+
 def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -241,7 +245,10 @@ class EntitlementGrantService:
                         # Only days the owner granted by hand and has not already taken back can be removed:
                         # paid time is never shortened here (use cancel_all to close a subscription).
                         removable = min(
-                            await self._granted_days_left(session, scope, target_id), until_before - current
+                            await self._granted_days_left(
+                                session, scope, target_id, since=_as_utc(entitlement.valid_from)
+                            ),
+                            until_before - current,
                         )
                         if removable <= timedelta(0):
                             raise GrantError(
@@ -554,18 +561,26 @@ class EntitlementGrantService:
         return found is not None
 
     @staticmethod
-    async def _granted_days_left(session: AsyncSession, scope: str, target_id: int) -> timedelta:
-        """Hand-granted time not yet taken back since the last full revoke (the journal is the source of truth)."""
+    async def _granted_days_left(
+        session: AsyncSession, scope: str, target_id: int, *, since: datetime
+    ) -> timedelta:
+        """Hand-granted time of the CURRENT period not yet taken back since the last full revoke.
+
+        A grant made before the subscription lapsed (``created_at < valid_from`` of the period a later payment or
+        grant started) is long used up and must never count against paid days.
+        """
         column = _target_column(scope)
         rows = (
             await session.execute(
-                select(EntitlementGrantModel.action, EntitlementGrantModel.delta_seconds)
+                select(EntitlementGrantModel.action, EntitlementGrantModel.delta_seconds, EntitlementGrantModel.created_at)
                 .where(column == target_id)
                 .order_by(EntitlementGrantModel.id.asc())
             )
         ).all()
         seconds = 0
-        for action, delta in rows:
+        for action, delta, created_at in rows:
+            if _as_utc(created_at) < since - _CLOCK_SLACK:  # a period starts when its first grant is written
+                continue
             if action in ("grant", "extend"):
                 seconds += int(delta)
             elif action == "shorten":

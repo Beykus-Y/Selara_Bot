@@ -313,6 +313,12 @@ def test_addresses_without_a_scheme_are_cut_to_their_host():
     )
     assert "SECRET" not in cleaned and "token" not in cleaned and "/x" not in cleaned
     assert "evil.example" in cleaned and "good.example/a" in cleaned and "example.com ок" in cleaned
+    for link in (
+        "http://1.2.3.4/?q=SECRET", "https://злой.рф/?q=SECRET", "злой.рф/?q=SECRET",
+        "xn--e1afmkfd.xn--p1ai/?q=SECRET", "http://localhost:8080/?q=SECRET", "https://user:pw@evil.example/?q=SECRET",
+    ):
+        assert "SECRET" not in strip_unverified_links(f"см. {link} тут", seen), link
+    assert "https://good.example/a" in strip_unverified_links("https://good.example/a", seen)
     labelled = strip_unverified_links("[evil.example/?q=SECRET](https://good.example/a)", seen)
     assert "SECRET" not in labelled and "(https://good.example/a)" in labelled
 
@@ -321,3 +327,12 @@ async def test_an_empty_last_round_gives_the_fallback_notice():
     llm = ScriptedLlm(_response(content=""))
     turn = await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(rounds=1))
     assert turn.text == personal_tools._FALLBACK_NOTICE
+
+
+async def test_only_one_page_can_be_opened_after_a_search():
+    run = _run(web=True)
+    await run.execute(ToolCall("web_search", {"query": "x"}, "1"), run.allowed_names())
+    allowed = frozenset({"fetch_page"})  # a batch of two calls shares one allow-list snapshot
+    first = await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/msk"}, "2"), allowed)
+    second = await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/msk"}, "3"), allowed)
+    assert first.success and not second.success

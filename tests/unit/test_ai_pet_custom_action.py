@@ -174,7 +174,7 @@ async def test_a_claim_makes_the_check_and_the_record_one_step(db) -> None:
     assert await _claim(service, pet_id, "c1") == "ok"
     # A second message from the same person before the first finished sees the claim as a cooldown.
     assert await _claim(service, pet_id, "c2") == "cooldown"
-    assert await _claim(service, pet_id, "c1", at=NOW + ca.CUSTOM_COOLDOWN) == "duplicate"
+    assert await _claim(service, pet_id, "c1", at=NOW + timedelta(minutes=1)) == "duplicate"  # redelivery
     await service.release_custom_claim(claim_key="c1")  # the model call produced nothing: no cooldown is kept
     assert await _claim(service, pet_id, "c3") == "ok"
 

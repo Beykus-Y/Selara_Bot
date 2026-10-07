@@ -687,6 +687,8 @@ class AiPetService:
                 row = None
         if row is None:
             return "unavailable", "Этого питомца здесь нет или он спит."
+        if claim_key is not None and await self._event_exists(claim_key):
+            return "duplicate", ""  # a redelivered update must not be told about its own claim
         custom_types = [ca.event_type(key) for key in ca.CLASS_KEYS]
         last = await self._session.scalar(
             select(func.max(AiPetEventModel.created_at)).where(

@@ -301,6 +301,22 @@ async def test_shorten_never_removes_paid_days(env) -> None:
         )
 
 
+async def test_a_grant_from_a_lapsed_period_never_counts_against_later_paid_days(env) -> None:
+    factory, service = env
+    await service.grant(**_args(days=7))  # used up long ago
+    async with factory() as session:  # the person paid 30 days after the gap: a new period starts
+        row = await session.scalar(select(UserEntitlementModel).where(UserEntitlementModel.user_id == PERSON))
+        later = datetime.now(timezone.utc) + timedelta(days=100)
+        row.status, row.valid_from, row.valid_until = "active", later, later + timedelta(days=30)
+        await session.commit()
+    with pytest.raises(eg.GrantError) as caught:
+        await service.revoke(
+            scope="user", target_id=PERSON, mode="shorten", days=7, reason="x",
+            idempotency_key="gap1", actor_user_id=OWNER, source="command", now=later + timedelta(days=1),
+        )
+    assert caught.value.code == "exceeds_granted"
+
+
 async def test_an_idempotency_key_cannot_be_replayed_as_another_kind_of_operation(env) -> None:
     _, service = env
     await service.grant(**_args(days=5, idempotency_key="same"))

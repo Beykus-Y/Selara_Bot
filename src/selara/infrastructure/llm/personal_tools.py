@@ -181,6 +181,8 @@ class PersonalToolRun:
         if call.name == "send_artifact":
             return await self._send_artifact(call)
         if call.name == "fetch_page" and self.web_used:
+            if self.post_web_fetches >= POST_WEB_FETCHES:
+                return _err(call.call_id, call.name, "После поиска можно открыть только одну страницу.")
             if _normalize_url(str(call.arguments.get("url", ""))) not in self.seen_urls:
                 return _err(call.call_id, call.name, "Открывать можно только ссылки из результатов поиска.")
             self.post_web_fetches += 1
@@ -271,9 +273,12 @@ class PersonalToolRun:
 # --- link handling ---------------------------------------------------------------------------------
 
 _MD_LINK = re.compile(r"\[([^\]\n]{1,300})\]\((\s*<?)([^)\s>]+)>?[^)]*\)")
-# An address with or without a scheme: «evil.com/?q=secret» and «www.evil.com» are links in Telegram too.
+# Any link with a scheme (IPs, localhost, user@host, Cyrillic hosts included) or an address without one:
+# «evil.com/?q=secret» and «www.evil.com» are links in Telegram too. The scheme alternative comes first.
+_LABEL = r"[^\W_](?:[\w-]*[^\W_])?"
 _ADDRESS = re.compile(
-    r"(?<![\w@.-])(?:https?://)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}(?::\d{1,5})?(?:[/?#][^\s<>\"')\]]*)?",
+    r"(?P<schemed>https?://[^\s<>\"')\]]+)"
+    rf"|(?<![\w@.-])(?P<bare>(?:{_LABEL}\.)+(?:xn--[a-z0-9-]+|[^\W\d_]{{2,24}})(?::\d{{1,5}})?(?:[/?#][^\s<>\"')\]]*)?)",
     re.IGNORECASE,
 )
 
@@ -309,6 +314,8 @@ def _scrub_addresses(text: str, seen_urls: set[str] | frozenset[str]) -> str:
         url = match.group(0)
         if _is_verified(url, seen_urls):
             return url
+        if match.group("schemed"):
+            return _host(url) or "ссылка"
         has_scheme = "://" in url
         tail = url.split("://", 1)[-1]
         has_payload = tail.rstrip("/") != re.split(r"[/?#]", tail, maxsplit=1)[0]
