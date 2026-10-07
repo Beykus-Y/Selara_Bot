@@ -55,7 +55,7 @@ WEB_SESSION_COOKIE_SECURE=false
 ```
 
 ### 3.2 Важные замечания
-- `WEB_AUTH_SECRET` обязателен в production: без него (или если он совпадает с `BOT_TOKEN`) старт завершается ошибкой. Fallback на `BOT_TOKEN` работает только для dev/test `APP_ENV` и сопровождается предупреждением.
+- `WEB_AUTH_SECRET` обязателен: без него (или если он совпадает с `BOT_TOKEN`) старт веб-панели завершается ошибкой — независимо от `APP_ENV`. Fallback на `BOT_TOKEN` существует только для локальной разработки и включается явным флагом `WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true` (с предупреждением в лог); по умолчанию он выключен, поэтому «свежий» deployment из `.env.example` не может тихо получить небезопасную конфигурацию.
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
 - При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
 
