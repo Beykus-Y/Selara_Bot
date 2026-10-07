@@ -6,7 +6,10 @@ import json
 import logging
 import random
 import re
+import time
+from collections import deque
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -1189,8 +1192,24 @@ class GroupGame:
     economy_rewards_granted: bool = False
 
 
+# Games a single GameStore call mutates. ``RuntimeGameStore`` sets it around each
+# call so it persists only the games that call changed (see ``_note_touched_game``).
+_TOUCHED_GAME_IDS: ContextVar[set[str] | None] = ContextVar("_touched_game_ids", default=None)
+
+
+def _note_touched_game(game_id: str) -> None:
+    """Record that the running GameStore call mutates ``game_id``."""
+    touched = _TOUCHED_GAME_IDS.get()
+    if touched is not None:
+        touched.add(game_id)
+
+
 class GameStore:
     """Registry of in-process group games.
+
+    Mutation contract: a game may only be changed through a GameStore method.
+    Those methods take the game's lock (``_lock_game``) or, for new games, call
+    ``_note_touched_game``, so the persistence layer knows which games to write.
 
     Locking model:
 
@@ -1231,6 +1250,7 @@ class GameStore:
             self._game_lock_refs[game_id] = self._game_lock_refs.get(game_id, 0) + 1
         try:
             async with lock:
+                _note_touched_game(game_id)
                 yield
         finally:
             async with self._registry_lock:
@@ -1365,6 +1385,7 @@ class GameStore:
                 game.bunker_seats_tuned = False
             self._by_id[game_id] = game
             self._active_by_chat[chat_id] = game_id
+            _note_touched_game(game_id)
             return game, None
 
     async def set_message_id(self, *, game_id: str, message_id: int) -> GroupGame | None:
@@ -1381,6 +1402,15 @@ class GameStore:
             if game is None:
                 return None
             game.execution_confirm_message_id = message_id
+            return game
+
+    async def mark_economy_rewards_granted(self, *, game_id: str) -> GroupGame | None:
+        """Record that the game's economy rewards were settled (persisted, so a retry after restart cannot pay twice)."""
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None
+            game.economy_rewards_granted = True
             return game
 
     async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
@@ -1729,6 +1759,7 @@ class GameStore:
                     game.chat_title = new_chat_title
                 if game.status in {"lobby", "started"} and new_chat_id not in self._active_by_chat:
                     self._active_by_chat[new_chat_id] = game.game_id
+                _note_touched_game(game.game_id)
                 migrated += 1
 
             return migrated
@@ -5891,6 +5922,12 @@ class RuntimeGameStore:
         # record it when serializing and retry from the live object when it
         # moved under an in-flight write (see `_save_game_until_stable`).
         self._game_revisions: dict[str, int] = {}
+        # Finished games waiting to leave hot memory: (due monotonic time, game
+        # id, persisted revision). Queued in due order, see `_evict_finished_games`.
+        self._finished_games_to_evict: deque[tuple[float, str, int]] = deque()
+        self._finished_game_hot_seconds: float = 30 * 60
+        # Next monotonic time at which every active game's Redis TTL is renewed.
+        self._next_active_refresh_at: float = 0.0
         # Bumped whenever the runtime components (backend/repo/broker/mode)
         # are replaced. Recovery attempts capture it and a cancelled attempt
         # may only degrade the runtime generation it was serving.
@@ -5962,6 +5999,7 @@ class RuntimeGameStore:
         self._closed = False
         self._game_revisions = {}
         self._chat_write_locks = {}
+        self._finished_games_to_evict.clear()
         # Invalidate the generation *before* cancelling: the cancelled
         # recovery task must observe that the runtime it was serving is gone
         # and leave this fresh configuration untouched in its handler.
@@ -5977,6 +6015,7 @@ class RuntimeGameStore:
         self._degraded_owned_chats = set()
         self._game_revisions = {}
         self._chat_write_locks = {}
+        self._finished_games_to_evict.clear()
         self._runtime_generation += 1
         self._cancel_recovery_task()
 
@@ -6302,6 +6341,10 @@ class RuntimeGameStore:
         # this load was in flight is kept, and the loaded payload is dropped.
         if not await self._backend._cache_hydrated_game(game):
             return
+        if game.status == "finished":
+            # Loaded only to be read or acted on: let it leave memory again
+            # once its retention window passes.
+            self._schedule_finished_eviction(game.game_id)
         # Hydration changes the state pointer re-assertion reads; bump the
         # version so an in-flight pointer write for this chat is retried.
         self._game_state_version += 1
@@ -6356,7 +6399,12 @@ class RuntimeGameStore:
             if isinstance(chat_id, int):
                 await self._hydrate_active_for_chat(chat_id)
 
-    async def _sync_cached_state(self) -> None:
+    async def _sync_cached_state(self, game_ids: set[str] | None = None) -> None:
+        """Persist cached games to Redis; ``None`` means every cached game.
+
+        Mutations pass the games they touched, so a call writes O(touched)
+        payloads instead of re-serializing the whole registry.
+        """
         repo = self._state_repo
         if repo is None:
             return
@@ -6367,9 +6415,19 @@ class RuntimeGameStore:
         # lease defers closing the repo until the last such sync is done.
         self._repo_sync_leases[repo] = self._repo_sync_leases.get(repo, 0) + 1
         try:
-            _, games = await self._backend._games_snapshot()
-            for game in games.values():
+            if game_ids is None:
+                _, snapshot = await self._backend._games_snapshot()
+                targets = list(snapshot.values())
+            else:
+                targets = []
+                for game_id in game_ids:
+                    game = self._backend._by_id.get(game_id)
+                    if game is not None:
+                        targets.append(game)
+            for game in targets:
                 await self._save_game_until_stable(repo, game)
+                if game.status == "finished":
+                    self._schedule_finished_eviction(game.game_id)
         finally:
             remaining = self._repo_sync_leases.pop(repo) - 1
             if remaining:
@@ -6428,8 +6486,8 @@ class RuntimeGameStore:
             # payload just written may already be stale. Re-serialize the
             # current object and write again.
 
-    def _bump_game_revisions(self) -> None:
-        """Invalidate payload freshness for every known game.
+    def _bump_game_revisions(self, game_ids: set[str]) -> None:
+        """Invalidate payload freshness for the games a mutation changed.
 
         Called right after a backend mutation returns and before that
         mutation's own Redis sync: the in-memory objects are now newer than
@@ -6438,8 +6496,69 @@ class RuntimeGameStore:
         that. Bumping before the sync (not only after it) closes the window
         where a stale write could return without seeing the mutation.
         """
-        for game_id in self._backend._by_id:
+        for game_id in game_ids:
             self._game_revisions[game_id] = self._game_revisions.get(game_id, 0) + 1
+
+    async def _game_ids_to_sync(self, touched: set[str]) -> set[str]:
+        """Games to persist after a mutation: the touched ones, plus active games when their TTL is due.
+
+        Redis expires a payload ``ttl`` after its last write, and before this
+        change every mutation rewrote every cached game, which kept idle lobbies
+        alive. Now only touched games are written, so every active game is
+        re-saved once per quarter of the TTL instead. That keeps Redis writes
+        O(touched) per action and O(active games) per interval.
+        """
+        if self._state_repo is None:
+            return touched
+        now = time.monotonic()
+        if now < self._next_active_refresh_at:
+            return touched
+        self._next_active_refresh_at = now + self._redis_ttl.total_seconds() / 4
+        return touched | await self._backend._active_game_ids()
+
+    def _schedule_finished_eviction(self, game_id: str) -> None:
+        """Queue a just-persisted finished game for eviction from hot memory.
+
+        The entry remembers the revision that was persisted, so a later
+        mutation (which bumps the revision and re-queues on its own sync) makes
+        the entry stale instead of evicting newer state.
+        """
+        due = time.monotonic() + self._finished_game_hot_seconds
+        self._finished_games_to_evict.append((due, game_id, self._game_revisions.get(game_id, 0)))
+
+    def _evict_finished_games(self) -> None:
+        """Drop finished games whose hot-memory window has passed.
+
+        An evicted game is served from Redis on the next access (see
+        ``_hydrate_game``), so memory stays bounded by the games still in
+        play instead of every game this process ever finished. Entries are
+        appended in due-time order, so the sweep stops at the first one that
+        is not due yet and costs amortized O(1) per finished game.
+        """
+        if self._state_repo is None:
+            return
+        registry_lock = self._backend._registry_lock
+        now = time.monotonic()
+        queue = self._finished_games_to_evict
+        # One pass over the entries queued so far: a requeued entry must not be
+        # picked up again within the same sweep.
+        for _ in range(len(queue)):
+            if not queue or queue[0][0] > now:
+                break
+            if registry_lock.locked():
+                return
+            _, game_id, revision = queue.popleft()
+            game = self._backend._by_id.get(game_id)
+            if game is None or game.status != "finished" or self._game_revisions.get(game_id, 0) != revision:
+                # Already gone, or changed since it was persisted; a newer
+                # sync queues it again if it is still a finished game.
+                continue
+            if game_id in self._backend._game_lock_refs:
+                # Being acted on right now: retry after another retention window.
+                queue.append((now + self._finished_game_hot_seconds, game_id, revision))
+                continue
+            del self._backend._by_id[game_id]
+            self._game_revisions.pop(game_id, None)
 
     async def _publish_after_call(self, name: str, result: Any, kwargs: dict[str, Any]) -> None:
         if self._broker is None:
@@ -6476,20 +6595,27 @@ class RuntimeGameStore:
                     self._degrade_to_in_memory(stage=f"{name}:hydrate", exc=exc)
                 else:
                     raise
-            result = await attr(*args, **kwargs)
+            touched: set[str] = set()
+            token = _TOUCHED_GAME_IDS.set(touched)
+            try:
+                result = await attr(*args, **kwargs)
+            finally:
+                _TOUCHED_GAME_IDS.reset(token)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
                 # The mutation is in: invalidate payload freshness right away
                 # (not only after the sync below) so any write already in
                 # flight for these games detects it and re-serializes instead
                 # of landing a stale payload over a confirmed newer state.
-                self._bump_game_revisions()
+                self._bump_game_revisions(touched)
                 try:
-                    await self._sync_cached_state()
+                    await self._sync_cached_state(await self._game_ids_to_sync(touched))
                     # The mutation (and its persisted sync) is now visible in
                     # memory; invalidate any pointer decision computed before
                     # it so the recovery pass cannot replay stale pointers.
                     self._game_state_version += 1
                     await self._publish_after_call(name, result, kwargs)
+                    # Last, so publishing above still finds the games it reports.
+                    self._evict_finished_games()
                 except Exception as exc:
                     if self._is_redis_error(exc):
                         self._degrade_to_in_memory(stage=f"{name}:sync", exc=exc)

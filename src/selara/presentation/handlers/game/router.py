@@ -1327,6 +1327,7 @@ async def _grant_game_rewards_if_needed(
 
     rewards = _build_game_rewards(game, winner_user_ids_override=winner_user_ids_override)
     if not rewards:
+        await GAME_STORE.mark_economy_rewards_granted(game_id=game.game_id)
         game.economy_rewards_granted = True
         return None
 
@@ -1345,6 +1346,7 @@ async def _grant_game_rewards_if_needed(
         )
         return None
 
+    await GAME_STORE.mark_economy_rewards_granted(game_id=game.game_id)
     game.economy_rewards_granted = True
     if result is None:
         return None
