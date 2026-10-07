@@ -149,7 +149,10 @@ jobs:
         uses: ./.github/actions/backend-setup
 
       - name: Install snapshot fonts and ffmpeg
-        uses: ./.github/actions/snapshot-fonts
+        uses: ./.github/actions/cached-apt-install
+        with:
+          cache-name: fonts
+          packages: fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -157,14 +160,40 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
-      - name: Install headless Chromium
+      - name: Download headless Chromium
         timeout-minutes: 10
         run: |
           for attempt in 1 2 3; do
-            if [ "$attempt" = "3" ]; then
-              sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
-                /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            if timeout 150 python -m playwright install chromium; then
+              exit 0
             fi
+            echo "playwright download attempt $attempt failed" >&2
+            sleep 5
+          done
+          exit 1
+
+      - name: Find Chromium system packages
+        id: chromium-deps
+        run: |
+          # Ask Playwright which apt packages it wants; empty means "use --with-deps".
+          pkgs=$(python -m playwright install-deps --dry-run chromium 2>/dev/null \
+            | grep -o 'no-install-recommends [^"]*' | head -1 | sed 's/^no-install-recommends //')
+          echo "packages=$pkgs" >> "$GITHUB_OUTPUT"
+          echo "Chromium packages: ${pkgs:-<none found>}"
+
+      - name: Install Chromium system packages
+        if: ${{ steps.chromium-deps.outputs.packages != '' }}
+        uses: ./.github/actions/cached-apt-install
+        with:
+          cache-name: chromium-deps
+          cache-version: ${{ hashFiles('uv.lock') }}
+          packages: ${{ steps.chromium-deps.outputs.packages }}
+
+      - name: Install Chromium system packages (fallback)
+        if: ${{ steps.chromium-deps.outputs.packages == '' }}
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
             if timeout 150 python -m playwright install --with-deps chromium; then
               exit 0
             fi

@@ -1,0 +1,91 @@
+name: Cached apt packages
+description: >-
+  Installs apt packages for the snapshot and browser tests. The downloaded .deb
+  files are cached, apt is tried without `apt-get update` first, every call has
+  a hard timeout, and the last attempt falls back to the public Ubuntu mirror.
+
+inputs:
+  packages:
+    description: Space-separated apt packages to install.
+    required: true
+  cache-name:
+    description: Short name that keeps this package set's cache separate.
+    required: true
+  cache-version:
+    description: Extra cache key part, for example a hash of what decides the package list.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: Read runner image version
+      id: image
+      shell: bash
+      run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached packages
+      id: debs-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/debs-${{ inputs.cache-name }}
+        key: debs-${{ inputs.cache-name }}-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ inputs.cache-version }}
+
+    - name: Install packages
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.debs-cache.outputs.cache-hit }}
+        PKGS: ${{ inputs.packages }}
+        CACHE_NAME: ${{ inputs.cache-name }}
+      run: |
+        set -u
+        DEBS="$HOME/debs-$CACHE_NAME"
+        APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dir::Cache::archives=$DEBS"
+
+        if [ "$CACHE_HIT" = "true" ] && ls "$DEBS"/*.deb >/dev/null 2>&1; then
+          echo "Installing from cached packages"
+          if timeout 180 sudo dpkg -i "$DEBS"/*.deb; then
+            exit 0
+          fi
+          echo "Cached packages did not install, falling back to apt" >&2
+        fi
+
+        mkdir -p "$DEBS"
+        finish() {
+          sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+          rm -rf "$DEBS/partial" "$DEBS/lock"
+        }
+
+        # The runner image already has a package index, so try without `update`
+        # first: it skips the mirror round trips that stall on bad days.
+        # shellcheck disable=SC2086
+        if timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
+          finish
+          exit 0
+        fi
+
+        for attempt in 1 2 3; do
+          if [ "$attempt" = "3" ]; then
+            echo "Switching to archive.ubuntu.com for the last attempt"
+            # Hosted runners list their mirror in apt-mirrors.txt (mirror+file: URI).
+            sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
+              /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          fi
+          # Each call is bounded so a stalled mirror fails the attempt in ~3 minutes.
+          # shellcheck disable=SC2086
+          if timeout 60 sudo apt-get $APT_OPTS update \
+            && timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
+            finish
+            exit 0
+          fi
+          echo "apt attempt $attempt failed" >&2
+          sleep 5
+        done
+        exit 1
+
+    - name: Save packages to cache
+      if: ${{ steps.debs-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ~/debs-${{ inputs.cache-name }}
+        key: debs-${{ inputs.cache-name }}-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ inputs.cache-version }}
