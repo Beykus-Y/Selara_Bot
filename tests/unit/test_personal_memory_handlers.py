@@ -510,7 +510,8 @@ async def test_forget_all_is_committed_before_telegram_is_called(monkeypatch, se
 
     await _memory_call(memory_handler.memory_callback, query, session, settings)
 
-    assert events[:2] == ["commit", "answer"]
+    # The first commit ends the request transaction before the lease; the deletion commit must still precede the answer.
+    assert events[-2:] == ["commit", "answer"]
 
 
 async def test_forget_all_declined_keeps_everything(monkeypatch, session):
