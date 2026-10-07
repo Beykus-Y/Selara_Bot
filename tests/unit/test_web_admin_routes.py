@@ -2317,14 +2317,14 @@ async def test_admin_table_update_converts_blank_datetime_fields_to_none(monkeyp
 async def test_admin_request_backup_calls_runtime_backup(monkeypatch) -> None:
     settings = _settings()
     auth_session = FakeSession()
-    backup_mock = AsyncMock()
+    backup_mock = AsyncMock(return_value="job-1")
 
     monkeypatch.setattr(
         web_app_module,
         "SqlAlchemyAdminAuthRepository",
         lambda session: FakeAdminAuthRepo(settings.admin_user_id),
     )
-    monkeypatch.setattr(web_app_module, "send_daily_backup", backup_mock)
+    monkeypatch.setattr(web_app_module, "start_manual_backup", backup_mock)
 
     app = web_app_module.create_web_app(
         settings=settings,
@@ -2342,6 +2342,38 @@ async def test_admin_request_backup_calls_runtime_backup(monkeypatch) -> None:
     assert response.status_code == 303
     assert response.headers["location"].startswith("/app/admin?flash=")
     backup_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_api_backup_returns_conflict_while_another_backup_runs(monkeypatch) -> None:
+    settings = _settings()
+    auth_session = FakeSession()
+
+    async def busy_start_manual_backup(**kwargs) -> str:
+        raise web_app_module.BackupAlreadyRunningError("busy")
+
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+    monkeypatch.setattr(web_app_module, "start_manual_backup", busy_start_manual_backup)
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.post("/api/admin/request-backup")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 409
+    assert response.json()["ok"] is False
 
 
 @pytest.mark.asyncio

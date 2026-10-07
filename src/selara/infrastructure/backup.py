@@ -27,10 +27,14 @@ from selara.core.config import Settings
 from selara.infrastructure.db.backup_claims import (
     BACKUP_SLOT_COMPLETED,
     BACKUP_SLOT_FAILED,
+    BACKUP_SLOT_RUNNING,
+    MANUAL_BACKUP_SLOT_KEY,
     finish_backup_slot,
+    read_backup_slot,
     read_backup_slot_status,
     renew_backup_slot_lease,
     try_claim_backup_slot,
+    try_claim_manual_backup,
 )
 from selara.infrastructure.http.gacha_client import GachaClientError, HttpGachaClient
 
@@ -67,6 +71,14 @@ _BACKUP_FAILURE_REASON_MAX_CHARS = 500
 
 class BackupJobError(RuntimeError):
     pass
+
+
+class BackupAlreadyRunningError(BackupJobError):
+    pass
+
+
+# Manual backup jobs are not owned by any request, so keep them (by job id) until they finish.
+_manual_backup_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 @dataclass(slots=True)
@@ -247,8 +259,170 @@ async def _stop_task(task: asyncio.Task[None]) -> None:
         await task
 
 
+async def start_manual_backup(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Start an admin-requested backup in the background and return its job id.
+
+    The request only claims the single manual slot. The dump runs in its own task, so
+    a dropped browser connection cannot cancel it. Only one manual backup may run at a
+    time across bot instances; a second request raises BackupAlreadyRunningError.
+    """
+    if settings.admin_user_id is None:
+        raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
+
+    job_id = uuid4().hex
+    claimed = await try_claim_manual_backup(
+        session_factory=session_factory,
+        owner_token=job_id,
+        lease_seconds=_BACKUP_LEASE_SECONDS,
+    )
+    if not claimed:
+        raise BackupAlreadyRunningError("Backup уже выполняется.")
+
+    task = asyncio.create_task(
+        _run_manual_backup(
+            bot=bot,
+            settings=settings,
+            session_factory=session_factory,
+            job_id=job_id,
+        ),
+        name="manual-backup-job",
+    )
+    _manual_backup_tasks[job_id] = task
+    task.add_done_callback(lambda _done, jid=job_id: _manual_backup_tasks.pop(jid, None))
+    return job_id
+
+
+async def _run_manual_backup(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    job_id: str,
+) -> None:
+    lease_lost = asyncio.Event()
+    job = asyncio.create_task(send_daily_backup(bot=bot, settings=settings), name="manual-backup-dump")
+    lease = asyncio.create_task(
+        _keep_backup_lease_alive(
+            session_factory=session_factory,
+            slot_key=MANUAL_BACKUP_SLOT_KEY,
+            owner_token=job_id,
+            on_lost=lambda: _abort_lost_backup(job, lease_lost),
+        ),
+        name="manual-backup-lease",
+    )
+    try:
+        await job
+    except asyncio.CancelledError:
+        await _stop_task(lease)
+        if lease_lost.is_set():
+            logger.error("Manual backup stopped after losing its lease", extra={"job_id": job_id})
+            return
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
+        raise
+    except Exception as exc:
+        await _stop_task(lease)
+        logger.exception("Manual Selara backup failed", extra={"job_id": job_id})
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error=str(exc),
+        )
+        try:
+            await _notify_backup_failure(bot=bot, settings=settings, reason=str(exc))
+        except Exception:
+            logger.exception("Could not notify admin about manual backup failure")
+        return
+
+    await _stop_task(lease)
+    await _record_manual_backup_result(
+        session_factory=session_factory,
+        job_id=job_id,
+        status=BACKUP_SLOT_COMPLETED,
+    )
+
+
+async def _record_manual_backup_result(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    job_id: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    # A failed status write must not hide the outcome from the admin: the caller still notifies.
+    try:
+        await finish_backup_slot(
+            session_factory=session_factory,
+            slot_key=MANUAL_BACKUP_SLOT_KEY,
+            owner_token=job_id,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        logger.exception("Could not record manual backup result", extra={"job_id": job_id, "status": status})
+
+
+async def stop_manual_backups(*, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Cancel manual backups still running and record each as failed; call before their bot session closes.
+
+    A job cancelled before it first runs never reaches its own failure path, so the
+    record is written here. finish_backup_slot only updates a row that is still running,
+    so a job that already finished keeps its result.
+    """
+    jobs = tuple(_manual_backup_tasks.items())
+    for _job_id, task in jobs:
+        task.cancel()
+    if jobs:
+        await asyncio.gather(*(task for _job_id, task in jobs), return_exceptions=True)
+    for job_id, _task in jobs:
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
+
+
+async def read_manual_backup_status(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    now: datetime | None = None,
+) -> dict[str, str | None]:
+    """Describe the latest manual backup: idle, running, completed, failed or interrupted.
+
+    A running row whose lease has expired means its process died mid-job; the next
+    request may take the slot over, so it is reported as interrupted rather than running.
+    """
+    snapshot = await read_backup_slot(session_factory=session_factory, slot_key=MANUAL_BACKUP_SLOT_KEY)
+    if snapshot is None:
+        return {"status": "idle", "started_at": None, "finished_at": None, "error": None}
+
+    status = snapshot.status
+    error = snapshot.last_error
+    if status == BACKUP_SLOT_RUNNING and _as_utc(now) > _as_utc(snapshot.lease_expires_at):
+        status = "interrupted"
+        error = "Backup прервался до завершения. Запросите его снова."
+    finished_at = snapshot.finished_at
+    return {
+        "status": status,
+        "started_at": _as_utc(snapshot.claimed_at).isoformat(),
+        "finished_at": _as_utc(finished_at).isoformat() if finished_at is not None else None,
+        "error": error,
+    }
+
+
 async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
-    """Send a backup now. Manual admin requests call this directly and do not claim a scheduled slot."""
+    """Send a backup now. Admin requests reach it through start_manual_backup; it claims no scheduled slot."""
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")
