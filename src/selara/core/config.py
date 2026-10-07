@@ -1,3 +1,4 @@
+import warnings
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -7,6 +8,14 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from selara.core.web_auth import normalize_base_url
+
+# APP_ENV values where falling back to BOT_TOKEN for web auth is tolerated
+# (explicit dev/test compatibility, #71). Anything outside this set --
+# "prod", "production", "staging", typos, future values -- is treated as
+# production and requires an explicit WEB_AUTH_SECRET (fail-closed).
+WEB_AUTH_FALLBACK_APP_ENVS: frozenset[str] = frozenset(
+    {"dev", "development", "local", "test", "testing"}
+)
 
 
 class Settings(BaseSettings):
@@ -260,15 +269,66 @@ class Settings(BaseSettings):
             raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
+    @model_validator(mode="after")
+    def _check_web_auth_secret(self):
+        # #71: BOT_TOKEN doubles as the Telegram Bot API credential and, via
+        # the fallback below, the HMAC key for web login/session digests.
+        # Coupling the two security domains means rotating or leaking the bot
+        # token silently compromises web auth. Fail closed outside dev/test.
+        if not self.web_enabled:
+            return self
+        secret = (self.web_auth_secret or "").strip()
+        if not secret:
+            if self._web_auth_fallback_allowed:
+                warnings.warn(
+                    "WEB_AUTH_SECRET is not set; falling back to BOT_TOKEN for web auth. "
+                    "This dev/test compatibility couples the web auth HMAC domain to the "
+                    "Telegram bot credential -- set a separate WEB_AUTH_SECRET before production.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return self
+            raise ValueError(
+                f"WEB_AUTH_SECRET is required when APP_ENV={self.app_env!r} while the web panel "
+                "is enabled; the BOT_TOKEN fallback is allowed only for dev/test APP_ENV values"
+            )
+        if secret == (self.bot_token or "").strip():
+            if self._web_auth_fallback_allowed:
+                warnings.warn(
+                    "WEB_AUTH_SECRET equals BOT_TOKEN; web auth and the Telegram bot credential "
+                    "share one secret. Set a separate WEB_AUTH_SECRET before production.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return self
+            raise ValueError(
+                "WEB_AUTH_SECRET must differ from BOT_TOKEN; use a separate random secret "
+                "so the web auth and Telegram credentials can be rotated independently"
+            )
+        return self
+
     @property
     def supported_chat_types(self) -> set[str]:
         return {"private", "group", "supergroup"}
+
+    @property
+    def _web_auth_fallback_allowed(self) -> bool:
+        return self.app_env.strip().lower() in WEB_AUTH_FALLBACK_APP_ENVS
 
     @property
     def resolved_web_auth_secret(self) -> str:
         value = (self.web_auth_secret or "").strip()
         if value:
             return value
+        # Defense in depth (#71): Settings validation already rejects a missing
+        # secret for web-enabled production, but any caller of this property is
+        # about to derive web auth HMAC keys from it, so fail closed here too
+        # instead of silently reusing the bot token outside dev/test.
+        if not self._web_auth_fallback_allowed:
+            raise RuntimeError(
+                f"WEB_AUTH_SECRET is required when APP_ENV={self.app_env!r}; "
+                "the BOT_TOKEN fallback is allowed only for dev/test APP_ENV values"
+            )
         return self.bot_token
 
     @property

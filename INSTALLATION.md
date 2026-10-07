@@ -55,7 +55,7 @@ WEB_SESSION_COOKIE_SECURE=false
 ```
 
 ### 3.2 Важные замечания
-- `WEB_AUTH_SECRET` нельзя оставлять дефолтным в production.
+- `WEB_AUTH_SECRET` обязателен в production: без него (или если он совпадает с `BOT_TOKEN`) старт завершается ошибкой. Fallback на `BOT_TOKEN` работает только для dev/test `APP_ENV` и сопровождается предупреждением.
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
 - При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
 
