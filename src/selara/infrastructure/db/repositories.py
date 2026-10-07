@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -9192,25 +9193,89 @@ class SqlAlchemyEconomyRepository:
         return self._to_inventory_item(row)
 
     async def add_inventory_item(self, *, account_id: int, item_code: str, delta: int) -> InventoryItem:
-        row = await self._session.get(EconomyInventoryModel, {"account_id": account_id, "item_code": item_code})
-        if row is None:
-            if delta < 0:
-                raise ValueError("Cannot subtract missing inventory item")
-            row = EconomyInventoryModel(account_id=account_id, item_code=item_code, quantity=0)
-            self._session.add(row)
-
-        row.quantity = int(row.quantity) + int(delta)
-        if row.quantity < 0:
+        normalized_delta = int(delta)
+        changed_at = datetime.now(timezone.utc)
+        # Atomic conditional increment/decrement: the UPDATE itself takes the row
+        # lock, so concurrent writers serialize instead of racing a
+        # read-modify-write that loses updates or double-spends the last unit.
+        stmt = (
+            update(EconomyInventoryModel)
+            .where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+                EconomyInventoryModel.quantity + normalized_delta >= 0,
+            )
+            .values(
+                quantity=EconomyInventoryModel.quantity + normalized_delta,
+                updated_at=changed_at,
+            )
+            .returning(EconomyInventoryModel.quantity)
+        )
+        new_quantity = (await self._session.execute(stmt)).scalar_one_or_none()
+        if new_quantity is not None:
+            return await self._finish_inventory_change(
+                account_id=account_id, item_code=item_code, quantity=int(new_quantity)
+            )
+        # No row matched: the item is missing or the stored quantity is too low.
+        stored_quantity = await self._session.scalar(
+            select(EconomyInventoryModel.quantity).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+            )
+        )
+        if stored_quantity is not None:
             raise ValueError("Inventory quantity cannot be negative")
+        if normalized_delta < 0:
+            raise ValueError("Cannot subtract missing inventory item")
+        # Missing row: atomic upsert so concurrent first inserts cannot collide
+        # on the primary key or lose an increment. The negative-delta guard above
+        # rejects a subtract on a missing row, so `quantity + delta >= 0` holds by
+        # construction here; unlike the conditional UPDATE, the upsert needs no
+        # inline non-negative check because it only ever adds a non-negative delta
+        # to an existing row (or inserts that same non-negative delta).
+        upsert_quantity = await self._upsert_inventory_quantity(
+            account_id=account_id,
+            item_code=item_code,
+            quantity=normalized_delta,
+            changed_at=changed_at,
+        )
+        return await self._finish_inventory_change(
+            account_id=account_id, item_code=item_code, quantity=upsert_quantity
+        )
 
-        if row.quantity == 0:
-            await self._session.delete(row)
-            await self._session.flush()
+    async def _upsert_inventory_quantity(
+        self, *, account_id: int, item_code: str, quantity: int, changed_at: datetime
+    ) -> int:
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        insert = sqlite_insert if dialect == "sqlite" else pg_insert
+        stmt = insert(EconomyInventoryModel).values(
+            account_id=account_id,
+            item_code=item_code,
+            quantity=quantity,
+            updated_at=changed_at,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[EconomyInventoryModel.account_id, EconomyInventoryModel.item_code],
+            set_={
+                "quantity": EconomyInventoryModel.quantity + stmt.excluded.quantity,
+                "updated_at": changed_at,
+            },
+        )
+        return int(
+            (await self._session.execute(stmt.returning(EconomyInventoryModel.quantity))).scalar_one()
+        )
+
+    async def _finish_inventory_change(self, *, account_id: int, item_code: str, quantity: int) -> InventoryItem:
+        if quantity == 0:
+            # The change above holds the row lock until commit, so removing the
+            # zero row cannot open a window for a concurrent lost update.
+            stmt = delete(EconomyInventoryModel).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+            )
+            await self._session.execute(stmt)
             return InventoryItem(account_id=account_id, item_code=item_code, quantity=0)
-
-        row.updated_at = datetime.now(timezone.utc)
-        await self._session.flush()
-        return self._to_inventory_item(row)
+        return InventoryItem(account_id=account_id, item_code=item_code, quantity=quantity)
 
     async def add_balance(self, *, account_id: int, delta: int) -> int:
         normalized_delta = int(delta)
