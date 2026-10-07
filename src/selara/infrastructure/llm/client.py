@@ -131,8 +131,9 @@ UsageRecorder = Callable[[LlmAccountingContext, LlmCallUsage], Awaitable[None]]
 class LlmClient:
     def __init__(self, config: LlmConfig, *, usage_recorder: UsageRecorder | None = None,
                  accounting_service=None, model_catalog: CatalogProvider | None = None,
-                 model_router: ModelRouter | None = None) -> None:
+                 model_router: ModelRouter | None = None, feature_routes=None) -> None:
         self._config = config
+        self._feature_routes = feature_routes
         self._model_catalog = model_catalog
         self._model_router = model_router or DefaultModelRouter(config.model, model_catalog)
         self._client = AsyncOpenAI(
@@ -158,6 +159,7 @@ class LlmClient:
         model: str | None = None,
         model_profile: str | None = None,
     ):
+        model_profile = await self._routed_profile(model, model_profile, accounting_context)
         selected, snapshot, _ = await self._prepare_model(
             model, model_profile, self._config.model, ModelCapabilities(supports_tools=bool(tools)),
         )
@@ -194,6 +196,7 @@ class LlmClient:
                 model=resolved_model.model_id, messages=messages, max_tokens=max_tokens,
             )
             return LlmCallResult(response.choices[0].message.content or "", usages)
+        model_profile = await self._routed_profile(model, model_profile, accounting_context)
         selected, snapshot, _ = await self._prepare_model(model, model_profile, self._config.model)
         response, usages = await self._request_with_retries(
             "chat_simple", selected, accounting_context,
@@ -307,6 +310,18 @@ class LlmClient:
                 ) from exc
 
         raise AssertionError("unreachable")  # loop always returns or raises
+
+    async def _routed_profile(
+        self, model: str | None, profile: str | None, context: LlmAccountingContext | None
+    ) -> str | None:
+        """The owner-chosen profile of the call's feature, unless the caller picked a model itself."""
+        if model is not None or profile is not None or self._feature_routes is None or context is None:
+            return profile
+        try:
+            return await self._feature_routes.profile_for_feature(context.feature)
+        except Exception:
+            log.exception("Feature model route unavailable; using the default model")
+            return None
 
     async def _prepare_model(
         self, model: str | None, profile: str | None, legacy_model: str,

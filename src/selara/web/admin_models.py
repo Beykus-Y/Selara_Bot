@@ -12,6 +12,8 @@ from selara.application.model_catalog import (
     CatalogModel, CatalogSnapshot, ModelCapabilities, ModelConfigurationConflict, ModelProfile,
 )
 from selara.application.model_router import DefaultModelRouter
+from selara.application.llm_routes import ROUTE_TITLES
+from selara.infrastructure.db.llm_routes import build_feature_routes
 from selara.infrastructure.db.model_catalog import build_model_catalog
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,11 @@ class ModelCreate(ModelInput):
 class ModelUpdate(ModelInput):
     revision: Annotated[StrictInt, Field(ge=1)]
     confirm_disable: StrictBool = False
+
+
+class RouteUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_key: str | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -159,5 +166,38 @@ def build_admin_models_router(*, settings, session_factory, require_admin) -> AP
                                               updated_by=settings.admin_user_id))
         snapshot = await load()
         return {"ok": True, "item": next(p for p in await profiles_json(snapshot) if p["profile_key"] == profile_key)}
+
+    _routes_provider, route_store = build_feature_routes(session_factory)
+
+    async def routes_json(snapshot: CatalogSnapshot) -> list[dict]:
+        try:
+            stored = await route_store.load()
+        except SQLAlchemyError:
+            logger.exception("Unable to read feature model routes")
+            raise HTTPException(503, "Не удалось загрузить настройки. Повторите позже.") from None
+        resolver = DefaultModelRouter(settings.llm_model, _SnapshotProvider(snapshot))
+        items = []
+        for key, title in ROUTE_TITLES.items():
+            profile_key = stored.get(key)
+            resolved = await resolver.resolve(profile_key=profile_key)
+            items.append({"route_key": key, "title": title, "profile_key": profile_key,
+                          "effective_model_id": resolved.model_id, "is_fallback": resolved.is_fallback})
+        return items
+
+    @router.get("/feature-routes")
+    async def feature_routes():
+        snapshot = await load()
+        return {"ok": True, "items": await routes_json(snapshot),
+                "profiles": [{"profile_key": p.profile_key, "display_name": p.display_name} for p in snapshot.profiles],
+                "applies_within_seconds": 15,
+                "fallback_note": "Если профиль не выбран, выключен или без модели, используется LLM_MODEL из .env."}
+
+    @router.put("/feature-routes/{route_key}")
+    async def update_feature_route(route_key: str, payload: RouteUpdate):
+        snapshot = await load()
+        if payload.profile_key is not None and payload.profile_key not in snapshot.profiles_by_key:
+            raise HTTPException(422, "Профиль не найден.")
+        await write(lambda: route_store.save(route_key, payload.profile_key, updated_by=settings.admin_user_id))
+        return {"ok": True, "item": next(i for i in await routes_json(await load()) if i["route_key"] == route_key)}
 
     return router

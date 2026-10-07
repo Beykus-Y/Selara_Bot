@@ -67,3 +67,14 @@ export async function saveQuotaMode(payload: {
     throw error
   }
 }
+
+export type FeatureRoute = {
+  route_key: string; title: string; profile_key: string | null; effective_model_id: string; is_fallback: boolean
+}
+export const getFeatureRoutes = () => getMiniAppData<{
+  items: FeatureRoute[]; profiles: Array<{ profile_key: string; display_name: string }>
+  applies_within_seconds: number; fallback_note: string
+}>('/miniapp/admin/ai/feature-routes', 'Не удалось загрузить модели для групп.')
+export function saveFeatureRoute(routeKey: string, profileKey: string | null) {
+  return save(`/miniapp/admin/ai/feature-routes/${encodeURIComponent(routeKey)}`, { profile_key: profileKey })
+}

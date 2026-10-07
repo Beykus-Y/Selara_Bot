@@ -25,6 +25,7 @@ import {
   refundLabels,
 } from '../lib/format'
 import { AdminModelsSection } from './AdminModelsSection'
+import { AdminFeatureRoutesSection } from './AdminFeatureRoutesSection'
 import { AdminQuotaModeSection } from './AdminQuotaModeSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
@@ -523,6 +524,7 @@ export function AdminAiPage() {
       </header>
       <ReadinessSection />
       <AdminModelsSection />
+      <AdminFeatureRoutesSection />
       <AdminQuotaModeSection />
       <PeriodSwitch value={periodDays} onChange={setPeriodDays} />
       <AiSummarySection periodDays={periodDays} />
