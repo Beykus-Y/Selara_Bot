@@ -13,6 +13,15 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       postgres:
         image: postgres:16-alpine
         env:
@@ -31,6 +40,7 @@ jobs:
       BOT_TOKEN: 123456:CI_TOKEN
       DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
       TEST_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
       GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
       TEST_GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
 

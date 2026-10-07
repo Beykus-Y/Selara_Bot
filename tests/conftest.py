@@ -1,6 +1,25 @@
 import pytest
 
 
+@pytest.fixture
+def stt_cooldown_stub(monkeypatch):
+    """Handler tests inject admission; the real Redis contract is tested separately."""
+    from selara.presentation.handlers import voice
+
+    claimed = set()
+
+    async def claim(*, chat_id, user_id, cooldown_seconds, **kwargs):
+        if cooldown_seconds <= 0:
+            return True
+        key = (chat_id, user_id)
+        if key in claimed:
+            return False
+        claimed.add(key)
+        return True
+
+    monkeypatch.setattr(voice, "claim_stt_cooldown", claim)
+
+
 @pytest.fixture(autouse=True)
 def _test_web_auth_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give every test a dedicated WEB_AUTH_SECRET (#71).
