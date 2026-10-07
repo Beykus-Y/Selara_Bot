@@ -89,6 +89,9 @@ class ArchivedMessageView:
     text: str | None
     transcript: str | None
     reply_to_telegram_message_id: int | None
+    # Minimal text_mention metadata; offsets/lengths use Telegram UTF-16 units.
+    # User objects, names and the rest of the Telegram payload stay in storage.
+    text_mentions: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
