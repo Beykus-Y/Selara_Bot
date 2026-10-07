@@ -6,15 +6,16 @@ App отвечает на три неавторизованных endpoint. Он
 - `/livez`: 200, если web process способен обработать запрос. БД, Redis,
   polling и внешние провайдеры не проверяются. Используйте для проверки
   жизни процесса, не для подтверждения успешного deploy.
-- `/readyz`: 200 только при успешном `SELECT 1` в main DB, Redis PING,
-  настроенном durable Redis game store и работающем polling с heartbeat
-  не старше 45 секунд. Иначе 503. DB/Redis probes идут параллельно,
-  каждая ограничена двумя секундами.
+- `/readyz`: 200 только при успешном `SELECT 1` в main DB, Redis PING и
+  работающем polling с heartbeat не старше 45 секунд. Иначе 503. DB/Redis
+  probes идут параллельно, каждая ограничена двумя секундами.
 - `/healthz`: compatibility alias для полной readiness. Старые мониторы
   получают строгий результат вместо прежней проверки одной БД.
 
 Ответ readiness содержит `status` и boolean `checks.database`, `checks.redis`,
-`checks.polling`, с `Cache-Control: no-store`. Polling heartbeat обновляется
+`checks.polling`, с `Cache-Control: no-store`. `checks.game_store_redis`
+(`disabled`/`connected`/`degraded`/`recovering`) информационный и на `status`
+не влияет. Polling heartbeat обновляется
 каждые 10 секунд; `mark_bot_polling_stopped()` в `finally` выключает readiness
 при завершении poller. Heartbeat показывает жизнь процесса polling, а не
 latency Telegram API; он не отправляет дополнительные Telegram API запросы
@@ -22,12 +23,13 @@ latency Telegram API; он не отправляет дополнительны�
 
 ## Redis policy
 
-Redis обязателен для production readiness: durable game state, live events
-и общий login limiter требуют shared store. Memory fallback не считается
-готовым production runtime, даже если другой Redis client уже получил PONG.
-Старый game store, оставшийся в memory mode после outage, должен восстановить
-durable backend или быть перезапущен; один ответ PONG не означает, что runtime
-уже восстановил состояние. Это не запрещает `/livez` и диагностику outage.
+Redis обязателен для production readiness: Redis PING входит в `/readyz`, а
+durable game state, live events и общий login limiter требуют shared store.
+Если game store ушёл в memory mode после outage, он сам переподключается к Redis
+и переносит накопленное состояние обратно (reconciliation). Пока это не
+завершилось, `checks.game_store_redis` показывает `degraded` или `recovering`,
+а readiness не падает: игры продолжают работать из памяти. Один ответ PONG не
+означает, что состояние уже восстановлено; для этого нужен `connected`.
 
 LLM, STT, web search, gacha API и прогрев image cache не входят в обязательные
 probes: их отказ может корректно отключить только соответствующую feature.

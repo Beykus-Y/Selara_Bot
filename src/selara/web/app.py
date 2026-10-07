@@ -4539,10 +4539,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         database_ok, redis_ok = await asyncio.gather(database_ready(session_factory), redis_ready(settings.redis_url))
         checks = {
             "database": database_ok,
-            "redis": redis_ok and GAME_STORE.durable_runtime_ready,
+            "redis": redis_ok,
             "polling": polling_ready(get_bot_polling_runtime_state()),
         }
         ready = all(checks.values())
+        # Informational only: a degraded or recovering game store still serves games from memory,
+        # so its Redis mode (disabled/connected/degraded/recovering) must not fail readiness.
+        checks["game_store_redis"] = GAME_STORE.redis_recovery_state
         return JSONResponse(content={"status": "ok" if ready else "unavailable", "checks": checks},
                             status_code=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
