@@ -29,6 +29,7 @@ from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementRes
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.presentation.auth import resolve_owner_private_exemption
 from selara.infrastructure.llm.features import AiFeature
+from selara.presentation.handlers.pet_billing import pet_reserve_units, settle_pet_line
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +214,7 @@ async def _phrase(
         trigger="spontaneous",
         timezone_name=settings.bot_timezone,
         idempotency_key=f"pet_event_text:{chat_id}:{claim_event_id}",
+        units=pet_reserve_units(settings),
     )
     if not decision.allowed:
         return False
@@ -226,6 +228,7 @@ async def _phrase(
         else None
     )
     outcome = {"status": "failed", "error_category": "empty_answer"}
+    line_usages: list = []
     try:
         kwargs: dict = {"max_tokens": ev.MAX_EVENT_TOKENS}
         if context is not None:
@@ -240,6 +243,7 @@ async def _phrase(
             ),
             **kwargs,
         )
+        line_usages.extend(getattr(result, "usages", ()) or ())
         value = result.value if hasattr(result, "value") else result
         line = ev.clean_event_line(value or "")
         if line:
@@ -248,8 +252,20 @@ async def _phrase(
         return None
     except LlmClientError as exc:
         outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
+        line_usages.extend(exc.usages)
         return None
     finally:
+        if line_usages and personal_config is not None:
+            try:
+                await settle_pet_line(
+                    access,
+                    config=await personal_config.get(),
+                    decision=decision,
+                    usages=line_usages,
+                    failed=outcome["status"] != "succeeded",
+                )
+            except Exception:
+                log.exception("Could not settle pet event AIL invocation_id=%s", invocation_id)
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
                 try:

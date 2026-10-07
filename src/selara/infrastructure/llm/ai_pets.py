@@ -22,13 +22,19 @@ MAX_TOKENS_EXTRACTION = 200
 
 
 async def generate_pet_reply(
-    *, llm_client: LlmClient, messages: list[dict], accounting_context: LlmAccountingContext | None
+    *,
+    llm_client: LlmClient,
+    messages: list[dict],
+    accounting_context: LlmAccountingContext | None,
+    usages_out: list | None = None,
 ) -> str:
-    """No tools are offered: a pet can only speak, never act."""
+    """No tools are offered: a pet can only speak, never act. ``usages_out`` collects the call's cost records."""
     kwargs: dict = {"max_tokens": MAX_REPLY_TOKENS}
     if accounting_context is not None:
         kwargs["accounting_context"] = accounting_context
     result = await llm_client.chat_simple(messages, **kwargs)
+    if usages_out is not None:
+        usages_out.extend(getattr(result, "usages", ()) or ())
     value = result.value if hasattr(result, "value") else result
     return (value or "").strip()[:MAX_REPLY_CHARS]
 

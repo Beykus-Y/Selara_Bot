@@ -30,6 +30,7 @@ from selara.infrastructure.db.ai_pet_dialogue import AiPetDialogueRepository
 from selara.infrastructure.db.ai_pets import AiPetService, PetView
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
+from selara.presentation.handlers.pet_billing import pet_reserve_units, settle_pet_line
 from selara.infrastructure.llm.ai_pets import extract_notes, generate_pet_reply
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
@@ -260,6 +261,7 @@ async def handle_pet_talk(
                 feature=AiFeature.PET_TALK, chat_id=chat_id, source_message_id=message.message_id
             ),
             source_message_id=message.message_id,
+            units=pet_reserve_units(settings),
         )
     except Exception:
         log.exception("Pet talk quota reservation failed message_id=%s", message.message_id)
@@ -295,15 +297,18 @@ async def handle_pet_talk(
         )
 
     outcome = {"status": "failed", "error_category": "handler_error"}
+    line_usages: list = []
     try:
         try:
             answer = await generate_pet_reply(
                 llm_client=llm_client,
                 messages=d.build_pet_messages(context, user_text=talk_text),
                 accounting_context=_context(AiFeature.PET_TALK, "pet_talk"),
+                usages_out=line_usages,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
+            line_usages.extend(exc.usages)
             answer = ""
         except Exception:
             log.exception("pet talk: LLM request failed before reaching the provider")
@@ -352,6 +357,17 @@ async def handle_pet_talk(
         except Exception:
             log.exception("pet talk: note extraction crashed pet_id=%s", pet.id)
     finally:
+        if line_usages and personal_config is not None:
+            try:
+                await settle_pet_line(
+                    access_service,
+                    config=await personal_config.get(),
+                    decision=decision,
+                    usages=line_usages,
+                    failed=outcome["status"] != "succeeded",
+                )
+            except Exception:
+                log.exception("Could not settle pet talk AIL invocation_id=%s", invocation_id)
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
                 try:

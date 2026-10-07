@@ -218,7 +218,7 @@ class SqlAlchemyUserEntitlementResolver:
             source="telegram_stars",
             product_key=row.product_key,
             quota_policy=(
-                paid_pet_policy(self._pet_daily_limit, feature)
+                paid_pet_policy(self._pet_daily_limit, feature, limits if limits.unit == AIL_UNIT else None)
                 if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT)
                 # The sold request limit is a requests-mode promise; AIL budgets come from the config.
                 else paid_personal_policy(
