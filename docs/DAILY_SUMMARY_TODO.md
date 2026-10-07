@@ -147,7 +147,8 @@ Status: **в разработке**, слайсами с тестами перв
   подменить). `search_messages`/`get_activity_stats` дополнительно клэмпают
   запрошенное окно через `clamp_window_to_scope` (новая функция в `tool_limits.py`,
   4 теста). Каждое возвращаемое сообщение проходит через
-  `author_tokens`(санитизация автора) + `redact_known_aliases` (privacy-pass) перед
+  `author_tokens`(санитизация автора) + `redact_text_mentions` (UTF-16 offsets,
+  только ушедшие участники) + `redact_known_aliases` (privacy-pass) перед
   тем как попасть в JSON, отдаваемый модели — то есть даже тулы аналитика не могут
   случайно раскрыть имя/persona ушедшего участника. Проверено 7 юнит-тестами с
   фейковым репозиторием (`tests/unit/test_daily_summary_tools.py`): подмена автора

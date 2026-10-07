@@ -27,6 +27,7 @@ from selara.application.daily_summary.sanitize import (
     build_alias_index,
     build_author_display_tokens,
     redact_known_aliases,
+    redact_text_mentions,
 )
 from selara.application.daily_summary.schemas import MergedThemeList, SegmentTopicCard, SegmentTopicCardList
 from selara.application.daily_summary.segmentation import SegmentableMessage, segment_messages
@@ -216,11 +217,18 @@ def _known_pipeline_cost(usages: list[DailySummaryStageUsage]) -> Decimal:
     return sum((u.estimated_cost_usd for u in usages if u.estimated_cost_usd is not None), Decimal(0))
 
 
-def _build_segment_block(segment_messages_list, *, author_tokens: dict[int, str], alias_index: dict[str, int]) -> str:
+def _build_segment_block(
+    segment_messages_list, *, author_tokens: dict[int, str], alias_index: dict[str, int],
+    text_mention_tokens: dict[int, str] | None = None,
+) -> str:
     lines: list[str] = []
     for message in segment_messages_list:
         author = author_tokens.get(message.user_id, "Участник")
         content = _message_content(message) or ""
+        if message.text:
+            content = redact_text_mentions(
+                content, entities=message.text_mentions, tokens=text_mention_tokens or {},
+            )
         content = redact_known_aliases(content, alias_index=alias_index, tokens=author_tokens)
         reply_part = f", reply→{message.reply_to_telegram_message_id}" if message.reply_to_telegram_message_id else ""
         lines.append(f'msg {message.telegram_message_id}, {author}{reply_part}: "{content}"')
@@ -260,9 +268,16 @@ async def run_daily_summary_pipeline(
             pipeline_cost_usd=Decimal(0),
         )
 
-    author_ids = sorted({message.user_id for message in messages})
+    author_ids = sorted(
+        {message.user_id for message in messages}
+        | {user_id for message in messages for _, _, user_id in message.text_mentions}
+    )
     members = await repo.get_daily_summary_member_info(chat_id=chat_id, user_ids=author_ids)
     author_tokens = build_author_display_tokens(members, persona_enabled=persona_enabled)
+    text_mention_tokens = {
+        member.user_id: author_tokens[member.user_id]
+        for member in members if not member.is_active_member
+    }
     alias_index = build_alias_index(members)
     participant_directory = build_participant_directory(members, persona_enabled=persona_enabled)
 
@@ -304,7 +319,10 @@ async def run_daily_summary_pipeline(
     all_cards: list[SegmentTopicCard] = []
     for segment in segments:
         segment_full_messages = [message_by_id[m.message_id] for m in segment.messages if m.message_id in message_by_id]
-        block = _build_segment_block(segment_full_messages, author_tokens=author_tokens, alias_index=alias_index)
+        block = _build_segment_block(
+            segment_full_messages, author_tokens=author_tokens, alias_index=alias_index,
+            text_mention_tokens=text_mention_tokens,
+        )
         try:
             await ensure_daily_summary_claim(claim_check)
             result = await llm_client.chat_structured(
@@ -431,6 +449,7 @@ async def run_daily_summary_pipeline(
         author_tokens=author_tokens,
         alias_index=alias_index,
         themes=final_themes,
+        text_mention_tokens=text_mention_tokens,
         stage_usages=stage_usages,
         invocation_id=invocation_id,
         claim_check=claim_check,
@@ -500,6 +519,7 @@ async def _run_analyst_stage(
     stage_usages: list[DailySummaryStageUsage],
     invocation_id: int | None,
     claim_check: Callable[[], Awaitable[bool]] | None = None,
+    text_mention_tokens: dict[int, str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Best-effort refinement: if the analyst's tool loop or its final JSON parse
     fails for any reason, silently keep the pre-analyst themes as-is rather than
@@ -515,6 +535,7 @@ async def _run_analyst_stage(
         scope=ToolScope(chat_id=chat_id, window_from=window_from, window_to=window_to),
         author_tokens=author_tokens,
         alias_index=alias_index,
+        text_mention_tokens=text_mention_tokens or {},
     )
     analyst_prompt = load_analyst_prompt(
         chat_title=chat_title,

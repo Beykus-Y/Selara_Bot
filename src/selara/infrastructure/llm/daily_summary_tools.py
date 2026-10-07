@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from selara.application.daily_summary.participants import ChatMemberInfo
-from selara.application.daily_summary.sanitize import redact_known_aliases
+from selara.application.daily_summary.sanitize import redact_known_aliases, redact_text_mentions
 from selara.application.daily_summary.tool_limits import (
     GET_MESSAGE_CONTEXT_MAX_ROWS,
     GET_REPLY_THREAD_MAX_ROWS,
@@ -65,6 +65,7 @@ class DailySummaryToolContext:
     scope: ToolScope
     author_tokens: dict[int, str]
     alias_index: dict[str, int]
+    text_mention_tokens: dict[int, str] = field(default_factory=dict)
 
 
 GET_MESSAGE_CONTEXT_TOOL = "get_message_context"
@@ -180,11 +181,15 @@ def build_alias_free_text(value: str | None, *, context: DailySummaryToolContext
 
 
 def _serialize_message(row: ArchivedMessageView, *, context: DailySummaryToolContext) -> dict[str, Any]:
+    text = (
+        redact_text_mentions(row.text, entities=row.text_mentions, tokens=context.text_mention_tokens)
+        if row.text else row.text
+    )
     return {
         "message_id": row.telegram_message_id,
         "author": context.author_tokens.get(row.user_id, "Участник"),
         "sent_at": row.sent_at.isoformat(),
-        "text": build_alias_free_text(row.text, context=context),
+        "text": build_alias_free_text(text, context=context),
         "transcript": build_alias_free_text(row.transcript, context=context),
         "reply_to_message_id": row.reply_to_telegram_message_id,
     }
