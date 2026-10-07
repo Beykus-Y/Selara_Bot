@@ -7870,6 +7870,31 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     ADMIN_VIRTUAL_TABLES = (
         "messages_compact",
     )
+    # Платёжные, auth, квотные, accounting и audit-таблицы: только просмотр.
+    # Ручная правка или удаление строк может создать состояние, которое
+    # невозможно получить через application use-case.
+    ADMIN_READONLY_TABLES = frozenset(
+        {
+            "admin_sessions",
+            "ai_feature_invocations",
+            "ai_feature_quota_usage",
+            "chat_audit_logs",
+            "chat_entitlements",
+            "economy_accounts",
+            "economy_ledger",
+            "economy_market_trades",
+            "economy_transfer_daily",
+            "entitlement_grants",
+            "llm_admin_actions",
+            "llm_usage_log",
+            "selara_ai_payments",
+            "selara_ai_purchase_intents",
+            "user_entitlements",
+            "web_login_codes",
+            "web_sessions",
+        }
+    )
+    ADMIN_SECRET_COLUMN_SUFFIXES = ("token", "hash", "digest", "secret", "password")
 
     ADMIN_TABLE_META = {
         "admin_broadcast_deliveries": {"title": "Доставки админ-рассылок", "group": "web"},
@@ -8060,6 +8085,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     def _admin_is_chat_reference_column(column_name: str) -> bool:
         return column_name in {"telegram_chat_id", "chat_id"} or column_name.endswith("_chat_id")
+
+    def _admin_table_is_writable(table_name: str) -> bool:
+        # Явный allowlist: таблица должна быть описана в ADMIN_TABLE_META, иначе новая ORM-модель
+        # автоматически стала бы редактируемой.
+        return table_name in ADMIN_TABLE_META and table_name not in ADMIN_READONLY_TABLES
+
+    def _admin_is_secret_column(column_name: str) -> bool:
+        return column_name.lower().endswith(ADMIN_SECRET_COLUMN_SUFFIXES)
 
     def _admin_reference_id(raw_value: object) -> int | None:
         if raw_value is None or isinstance(raw_value, bool):
@@ -10242,6 +10275,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if not _admin_auth_required(admin_user_id):
             return _redirect("/app/admin/login")
 
+        if not _admin_table_is_writable(table_name):
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Таблица доступна только для чтения."))
+
         async with session_factory() as session:
             model_class = _load_admin_model_class(table_name)
             if model_class is None:
@@ -10259,7 +10295,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
             # Получаем колонки и значения
-            columns = [(col.name, _admin_edit_value(col, getattr(row, col.name, None))) for col in model_class.__table__.columns]
+            columns = [
+                (col.name, _admin_edit_value(col, getattr(row, col.name, None)))
+                for col in model_class.__table__.columns
+                if not _admin_is_secret_column(col.name)
+            ]
             reference_labels = await _admin_reference_labels(session, column_values=columns)
             primary_key_columns = [column.name for column in _admin_primary_key_columns(model_class)]
             record_id = _admin_primary_key_display(pk_values)
@@ -10299,6 +10339,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if table_name not in valid_tables:
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
 
+        if not _admin_table_is_writable(table_name):
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Таблица доступна только для чтения."))
+
         form = await _parse_form(request)
 
         async with session_factory() as session:
@@ -10317,7 +10360,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             # Обновляем поля (кроме id и первичных ключей)
             updated_fields = []
             for col in model_class.__table__.columns:
-                if col.primary_key:
+                if col.primary_key or _admin_is_secret_column(col.name):
                     continue
                 if col.name in form:
                     value = _coerce_admin_form_value(col, form[col.name])
@@ -10358,6 +10401,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
             return _redirect(_with_message("/app/admin", key="error", text="Неизвестная таблица."))
+
+        if not _admin_table_is_writable(table_name):
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Таблица доступна только для чтения."))
 
         form = await _parse_form(request)
 
@@ -11061,6 +11107,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if table_name not in valid_tables:
             return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
 
+        if not _admin_table_is_writable(table_name):
+            return _json_result(ok=False, message="Таблица доступна только для чтения.", status_code=403)
+
         form = await _parse_form(request)
 
         async with session_factory() as session:
@@ -11078,7 +11127,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             updated_fields = []
             for col in model_class.__table__.columns:
-                if col.primary_key:
+                if col.primary_key or _admin_is_secret_column(col.name):
                     continue
                 if col.name in form:
                     value = _coerce_admin_form_value(col, form[col.name])
@@ -11118,6 +11167,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         valid_tables = [t[0] for t in ADMIN_TABLES]
         if table_name not in valid_tables:
             return _json_result(ok=False, message="Неизвестная таблица.", status_code=404)
+
+        if not _admin_table_is_writable(table_name):
+            return _json_result(ok=False, message="Таблица доступна только для чтения.", status_code=403)
 
         form = await _parse_form(request)
 
