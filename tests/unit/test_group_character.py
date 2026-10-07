@@ -55,7 +55,7 @@ from selara.infrastructure.llm.group_member_tools import (
 from selara.infrastructure.llm.tools import ToolCall
 from selara.presentation.handlers import group_character
 
-LIMITS = GroupMemberQuotaLimits(free_daily=30, free_per_actor=5, paid_daily=300, paid_per_actor=30)
+LIMITS = GroupMemberQuotaLimits(free_daily=30, free_per_actor=5, paid_daily=100, paid_per_actor=30)
 
 
 def _names(*names: str, primary: str | None = None) -> list[CallName]:
@@ -159,7 +159,7 @@ def test_group_member_policy_is_free_for_every_chat_with_a_per_member_share():
     )
     assert (policy.limit, policy.per_actor_limit, policy.pool) == (30, 5, GROUP_MEMBER_POOL_KEY)
     paid = paid_group_member_policy(LIMITS)
-    assert (paid.limit, paid.per_actor_limit, paid.pool) == (300, 30, GROUP_MEMBER_POOL_KEY)
+    assert (paid.limit, paid.per_actor_limit, paid.pool) == (100, 30, GROUP_MEMBER_POOL_KEY)
 
 
 def test_group_member_policy_fails_closed_without_limits():
@@ -215,7 +215,7 @@ async def test_selara_ai_raises_member_limits_and_a_lower_share_is_refused():
         feature=AiFeature.GROUP_MEMBER, chat_id=-1, actor_user_id=1, trigger="telegram_message",
         timezone_name="UTC", idempotency_key="k1",
     )
-    assert repository.policy.limit == 300 and repository.policy.per_actor_limit == 30
+    assert repository.policy.limit == 100 and repository.policy.per_actor_limit == 30
 
     from dataclasses import replace
 
