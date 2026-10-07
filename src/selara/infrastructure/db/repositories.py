@@ -3325,15 +3325,16 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         return int(row_id) if row_id is not None else None
 
-    async def release_transcription_claim(self, *, archive_row_id: int) -> None:
+    async def release_transcription_claim(self, *, archive_row_id: int, claim_at: datetime | None = None) -> None:
         """Undo a claim after a failed/skipped transcription attempt, so a later
         recovery scan can retry this message. A no-op if the row somehow already
         has a real transcript (never clobber a finished result)."""
-        await self._session.execute(
-            update(MessageArchiveModel)
-            .where(MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None))
-            .values(transcribed_at=None)
+        statement = update(MessageArchiveModel).where(
+            MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None),
         )
+        if claim_at is not None:
+            statement = statement.where(MessageArchiveModel.transcribed_at == _coerce_utc_datetime(claim_at))
+        await self._session.execute(statement.values(transcribed_at=None))
         await self._session.flush()
 
     async def finalize_message_transcript(

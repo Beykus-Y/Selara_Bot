@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from selara.application.use_cases.economy.harvest_all_ready import execute as harvest_all_ready
+from selara.application.use_cases.economy.harvest import execute as harvest
 from selara.application.use_cases.economy.plant_all_last_crop import execute as plant_all_last_crop
 from selara.application.use_cases.economy.plant_crop import execute as plant_crop
 from selara.domain.economy_entities import EconomyAccount, EconomyScope, FarmState, InventoryItem, PlotState
@@ -93,6 +95,61 @@ class FakeBatchRepo:
     async def add_inventory_item(self, *, account_id: int, item_code: str, delta: int):
         self.inventory[item_code] = max(0, self.inventory.get(item_code, 0) + delta)
         return InventoryItem(account_id=account_id, item_code=item_code, quantity=self.inventory[item_code])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["plant", "plant_all", "harvest", "harvest_all"])
+async def test_farm_operations_lock_before_snapshot_and_have_one_winner(action):
+    class LockingRepository(FakeBatchRepo):
+        def __init__(self):
+            super().__init__()
+            self.lock = asyncio.Lock()
+            self.owner = None
+
+        async def lock_resources(self, *keys):
+            assert keys == (f"economy:account:{self.scope.scope_id}:10",)
+            await self.lock.acquire()
+            self.owner = asyncio.current_task()
+
+        async def get_or_create_account(self, **kwargs):
+            assert self.owner is asyncio.current_task()
+            await asyncio.sleep(0)
+            return self.account, self.farm
+
+        async def upsert_plot(self, **kwargs):
+            await asyncio.sleep(0)
+            return await super().upsert_plot(**kwargs)
+
+    repo = LockingRepository()
+    now = datetime(2026, 3, 9, 12, tzinfo=timezone.utc)
+    if action.startswith("harvest"):
+        for plot_no, plot in repo.plots.items():
+            repo.plots[plot_no] = replace(plot, crop_code="radish", planted_at=now - timedelta(hours=2),
+                                         ready_at=now - timedelta(hours=1))
+
+    async def invoke():
+        kwargs = dict(economy_mode="local", chat_id=-1, user_id=10, event_at=now)
+        try:
+            if action == "plant":
+                return await plant_crop(repo, crop_code="radish", plot_no=1, **kwargs)
+            if action == "plant_all":
+                return await plant_all_last_crop(repo, crop_code="radish", **kwargs)
+            kwargs.update(negative_event_chance_percent=0, negative_event_loss_percent=0)
+            if action == "harvest":
+                return await harvest(repo, plot_no=1, **kwargs)
+            return await harvest_all_ready(repo, **kwargs)
+        finally:
+            if repo.owner is asyncio.current_task():
+                repo.owner = None
+                repo.lock.release()
+
+    results = await asyncio.wait_for(asyncio.gather(invoke(), invoke()), timeout=2)
+    assert sum(result.accepted for result in results) == 1
+    expected_operations = 3 if action.endswith("_all") else 1
+    assert len(repo.ledger) == expected_operations
+    if action.startswith("harvest"):
+        winner = next(result for result in results if result.accepted)
+        assert repo.inventory["crop:radish"] == (winner.amount if action == "harvest" else winner.total_amount)
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,8 @@ from selara.core.config import Settings
 from selara.domain.entities import UserSnapshot
 from selara.web import app as web_app_module
 
+pytestmark = pytest.mark.usefixtures("login_limiter_stub")
+
 
 def _settings(web_base_url="http://127.0.0.1:8080") -> Settings:
     return Settings.model_validate(
