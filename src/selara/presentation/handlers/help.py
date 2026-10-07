@@ -241,6 +241,8 @@ def _ai_plus_help_text(settings: Settings) -> str:
         "(порог — <code>daily_summary_min_messages</code>)\n"
         "• <code>daily_summary_include_voice</code> и <code>daily_summary_include_video_notes</code> — "
         "учитывать голосовые и кружки\n"
+        "• <code>/setcfg instant_stt_enabled false</code> — отключить автоматические ответы "
+        "расшифровкой в этом чате, независимо от итогов дня\n"
         "\n"
         "<b>AI-настройка группы</b>\n"
         "• <code>/autocfg</code> в личке: выберите группу и опишите словами, что изменить; "

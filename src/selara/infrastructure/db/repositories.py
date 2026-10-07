@@ -8856,6 +8856,7 @@ class SqlAlchemyActivityRepository:
             daily_summary_style=str(getattr(row, "daily_summary_style", "neutral") or "neutral"),
             daily_summary_include_voice=bool(getattr(row, "daily_summary_include_voice", False)),
             daily_summary_include_video_notes=bool(getattr(row, "daily_summary_include_video_notes", False)),
+            instant_stt_enabled=bool(getattr(row, "instant_stt_enabled", True)),
         )
 
     @staticmethod
