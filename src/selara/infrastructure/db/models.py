@@ -2255,6 +2255,20 @@ class ChatMemberCountSnapshotModel(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class BackupJobClaimModel(Base):
+    """One row per scheduled backup slot; the claim is what stops a second bot instance from dumping again."""
+
+    __tablename__ = "backup_job_claims"
+
+    slot_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class GlobalMetricsModel(Base):
     __tablename__ = "global_metrics"
 

@@ -8,18 +8,30 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from time import monotonic
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.core.config import Settings
+from selara.infrastructure.db.backup_claims import (
+    BACKUP_SLOT_COMPLETED,
+    BACKUP_SLOT_FAILED,
+    finish_backup_slot,
+    read_backup_slot_status,
+    renew_backup_slot_lease,
+    try_claim_backup_slot,
+)
 from selara.infrastructure.http.gacha_client import GachaClientError, HttpGachaClient
 
 logger = logging.getLogger(__name__)
@@ -27,6 +39,11 @@ logger = logging.getLogger(__name__)
 # The hosted Telegram Bot API accepts documents smaller than 50 MB. Keep a
 # margin for differences between decimal MB and MiB and for future API changes.
 BACKUP_CHUNK_SIZE_BYTES = 45 * 1024 * 1024
+
+# A scheduled slot is owned through a lease that the running job renews. If the
+# owner dies, its lease expires and a later claim may take the slot over.
+_BACKUP_LEASE_SECONDS = 15 * 60
+_BACKUP_LEASE_RENEW_SECONDS = _BACKUP_LEASE_SECONDS / 3
 
 # Serialize dump verification: overlapping backup jobs (the nightly scheduler
 # and an admin-triggered request) must not run parallel pg_restore children.
@@ -67,30 +84,52 @@ class BackupPart:
     size_bytes: int
 
 
-def seconds_until_next_backup(*, timezone_name: str, now: datetime | None = None) -> float:
+def next_backup_slot(*, timezone_name: str, now: datetime | None = None) -> datetime:
+    """Return the next local midnight; every bot instance computes the same slot for a given day."""
     try:
         local_tz = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError as exc:
         raise BackupJobError(f"Unknown backup timezone: {timezone_name}") from exc
 
-    now_utc = now or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    else:
-        now_utc = now_utc.astimezone(timezone.utc)
-
-    local_now = now_utc.astimezone(local_tz)
+    local_now = _as_utc(now).astimezone(local_tz)
     next_local_date = local_now.date() + timedelta(days=1)
-    next_local_midnight = datetime.combine(next_local_date, time.min, tzinfo=local_tz)
+    return datetime.combine(next_local_date, time.min, tzinfo=local_tz)
+
+
+def seconds_until_next_backup(*, timezone_name: str, now: datetime | None = None) -> float:
+    now_utc = _as_utc(now)
+    next_local_midnight = next_backup_slot(timezone_name=timezone_name, now=now_utc)
     return max(1.0, (next_local_midnight.astimezone(timezone.utc) - now_utc).total_seconds())
 
 
-async def run_daily_backup_scheduler(*, bot: Bot, settings: Settings) -> None:
+def _as_utc(now: datetime | None) -> datetime:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
+def _scheduled_slot_key(slot: datetime) -> str:
+    return f"daily:{slot.date().isoformat()}"
+
+
+async def run_daily_backup_scheduler(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     while True:
-        delay = seconds_until_next_backup(timezone_name=settings.bot_timezone)
+        slot = next_backup_slot(timezone_name=settings.bot_timezone)
+        delay = max(1.0, (slot.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds())
         await asyncio.sleep(delay)
         try:
-            await send_daily_backup(bot=bot, settings=settings)
+            await run_scheduled_daily_backup(
+                bot=bot,
+                settings=settings,
+                session_factory=session_factory,
+                slot_key=_scheduled_slot_key(slot),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -101,7 +140,115 @@ async def run_daily_backup_scheduler(*, bot: Bot, settings: Settings) -> None:
                 logger.exception("Could not notify admin about backup failure")
 
 
+async def run_scheduled_daily_backup(
+    *,
+    bot: Bot,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    slot_key: str,
+) -> None:
+    """Run the scheduled backup for one slot, taking it over if its owner crashes.
+
+    A losing instance waits while the slot is running elsewhere. It returns once the
+    slot is completed or failed, or claims it after the owner's lease has expired.
+    """
+    owner_token = uuid4().hex
+    while True:
+        claimed = await try_claim_backup_slot(
+            session_factory=session_factory,
+            slot_key=slot_key,
+            owner_token=owner_token,
+            lease_seconds=_BACKUP_LEASE_SECONDS,
+        )
+        if claimed:
+            break
+        status = await read_backup_slot_status(session_factory=session_factory, slot_key=slot_key)
+        if status in (BACKUP_SLOT_COMPLETED, BACKUP_SLOT_FAILED):
+            logger.info("Daily backup slot already finished on another instance; skipping", extra={"slot_key": slot_key})
+            return
+        # Still running on another instance: look again once its lease could have expired.
+        await asyncio.sleep(_BACKUP_LEASE_SECONDS + 1)
+
+    lease_lost = asyncio.Event()
+    job = asyncio.create_task(send_daily_backup(bot=bot, settings=settings), name="daily-backup-job")
+    lease = asyncio.create_task(
+        _keep_backup_lease_alive(
+            session_factory=session_factory,
+            slot_key=slot_key,
+            owner_token=owner_token,
+            on_lost=lambda: _abort_lost_backup(job, lease_lost),
+        ),
+        name="daily-backup-lease",
+    )
+    try:
+        await job
+    except asyncio.CancelledError:
+        await _stop_task(lease)
+        if lease_lost.is_set():
+            # Another instance now owns the slot; this run must not record its outcome.
+            logger.error("Daily backup stopped after losing its lease", extra={"slot_key": slot_key})
+            return
+        raise
+    except Exception as exc:
+        await _stop_task(lease)
+        await finish_backup_slot(
+            session_factory=session_factory,
+            slot_key=slot_key,
+            owner_token=owner_token,
+            status=BACKUP_SLOT_FAILED,
+            error=str(exc),
+        )
+        raise
+
+    await _stop_task(lease)
+    await finish_backup_slot(
+        session_factory=session_factory,
+        slot_key=slot_key,
+        owner_token=owner_token,
+        status=BACKUP_SLOT_COMPLETED,
+    )
+
+
+def _abort_lost_backup(job: asyncio.Task[None], lease_lost: asyncio.Event) -> None:
+    lease_lost.set()
+    job.cancel()
+
+
+async def _keep_backup_lease_alive(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    slot_key: str,
+    owner_token: str,
+    on_lost: Callable[[], None],
+) -> None:
+    while True:
+        await asyncio.sleep(_BACKUP_LEASE_RENEW_SECONDS)
+        try:
+            renewed = await renew_backup_slot_lease(
+                session_factory=session_factory,
+                slot_key=slot_key,
+                owner_token=owner_token,
+                lease_seconds=_BACKUP_LEASE_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Could not renew daily backup lease", extra={"slot_key": slot_key})
+            continue
+        if not renewed:
+            logger.error("Daily backup lease was lost; stopping this run", extra={"slot_key": slot_key})
+            on_lost()
+            return
+
+
+async def _stop_task(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
+    """Send a backup now. Manual admin requests call this directly and do not claim a scheduled slot."""
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         raise BackupJobError("ADMIN_USER_ID is not configured, backup archive cannot be delivered.")

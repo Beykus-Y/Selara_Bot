@@ -184,7 +184,10 @@ async def _run_bot(settings, session_factory) -> None:
         name="interesting-facts",
     )
     if settings.admin_user_id is not None:
-        backup_task = asyncio.create_task(run_daily_backup_scheduler(bot=bot, settings=settings), name="daily-backup")
+        backup_task = asyncio.create_task(
+            run_daily_backup_scheduler(bot=bot, settings=settings, session_factory=session_factory),
+            name="daily-backup",
+        )
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
     gacha_warmup_task = asyncio.create_task(
