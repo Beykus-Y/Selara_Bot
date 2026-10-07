@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
@@ -20,6 +20,7 @@ from selara.application.use_cases.economy.transfer_coins import (
 )
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
+    EconomyAccountModel,
     EconomyInventoryModel,
     EconomyLedgerModel,
     EconomyMarketListingModel,
@@ -138,10 +139,73 @@ async def test_daily_claim_is_single_winner_under_concurrency() -> None:
         )
         scope, _ = await SqlAlchemyEconomyRepository(session).resolve_scope(mode="global", chat_id=None, user_id=10)
         account = await SqlAlchemyEconomyRepository(session).get_account(scope=scope, user_id=10)
+        assert account is not None
+        tickets = await session.scalar(
+            select(func.coalesce(EconomyInventoryModel.quantity, 0)).where(
+                EconomyInventoryModel.item_code == "item:lottery_ticket",
+                EconomyInventoryModel.account_id == account.id,
+            )
+        )
 
     assert sum(result.accepted for result in results) == 1
     assert int(ledger_count or 0) == 1
-    assert account is not None and account.balance == 120
+    assert account.balance == 120
+    assert account.daily_streak == 1
+    assert int(tickets or 0) == 0
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_daily_streak_cap_race_grants_single_ticket() -> None:
+    engine, session_factory = await _database()
+    old_claim = datetime(2026, 8, 2, 10, 0, tzinfo=timezone.utc)
+    event_at = old_claim + timedelta(hours=25)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyEconomyRepository(session)
+        scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=11)
+        account, _ = await repo.get_or_create_account(scope=scope, user_id=11)
+        await repo.update_daily_state(account_id=account.id, daily_streak=6, last_daily_claimed_at=old_claim)
+        await session.commit()
+        account_id = account.id
+
+    rendezvous = _Rendezvous()
+
+    async def run_claim():
+        async with session_factory() as session:
+            result = await claim_daily(
+                _DailyRaceRepository(session, rendezvous),
+                economy_mode="global",
+                chat_id=None,
+                user_id=11,
+                daily_base_reward=120,
+                daily_streak_cap=7,
+                event_at=event_at,
+            )
+            await session.commit()
+            return result
+
+    results = await asyncio.gather(run_claim(), run_claim())
+
+    async with session_factory() as session:
+        ledger_count = await session.scalar(
+            select(func.count(EconomyLedgerModel.id)).where(EconomyLedgerModel.reason == "daily")
+        )
+        tickets = await session.scalar(
+            select(func.coalesce(func.sum(EconomyInventoryModel.quantity), 0)).where(
+                EconomyInventoryModel.item_code == "item:lottery_ticket",
+                EconomyInventoryModel.account_id == account_id,
+            )
+        )
+        account = await session.get(EconomyAccountModel, account_id)
+
+    assert sum(result.accepted for result in results) == 1
+    assert int(ledger_count or 0) == 1
+    assert int(tickets or 0) == 1
+    assert account is not None
+    assert account.balance == 120 + 6 * 20
+    assert account.daily_streak == 7
     await engine.dispose()
 
 
