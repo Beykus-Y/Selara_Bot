@@ -38,7 +38,7 @@ def _message():
     )
 
 
-def _repo(disabled=frozenset(), users=None):
+def _repo(disabled=frozenset(), users=None, member=True):
     users = users or {}
 
     async def find_user(*, chat_id, username):
@@ -48,6 +48,7 @@ def _repo(disabled=frozenset(), users=None):
         get_disabled_rp_actions=AsyncMock(return_value=set(disabled)),
         get_chat_display_name=AsyncMock(return_value=None),
         find_chat_user_by_username=find_user,
+        is_active_chat_member=AsyncMock(return_value=member),
     )
 
 
@@ -90,6 +91,10 @@ async def test_adult_disabled_and_unknown_actions_and_bad_targets_are_refused():
     repo = _repo(disabled={"hug"}, users={"botty": _user(31, "botty", bot=True)})
     for arguments in (
         {"action": "трахнуть", "target": "asker"},  # 18+ is never available to Selara
+        {"action": "убить", "target": "asker"},  # hostile actions are outside the allowlist
+        {"action": "унизить", "target": "asker"},
+        {"action": "обнять", "target": "12345"},  # numeric ids are not an accepted target form
+        {"action": "обнять", "target": "@12345 "},
         {"action": "обнять", "target": "asker"},  # disabled by the chat admins
         {"action": "летать", "target": "asker"},  # not an action
         {"action": "погладить", "target": "@nobody"},  # nobody by that name
@@ -99,6 +104,31 @@ async def test_adult_disabled_and_unknown_actions_and_bad_targets_are_refused():
             message=_message(), bot=bot, activity_repo=repo, arguments=arguments, actor_label=None
         )
         assert ok is False, arguments
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_target_must_be_an_active_chat_member():
+    bot = _bot()
+    repo = _repo(users={"vasya": _user(21, "vasya")}, member=False)
+    text, ok = await member_actions.perform_member_action(
+        message=_message(), bot=bot, activity_repo=repo, arguments={"action": "обнять", "target": "@vasya"},
+        actor_label=None,
+    )
+    assert ok is False
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actions_fail_closed_when_the_disabled_list_cannot_be_loaded():
+    bot = _bot()
+    repo = _repo()
+    repo.get_disabled_rp_actions = AsyncMock(side_effect=RuntimeError("db timeout"))
+    text, ok = await member_actions.perform_member_action(
+        message=_message(), bot=bot, activity_repo=repo, arguments={"action": "обнять", "target": "asker"},
+        actor_label=None,
+    )
+    assert ok is False
     bot.send_message.assert_not_awaited()
 
 
