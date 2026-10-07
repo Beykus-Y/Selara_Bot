@@ -9638,6 +9638,53 @@ class SqlAlchemyEconomyRepository:
             return None
         return self._to_market_listing(row)
 
+    async def get_market_listing_owner(self, *, listing_id: int) -> tuple[EconomyScope, int] | None:
+        # Column select on purpose: it must not load the listing into the session, so the
+        # locked get_market_listing that follows is the first read and sees committed state.
+        stmt = select(
+            EconomyMarketListingModel.scope_id,
+            EconomyMarketListingModel.scope_type,
+            EconomyMarketListingModel.chat_id,
+            EconomyMarketListingModel.seller_user_id,
+        ).where(EconomyMarketListingModel.id == listing_id)
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        scope = EconomyScope(
+            scope_id=row.scope_id,
+            scope_type=row.scope_type,  # type: ignore[arg-type]
+            chat_id=int(row.chat_id) if row.chat_id is not None else None,
+        )
+        return scope, int(row.seller_user_id)
+
+    async def list_market_listing_ids_due_for_settlement(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[tuple[int, str]]:
+        # Open listings past expiry, plus expired listings that still hold escrow (rows the
+        # pre-fix code left behind). Returns (listing_id, status) as read here.
+        stmt = (
+            select(EconomyMarketListingModel.id, EconomyMarketListingModel.status)
+            .where(
+                or_(
+                    and_(
+                        EconomyMarketListingModel.status == "open",
+                        EconomyMarketListingModel.expires_at <= now,
+                    ),
+                    and_(
+                        EconomyMarketListingModel.status == "expired",
+                        EconomyMarketListingModel.qty_left > 0,
+                    ),
+                )
+            )
+            .order_by(EconomyMarketListingModel.id)
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(int(row.id), str(row.status)) for row in rows]
+
     async def update_market_listing_qty_and_status(
         self,
         *,
