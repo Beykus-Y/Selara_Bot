@@ -576,7 +576,7 @@ class ChatActivityEventSyncStateModel(Base):
 
 
 class ActivityEventInboxModel(Base):
-    """Durable copy of a tracked group message, kept until ActivityBatcher aggregates it and deletes the row."""
+    """Durable copy of a tracked group message, kept until ActivityBatcher aggregates it or parks it as a dead letter."""
 
     __tablename__ = "activity_event_inbox"
 
@@ -587,6 +587,26 @@ class ActivityEventInboxModel(Base):
     chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Failed apply attempts. At the limit the row moves to activity_event_dead_letters.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class ActivityEventDeadLetterModel(Base):
+    """A tracked group message that failed on every attempt. It leaves the inbox so it cannot hold back other rows.
+
+    It stays here for inspection or a manual replay. Its id is the inbox row's id, so the logs can be matched to it.
+    """
+
+    __tablename__ = "activity_event_dead_letters"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ChatInterestingFactStateModel(Base):
