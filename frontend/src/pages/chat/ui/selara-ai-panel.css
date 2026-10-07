@@ -118,3 +118,62 @@
   gap: 8px;
   font-size: 13px;
 }
+
+.selara-char__names,
+.selara-char__toggles {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.selara-char__names li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.selara-char__row-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.selara-char__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.selara-char__form input,
+.selara-char__form textarea {
+  flex: 1 1 200px;
+  min-width: 0;
+  font: inherit;
+}
+
+.selara-char__heading {
+  margin: 16px 0 8px;
+  font-size: 1rem;
+}
+
+.selara-char__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.selara-char__toggles label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selara-char__toggles small {
+  display: block;
+  opacity: 0.7;
+  margin-left: 26px;
+}

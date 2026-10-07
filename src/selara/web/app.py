@@ -180,6 +180,7 @@ from selara.web.presenters import (
     user_label,
 )
 from selara.web.rendering import create_template_environment
+from selara.web.selara_chat_settings import apply_selara_action, build_selara_settings_payload
 from selara.web.user_docs import build_user_docs_context
 
 _UTC = timezone.utc
@@ -5116,6 +5117,99 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             display_timezone=settings.bot_timezone,
         )
         return JSONResponse(content={"ok": True, **payload}, headers={"Cache-Control": "no-store"})
+
+    async def _selara_settings_context(session, request: Request, chat_id: int):
+        """Viewer, chat and manage_settings right for the Selara-in-chat settings routes."""
+        user, activity_repo, chat = await _load_request_user_and_chat(session, request, chat_id=chat_id, touch=False)
+        if user is None:
+            return None, activity_repo, None, False
+        if chat is None:
+            return user, activity_repo, None, False
+        allowed, _, _ = await has_permission(
+            activity_repo,
+            chat_id=chat_id,
+            chat_type=chat.chat_type,
+            chat_title=chat.chat_title,
+            user_id=user.telegram_user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            is_bot=user.is_bot,
+            permission="manage_settings",
+            bootstrap_if_missing_owner=False,
+        )
+        return user, activity_repo, chat, bool(allowed)
+
+    @app.get("/api/miniapp/chat/{chat_id}/selara")
+    async def miniapp_chat_selara_settings_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user, _, chat, can_manage = await _selara_settings_context(session, request, chat_id)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None or chat.chat_type not in {"group", "supergroup"}:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+            payload = await build_selara_settings_payload(
+                db_session=session,
+                chat_id=chat_id,
+                session_factory=session_factory,
+                settings=settings,
+                can_manage=can_manage,
+            )
+            await session.commit()
+        return JSONResponse(content={"ok": True, **payload}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/miniapp/chat/{chat_id}/selara")
+    async def miniapp_chat_selara_settings_update_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            user, activity_repo, chat, can_manage = await _selara_settings_context(session, request, chat_id)
+            if user is None:
+                await session.commit()
+                return _json_result(ok=False, message="Mini App сессия истекла.", status_code=401)
+            if chat is None or chat.chat_type not in {"group", "supergroup"}:
+                await session.commit()
+                return _json_result(ok=False, message="Группа недоступна.", status_code=403)
+            if not can_manage:
+                await session.commit()
+                return _json_result(
+                    ok=False, message="Настраивать Selara могут админы с правом manage_settings.", status_code=403
+                )
+            form = await _parse_form(request)
+            ok, message = await apply_selara_action(
+                db_session=session,
+                activity_repo=activity_repo,
+                chat_id=chat_id,
+                actor_id=user.telegram_user_id,
+                action=(form.get("action") or "").strip(),
+                value=form.get("value") or "",
+                session_factory=session_factory,
+                settings=settings,
+            )
+            if ok:
+                await log_chat_action(
+                    activity_repo,
+                    chat_id=chat_id,
+                    chat_type=chat.chat_type,
+                    chat_title=chat.chat_title,
+                    action_code="web_setting_updated",
+                    description=f"Через веб изменены настройки Selara в чате ({(form.get('action') or '').strip()})",
+                    actor_user_id=user.telegram_user_id,
+                )
+            await session.commit()
+            payload = await build_selara_settings_payload(
+                db_session=session,
+                chat_id=chat_id,
+                session_factory=session_factory,
+                settings=settings,
+                can_manage=True,
+            )
+            await session.commit()
+        return JSONResponse(
+            content={"ok": ok, "message": message, **payload},
+            status_code=200 if ok else 400,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/miniapp/chat/{chat_id}/leaderboard")
     async def miniapp_chat_leaderboard_api(chat_id: int, request: Request):

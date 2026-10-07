@@ -3104,6 +3104,8 @@ class ChatAiCharacterModel(Base):
     character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
     member_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     member_history_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Selara may do harmless social (RP) actions like a regular participant; admins can switch it off.
+    member_actions_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     updated_by_user_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
     )
