@@ -7,13 +7,17 @@ transcription + cost accounting, toggle-turned-off-before-processing, per-chat
 transcription budget enforcement, download/STT failure release-and-move-on, atomic
 dedup between a "live" claim and a "recovery scan" claim for the same message, the
 recovery scan itself finding and re-queuing pending candidates, worker pool sizing,
-and one bad job not taking down the whole worker loop.
+and one bad job not taking down the whole worker loop. Issue #81 adds: a job
+dropped by a full queue is picked back up by the periodic recovery scan (without a
+restart), and a job stranded in a dying worker pool is re-discovered by a fresh
+queue instance over the same DB.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -508,5 +512,112 @@ async def test_one_crashing_job_does_not_stop_the_worker_from_processing_the_nex
 
         row2 = await _get_archive_row(session_factory, telegram_message_id=2)
         assert row2.transcript == "второе сообщение обработано"
+    finally:
+        await engine.dispose()
+
+
+def _gated_stt_client(gate: asyncio.Event, *, text: str = "текст") -> SimpleNamespace:
+    async def _transcribe(raw, *, filename):
+        await gate.wait()
+        return text
+
+    return SimpleNamespace(transcribe_with_retry=AsyncMock(side_effect=_transcribe), model="whisper-test")
+
+
+async def _wait_for_transcript(session_factory, *, telegram_message_id: int, timeout: float = 5.0) -> MessageArchiveModel:
+    deadline = time.monotonic() + timeout
+    while True:
+        row = await _get_archive_row(session_factory, telegram_message_id=telegram_message_id)
+        if row.transcript is not None:
+            return row
+        if time.monotonic() > deadline:
+            pytest.fail(f"message {telegram_message_id} was never transcribed within {timeout}s")
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_queue_full_job_is_recovered_by_the_periodic_scan_and_processed() -> None:
+    # Issue #81 acceptance scenario: queue full -> job dropped -> its archive row
+    # appears later -> capacity frees -> the now-periodic recovery scan re-discovers
+    # the message from the DB and it gets transcribed, no restart required.
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory)
+        await _insert_archive_row(session_factory, telegram_message_id=1)
+        await _insert_archive_row(session_factory, telegram_message_id=2, file_id="file-2", duration=6)
+        # message 3's archive row intentionally does NOT exist yet: like the real
+        # handler, the job is enqueued before the batcher archives the message.
+
+        gate = asyncio.Event()
+        stt_client = _gated_stt_client(gate)
+        queue = DailySummaryTranscriptionQueue(
+            bot=_fake_bot(), stt_client=stt_client, session_factory=session_factory,
+            settings=_settings(concurrency=1), max_queue_size=1,
+            recovery_scan_interval_seconds=0.05, max_lookup_attempts=2, lookup_backoff_seconds=0.01,
+        )
+        await queue.start()
+        try:
+            # No await points below yet, so the worker hasn't picked anything up:
+            # job 1 takes the only queue slot, jobs 2 and 3 hit QueueFull and are
+            # dropped -- the exact loss path from issue #81.
+            queue.enqueue(_job(telegram_message_id=1, duration_seconds=10.0))
+            queue.enqueue(_job(telegram_message_id=2, duration_seconds=6.0))
+            queue.enqueue(_job(telegram_message_id=3, duration_seconds=7.0))
+            assert queue._queue.qsize() == 1
+
+            # the dropped message's archive row shows up only now
+            await _insert_archive_row(session_factory, telegram_message_id=3, file_id="file-3", duration=7)
+
+            gate.set()  # capacity frees: the blocked worker makes progress and drains
+
+            # no restart happens -- the periodic scan alone must recover jobs 2 and 3.
+            # (job 1 is read last: the single worker finishes jobs in order, so once
+            # 2 and 3 have transcripts, 1 must be finalized too.)
+            row2 = await _wait_for_transcript(session_factory, telegram_message_id=2)
+            row3 = await _wait_for_transcript(session_factory, telegram_message_id=3)
+            row1 = await _get_archive_row(session_factory, telegram_message_id=1)
+            assert row1.transcript is not None
+            assert row2.transcript is not None
+            assert row3.transcript is not None
+            assert stt_client.transcribe_with_retry.await_count == 3
+        finally:
+            await queue.close()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_job_stranded_by_a_dead_worker_pool_is_recovered_after_restart() -> None:
+    # Process-restart emulation: a job sits in the in-memory queue of a queue
+    # instance that dies before processing it (workers cancelled / process killed).
+    # The in-memory job is gone; a fresh instance over the same DB must re-discover
+    # the message via its startup recovery scan.
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory)
+        await _insert_archive_row(session_factory, telegram_message_id=1, file_id="restart-file", duration=9)
+
+        first = DailySummaryTranscriptionQueue(
+            bot=_fake_bot(), stt_client=_fake_stt_client(), session_factory=session_factory,
+            settings=_settings(concurrency=1),
+        )
+        first.enqueue(_job(telegram_message_id=1, duration_seconds=9.0))  # in-memory only, workers never started
+        await first.close()
+
+        row_before = await _get_archive_row(session_factory, telegram_message_id=1)
+        assert row_before.transcript is None  # the stranded job never ran
+
+        second = DailySummaryTranscriptionQueue(
+            bot=_fake_bot(), stt_client=_fake_stt_client(text="пережило рестарт"),
+            session_factory=session_factory, settings=_settings(concurrency=1),
+        )
+        await second.start()
+        try:
+            row_after = await _wait_for_transcript(session_factory, telegram_message_id=1)
+            assert row_after.transcript == "пережило рестарт"
+        finally:
+            await second.close()
     finally:
         await engine.dispose()

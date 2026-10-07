@@ -10,6 +10,14 @@ handler first, then hands the message to `ActivityBatcher`, which writes it to t
 point a voice/video_note handler runs). So a job here is enqueued by
 (chat_id, telegram_message_id, file_id), and the worker retries with backoff until
 the archive row shows up (or gives up after a bounded number of attempts).
+
+The in-memory queue is only a fast path, not the source of truth: the archive
+table itself (voice/video_note rows with `transcript IS NULL`, guarded by the
+`transcribed_at` claim marker) is the durable pending-jobs state. A recovery
+scan runs periodically -- not just once at startup -- so a job lost to a full
+queue (or to a process restart) is re-discovered from the DB within one scan
+interval; repeated discovery is safe because two workers can never both win
+`claim_message_for_transcription` for the same message.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_QUEUE_SIZE = 1000
 _DEFAULT_MAX_LOOKUP_ATTEMPTS = 5
 _DEFAULT_LOOKUP_BACKOFF_SECONDS = 2.0
+_DEFAULT_RECOVERY_SCAN_INTERVAL_SECONDS = 60.0
 _RECOVERY_LOOKBACK_HOURS = 26  # a bit over the 24h analysis window, in case of clock/scan skew
 
 
@@ -51,6 +60,7 @@ class DailySummaryTranscriptionQueue:
         max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
         max_lookup_attempts: int = _DEFAULT_MAX_LOOKUP_ATTEMPTS,
         lookup_backoff_seconds: float = _DEFAULT_LOOKUP_BACKOFF_SECONDS,
+        recovery_scan_interval_seconds: float = _DEFAULT_RECOVERY_SCAN_INTERVAL_SECONDS,
     ) -> None:
         self._bot = bot
         self._stt_client = stt_client
@@ -59,6 +69,12 @@ class DailySummaryTranscriptionQueue:
         self._queue: asyncio.Queue[TranscriptionJob] = asyncio.Queue(maxsize=max_queue_size)
         self._max_lookup_attempts = max_lookup_attempts
         self._lookup_backoff_seconds = lookup_backoff_seconds
+        self._recovery_scan_interval_seconds = recovery_scan_interval_seconds
+        # (chat_id, telegram_message_id) of jobs currently queued or in flight --
+        # keeps periodic recovery scans from piling duplicate jobs onto a backed-up
+        # queue. A job dropped by a full queue is deliberately NOT marked here, so
+        # the next scan gets another chance at it (issue #81).
+        self._pending_keys: set[tuple[int, int]] = set()
         self._workers: list[asyncio.Task[None]] = []
         self._recovery_task: asyncio.Task[None] | None = None
         self._closed = False
@@ -71,29 +87,36 @@ class DailySummaryTranscriptionQueue:
         self._workers = [
             asyncio.create_task(self._worker_loop(), name=f"daily-summary-stt-worker-{i}") for i in range(concurrency)
         ]
-        self._recovery_task = asyncio.create_task(self._run_recovery_scan(), name="daily-summary-stt-recovery")
+        self._recovery_task = asyncio.create_task(self._recovery_loop(), name="daily-summary-stt-recovery")
 
     async def close(self) -> None:
         self._closed = True
-        if self._recovery_task is not None:
-            self._recovery_task.cancel()
-        for worker in self._workers:
-            worker.cancel()
-        await asyncio.gather(*self._workers, self._recovery_task, return_exceptions=True)
+        tasks = [task for task in (*self._workers, self._recovery_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._workers = []
         self._recovery_task = None
 
     def enqueue(self, job: TranscriptionJob) -> None:
         if self._closed:
             return
+        key = (job.chat_id, job.telegram_message_id)
+        if key in self._pending_keys:
+            return  # already queued or being worked on -- a recovery scan must not duplicate it
         try:
             self._queue.put_nowait(job)
         except asyncio.QueueFull:
+            # Deliberately not marked as pending: the periodic recovery scan will
+            # re-discover this message from the archive table once capacity frees
+            # up, so a full queue is a delay, not a permanent loss.
             logger.warning(
-                "daily summary STT queue full, dropping job chat_id=%s message_id=%s",
+                "daily summary STT queue full, leaving job chat_id=%s message_id=%s to the recovery scan",
                 job.chat_id,
                 job.telegram_message_id,
             )
+            return
+        self._pending_keys.add(key)
 
     async def _worker_loop(self) -> None:
         while True:
@@ -109,6 +132,9 @@ class DailySummaryTranscriptionQueue:
                     job.telegram_message_id,
                 )
             finally:
+                # Forget the message either way, so a later recovery scan may retry
+                # it (e.g. after a failed/skipped attempt releases its DB claim).
+                self._pending_keys.discard((job.chat_id, job.telegram_message_id))
                 self._queue.task_done()
 
     async def _process_job(self, job: TranscriptionJob) -> None:
@@ -221,10 +247,34 @@ class DailySummaryTranscriptionQueue:
             await repo.release_transcription_claim(archive_row_id=archive_row_id)
             await session.commit()
 
+    async def _recovery_loop(self) -> None:
+        """Run the recovery scan periodically, forever (until cancelled by close()).
+
+        One scan at startup alone is not enough (issue #81): a job dropped by a
+        full in-memory queue, or a message archived seconds after the startup scan,
+        would otherwise sit untranscribed until the next process restart -- and fall
+        out of the recovery lookback entirely if that restart is late. The archive
+        table is the durable work state; this loop is what keeps re-reading it.
+        """
+        while True:
+            try:
+                await self._run_recovery_scan()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # _run_recovery_scan already guards its body, but the loop itself
+                # must never die -- a dead scan means silently lost jobs again.
+                logger.exception("daily summary STT: recovery scan loop failed")
+            await asyncio.sleep(self._recovery_scan_interval_seconds)
+
     async def _run_recovery_scan(self) -> None:
-        """One-shot on startup: re-queue voice/video_note messages that were
-        archived but never got a transcript -- a live job's in-memory
-        `asyncio.Queue` does not survive a process restart."""
+        """One pass: re-queue voice/video_note messages that were archived but
+        never got a transcript -- a live job's in-memory `asyncio.Queue` does not
+        survive a process restart, and a full one drops jobs outright. Safe to run
+        at any frequency: candidates with a live claim are excluded by
+        `list_pending_voice_transcription_candidates`, already-known jobs are
+        deduplicated by `enqueue`, and the DB claim makes any remaining race pay
+        for at most one STT call."""
         try:
             since = datetime.now(timezone.utc) - timedelta(hours=_RECOVERY_LOOKBACK_HOURS)
             async with self._session_factory() as session:
