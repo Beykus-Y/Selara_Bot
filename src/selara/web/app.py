@@ -126,7 +126,8 @@ from selara.infrastructure.db.admin_broadcast_jobs import (
     admin_broadcast_is_leased,
     cancel_admin_broadcast,
     claim_next_admin_broadcast_delivery,
-    fail_unclaimed_admin_broadcast_deliveries,
+    delivery_is_still_claimed,
+    fail_pending_admin_broadcast_deliveries,
     load_admin_broadcast_send_job,
     new_admin_broadcast_owner_token,
     release_admin_broadcast_lease,
@@ -8583,7 +8584,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return sent_count, failed_count
             if job.media_type == "photo" and job.media_file_id is None and job.media_content is None:
                 # Created before the photo was stored, so there is nothing left to upload.
-                failed_count += await fail_unclaimed_admin_broadcast_deliveries(
+                failed_count += await fail_pending_admin_broadcast_deliveries(
                     session_factory=session_factory,
                     broadcast_id=broadcast_id,
                     error_text=ADMIN_BROADCAST_PHOTO_UNAVAILABLE,
@@ -8617,6 +8618,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     if reaction_mode == "inline"
                     else None
                 )
+                if not await delivery_is_still_claimed(
+                    session_factory=session_factory,
+                    delivery_id=delivery.id,
+                    owner_token=owner_token,
+                ):
+                    # Cancelled during the preflight, or its claim expired and was swept: it must not be sent now.
+                    in_flight_delivery_id = None
+                    continue
                 try:
                     if job.media_type == "photo":
                         photo = reusable_photo_file_id
@@ -11623,10 +11632,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         pending = int(counts.get("pending", 0))
         if await admin_broadcast_is_leased(session, broadcast_id=broadcast_id):
             status = "sending"
+        elif broadcast.cancelled_at is not None:
+            status = "cancelled"
         elif pending:
             status = "interrupted"
         else:
-            status = "cancelled" if broadcast.cancelled_at is not None else "completed"
+            status = "completed"
         last_delivery_at = await session.scalar(
             select(func.max(AdminBroadcastDeliveryModel.updated_at)).where(
                 AdminBroadcastDeliveryModel.broadcast_id == broadcast_id

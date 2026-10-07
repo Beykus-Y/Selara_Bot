@@ -126,7 +126,7 @@ async def test_each_pending_delivery_is_claimed_once_and_expired_claims_are_neve
 
 
 @pytest.mark.asyncio
-async def test_cancel_stops_unclaimed_deliveries_and_leaves_the_claimed_one_to_its_worker() -> None:
+async def test_cancel_stops_every_unsent_delivery_and_a_send_already_under_way_is_recorded_as_sent() -> None:
     async with _session_factory() as session_factory:
         broadcast_id = await _seed(session_factory, statuses=["pending", "pending", "sent"])
         claimed = await _claim(session_factory, broadcast_id, "owner-a", T0)
@@ -134,12 +134,42 @@ async def test_cancel_stops_unclaimed_deliveries_and_leaves_the_claimed_one_to_i
 
         stopped = await jobs.cancel_admin_broadcast(session_factory=session_factory, broadcast_id=broadcast_id, now=T0)
 
-        assert stopped == 1
+        assert stopped == 2
         assert not await _acquire(session_factory, broadcast_id, "owner-b", T0)
+        assert await _claim(session_factory, broadcast_id, "owner-b", T0) is None
+        assert not await jobs.delivery_is_still_claimed(
+            session_factory=session_factory, delivery_id=claimed.id, owner_token="owner-a"
+        )
+        # The send that was already under way reaches Telegram after the cancel and is recorded as sent.
+        async with session_factory() as session:
+            await SqlAlchemyActivityRepository(session).mark_admin_broadcast_delivery_sent(
+                delivery_id=claimed.id, telegram_message_id=1, sent_at=T0
+            )
+            await session.commit()
         rows = await _delivery_rows(session_factory, broadcast_id)
 
-    assert [row.status for row in rows] == ["pending", "failed", "sent"]
+    assert [row.status for row in rows] == ["sent", "failed", "sent"]
     assert rows[1].error_text == jobs.ADMIN_BROADCAST_CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_claim_stops_being_ours_once_it_is_resolved_or_swept_after_expiring() -> None:
+    async with _session_factory() as session_factory:
+        broadcast_id = await _seed(session_factory, statuses=["pending"])
+        claimed = await _claim(session_factory, broadcast_id, "owner-a", T0)
+        assert claimed is not None
+
+        assert await jobs.delivery_is_still_claimed(
+            session_factory=session_factory, delivery_id=claimed.id, owner_token="owner-a"
+        )
+        assert not await jobs.delivery_is_still_claimed(
+            session_factory=session_factory, delivery_id=claimed.id, owner_token="owner-b"
+        )
+        # The claim expired without an outcome, and the next claim sweeps it to failed. Its worker must not send it.
+        assert await _claim(session_factory, broadcast_id, "owner-b", T0 + timedelta(seconds=120)) is None
+        assert not await jobs.delivery_is_still_claimed(
+            session_factory=session_factory, delivery_id=claimed.id, owner_token="owner-a"
+        )
 
 
 @pytest.mark.asyncio
@@ -171,4 +201,15 @@ async def test_stored_photo_is_kept_until_nothing_is_left_to_send() -> None:
         )
         job = await jobs.load_admin_broadcast_send_job(session_factory=session_factory, broadcast_id=broadcast_id)
 
+    assert job is not None and job.media_content is None and job.media_filename is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_drops_the_stored_photo_because_nothing_is_left_to_send() -> None:
+    async with _session_factory() as session_factory:
+        broadcast_id = await _seed(session_factory, statuses=["pending"], media=b"photo-bytes")
+        stopped = await jobs.cancel_admin_broadcast(session_factory=session_factory, broadcast_id=broadcast_id, now=T0)
+        job = await jobs.load_admin_broadcast_send_job(session_factory=session_factory, broadcast_id=broadcast_id)
+
+    assert stopped == 1
     assert job is not None and job.media_content is None and job.media_filename is None

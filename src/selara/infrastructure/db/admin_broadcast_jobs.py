@@ -216,22 +216,12 @@ async def claim_next_admin_broadcast_delivery(
     return None
 
 
-async def _fail_unclaimed_deliveries(
-    session: AsyncSession,
-    *,
-    broadcast_id: int,
-    error_text: str,
-    current: datetime,
-) -> int:
+async def _fail_pending_deliveries(session: AsyncSession, *, broadcast_id: int, error_text: str) -> int:
     result = await session.execute(
         update(AdminBroadcastDeliveryModel)
         .where(
             AdminBroadcastDeliveryModel.broadcast_id == int(broadcast_id),
             AdminBroadcastDeliveryModel.status == "pending",
-            or_(
-                AdminBroadcastDeliveryModel.claim_token.is_(None),
-                AdminBroadcastDeliveryModel.claim_expires_at < current,
-            ),
         )
         .values(status="failed", error_text=error_text, claim_token=None, claim_expires_at=None)
         .execution_options(synchronize_session=False)
@@ -239,20 +229,37 @@ async def _fail_unclaimed_deliveries(
     return int(result.rowcount or 0)
 
 
-async def fail_unclaimed_admin_broadcast_deliveries(
+async def fail_pending_admin_broadcast_deliveries(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     broadcast_id: int,
     error_text: str,
-    now: datetime | None = None,
 ) -> int:
-    current = _utc_now(now)
+    """Fail every delivery still pending. Only the worker holding the lease calls this, before it claims anything."""
     async with session_factory() as session:
-        stopped = await _fail_unclaimed_deliveries(
-            session, broadcast_id=broadcast_id, error_text=error_text, current=current
-        )
+        stopped = await _fail_pending_deliveries(session, broadcast_id=broadcast_id, error_text=error_text)
         await session.commit()
     return stopped
+
+
+async def delivery_is_still_claimed(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    delivery_id: int,
+    owner_token: str,
+) -> bool:
+    """True while owner_token holds the claim. A cancel, or a claim that expired and was swept, ends it."""
+    async with session_factory() as session:
+        found = await session.scalar(
+            select(func.count())
+            .select_from(AdminBroadcastDeliveryModel)
+            .where(
+                AdminBroadcastDeliveryModel.id == int(delivery_id),
+                AdminBroadcastDeliveryModel.status == "pending",
+                AdminBroadcastDeliveryModel.claim_token == owner_token,
+            )
+        )
+    return bool(found)
 
 
 async def cancel_admin_broadcast(
@@ -261,20 +268,25 @@ async def cancel_admin_broadcast(
     broadcast_id: int,
     now: datetime | None = None,
 ) -> int:
-    """Stop the deliveries nobody has started. A delivery already claimed is resolved by its own worker.
+    """Stop every delivery that has not been sent yet, claimed or not, and drop the stored photo.
 
-    Returns how many deliveries were stopped. When that is zero nothing was cancelled and the broadcast is left alone.
+    A claimed delivery whose send has not started is never sent: the worker checks its claim again before the send, and
+    the cancel has already ended that claim. A send already under way is recorded as cancelled here and becomes sent if
+    Telegram accepts it. Returns how many deliveries were stopped. When that is zero nothing was cancelled and the
+    broadcast is left alone.
     """
     current = _utc_now(now)
     async with session_factory() as session:
-        stopped = await _fail_unclaimed_deliveries(
-            session, broadcast_id=broadcast_id, error_text=ADMIN_BROADCAST_CANCELLED, current=current
+        stopped = await _fail_pending_deliveries(
+            session, broadcast_id=broadcast_id, error_text=ADMIN_BROADCAST_CANCELLED
         )
         if stopped:
+            # Nothing is pending now, so the stored photo can never be sent. It is dropped here because the worker that
+            # held a claim may have died, and no later release would clear it.
             await session.execute(
                 update(AdminBroadcastModel)
                 .where(AdminBroadcastModel.id == int(broadcast_id), AdminBroadcastModel.cancelled_at.is_(None))
-                .values(cancelled_at=current)
+                .values(cancelled_at=current, media_content=None, media_filename=None)
                 .execution_options(synchronize_session=False)
             )
         await session.commit()
