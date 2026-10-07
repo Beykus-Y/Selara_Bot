@@ -148,6 +148,26 @@ curl -i http://127.0.0.1:8080/healthz
 docker network create edge
 ```
 
+### 4.4 Non-root app-контейнер и том `selara_gacha_reel_cache`
+
+Контейнер `app` работает под непривилегированным пользователем `10001:10001`
+с read-only корневой ФС. Запись возможна только в `/tmp` (tmpfs: бэкапы,
+ffmpeg, профили Chromium, кэши matplotlib/fontconfig) и в том
+`selara_gacha_reel_cache` (кэш MP4-анимаций гачи, регенерируется автоматически).
+
+Тома, созданные деплоем до этого изменения, принадлежат `root` — новый
+пользователь не сможет писать новый кэш (анимации гачи будут падать с
+fallback на мгновенный результат). Один раз исправьте владельца:
+
+```bash
+docker compose stop app
+docker run --rm -v selara_gacha_reel_cache:/data alpine chown -R 10001:10001 /data
+docker compose up -d app
+```
+
+Либо просто удалите том (`docker compose stop app && docker volume rm selara_gacha_reel_cache`)
+— кэш пересоздастся сам.
+
 ---
 
 ## 5. Модель с Docker-образом (GHCR/VPS)
