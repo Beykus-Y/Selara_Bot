@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.achievements import AchievementCatalogService
@@ -12,6 +13,7 @@ from selara.infrastructure.db import activity_batcher as activity_batcher_module
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.activity_batching import ActivityBatchFlushResult
 from selara.infrastructure.db.base import Base
+from selara.infrastructure.db.models import MessageArchiveModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, reason="aiosqlite is not installed")
@@ -181,3 +183,64 @@ async def test_activity_batcher_applies_backpressure_at_capacity(monkeypatch) ->
 
     second_batch = await batcher._drain_pending()
     assert await batcher._flush_batch(second_batch)
+
+
+@pytest.mark.asyncio
+async def test_events_enqueued_before_a_crash_are_flushed_by_the_next_process() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # The first batcher never reaches start() or close(): the process dies after enqueue and before any flush.
+    crashed = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    for message_id in range(1, 6):
+        await crashed.enqueue_message(
+            chat_id=5005,
+            chat_type="group",
+            chat_title="Crash",
+            user_id=901,
+            username="dave",
+            first_name="Dave",
+            last_name=None,
+            is_bot=False,
+            event_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            telegram_message_id=message_id,
+            snapshot_kind="created",
+            snapshot_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            sent_at=datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc),
+            message_type="text",
+            text=f"message {message_id}",
+            raw_message_json={"message_id": message_id, "text": f"message {message_id}"},
+            snapshot_hash=f"hash-{message_id}",
+        )
+    del crashed
+
+    restarted = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    await restarted.start()
+    await restarted.close()
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        stats = await repo.get_user_stats(chat_id=5005, user_id=901)
+        archived_rows = (
+            await session.execute(
+                select(func.count()).select_from(MessageArchiveModel).where(MessageArchiveModel.chat_id == 5005)
+            )
+        ).scalar_one()
+
+    assert stats is not None
+    assert stats.message_count == 5
+    assert archived_rows == 5
+    await engine.dispose()
