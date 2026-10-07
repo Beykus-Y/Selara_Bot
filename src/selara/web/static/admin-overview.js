@@ -30,6 +30,7 @@ if (dialog instanceof HTMLDialogElement && openButton instanceof HTMLButtonEleme
     }
   });
   dialog.addEventListener("close", restoreBackupTriggerFocus);
+  dialog.addEventListener("close", () => window.clearTimeout(backupStatusTimer));
 }
 
 const backupError = document.querySelector("[data-admin-backup-error]");
@@ -78,9 +79,25 @@ function fetchBackupStatus() {
     .catch(() => null);
 }
 
+function currentBackupSubmitButton() {
+  return backupForm instanceof HTMLFormElement ? backupForm.querySelector("[data-admin-backup-submit]") : null;
+}
+
+function resetBackupSubmit(submitButton) {
+  if (submitButton instanceof HTMLButtonElement) {
+    submitButton.disabled = false;
+    submitButton.textContent = backupSubmitDefaultText;
+  }
+}
+
 function refreshBackupStatus() {
   fetchBackupStatus().then((backup) => {
+    if (backup && backup.status === "running") {
+      watchBackupJob(currentBackupSubmitButton());
+      return;
+    }
     setBackupStatusText(backup && backup.status !== "idle" ? describeBackupStatus(backup) : "");
+    resetBackupSubmit(currentBackupSubmitButton());
   });
 }
 
@@ -91,13 +108,12 @@ function showBackupFailure(message, submitButton) {
     backupError.hidden = false;
     backupError.focus({ preventScroll: true });
   }
-  if (submitButton instanceof HTMLButtonElement) {
-    submitButton.disabled = false;
-    submitButton.textContent = backupSubmitDefaultText;
-  }
+  resetBackupSubmit(submitButton);
 }
 
-// The server runs the dump in the background, so the dialog follows the job until it ends.
+// The server runs the dump in the background. The dialog follows the job only while it is open:
+// closing it stops polling, and reopening it picks the job up again. The page is never reloaded here,
+// so input elsewhere on the admin screen survives a finished backup.
 function watchBackupJob(submitButton) {
   window.clearTimeout(backupStatusTimer);
   setBackupStatusText("Backup выполняется…");
@@ -107,11 +123,14 @@ function watchBackupJob(submitButton) {
       return;
     }
     if (backup.status === "running") {
-      backupStatusTimer = window.setTimeout(() => watchBackupJob(submitButton), backupStatusPollMs);
+      if (dialog instanceof HTMLDialogElement && dialog.open) {
+        backupStatusTimer = window.setTimeout(() => watchBackupJob(submitButton), backupStatusPollMs);
+      }
       return;
     }
     if (backup.status === "completed") {
-      window.location.reload();
+      setBackupStatusText(describeBackupStatus(backup));
+      resetBackupSubmit(submitButton);
       return;
     }
     showBackupFailure(backup.error || "Не удалось отправить backup. Проверьте логи и конфиг.", submitButton);

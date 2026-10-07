@@ -322,14 +322,19 @@ async def _run_manual_backup(
         if lease_lost.is_set():
             logger.error("Manual backup stopped after losing its lease", extra={"job_id": job_id})
             return
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
         raise
     except Exception as exc:
         await _stop_task(lease)
         logger.exception("Manual Selara backup failed", extra={"job_id": job_id})
-        await finish_backup_slot(
+        await _record_manual_backup_result(
             session_factory=session_factory,
-            slot_key=MANUAL_BACKUP_SLOT_KEY,
-            owner_token=job_id,
+            job_id=job_id,
             status=BACKUP_SLOT_FAILED,
             error=str(exc),
         )
@@ -340,12 +345,40 @@ async def _run_manual_backup(
         return
 
     await _stop_task(lease)
-    await finish_backup_slot(
+    await _record_manual_backup_result(
         session_factory=session_factory,
-        slot_key=MANUAL_BACKUP_SLOT_KEY,
-        owner_token=job_id,
+        job_id=job_id,
         status=BACKUP_SLOT_COMPLETED,
     )
+
+
+async def _record_manual_backup_result(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    job_id: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    # A failed status write must not hide the outcome from the admin: the caller still notifies.
+    try:
+        await finish_backup_slot(
+            session_factory=session_factory,
+            slot_key=MANUAL_BACKUP_SLOT_KEY,
+            owner_token=job_id,
+            status=status,
+            error=error,
+        )
+    except Exception:
+        logger.exception("Could not record manual backup result", extra={"job_id": job_id, "status": status})
+
+
+async def stop_manual_backups() -> None:
+    """Cancel manual backups still running; call before the bot session they send through is closed."""
+    tasks = tuple(_manual_backup_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def read_manual_backup_status(

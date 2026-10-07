@@ -334,6 +334,48 @@ async def test_manual_backup_with_expired_lease_is_reported_as_interrupted():
 
 
 @pytest.mark.asyncio
+async def test_failure_alert_is_sent_even_when_recording_the_failure_fails(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+
+    async def failing_send_daily_backup(*, bot, settings) -> None:
+        raise RuntimeError("database is unavailable")
+
+    async def broken_finish_backup_slot(**kwargs) -> bool:
+        raise RuntimeError("database is unavailable")
+
+    monkeypatch.setattr(backup, "send_daily_backup", failing_send_daily_backup)
+    monkeypatch.setattr(backup, "finish_backup_slot", broken_finish_backup_slot)
+    bot = _RecordingBot()
+    try:
+        await backup.start_manual_backup(bot=bot, settings=SimpleNamespace(admin_user_id=42), session_factory=session_factory)
+        await asyncio.gather(*list(backup._manual_backup_tasks))
+
+        assert len(bot.messages) == 1 and "database is unavailable" in bot.messages[0]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stop_manual_backups_cancels_the_running_job_and_records_it_as_failed(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+
+    async def endless_send_daily_backup(*, bot, settings) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(backup, "send_daily_backup", endless_send_daily_backup)
+    try:
+        await backup.start_manual_backup(bot=_RecordingBot(), settings=SimpleNamespace(admin_user_id=42), session_factory=session_factory)
+        await backup.stop_manual_backups()
+
+        assert backup._manual_backup_tasks == set()
+        status = await backup.read_manual_backup_status(session_factory=session_factory)
+        assert status["status"] == "failed"
+        assert "остановкой сервиса" in (status["error"] or "")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_lost_lease_stops_the_running_backup_and_records_nothing(monkeypatch: pytest.MonkeyPatch):
     engine, session_factory = await _session_factory()
     outcomes: list[str] = []

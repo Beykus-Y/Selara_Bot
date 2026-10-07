@@ -116,6 +116,7 @@ from selara.infrastructure.backup import (
     BackupAlreadyRunningError,
     read_manual_backup_status,
     start_manual_backup,
+    stop_manual_backups,
 )
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.models import (
@@ -709,6 +710,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         if miniapp_broadcast_tasks:
             await asyncio.gather(*miniapp_broadcast_tasks.values(), return_exceptions=True)
         miniapp_broadcast_tasks.clear()
+        # Manual backups send through game_bot, so stop them before its session closes.
+        await stop_manual_backups()
         if game_bot is not None:
             await game_bot.session.close()
             game_bot = None
