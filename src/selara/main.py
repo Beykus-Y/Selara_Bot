@@ -305,10 +305,15 @@ async def run() -> None:
     renderer_service = PlaywrightRendererService.get_instance()
 
     try:
+        # Only one instance may write game state to Redis. A process that cannot
+        # claim the writer lease fails here, before it serves any update, and a
+        # process that loses the lease later stops through the task group.
+        await GAME_STORE.start_writer_lease()
         async with asyncio.TaskGroup() as tg:
             tg.create_task(run_message_event_backfill(session_factory))
             tg.create_task(_run_bot(settings, session_factory))
             tg.create_task(_run_web_panel(settings, session_factory))
+            tg.create_task(GAME_STORE.watch_writer_lease(), name="game-store-writer-lease")
     finally:
         await renderer_service.stop()
         await GAME_STORE.close()

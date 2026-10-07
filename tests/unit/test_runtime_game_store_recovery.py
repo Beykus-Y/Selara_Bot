@@ -898,6 +898,49 @@ class _GatedFakeRedisClient:
     def pipeline(self) -> _GatedFakeRedisPipeline:
         return _GatedFakeRedisPipeline(self)
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Emulates the fenced game writes (issue #87) through this fake's own commands.
+
+        The effects and their order match the Lua scripts, and the payload SET
+        still goes through ``_hold_if_requested``, so the gate and the hung GET
+        keep modelling the same interleavings as the plain SET/GET did.
+        """
+        keys, args = list(keys_and_args[:numkeys]), list(keys_and_args[numkeys:])
+        if script == game_state_module._FENCED_SAVE_GAME_LUA:
+            return await self._fenced_save(keys, args)
+        if script == game_state_module._FENCED_SET_ACTIVE_LUA:
+            return await self._fenced_set_active(keys, args)
+        raise AssertionError("the gated fake only emulates the fenced game writes")
+
+    async def _fenced_save(self, keys: list[str], args: list[str]) -> int:
+        lease, game_key, active_key, *recent_keys = keys
+        token, payload, _ttl, game_id, is_active, finished, score = args
+        if self.data.get(lease) != token:
+            return 0
+        await self._hold_if_requested(payload)
+        self.data[game_key] = payload
+        if is_active == "1" and finished == "0":
+            self.data[active_key] = game_id
+            return 1
+        if await self.get(active_key) == game_id:
+            self.data.pop(active_key, None)
+        if finished == "0":
+            return 1
+        for recent_key in recent_keys:
+            self.zsets.setdefault(recent_key, {})[game_id] = float(score)
+        return 1
+
+    async def _fenced_set_active(self, keys: list[str], args: list[str]) -> int:
+        lease, active_key = keys
+        token, game_id, _ttl = args
+        if self.data.get(lease) != token:
+            return 0
+        if game_id == "":
+            await self.delete(active_key)
+        else:
+            await self.set(active_key, game_id)
+        return 1
+
 
 @pytest.mark.asyncio
 async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
@@ -926,7 +969,9 @@ async def test_second_pass_stale_set_cannot_overwrite_confirmed_mutation(
         client=client,
         codec=game_state_module.GameStateCodec(),
         ttl=timedelta(hours=1),
+        writer_token="unit-writer",
     )
+    client.data[repo._WRITER_LEASE_KEY] = "unit-writer"
     broker = _RecordingBroker()
     # Hold exactly the writes made by the recovery attempt once the live repo
     # is wired in: the second pass. Pass one (repo not yet wired) applies.
@@ -1150,7 +1195,9 @@ async def _stale_set_then_hang_schedule(
         client=client,
         codec=game_state_module.GameStateCodec(),
         ttl=timedelta(hours=1),
+        writer_token="unit-writer",
     )
+    client.data[repo._WRITER_LEASE_KEY] = "unit-writer"
     broker = _RecordingBroker()
     attempt: dict[str, asyncio.Task[None]] = {}
 
