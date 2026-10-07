@@ -32,13 +32,13 @@ def top_result():
         'top': [{'user_id': 1, 'username': '@one', 'messages': 436, 'karma': 2}]}), 'Получен топ по карме')
 
 
-async def run(responses, execute=None):
+async def run(responses, execute=None, save_error=None):
     settings = Settings(bot_token='123:TEST', database_url='sqlite+aiosqlite:///:memory:')
     message = SimpleNamespace(text='?? Покажи таблицу и график топа', message_id=1, message_thread_id=None,
         chat=SimpleNamespace(id=-100123, type='supergroup', title='Чат'),
         from_user=SimpleNamespace(id=1, username='one', first_name='Один', last_name=None, is_bot=False),
         reply=AsyncMock(return_value=AsyncMock()))
-    client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=responses), chat_simple=AsyncMock())
+    client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=responses), chat_simple=AsyncMock(), placeholder=message.reply.return_value)
     repo = MagicMock()
     repo.get_last_user_message_at = AsyncMock(return_value=None)
     repo.search_glossary = AsyncMock(return_value=[])
@@ -57,7 +57,7 @@ async def run(responses, execute=None):
          patch.object(handler, 'execute_tool', execute), \
          patch.object(handler, '_send_formatted_answer', AsyncMock()) as sent, \
          patch.object(handler, '_send_dm_summary', AsyncMock()) as summary, \
-         patch.object(handler, 'save_interaction', AsyncMock()) as saved:
+         patch.object(handler, 'save_interaction', AsyncMock(side_effect=save_error)) as saved:
         await handler._handle(message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True), client,
             AsyncMock(), with_context=False, settings=settings, session_factory=object())
     return client, execute, sent, summary, saved
@@ -114,10 +114,24 @@ async def test_last_round_offers_no_tools_tells_the_model_and_caps_tokens():
     last = c.chat_with_tools.await_args_list[-1].kwargs
     assert last['tools'] == [] and last['messages'][-1]['content'] == LAST_ROUND_NOTICE
     assert all(call_.kwargs['tools'] for call_ in c.chat_with_tools.await_args_list[:-1])
-    # The short cap is for the tool-free final answer; tool rounds (artifact arguments) stay uncapped by it.
-    assert all('max_tokens' not in call_.kwargs for call_ in c.chat_with_tools.await_args_list[:-1])
-    assert last['max_tokens'] == 800
+    assert all(call_.kwargs['max_tokens'] == 800 for call_ in c.chat_with_tools.await_args_list)
     assert sent.call_args.args[2] == 'Итог без документов'
+
+
+async def test_cap_is_raised_only_after_the_artifacts_skill_was_read():
+    execute = AsyncMock(return_value=ToolResult('read_skill', 'read_skill', '{}', 'Навык прочитан'))
+    c, _, _, _, _ = await run([
+        response(calls=[call('read_skill', name='artifacts')]), response(calls=[call('read_skill', name='other')]),
+        response('Готово')], execute)
+    caps = [call_.kwargs['max_tokens'] for call_ in c.chat_with_tools.await_args_list]
+    assert caps == [800, 4000, 4000]
+
+
+async def test_failure_after_the_answer_was_sent_does_not_replace_it():
+    client, execute, sent, _, saved = await run([response('Готовый ответ')], save_error=RuntimeError('db down'))
+    assert sent.call_args.args[2] == 'Готовый ответ'
+    # The placeholder edit with an error text must not have happened after the answer went out.
+    client.placeholder.edit_text.assert_not_awaited()
 
 
 async def test_truncated_tool_arguments_become_a_tool_error_not_a_crash():

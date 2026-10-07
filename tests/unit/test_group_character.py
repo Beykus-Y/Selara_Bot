@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from selara.application.ai_character import ProfileValidationError
 from selara.application.ai_character.group import (
     LAST_ROUND_NOTICE,
-    MEMBER_REPLY_MAX_TOKENS,
     CallName,
     GroupCharacter,
     MemberTurn,
@@ -489,8 +488,7 @@ async def test_member_tool_rounds_depend_on_subscription_and_last_round_is_tool_
     assert all(r["tools"] for r in llm.requests[:-1])
     last = llm.requests[-1]
     assert last["tools"] == [] and last["messages"][-1]["content"] == LAST_ROUND_NOTICE
-    assert llm.requests[-1]["max_tokens"] == 500
-    assert all(r["max_tokens"] == MEMBER_REPLY_MAX_TOKENS for r in llm.requests[:-1])
+    assert all(r["max_tokens"] == 500 for r in llm.requests)
 
 
 @pytest.mark.asyncio

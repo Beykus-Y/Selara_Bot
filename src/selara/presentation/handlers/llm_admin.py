@@ -401,6 +401,7 @@ async def _handle(
         # trusted context (see save_interaction below).
         web_tainted = False
         web_withdrawal = False
+        artifacts_skill_read = False
 
         # 4 model turns without a group subscription, 8 with one; the last turn offers no tools and says so.
         has_ai = await chat_has_selara_ai(session_factory, chat_id=message.chat.id, settings=settings)
@@ -426,10 +427,13 @@ async def _handle(
                     "messages": messages,
                     "tools": [] if is_last_round else available_tools,
                 }
-                # The short cap is for the tool-free final answer only: tool rounds may carry long
-                # create_artifact arguments, which a cut-off would turn into broken JSON.
-                if is_last_round:
-                    request_kwargs["max_tokens"] = settings.llm_admin_max_tokens
+                # Plain answers are capped; only after the artifacts skill was read (the model is about to
+                # write long create_artifact arguments, which a cut-off would break) the ceiling is higher.
+                request_kwargs["max_tokens"] = (
+                    _ARTIFACT_MAX_TOKENS
+                    if artifacts_skill_read and not is_last_round
+                    else settings.llm_admin_max_tokens
+                )
                 # `tools` is always passed, [] included: LlmClient normalizes
                 # it to tools=None / tool_choice=None (a required positional
                 # -- omitting the key would raise TypeError on the real
@@ -547,6 +551,8 @@ async def _handle(
                 else:
                     result = await execute_tool(call, **tool_ctx)
                 tool_results.append(result)
+                if call.name == "read_skill" and result.success and call.arguments.get("name") == "artifacts":
+                    artifacts_skill_read = True
                 if result.success and result.db_action_id is not None:
                     # #22: commit immediately so a crash on a *later* round can
                     # no longer roll back an already-completed action's DB state
@@ -591,6 +597,7 @@ async def _handle(
         else:
             final_answer = final_answer.strip() or _verified_fallback(tool_results)
             await _send_formatted_answer(message, thinking_msg, final_answer)
+        outcome["answer_sent"] = True
         chat_answer = final_answer
         if artifact_context.sent_artifacts:
             final_answer += "\nАртефакты этого чата: " + ", ".join(artifact_context.sent_artifacts)
@@ -644,11 +651,15 @@ async def _handle(
         log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)
         outcome["status"] = "failed"
         outcome["error_category"] = "handler_error"
-        error_text = "⚠️ Ошибка AI-ассистента: не удалось завершить запрос. Попробуйте позже."
-        try:
-            await thinking_msg.edit_text(error_text)
-        except Exception:
-            pass
+        if outcome.get("answer_sent"):
+            # The answer already reached the chat; only post-processing failed, so keep the answer as is.
+            outcome["error_category"] = "post_answer_error"
+        else:
+            error_text = "⚠️ Ошибка AI-ассистента: не удалось завершить запрос. Попробуйте позже."
+            try:
+                await thinking_msg.edit_text(error_text)
+            except Exception:
+                pass
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
@@ -669,6 +680,7 @@ async def _handle(
                 log.exception("Could not finalize llm_admin invocation id=%s", invocation_id)
 
 
+_ARTIFACT_MAX_TOKENS = 4000
 _TRUNCATED_MARK = "\n\n…(ответ обрезан по длине)"
 
 
