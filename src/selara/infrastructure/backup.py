@@ -462,6 +462,13 @@ async def _run_pg_restore_verification(
             f"Backup restore verification timed out after {timeout_seconds:g}s for {label}: "
             f"'{settings.backup_pg_restore_path}' did not finish and was terminated."
         ) from exc
+    except asyncio.CancelledError:
+        # Shutdown cancels the scheduler task (backup_task.cancel() in
+        # main.py) without any timeout having expired: the child must not
+        # survive as an orphan that keeps restoring while the drill lock is
+        # already released. Kill and reap it, then propagate the cancellation.
+        await _kill_verification_process(process)
+        raise
 
     if process.returncode == 0:
         return
@@ -473,11 +480,12 @@ async def _run_pg_restore_verification(
 
 
 async def _kill_verification_process(process: asyncio.subprocess.Process) -> None:
-    """Terminate and reap a verification child whose timeout expired.
+    """Terminate and reap a verification child that outlived its coroutine.
 
-    The pending ``communicate()`` is already cancelled by ``asyncio.timeout``,
-    so the process is killed and then reaped explicitly; otherwise a stalled
-    pg_restore would survive as an orphan holding the archive open.
+    Whether its ``communicate()`` was cut short by the verification timeout or
+    by the surrounding task being cancelled (bot shutdown), the child is killed
+    and then reaped explicitly; otherwise a stalled pg_restore would survive as
+    an orphan holding the archive -- or the scratch database -- open.
     """
     if process.returncode is None:
         try:

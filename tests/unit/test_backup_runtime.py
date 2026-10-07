@@ -586,6 +586,65 @@ async def test_verify_dump_restorable_times_out_and_kills_pg_restore(
 
 
 @pytest.mark.asyncio
+async def test_verify_dump_restorable_cancellation_kills_pg_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "bot_pg_dump.dump"
+    dump_path.write_bytes(b"PGDMP-fake")
+    state = {"killed": 0, "reaped": 0}
+    restore_started = asyncio.Event()
+
+    class HangingRestoreProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            # Simulate a pg_restore that is still restoring when the task that
+            # spawned it is cancelled (bot shutdown in the middle of a drill).
+            restore_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def kill(self) -> None:
+            state["killed"] += 1
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            state["reaped"] += 1
+            return self.returncode if self.returncode is not None else -9
+
+    async def fake_exec(*command: str, **kwargs: object) -> HangingRestoreProcess:
+        _ = command, kwargs
+        return HangingRestoreProcess()
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@restore-db.internal:5433/selara_restore",
+    )
+
+    task = asyncio.create_task(
+        backup._verify_dump_restorable(
+            dump_path=dump_path,
+            label="main bot database dump",
+            settings=settings,
+            temp_dir=tmp_path,
+        )
+    )
+    await asyncio.wait_for(restore_started.wait(), 1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The child was killed and reaped instead of surviving as an orphan, the
+    # cancellation still propagates, and the drill lock is free again.
+    assert state == {"killed": 1, "reaped": 1}
+    assert task.cancelled()
+    assert not backup._RESTORE_DRILL_LOCK.locked()
+
+
+@pytest.mark.asyncio
 async def test_notify_backup_failure_includes_bounded_reason() -> None:
     messages: list[str] = []
 
