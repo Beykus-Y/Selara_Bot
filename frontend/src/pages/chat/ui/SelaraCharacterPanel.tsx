@@ -133,7 +133,7 @@ export function SelaraCharacterPanel({ chatId }: { chatId: string }) {
   })
 
   return (
-    <section className="miniapp-section-card selara-ai" aria-labelledby="selara-char-title" aria-busy={query.isFetching}>
+    <section className="miniapp-section-card selara-char" aria-labelledby="selara-char-title" aria-busy={query.isFetching}>
       <div className="miniapp-section-head">
         <h2 id="selara-char-title">Selara в чате</h2>
       </div>

@@ -1,4 +1,5 @@
-.selara-ai {
+.selara-ai,
+.selara-char {
   display: grid;
   gap: 12px;
   min-width: 0;
