@@ -9,7 +9,7 @@ from selara.infrastructure.http.gacha_client import HttpGachaClient
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["pull", "purchase", "sell", "profile", "history"])
+@pytest.mark.parametrize("operation", ["pull", "purchase", "sell", "profile", "history", "collection"])
 async def test_gacha_client_sends_service_token_for_user_scoped_calls(operation: str) -> None:
     client = HttpGachaClient(
         base_url="http://gacha.local",
@@ -27,6 +27,8 @@ async def test_gacha_client_sends_service_token_for_user_scoped_calls(operation:
             await client.sell_pull(user_id=10, pull_id=99)
         elif operation == "profile":
             await client.get_profile(user_id=10, banner="genshin")
+        elif operation == "collection":
+            await client.get_collection(user_id=10, banner="genshin")
         else:
             await client.get_history(user_id=10, banner="genshin")
 

@@ -309,7 +309,9 @@ X-Gacha-Service-Token: <GACHA_SERVICE_TOKEN>
 Per-user данные (профиль, история круток, коллекция) не публичны: Telegram user_id предсказуем,
 поэтому без токена любой клиент с сетевым доступом мог бы перечислять чужие данные (issue #77).
 `GET /v1/gacha/banners/{banner}/cards` и `GET /v1/gacha/health` остаются публичными — это
-статический каталог карт и healthcheck без пользовательских данных.
+статический каталог карт и healthcheck без пользовательских данных. Mini App читает per-user
+данные не напрямую, а через авторизованный app-прокси `GET /api/miniapp/gacha/*` (см. ниже),
+поэтому на публичном краю токен не подставляется.
 
 Пример тела:
 
@@ -377,10 +379,11 @@ GACHA_PG_DUMP_PATH=/usr/bin/pg_dump
 }
 ```
 
-Для команды вида `моя гача геншин` основной бот позже может вызывать:
+Для команды вида `моя гача геншин` основной бот вызывает:
 
 ```text
 GET /v1/gacha/users/12345/profile?banner=genshin
+X-Gacha-Service-Token: <GACHA_SERVICE_TOKEN>
 ```
 
 Этот endpoint возвращает:
@@ -390,6 +393,17 @@ GET /v1/gacha/users/12345/profile?banner=genshin
 - очки и примогемы;
 - количество уникальных карт и копий;
 - последние крутки по выбранному баннеру.
+
+## Mini App
+
+Telegram Mini App не обращается к per-user gacha-эндпоинтам напрямую: браузер не должен
+держать `GACHA_SERVICE_TOKEN`, а публичный nginx-прокси `/miniapp/gacha/` намеренно ничего не
+подставляет. Экран коллекции ходит в основной app по `GET /api/miniapp/gacha/profile` и
+`GET /api/miniapp/gacha/collection`; app определяет Telegram user_id из Mini App-сессии
+(клиентский `user_id` игнорируется) и уже от себя вызывает gacha-сервис с service-токеном.
+
+Публичным через `/miniapp/gacha/` остаётся только статический каталог карт
+(`GET /v1/gacha/banners/{banner}/cards`) и картинки `/images/...` — пользовательских данных там нет.
 
 ## Интеграция с Selara позже
 

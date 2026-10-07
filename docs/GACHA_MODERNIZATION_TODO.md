@@ -432,7 +432,11 @@ Web UI Modernization (`docs/WEB_UI_MODERNIZATION_TODO.md`) закрыт и не 
 ## 7. Отложенные задачи
 
 - Система pity/гарантий — решение #3, обсуждается отдельно, вне этого TODO.
-- Публичные read-эндпоинты без авторизации — решение #1, осознанно оставлено как есть.
+- Публичные read-эндпоинты `profile`/`history`/`collection` — решение #1, закрыто в issue #77:
+  per-user чтения требуют `X-Gacha-Service-Token`, а Mini App читает их через авторизованный
+  app-прокси `GET /api/miniapp/gacha/profile|collection` (app определяет user_id из Mini App-сессии).
+  Публичными намеренно остаются только статический каталог карт
+  `GET /v1/gacha/banners/{banner}/cards`, картинки `/images/...` и `GET /v1/gacha/health`.
 
 ## 8. Сводный прогресс
 

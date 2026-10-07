@@ -247,8 +247,8 @@ async def test_banner_cards_endpoint_returns_full_catalog_without_auth() -> None
     Этап 3): the main bot has to pick filler characters for the scroll
     animation, but no endpoint exposed the banner's card catalog at all —
     only per-user profile/history/collection existed. This is pure static
-    config data (no per-user info, no economy state), so it follows the
-    same unauthenticated-read precedent as profile/history/collection."""
+    config data (no per-user info, no economy state), so it stays public
+    while profile/history/collection are token-gated (issue #77)."""
     app = _build_app()
     transport = httpx.ASGITransport(app=app)
 
