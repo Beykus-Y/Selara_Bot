@@ -575,6 +575,17 @@ class ChatActivityEventSyncStateModel(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ActivityEventInboxModel(Base):
+    """Durable copy of a tracked group message, kept until ActivityBatcher aggregates it and deletes the row."""
+
+    __tablename__ = "activity_event_inbox"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ChatInterestingFactStateModel(Base):
     __tablename__ = "chat_interesting_fact_state"
 

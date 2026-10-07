@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,12 +17,25 @@ from selara.infrastructure.db.activity_batching import (
     ActivityBatchFlushResult,
     ActivityBatchMessage,
 )
+from selara.infrastructure.db.activity_inbox import (
+    claim_activity_inbox_batch,
+    delete_activity_inbox_events,
+    stage_activity_inbox_events,
+)
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 logger = logging.getLogger(__name__)
 
 
 class ActivityBatcher:
+    """Aggregates tracked group messages into activity counters and the message archive.
+
+    `enqueue_message` writes each event to `activity_event_inbox` and returns only after that commit, so a
+    crash cannot lose it. A background task applies inbox rows in batches. Each batch is aggregated and its
+    rows are deleted in one transaction: a failed or interrupted batch is retried whole, and an applied row
+    is never applied again.
+    """
+
     def __init__(
         self,
         *,
@@ -31,18 +43,16 @@ class ActivityBatcher:
         catalog: AchievementCatalogService,
         flush_seconds: int,
         max_events: int,
-        max_pending_events: int | None = None,
+        max_inflight_writes: int = 8,
         live_event_publisher: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._catalog = catalog
         self._flush_seconds = max(1, int(flush_seconds))
         self._max_events = max(1, int(max_events))
-        pending_limit = max_pending_events if max_pending_events is not None else self._max_events * 10
-        self._capacity = asyncio.Semaphore(max(1, int(pending_limit)))
+        self._write_slots = asyncio.Semaphore(max(1, int(max_inflight_writes)))
         self._live_event_publisher = live_event_publisher
-        self._pending: deque[ActivityBatchMessage] = deque()
-        self._lock = asyncio.Lock()
+        self._unflushed_hint = 0
         self._wake_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
@@ -81,113 +91,104 @@ class ActivityBatcher:
         if self._closed:
             raise RuntimeError("ActivityBatcher is closed.")
 
-        await self._capacity.acquire()
-        try:
+        event = ActivityBatchMessage(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            chat_title=chat_title,
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            is_bot=is_bot,
+            event_at=event_at,
+            telegram_message_id=telegram_message_id,
+            count_as_activity=count_as_activity,
+            snapshot_kind=snapshot_kind,
+            snapshot_at=snapshot_at,
+            sent_at=sent_at,
+            edited_at=edited_at,
+            message_type=message_type,
+            text=text,
+            caption=caption,
+            raw_message_json=raw_message_json,
+            snapshot_hash=snapshot_hash,
+            reply_to_telegram_message_id=reply_to_telegram_message_id,
+        )
+        async with self._write_slots:
             if self._closed:
                 raise RuntimeError("ActivityBatcher is closed.")
-            async with self._lock:
-                self._pending.append(
-                    ActivityBatchMessage(
-                        chat_id=chat_id,
-                        chat_type=chat_type,
-                        chat_title=chat_title,
-                        user_id=user_id,
-                        username=username,
-                        first_name=first_name,
-                        last_name=last_name,
-                        is_bot=is_bot,
-                        event_at=event_at,
-                        telegram_message_id=telegram_message_id,
-                        count_as_activity=count_as_activity,
-                        snapshot_kind=snapshot_kind,
-                        snapshot_at=snapshot_at,
-                        sent_at=sent_at,
-                        edited_at=edited_at,
-                        message_type=message_type,
-                        text=text,
-                        caption=caption,
-                        raw_message_json=raw_message_json,
-                        snapshot_hash=snapshot_hash,
-                        reply_to_telegram_message_id=reply_to_telegram_message_id,
-                    )
-                )
-                should_wake = len(self._pending) >= self._max_events
-        except BaseException:
-            self._capacity.release()
-            raise
+            async with self._session_factory() as session:
+                stage_activity_inbox_events(session, [event])
+                await session.commit()
 
-        if should_wake:
+        self._unflushed_hint += 1
+        if self._unflushed_hint >= self._max_events:
             self._wake_event.set()
 
     async def close(self) -> None:
-        if self._task is None:
-            self._closed = True
-            return
-
+        # Stops accepting events, applies what is in the inbox and returns. If the database is failing, the
+        # remaining rows stay in the inbox and the next start applies them.
         self._closed = True
         self._wake_event.set()
         task = self._task
         self._task = None
-        await task
+        if task is not None:
+            await task
 
     async def _run(self) -> None:
+        retry = False
         while True:
-            try:
-                await asyncio.wait_for(self._wake_event.wait(), timeout=self._flush_seconds)
-            except asyncio.TimeoutError:
-                pass
+            if not retry:
+                await self._wait_for_work()
             self._wake_event.clear()
-
-            batch = await self._drain_pending()
-            if not batch:
-                if self._closed:
-                    break
-                continue
-
-            flushed = await self._flush_batch(batch)
-            if not flushed:
+            retry = not await self._drain_inbox()
+            if self._closed:
+                break
+            if retry:
+                # The failed rows are still in the inbox. A fixed backoff keeps enqueue wake-ups from turning
+                # one failing flush into a retry per message.
                 await asyncio.sleep(self._flush_seconds)
 
-            if self._closed and not await self._has_pending():
-                break
-
-    async def _drain_pending(self) -> list[ActivityBatchMessage]:
-        async with self._lock:
-            if not self._pending:
-                return []
-            batch = list(self._pending)
-            self._pending.clear()
-            return batch
-
-    async def _has_pending(self) -> bool:
-        async with self._lock:
-            return bool(self._pending)
-
-    async def _requeue_front(self, batch: Sequence[ActivityBatchMessage]) -> None:
-        async with self._lock:
-            restored = deque(batch)
-            restored.extend(self._pending)
-            self._pending = restored
-            if self._pending:
-                self._wake_event.set()
-
-    async def _flush_batch(self, batch: Sequence[ActivityBatchMessage]) -> bool:
+    async def _wait_for_work(self) -> None:
         try:
-            async with self._session_factory() as session:
-                repo = SqlAlchemyActivityRepository(session)
-                result = await repo.flush_activity_batch(batch)
-                if result.latest_event_at_by_pair:
-                    await self._process_achievements(session=session, repo=repo, result=result)
-                await session.commit()
-        except Exception:
-            logger.exception("Failed to flush activity batch", extra={"batch_size": len(batch)})
-            await self._requeue_front(batch)
-            return False
+            await asyncio.wait_for(self._wake_event.wait(), timeout=self._flush_seconds)
+        except asyncio.TimeoutError:
+            pass
 
-        for _ in batch:
-            self._capacity.release()
+    async def _drain_inbox(self) -> bool:
+        """Apply inbox batches until the inbox is empty. Returns False if a batch failed."""
+        while True:
+            applied = await self._flush_next_batch()
+            if applied is None:
+                return False
+            self._unflushed_hint = max(0, self._unflushed_hint - applied)
+            if applied < self._max_events:
+                return True
+
+    async def _flush_next_batch(self) -> int | None:
+        try:
+            applied, result = await self._apply_next_batch()
+        except Exception:
+            logger.exception("Failed to flush activity inbox batch", extra={"batch_limit": self._max_events})
+            return None
+
         await self._publish_live_events(result)
-        return True
+        return applied
+
+    async def _apply_next_batch(self) -> tuple[int, ActivityBatchFlushResult]:
+        # Aggregates, achievements and inbox deletes share one transaction: they all commit or none do.
+        async with self._session_factory() as session:
+            claimed = await claim_activity_inbox_batch(session, limit=self._max_events)
+            if not claimed:
+                return 0, ActivityBatchFlushResult()
+
+            repo = SqlAlchemyActivityRepository(session)
+            result = await repo.flush_activity_batch([event for _, event in claimed])
+            if result.latest_event_at_by_pair:
+                await self._process_achievements(session=session, repo=repo, result=result)
+            await delete_activity_inbox_events(session, [row_id for row_id, _ in claimed])
+            await session.commit()
+        return len(claimed), result
 
     async def _process_achievements(
         self,

@@ -112,8 +112,12 @@ async def _run(*, dump_path: Path, chunk_size: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay dumped ActivityBatcher queue into the database.")
-    parser.add_argument("dump_path", type=Path, help="Path to JSON dump created from ActivityBatcher._pending")
+    parser = argparse.ArgumentParser(description="Replay a JSON array of activity batch payloads into the database.")
+    parser.add_argument(
+        "dump_path",
+        type=Path,
+        help="Path to a JSON array of activity batch payloads, e.g. rows exported from activity_event_inbox.payload",
+    )
     parser.add_argument("--chunk-size", type=int, default=500, help="How many events to replay per transaction.")
     args = parser.parse_args()
     asyncio.run(_run(dump_path=args.dump_path, chunk_size=args.chunk_size))
