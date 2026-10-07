@@ -205,9 +205,9 @@ def _ai_help_text(settings: Settings) -> str:
         "• Разговоры и свои действия (<code>/pet_do</code>) оплачивает хозяин из Selara Personal, не чат: "
         f"{settings.pet_talk_daily_limit} AI-реплик в сутки на питомца (разговоры и самостоятельные сообщения расходуют один лимит), из них гостям — "
         f"{settings.pet_talk_guests_daily_limit} всего и {settings.pet_talk_guest_daily_limit} на человека; "
-        f"<code>/pet_do</code>: пауза 10 минут у каждого человека; в сутки хозяину до {settings.pet_custom_actions_daily_limit}, "
-        f"каждому гостю до {settings.pet_custom_actions_guest_daily_limit}, всем гостям вместе до "
-        f"{settings.pet_custom_actions_guests_daily_limit}\n"
+        f"<code>/pet_do</code>: пауза 10 минут у каждого человека; хозяину до {settings.pet_custom_actions_daily_limit} в сутки, "
+        f"каждому гостю до {settings.pet_custom_actions_guest_daily_limit} в сутки, всем гостям вместе до "
+        f"{settings.pet_custom_actions_guests_daily_limit} в сутки\n"
         "• В режиме AI Limits реплики питомца списываются из общего суточного бюджета хозяина по фактической стоимости\n"
         "• Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без AI-лимита (у ухода свои кулдауны)"
     )

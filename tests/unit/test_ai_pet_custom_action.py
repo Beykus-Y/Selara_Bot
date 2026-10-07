@@ -248,6 +248,7 @@ class _Access:
 @pytest.fixture
 def fake_quota(monkeypatch: pytest.MonkeyPatch):
     _Access.allowed = True
+    _Access.last = {}
     monkeypatch.setattr(ai_pet_actions, "FeatureAccessService", _Access)
     monkeypatch.setattr(ai_pet_actions, "SqlAlchemyFeatureQuotaRepository", lambda *a, **k: None)
     monkeypatch.setattr(ai_pet_actions, "SqlAlchemyUserEntitlementResolver", lambda *a, **k: None)
