@@ -25,7 +25,7 @@ def test_ci_workflow_checks_backend_gacha_and_frontend() -> None:
         "frontend": {"frontend-static", "frontend-browser"},
     }.items():
         assert jobs[aggregator]["name"] == aggregator
-        assert set(jobs[aggregator]["needs"].strip("[]").replace(" ", "").split(",")) == parts
+        assert set(jobs[aggregator]["needs"]) == parts
         assert jobs[aggregator]["if"] == "${{ always() }}"
         assert "success" in _commands(jobs[aggregator])
 

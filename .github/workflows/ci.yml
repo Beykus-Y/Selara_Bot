@@ -149,11 +149,11 @@ jobs:
         uses: ./.github/actions/backend-setup
 
       - name: Install snapshot fonts
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           for attempt in 1 2 3; do
-            if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
+            if timeout 60 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
@@ -181,7 +181,7 @@ jobs:
 
       - name: Run Unit tests shard
         run: >-
-          python -m pytest -q $(python scripts/ci_test_shard.py tests/unit ${{ matrix.shard }} 4)
+          python -m pytest -q --durations=40 --durations-min=3 $(python scripts/ci_test_shard.py tests/unit ${{ matrix.shard }} 4)
 
   backend-integration:
     name: Integration tests (${{ matrix.shard }}/4)
@@ -231,11 +231,11 @@ jobs:
         uses: ./.github/actions/backend-setup
 
       - name: Install snapshot fonts
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           for attempt in 1 2 3; do
-            if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
+            if timeout 60 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
               exit 0
             fi
             echo "apt attempt $attempt failed" >&2
@@ -263,7 +263,7 @@ jobs:
 
       - name: Run Integration tests shard
         run: >-
-          python -m pytest -q $(python scripts/ci_test_shard.py tests/integration ${{ matrix.shard }} 4)
+          python -m pytest -q --durations=40 --durations-min=3 $(python scripts/ci_test_shard.py tests/integration ${{ matrix.shard }} 4)
 
   backend:
     name: backend
