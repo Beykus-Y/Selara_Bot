@@ -1,14 +1,14 @@
 """Durable inbox for tracked group messages until ActivityBatcher aggregates them (issue #91).
 
 Revision ID: 0106_activity_event_inbox
-Revises: 0103_ai_turn_leases
+Revises: 0104_interesting_fact_claims
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0106_activity_event_inbox"
-down_revision = "0103_ai_turn_leases"
+down_revision = "0104_interesting_fact_claims"
 branch_labels = None
 depends_on = None
 

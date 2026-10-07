@@ -3,17 +3,21 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import SendMessage
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import ChatActivityEventSyncStateModel
+from selara.infrastructure.db.models import ChatActivityEventSyncStateModel, ChatInterestingFactDeliveryModel
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.interesting_facts import InterestingFactCatalog, InterestingFactsScheduler
@@ -155,5 +159,213 @@ async def test_interesting_fact_scheduler_does_not_persist_state_on_send_error(
         repo = SqlAlchemyActivityRepository(session)
         state = await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
         assert state is None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_is_not_resent_when_state_persist_fails_after_send(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100901, chat_type="group", title="Facts")
+    human = UserSnapshot(telegram_user_id=1, username="human", first_name="Human", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_chat_settings(chat=chat, values=settings_to_dict(_fact_settings()))
+        await repo.upsert_activity(chat=chat, user=human, event_at=now - timedelta(hours=5))
+        await session.commit()
+
+    path = tmp_path / "facts.json"
+    path.write_text('["Тестовый факт"]', encoding="utf-8")
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)))
+    scheduler = InterestingFactsScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        catalog=InterestingFactCatalog(path),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    original_upsert = SqlAlchemyActivityRepository.upsert_chat_interesting_fact_state
+
+    async def failing_upsert(self, **kwargs):
+        raise RuntimeError("db unavailable after send")
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "upsert_chat_interesting_fact_state", failing_upsert)
+    assert await scheduler.run_once(now=now) == 1
+
+    # The DB recovers; the next tick is still inside the 180 minute interval.
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "upsert_chat_interesting_fact_state", original_upsert)
+    assert await scheduler.run_once(now=now + timedelta(minutes=5)) == 0
+    bot.send_message.assert_awaited_once()
+
+    await engine.dispose()
+
+
+async def _seed_fact_chat(session_factory, chat: ChatSnapshot, now: datetime) -> None:
+    human = UserSnapshot(telegram_user_id=1, username="human", first_name="Human", last_name=None, is_bot=False)
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_chat_settings(chat=chat, values=settings_to_dict(_fact_settings()))
+        await repo.upsert_activity(chat=chat, user=human, event_at=now - timedelta(hours=5))
+        await session.commit()
+
+
+def _write_facts(tmp_path, texts: list[str]) -> InterestingFactCatalog:
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps(texts, ensure_ascii=False), encoding="utf-8")
+    return InterestingFactCatalog(path)
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_telegram_rejection_keeps_state_and_retries_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100902, chat_type="group", title="Facts")
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+    await _seed_fact_chat(session_factory, chat, now)
+
+    rejection = TelegramBadRequest(
+        method=SendMessage(chat_id=chat.telegram_chat_id, text="x"),
+        message="chat not found",
+    )
+    bot = SimpleNamespace(
+        send_message=AsyncMock(side_effect=[rejection, SimpleNamespace(message_id=777)]),
+    )
+    scheduler = InterestingFactsScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        catalog=_write_facts(tmp_path, ["Тестовый факт"]),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    assert await scheduler.run_once(now=now) == 0
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        assert await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id) is None
+
+    retry_at = now + timedelta(minutes=5)
+    assert await scheduler.run_once(now=retry_at) == 1
+    assert bot.send_message.await_count == 2
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        state = await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
+        assert state is not None
+        assert state.last_sent_at == retry_at
+        assert state.last_fact_id is not None
+        claims_stmt = select(ChatInterestingFactDeliveryModel).order_by(ChatInterestingFactDeliveryModel.id)
+        claims = (await session.execute(claims_stmt)).scalars().all()
+        assert [(item.status, item.telegram_message_id, item.error_summary) for item in claims] == [
+            ("failed", None, "TelegramBadRequest"),
+            ("sent", 777, None),
+        ]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_expired_claim_is_abandoned_and_still_cools_chat_down(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100903, chat_type="group", title="Facts")
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+    await _seed_fact_chat(session_factory, chat, now)
+
+    # A worker claimed a slot 10 minutes ago and died before recording the outcome.
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.create_interesting_fact_claim(
+            chat_id=chat.telegram_chat_id,
+            fact_id="fact_dead",
+            claimed_at=now - timedelta(minutes=10),
+            lease_until=now - timedelta(minutes=5),
+        )
+        await session.commit()
+
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    scheduler = InterestingFactsScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        catalog=_write_facts(tmp_path, ["Тестовый факт"]),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    assert await scheduler.run_once(now=now) == 0
+    bot.send_message.assert_not_awaited()
+
+    async with session_factory() as session:
+        claims = (await session.execute(select(ChatInterestingFactDeliveryModel))).scalars().all()
+        assert [(item.fact_id, item.status, item.error_summary) for item in claims] == [
+            ("fact_dead", "abandoned", "lease_expired"),
+        ]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_network_error_is_not_retried_while_outcome_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100904, chat_type="group", title="Facts")
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+    await _seed_fact_chat(session_factory, chat, now)
+
+    # A timeout may still have delivered the message, so the slot must not be sent again.
+    timeout = TelegramNetworkError(method=SendMessage(chat_id=chat.telegram_chat_id, text="x"), message="timeout")
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=[timeout, SimpleNamespace(message_id=1)]))
+    scheduler = InterestingFactsScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        catalog=_write_facts(tmp_path, ["Тестовый факт"]),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    assert await scheduler.run_once(now=now) == 0
+    async with session_factory() as session:
+        claims_stmt = select(ChatInterestingFactDeliveryModel)
+        claims = (await session.execute(claims_stmt)).scalars().all()
+        assert [(item.status, item.finished_at) for item in claims] == [("claimed", None)]
+
+    assert await scheduler.run_once(now=now + timedelta(minutes=5)) == 0
+    bot.send_message.assert_awaited_once()
 
     await engine.dispose()

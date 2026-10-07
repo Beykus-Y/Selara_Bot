@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
+    # Public half of the X25519 backup key (base64). Only this key lives on the bot host; the private key stays with the operator.
+    backup_encryption_public_key: str | None = Field(default=None, validation_alias="BACKUP_ENCRYPTION_PUBLIC_KEY")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
     # to BOT_TOKEN. Defaults to false so a fresh production install (including
