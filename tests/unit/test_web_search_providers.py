@@ -259,3 +259,29 @@ def test_config_default_provider_is_auto(monkeypatch):
 
     monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
     assert Settings.model_fields["web_search_provider"].default == "auto"
+
+
+@pytest.mark.asyncio
+async def test_empty_searxng_result_falls_through_to_ddg_without_cooldown():
+    searx_calls = []
+
+    def empty(request):
+        searx_calls.append(request)
+        return httpx.Response(200, json={"results": []})
+
+    chain = FallbackProvider([SearxngProvider(transport=httpx.MockTransport(empty)),
+                              DuckDuckGoProvider(transport=_transport([200], DDG_HTML))])
+    assert (await chain.search("q", max_results=5))[0].title == "Title A"
+    assert (await chain.search("q", max_results=5))[0].title == "Title A"
+    assert len(searx_calls) == 2  # empty is not a failure: SearXNG is still asked
+
+
+@pytest.mark.asyncio
+async def test_all_providers_empty_returns_empty_list_and_failed_plus_empty_is_not_error():
+    empty_json = httpx.MockTransport(lambda r: httpx.Response(200, json={"results": []}))
+    searx = SearxngProvider(transport=empty_json)
+    ddg_empty = DuckDuckGoProvider(transport=_transport([200], "<html></html>"))
+    assert await FallbackProvider([searx, ddg_empty]).search("q", max_results=5) == []
+
+    down = SearxngProvider(transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+    assert await FallbackProvider([down, ddg_empty]).search("q", max_results=5) == []
