@@ -23,10 +23,15 @@ from selara.infrastructure.http.web_search.dns_pinning import PinnedDnsTransport
 from selara.infrastructure.http.web_search.htmlutil import extract_text, extract_title
 from selara.infrastructure.http.web_search.models import PageContent, SearchResultItem, WebSearchError
 from selara.infrastructure.http.web_search.providers import (
+    DEFAULT_BRAVE_BASE_URL,
     DEFAULT_DUCKDUCKGO_BASE_URL,
+    DEFAULT_TAVILY_BASE_URL,
     USER_AGENT,
+    BraveProvider,
     DuckDuckGoProvider,
+    FallbackProvider,
     SearchProvider,
+    TavilyProvider,
 )
 
 log = logging.getLogger(__name__)
@@ -242,17 +247,36 @@ def build_web_search_client(
     enabled: bool,
     provider: str,
     base_url: str = "",
+    api_key: str = "",
     timeout_seconds: float = 15.0,
 ) -> WebSearchClient | None:
-    """Composition-root factory: None means web tools stay disabled."""
+    """Composition-root factory: None means web tools stay disabled.
+
+    tavily/brave need WEB_SEARCH_API_KEY and fall back to DuckDuckGo when the
+    keyed provider fails (DuckDuckGo alone is often challenged on datacenter IPs).
+    """
     if not enabled:
         return None
     normalized = (provider or "").strip().lower()
+    ddg = DuckDuckGoProvider(
+        base_url=base_url if normalized == "duckduckgo" and base_url else DEFAULT_DUCKDUCKGO_BASE_URL,
+        timeout_seconds=timeout_seconds,
+    )
+    search_provider: SearchProvider
     if normalized == "duckduckgo":
-        search_provider: SearchProvider = DuckDuckGoProvider(
-            base_url=base_url or DEFAULT_DUCKDUCKGO_BASE_URL,
-            timeout_seconds=timeout_seconds,
-        )
+        search_provider = ddg
+    elif normalized in ("tavily", "brave"):
+        if not api_key.strip():
+            log.warning("WEB_SEARCH: для провайдера %s нужен WEB_SEARCH_API_KEY — используется duckduckgo.", normalized)
+            search_provider = ddg
+        else:
+            keyed_cls, default_url = (
+                (TavilyProvider, DEFAULT_TAVILY_BASE_URL) if normalized == "tavily"
+                else (BraveProvider, DEFAULT_BRAVE_BASE_URL)
+            )
+            keyed = keyed_cls(api_key=api_key.strip(), base_url=base_url or default_url,
+                              timeout_seconds=timeout_seconds)
+            search_provider = FallbackProvider([keyed, ddg])
     else:
         log.warning("WEB_SEARCH: неизвестный провайдер %r — поиск отключён.", provider)
         return None

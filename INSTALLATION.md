@@ -92,7 +92,7 @@ LLM_COOLDOWN_SECONDS=5
 
 ```env
 WEB_SEARCH_ENABLED=true
-WEB_SEARCH_PROVIDER=duckduckgo
+WEB_SEARCH_PROVIDER=duckduckgo   # или tavily / brave (нужен WEB_SEARCH_API_KEY)
 WEB_SEARCH_TIMEOUT_SECONDS=15
 WEB_SEARCH_MAX_RESULTS=5
 ```
@@ -106,6 +106,10 @@ WEB_SEARCH_MAX_RESULTS=5
 свой шлюз через `WEB_SEARCH_BASE_URL`. При блокировке ассистент корректно
 отвечает, что поиск временно недоступен. Чтобы полностью отключить поиск,
 выставьте `WEB_SEARCH_ENABLED=false`.
+
+DuckDuckGo с датацентровых IP часто отвечает анти-бот страницей (HTTP 202/403).
+Для стабильной работы задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
+`WEB_SEARCH_API_KEY`; при сбое такого провайдера бот пробует DuckDuckGo.
 
 ---
 
