@@ -178,7 +178,9 @@ jobs:
           # Ask Playwright which apt packages it wants; empty means "use --with-deps".
           python -m playwright install-deps --dry-run chromium > "$RUNNER_TEMP/pw-deps.txt" 2>&1 || true
           echo "--- install-deps --dry-run output ---"; cat "$RUNNER_TEMP/pw-deps.txt"; echo "---"
-          pkgs=$(grep -o 'no-install-recommends [^"]*' "$RUNNER_TEMP/pw-deps.txt" | head -1 | sed 's/^no-install-recommends //')
+          # Playwright lists the packages the image lacks under "Missing system dependencies (N):".
+          pkgs=$(sed -n '/^Missing system dependencies/,$p' "$RUNNER_TEMP/pw-deps.txt" \
+            | sed -n 's/^ \{2,\}\([a-z0-9][a-z0-9.+-]*\)$/\1/p' | tr '\n' ' ' | sed 's/ *$//')
           echo "packages=$pkgs" >> "$GITHUB_OUTPUT"
           echo "Chromium packages: ${pkgs:-<none found>}"
 
