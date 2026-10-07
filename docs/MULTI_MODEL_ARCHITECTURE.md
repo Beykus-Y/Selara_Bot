@@ -180,3 +180,16 @@ per-model and per-profile statistics. AIL and USD are independent: model prices 
 change multipliers and multipliers never enter USD estimates. Internal operations
 (memory extraction, compression), `/autocfg`, pets and group AI do not spend AIL and
 keep their own routing; there is no auto mode or classifier.
+
+## Models for group features (migration 0094)
+
+Table `llm_feature_routes` (`route_key`, nullable `profile_key`) lets the owner pick a catalog
+profile per feature group in Admin → «Модели для групп»: `group_ask` (`?`/`??`, feature
+`llm_admin`), `group_member` (call names, `group_member`) and `pets` (`pet_talk`,
+`pet_event_text`). `LlmClient` looks the route up by `accounting_context.feature` when the caller
+passed neither `model` nor `model_profile` (`chat_with_tools`, `chat_simple`). No route, an
+unassigned/disabled profile or a missing capability falls back to `LLM_MODEL`. Routes are cached
+for 15 s per process (last-known-good on DB errors). Daily summaries, autoconfig, Personal AI,
+memory extraction and context compression keep their own routing; quotas, AIL and billing for
+groups are unchanged. Endpoints (owner-only): `GET /ai/feature-routes`,
+`PUT /ai/feature-routes/{route_key}`.

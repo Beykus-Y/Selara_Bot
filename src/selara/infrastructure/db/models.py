@@ -1987,6 +1987,23 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class LlmFeatureRouteModel(Base):
+    """Owner-chosen model profile of a group of AI features; no row / NULL means the legacy model."""
+
+    __tablename__ = "llm_feature_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "profile_key IS NULL OR profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+            name="ck_llm_feature_routes_profile",
+        ),
+    )
+
+    route_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    profile_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class SelaraPersonalConfigModel(Base):
     """Singleton row of Selara Personal overrides edited at runtime; NULL falls back to .env."""
 
