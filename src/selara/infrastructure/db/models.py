@@ -2776,6 +2776,12 @@ class PersonalAiProfileModel(Base):
     model_profile_key: Mapped[str] = mapped_column(
         String(64), nullable=False, default="basic", server_default="basic"
     )
+    # Tools of the private assistant: off for everyone until the user switches them on (and only Selara Personal
+    # actually gets them: the flags stay stored when a subscription ends, the tools just stop being offered).
+    tools_web_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    tools_artifacts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Optimistic lock for the settings wizard (and the future Mini App).
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2811,6 +2817,8 @@ class PersonalAiMessageModel(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # The answer was written with untrusted web content in view: it never re-enters the context as a trusted turn.
+    web_tainted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

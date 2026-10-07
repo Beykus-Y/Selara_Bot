@@ -13,6 +13,7 @@ from selara.application.ai_character import CharacterProfile
 from selara.application.personal_memory import MemoryItem
 from selara.application.personal_models import is_profile_key
 from selara.infrastructure.db.models import (
+    LlmArtifactModel,
     PersonalAiMemoryModel,
     PersonalAiMessageModel,
     PersonalAiProfileModel,
@@ -34,6 +35,8 @@ _PROFILE_FIELDS = frozenset(
         "mode",
         "memory_enabled",
         "auto_memory_enabled",
+        "tools_web_enabled",
+        "tools_artifacts_enabled",
     }
 )
 
@@ -47,6 +50,9 @@ class StoredProfile:
     memory_extract_cursor: int = 0
     # Logical model profile (basic/analytics/...); routing metadata only, never a privilege.
     model_profile_key: str = "basic"
+    # Tool switches (off by default). A switch is a wish: tools are only offered to Selara Personal.
+    tools_web_enabled: bool = False
+    tools_artifacts_enabled: bool = False
 
 
 class AddMemoryStatus(StrEnum):
@@ -69,6 +75,7 @@ class ForgottenData:
     messages: int
     summaries: int
     profile: bool
+    artifacts: int = 0
 
 
 def _to_stored(row: PersonalAiProfileModel) -> StoredProfile:
@@ -88,6 +95,8 @@ def _to_stored(row: PersonalAiProfileModel) -> StoredProfile:
         auto_memory_enabled=row.auto_memory_enabled,
         memory_extract_cursor=row.memory_extract_cursor,
         model_profile_key=row.model_profile_key or "basic",
+        tools_web_enabled=bool(row.tools_web_enabled),
+        tools_artifacts_enabled=bool(row.tools_artifacts_enabled),
     )
 
 
@@ -162,11 +171,23 @@ class PersonalAiRepository:
     # --- dialogue history -------------------------------------------------
 
     async def add_message(
-        self, *, user_id: int, thread: str, role: str, content: str, telegram_message_id: int | None = None
+        self,
+        *,
+        user_id: int,
+        thread: str,
+        role: str,
+        content: str,
+        telegram_message_id: int | None = None,
+        web_tainted: bool = False,
     ) -> PersonalAiMessageModel:
         await self._ensure_user(user_id)
         row = PersonalAiMessageModel(
-            user_id=user_id, thread=thread, role=role, content=content, telegram_message_id=telegram_message_id
+            user_id=user_id,
+            thread=thread,
+            role=role,
+            content=content,
+            telegram_message_id=telegram_message_id,
+            web_tainted=web_tainted,
         )
         self._session.add(row)
         await self._session.flush()
@@ -310,6 +331,12 @@ class PersonalAiRepository:
                 delete(model).where(model.user_id == user_id).execution_options(synchronize_session=False)
             )
             counts[key] = int(result.rowcount or 0)
+        # Pictures the assistant made for this person (a private chat has the user's id as chat id).
+        artifacts = await self._session.execute(
+            delete(LlmArtifactModel)
+            .where(LlmArtifactModel.chat_id == user_id, LlmArtifactModel.creator_id == user_id)
+            .execution_options(synchronize_session=False)
+        )
         profile = await self._session.execute(
             delete(PersonalAiProfileModel)
             .where(PersonalAiProfileModel.user_id == user_id)
@@ -322,6 +349,7 @@ class PersonalAiRepository:
             messages=counts["messages"],
             summaries=counts["summaries"],
             profile=bool(profile.rowcount),
+            artifacts=int(artifacts.rowcount or 0),
         )
 
     # --- memories ------------------------------------------------------------

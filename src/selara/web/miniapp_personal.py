@@ -51,7 +51,10 @@ UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
 OfferChecker = Callable[[Settings, PersonalConfig], bool]
 
 _MAX_BODY_BYTES = 4096
-_SETTINGS_FIELDS = frozenset({"memory_enabled", "auto_memory_enabled"})
+_SETTINGS_FIELDS = frozenset(
+    {"memory_enabled", "auto_memory_enabled", "tools_web_enabled", "tools_artifacts_enabled"}
+)
+_TOOL_FIELDS = frozenset({"tools_web_enabled", "tools_artifacts_enabled"})
 
 
 class _ApiError(Exception):
@@ -159,6 +162,10 @@ def build_miniapp_personal_router(
             "auto_memory_enabled": stored.auto_memory_enabled if stored else False,
             # Extraction only runs for a paid (or owner) user and only while the admin switch is on.
             "auto_memory_available": bool(config.memory_auto_extract and tier in PAID_TIERS),
+            # Tools are off by default and a paid (or owner) feature; the switches stay stored without a plan.
+            "tools_web_enabled": stored.tools_web_enabled if stored else False,
+            "tools_artifacts_enabled": stored.tools_artifacts_enabled if stored else False,
+            "tools_available": bool(tier in PAID_TIERS),
             "display_name": stored.profile.display_name if stored else None,
             "mode": stored.profile.mode if stored else "assistant",
         }
@@ -327,7 +334,10 @@ def build_miniapp_personal_router(
         async with scope(request) as (session, user):
             payload = await _read_json_object(request)
             if not payload or set(payload) - _SETTINGS_FIELDS:
-                raise _ApiError(422, "Можно менять только memory_enabled и auto_memory_enabled.")
+                raise _ApiError(
+                    422,
+                    "Можно менять только memory_enabled, auto_memory_enabled, tools_web_enabled и tools_artifacts_enabled.",
+                )
             if any(not isinstance(value, bool) for value in payload.values()):
                 raise _ApiError(422, "Значения должны быть true или false.")
             user_id = user.telegram_user_id
@@ -335,11 +345,15 @@ def build_miniapp_personal_router(
             current = await repo.get_or_create_profile(user_id)
             if payload.get("auto_memory_enabled") is True and not payload.get("memory_enabled", current.memory_enabled):
                 raise _ApiError(422, "Автоматическое запоминание работает только при включённой памяти.")
+            decision = await _tier(user)
+            if any(payload.get(field) is True for field in _TOOL_FIELDS) and (
+                decision is None or decision.access_tier not in PAID_TIERS
+            ):
+                raise _ApiError(403, "Инструменты доступны с подпиской Selara Personal.")
             updated = await repo.update_profile(user_id, expected_revision=current.revision, **payload)
             if updated is None:
                 raise _ApiError(409, "Настройки уже изменились. Обновите страницу.")
             config = await config_provider.get()
-            decision = await _tier(user)
             profile = _profile_payload(updated, config, decision.access_tier if decision else None)
         return JSONResponse(content={"ok": True, "profile": profile}, headers={"Cache-Control": "no-store"})
 

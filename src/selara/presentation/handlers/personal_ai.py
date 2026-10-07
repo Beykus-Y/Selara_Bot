@@ -160,6 +160,8 @@ class _ModelDeps:
     session_factory: async_sessionmaker[AsyncSession]
     personal_config: PersonalConfigProvider
     llm_client: Any = None
+    # The server has a web search client wired in (the web tool switch is pointless without it).
+    web_available: bool = False
 
     @property
     def catalog(self):
@@ -170,10 +172,10 @@ class _ModelDeps:
         return getattr(self.llm_client, "default_model", None) or self.settings.llm_model
 
 
-def _model_deps(settings, session_factory, personal_config, llm_client) -> _ModelDeps | None:
+def _model_deps(settings, session_factory, personal_config, llm_client, web_search_client=None) -> _ModelDeps | None:
     if settings is None or session_factory is None or personal_config is None:
         return None
-    return _ModelDeps(settings, session_factory, personal_config, llm_client)
+    return _ModelDeps(settings, session_factory, personal_config, llm_client, web_available=web_search_client is not None)
 
 
 def _access_service(session_factory, personal_config: PersonalConfigProvider) -> FeatureAccessService:
@@ -283,6 +285,14 @@ async def _model_lines(user_id: int, stored: StoredProfile, deps: _ModelDeps | N
     return lines, f"Модель: {choice.display_name}"
 
 
+def _tools_summary(stored: StoredProfile) -> str:
+    parts = [
+        f"веб-поиск {'вкл' if stored.tools_web_enabled else 'выкл'}",
+        f"артефакты {'вкл' if stored.tools_artifacts_enabled else 'выкл'}",
+    ]
+    return ", ".join(parts)
+
+
 def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -> str:
     p = stored.profile
     character = escape(p.character_custom) if p.character_preset == CUSTOM_PRESET_KEY and p.character_custom else escape(preset_title(p.character_preset))
@@ -295,6 +305,7 @@ def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -
         f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
         f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
         f"Память: {'вкл' if stored.memory_enabled else 'выкл'}, авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+        f"Инструменты (только Selara Personal): {_tools_summary(stored)}",
         *(model_lines or []),
         "",
         "Просто напишите мне сообщение, и я отвечу. /ai_reset — начать диалог заново, /memory — что я о вас помню, "
@@ -306,31 +317,160 @@ def _profile_text(stored: StoredProfile, model_lines: list[str] | None = None) -
 
 
 def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> InlineKeyboardMarkup:
+    rev = stored.revision
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🎭 Персонаж", callback_data=_cb("cat", "character", rev))
+    builder.button(text="⚙️ Поведение и настройки", callback_data=_cb("cat", "behavior", rev))
+    builder.button(text="🧠 Память", callback_data=_cb("cat", "memory", rev))
+    builder.button(text=f"🤖 {model_label}", callback_data=_cb("models", rev))
+    builder.button(text="Закрыть", callback_data=_cb("close"))
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+_CATEGORIES = ("character", "behavior", "memory", "tools")
+_CATEGORY_TITLES = {
+    "character": "🎭 Персонаж",
+    "behavior": "⚙️ Поведение и настройки",
+    "memory": "🧠 Память",
+    "tools": "🛠 Инструменты",
+}
+# Callback value -> profile column for the switches a category screen can flip (``sc`` actions).
+_TOOL_SWITCHES = {"tweb": "tools_web_enabled", "tart": "tools_artifacts_enabled"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolsView:
+    """What the tools screen needs to know about the person and the server."""
+
+    has_personal: bool = False
+    web_available: bool = False
+
+
+def _switch_text(label: str, on: bool, locked: bool) -> str:
+    return f"{'🔒 ' if locked else ''}{label}: {'вкл' if on else 'выкл'}"
+
+
+async def _has_personal(user_id: int, deps: _ModelDeps | None) -> bool:
+    """True while the person holds an active Selara Personal entitlement (tools are a paid feature)."""
+    if deps is None:
+        return False
+    if deps.settings.admin_user_id is not None and user_id == deps.settings.admin_user_id:
+        return True  # the owner's internal access, like the Mini App
+    resolver = SqlAlchemyUserEntitlementResolver(deps.session_factory, deps.personal_config)
+    try:
+        entitlement = await resolver.resolve(user_id=user_id, feature=AiFeature.PERSONAL_CHAT, trigger="tools_menu")
+    except Exception:
+        return False
+    if entitlement.access_tier != AccessTier.PAID:
+        return False
+    return entitlement.valid_until is None or entitlement.valid_until > datetime.now(timezone.utc)
+
+
+async def _tools_view(user_id: int, deps: _ModelDeps | None) -> _ToolsView:
+    return _ToolsView(has_personal=await _has_personal(user_id, deps), web_available=bool(deps and deps.web_available))
+
+
+def _category_screen(
+    category: str, stored: StoredProfile, tools: _ToolsView | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     p, rev = stored.profile, stored.revision
     builder = InlineKeyboardBuilder()
-    builder.button(text="Имя", callback_data=_cb("in", "name", rev))
-    builder.button(text="Характер", callback_data=_cb("presets", rev))
-    builder.button(text="Обращение", callback_data=_cb("in", "address", rev))
-    builder.button(text=f"Ты/вы: {'вы' if p.formality == 'vy' else 'ты'}", callback_data=_cb("set", "formality", "ty" if p.formality == "vy" else "vy", rev))
-    next_length = {"short": "medium", "medium": "long", "long": "short"}[p.reply_length]
-    builder.button(text=f"Длина: {_LENGTH_TITLES[p.reply_length]}", callback_data=_cb("set", "length", next_length, rev))
-    builder.button(text=f"Эмодзи: {'вкл' if p.emoji_enabled else 'выкл'}", callback_data=_cb("set", "emoji", 0 if p.emoji_enabled else 1, rev))
+    if category == "character":
+        text = "\n".join(
+            [
+                "<b>Персонаж</b>",
+                f"Имя: <b>{escape(p.display_name)}</b>",
+                "Характер: "
+                + (
+                    escape(p.character_custom)
+                    if p.character_preset == CUSTOM_PRESET_KEY and p.character_custom
+                    else escape(preset_title(p.character_preset))
+                ),
+                f"Обращение: {escape(p.address_form) if p.address_form else 'по умолчанию'}, на «{'вы' if p.formality == 'vy' else 'ты'}»",
+            ]
+        )
+        builder.button(text="Имя", callback_data=_cb("in", "name", rev))
+        builder.button(text="Характер", callback_data=_cb("presets", rev))
+        builder.button(text="Обращение", callback_data=_cb("in", "address", rev))
+        builder.button(
+            text=f"Ты/вы: {'вы' if p.formality == 'vy' else 'ты'}",
+            callback_data=_cb("sc", category, "formality", "ty" if p.formality == "vy" else "vy", rev),
+        )
+        sizes: tuple[int, ...] = (2, 2)
+    elif category == "behavior":
+        text = "\n".join(
+            [
+                "<b>Поведение и настройки</b>",
+                f"Ответы: {_LENGTH_TITLES.get(p.reply_length, p.reply_length)}, эмодзи {'да' if p.emoji_enabled else 'нет'}",
+                f"Режим: {'ролевая игра' if p.mode == 'roleplay' else 'помощник'}",
+                f"Инструменты: {_tools_summary(stored)}",
+            ]
+        )
+        next_length = {"short": "medium", "medium": "long", "long": "short"}[p.reply_length]
+        builder.button(
+            text=f"Длина: {_LENGTH_TITLES[p.reply_length]}",
+            callback_data=_cb("sc", category, "length", next_length, rev),
+        )
+        builder.button(
+            text=f"Эмодзи: {'вкл' if p.emoji_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "emoji", 0 if p.emoji_enabled else 1, rev),
+        )
+        builder.button(
+            text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
+            callback_data=_cb("sc", category, "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
+        )
+        builder.button(text="🛠 Инструменты", callback_data=_cb("cat", "tools", rev))
+        sizes = (2, 1, 1)
+    elif category == "memory":
+        text = "\n".join(
+            [
+                "<b>Память</b>",
+                f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
+                f"Авто-запоминание (только Selara Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+                "/memory — что я о вас помню, /forget_all — удалить все личные данные.",
+            ]
+        )
+        builder.button(
+            text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "memory", 0 if stored.memory_enabled else 1, rev),
+        )
+        builder.button(
+            text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
+            callback_data=_cb("sc", category, "automemory", 0 if stored.auto_memory_enabled else 1, rev),
+        )
+        sizes = (1,)
+    else:
+        view = tools or _ToolsView()
+        locked = not view.has_personal
+        lines = [
+            "<b>Инструменты</b>",
+            "Всё выключено, пока вы сами не включите. Инструменты делают ответ дольше и дороже: запрос тратит больше AIL, "
+            "но не больше заранее зарезервированного.",
+            "• <b>Веб-поиск</b> — ищу в интернете и читаю страницы. После результатов поиска других инструментов в этом запросе нет.",
+            "• <b>Артефакты</b> — таблицы, схемы и инфографика картинкой.",
+        ]
+        if locked:
+            lines.append("🔒 Нужна подписка Selara Personal: пока её нет, инструменты не работают (настройки сохраняются).")
+        if not view.web_available:
+            lines.append("Веб-поиск на этом сервере не подключён.")
+        if p.mode == "roleplay":
+            lines.append("В ролевой игре инструменты недоступны.")
+        text = "\n".join(lines)
+        builder.button(
+            text=_switch_text("Веб-поиск", stored.tools_web_enabled, locked),
+            callback_data=_cb("sc", category, "tweb", 0 if stored.tools_web_enabled else 1, rev),
+        )
+        builder.button(
+            text=_switch_text("Артефакты", stored.tools_artifacts_enabled, locked),
+            callback_data=_cb("sc", category, "tart", 0 if stored.tools_artifacts_enabled else 1, rev),
+        )
+        sizes = (1,)
     builder.button(
-        text="Режим: " + ("ролевая игра" if p.mode == "roleplay" else "помощник"),
-        callback_data=_cb("set", "mode", "assistant" if p.mode == "roleplay" else "roleplay", rev),
+        text="Назад", callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
     )
-    builder.button(text=model_label, callback_data=_cb("models", rev))
-    builder.button(
-        text=f"Память: {'вкл' if stored.memory_enabled else 'выкл'}",
-        callback_data=_cb("set", "memory", 0 if stored.memory_enabled else 1, rev),
-    )
-    builder.button(
-        text=f"Авто-память (Personal): {'вкл' if stored.auto_memory_enabled else 'выкл'}",
-        callback_data=_cb("set", "automemory", 0 if stored.auto_memory_enabled else 1, rev),
-    )
-    builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 2, 1, 1, 2, 1)
-    return builder.as_markup()
+    builder.adjust(*sizes, 1)
+    return text, builder.as_markup()
 
 
 async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, InlineKeyboardMarkup]:
@@ -489,6 +629,12 @@ async def ai_settings_callback(
         return
 
     changes: dict[str, Any] | None = None
+    if action == "cat" and args and args[0] in _CATEGORIES:
+        await query.answer()
+        await repo.commit()
+        text, markup = _category_screen(args[0], stored, await _tools_view(user_id, deps))
+        await _edit(query, text, markup)
+        return
     if action == "models":
         if deps is None:
             await query.answer("Выбор модели сейчас недоступен.")
@@ -522,19 +668,26 @@ async def ai_settings_callback(
     if action == "preset" and len(args) == 2 and args[0] in CHARACTER_PRESETS:
         changes = {"character_preset": args[0]}
     elif action == "set" and len(args) == 3:
-        field, value = args[0], args[1]
-        if field == "formality" and value in ("ty", "vy"):
-            changes = {"formality": value}
-        elif field == "length" and value in ("short", "medium", "long"):
-            changes = {"reply_length": value}
-        elif field == "emoji" and value in ("0", "1"):
-            changes = {"emoji_enabled": value == "1"}
-        elif field == "mode" and value in ("assistant", "roleplay"):
-            changes = {"mode": value}
-        elif field == "memory" and value in ("0", "1"):
-            changes = {"memory_enabled": value == "1"}
-        elif field == "automemory" and value in ("0", "1"):
-            changes = {"auto_memory_enabled": value == "1"}
+        changes = _parse_switch(args[0], args[1])
+    elif action == "sc" and len(args) == 4 and args[0] in _CATEGORIES:
+        category = args[0]
+        changes = _parse_switch(args[1], args[2])
+        if changes is not None and any(column in changes for column in _TOOL_SWITCHES.values()):
+            # Switching a tool on needs Selara Personal; switching it off is always allowed.
+            if any(changes.values()) and not await _has_personal(user_id, deps):
+                await query.answer("Инструменты доступны с Selara Personal.", show_alert=True)
+                await repo.commit()
+                text, markup = _category_screen(category, stored, await _tools_view(user_id, deps))
+                await _edit(query, text, markup)
+                return
+        if changes is not None:
+            updated = await repo.update_profile(user_id, expected_revision=revision, **changes)
+            await query.answer("Сохранено" if updated is not None else "Настройки уже изменились.")
+            fresh = updated or await repo.get_or_create_profile(user_id)
+            await repo.commit()
+            text, markup = _category_screen(category, fresh, await _tools_view(user_id, deps))
+            await _edit(query, text, markup)
+            return
     if changes is None:
         await query.answer()
         return
@@ -542,6 +695,25 @@ async def ai_settings_callback(
     updated = await repo.update_profile(user_id, expected_revision=revision, **changes)
     await query.answer("Сохранено" if updated is not None else "Настройки уже изменились.")
     await _show_home(query, repo, deps=deps)
+
+
+def _parse_switch(field: str, value: str) -> dict[str, Any] | None:
+    """Validate one switch from callback data (user-controlled) into profile column changes."""
+    if field == "formality" and value in ("ty", "vy"):
+        return {"formality": value}
+    if field == "length" and value in ("short", "medium", "long"):
+        return {"reply_length": value}
+    if field == "emoji" and value in ("0", "1"):
+        return {"emoji_enabled": value == "1"}
+    if field == "mode" and value in ("assistant", "roleplay"):
+        return {"mode": value}
+    if field == "memory" and value in ("0", "1"):
+        return {"memory_enabled": value == "1"}
+    if field == "automemory" and value in ("0", "1"):
+        return {"auto_memory_enabled": value == "1"}
+    if field in _TOOL_SWITCHES and value in ("0", "1"):
+        return {_TOOL_SWITCHES[field]: value == "1"}
+    return None
 
 
 async def _selectable(profile_key: str, deps: _ModelDeps) -> bool:
