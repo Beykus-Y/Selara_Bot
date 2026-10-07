@@ -291,3 +291,30 @@ def resolve_text_command(
             return CommandIntent(name=command_key, args={"raw_args": tail})
 
     return None
+
+
+# Target commands whose text form accepts only @username/ID in the validator.
+# Their tail may also be a chat persona label, which the caller must confirm.
+_PERSONA_TARGET_COMMAND_KEYS = frozenset({"lastseen", "pair", "marry", "adopt", "adoptdaughter", "family_pet", "family"})
+
+
+def resolve_persona_target_text_candidate(text: str) -> CommandIntent | None:
+    """Return an unconfirmed intent for a text-form target command whose tail is a bare name.
+
+    Pure: no lookup happens here. The caller must confirm the tail resolves to a
+    chat persona before dispatching, so ordinary speech such as "пара слов" never acts.
+    """
+    normalized = normalize_text_command(text)
+    if not normalized or normalized.startswith("/"):
+        return None
+
+    for trigger in sorted(PREFIX_TRIGGER_TO_COMMAND_KEY, key=len, reverse=True):
+        command_key = PREFIX_TRIGGER_TO_COMMAND_KEY[trigger]
+        if command_key not in _PERSONA_TARGET_COMMAND_KEYS or not normalized.startswith(f"{trigger} "):
+            continue
+        tail = normalized[len(trigger) :].strip()
+        if not tail or tail.startswith("@") or tail.lstrip("-").isdigit():
+            return None
+        return CommandIntent(name=command_key, args={"raw_args": tail})
+
+    return None

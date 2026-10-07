@@ -73,7 +73,11 @@ from selara.presentation.commands.catalog import (
     resolve_builtin_command_key,
 )
 from selara.presentation.commands.normalizer import normalize_text_command
-from selara.presentation.commands.resolver import TextCommandResolutionError, resolve_text_command
+from selara.presentation.commands.resolver import (
+    TextCommandResolutionError,
+    resolve_persona_target_text_candidate,
+    resolve_text_command,
+)
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 from selara.presentation.middlewares.error_handler import notify_operational_error
@@ -6114,6 +6118,21 @@ async def text_commands_handler(
     except TextCommandResolutionError as exc:
         await message.answer(str(exc))
         return
+
+    if intent is None:
+        # Bare persona names ("пара Коломбина") fail the tail validator; accept them only
+        # when they resolve to a chat persona, the same lookup the slash commands use.
+        persona_candidate = resolve_persona_target_text_candidate(text)
+        if persona_candidate is not None and (
+            await resolve_chat_target_user(
+                message,
+                activity_repo,
+                explicit_target=persona_candidate.args["raw_args"],
+                prefer_reply=False,
+            )
+            is not None
+        ):
+            intent = persona_candidate
 
     if intent is None:
         if (

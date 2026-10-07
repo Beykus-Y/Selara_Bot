@@ -98,6 +98,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• <code>мой брак</code> — отдельная карточка активного брака\n"
         "• <code>браки</code> — все активные браки беседы\n"
         "• <code>/pair @user</code> или <code>предложить встречаться @user</code> — предложение пары\n"
+        "• В тексте цель можно указать именем персоны из беседы: <code>пара Коломбина</code>, <code>брак Коломбина</code>\n"
         f"• {_code_join(_base_words('relationships_end')[:1])} — расстаться\n"
         "• <code>/marry @user</code> или <code>предложить брак @user</code> — предложение брака\n"
         f"• {_code_join(_base_words('relationships_end')[1:2])} — развод\n"
