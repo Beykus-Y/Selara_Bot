@@ -35,6 +35,14 @@ _RESTORE_DRILL_LOCK = asyncio.Lock()
 # SQLite database files always start with this 16-byte header string.
 _SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
 
+# A verification child that ignores SIGKILL would defeat the timeout, so after
+# killing it wait only this long for the event loop to reap it.
+_PROCESS_REAP_TIMEOUT_SECONDS = 10.0
+
+# Telegram messages are bounded; keep the failure reason useful but short so a
+# verbose pg_restore error cannot turn the notification into a wall of text.
+_BACKUP_FAILURE_REASON_MAX_CHARS = 500
+
 
 class BackupJobError(RuntimeError):
     pass
@@ -81,10 +89,10 @@ async def run_daily_backup_scheduler(*, bot: Bot, settings: Settings) -> None:
             await send_daily_backup(bot=bot, settings=settings)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Daily Selara backup job failed")
             try:
-                await _notify_backup_failure(bot=bot, settings=settings)
+                await _notify_backup_failure(bot=bot, settings=settings, reason=str(exc))
             except Exception:
                 logger.exception("Could not notify admin about backup failure")
 
@@ -232,6 +240,8 @@ async def _verify_dump_restorable(
     integrity check.
     """
     if dump_path.suffix.lower() == ".sqlite3":
+        # The gacha service names its SQLite snapshot `*.sqlite3`; this suffix
+        # is what routes the dump to the integrity check instead of pg_restore.
         await asyncio.to_thread(_verify_sqlite_dump_restorable, dump_path, label)
         return
     await _verify_pg_dump_restorable(
@@ -249,6 +259,8 @@ async def _verify_pg_dump_restorable(
     settings: Settings,
     temp_dir: Path,
 ) -> None:
+    # temp_dir stays in the signature because the shared verification call
+    # contract passes it; the offline check deliberately writes nothing into it.
     restore_target = _resolve_backup_restore_target(settings)
     if restore_target is not None:
         database_url, password = restore_target
@@ -272,12 +284,14 @@ async def _verify_pg_dump_restorable(
 
     # Offline check without a database server: emitting the SQL script forces
     # pg_restore to parse and decompress every archive data block, unlike
-    # `--list`, which only reads the table of contents.
-    sql_path = temp_dir / f"{dump_path.name}.restore-check.sql"
+    # `--list`, which only reads the table of contents. The script itself is
+    # discarded into the null device instead of a staging file: /tmp is a
+    # small tmpfs shared with gacha rendering, and a dump-sized SQL file next
+    # to the archive can exhaust it.
     await _run_pg_restore_verification(
         label=label,
         settings=settings,
-        args=[f"--file={sql_path}", str(dump_path)],
+        args=[f"--file={os.devnull}", str(dump_path)],
         password=None,
     )
 
@@ -395,7 +409,20 @@ async def _run_pg_restore_verification(
             "is not available in the main bot runtime."
         ) from exc
 
-    _stdout, stderr = await process.communicate()
+    # A stalled pg_restore (unresponsive scratch database, lock waiter, DNS
+    # blackhole) must not pin the nightly scheduler task or the admin HTTP
+    # request forever, so bound the child and kill it on expiry.
+    timeout_seconds = settings.backup_timeout_seconds
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            _stdout, stderr = await process.communicate()
+    except TimeoutError as exc:
+        await _kill_verification_process(process)
+        raise BackupJobError(
+            f"Backup restore verification timed out after {timeout_seconds:g}s for {label}: "
+            f"'{settings.backup_pg_restore_path}' did not finish and was terminated."
+        ) from exc
+
     if process.returncode == 0:
         return
 
@@ -403,6 +430,24 @@ async def _run_pg_restore_verification(
     if detail:
         raise BackupJobError(f"Backup restore verification failed for {label}: {detail}")
     raise BackupJobError(f"Backup restore verification failed for {label}.")
+
+
+async def _kill_verification_process(process: asyncio.subprocess.Process) -> None:
+    """Terminate and reap a verification child whose timeout expired.
+
+    The pending ``communicate()`` is already cancelled by ``asyncio.timeout``,
+    so the process is killed and then reaped explicitly; otherwise a stalled
+    pg_restore would survive as an orphan holding the archive open.
+    """
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:  # pragma: no cover - child already exited
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+    except TimeoutError:  # pragma: no cover - a killed child must exit
+        logger.warning("Backup restore verification process did not exit after being killed")
 
 
 def _split_backup_file(
@@ -494,11 +539,23 @@ def _last_line(raw: bytes) -> str:
     return decoded.splitlines()[-1]
 
 
-async def _notify_backup_failure(*, bot: Bot, settings: Settings) -> None:
+def _bounded_failure_reason(reason: str) -> str:
+    collapsed = " ".join(reason.split())
+    if len(collapsed) <= _BACKUP_FAILURE_REASON_MAX_CHARS:
+        return collapsed
+    return collapsed[: _BACKUP_FAILURE_REASON_MAX_CHARS - 1] + "…"
+
+
+async def _notify_backup_failure(*, bot: Bot, settings: Settings, reason: str = "") -> None:
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         return
-    await bot.send_message(
-        chat_id=admin_user_id,
-        text="Суточный backup Selara завершился ошибкой. Подробности есть в логах.",
-    )
+    # Surface the concrete failure so a missing pg_restore, a misconfigured
+    # BACKUP_RESTORE_DATABASE_URL and real corruption are distinguishable
+    # without log access. The dump is still withheld on failure.
+    detail = _bounded_failure_reason(reason)
+    if detail:
+        text = f"Суточный backup Selara завершился ошибкой.\nПричина: {detail}"
+    else:
+        text = "Суточный backup Selara завершился ошибкой. Подробности есть в логах."
+    await bot.send_message(chat_id=admin_user_id, text=text)

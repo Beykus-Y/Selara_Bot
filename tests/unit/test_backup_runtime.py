@@ -262,6 +262,7 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
         "database_url": "postgresql://bot_user:bot_pass@db.internal:5432/selara",
         "backup_pg_restore_path": "pg_restore",
         "backup_restore_database_url": None,
+        "backup_timeout_seconds": 30.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -305,13 +306,16 @@ async def test_verify_dump_restorable_emits_full_sql_script_offline(
     )
 
     # Emitting the SQL script makes pg_restore decompress every archive data
-    # block, unlike `--list`, which only reads the table of contents.
+    # block, unlike `--list`, which only reads the table of contents. The
+    # script goes to the null device so no dump-sized file lands in /tmp.
     assert captured["command"] == (
         "pg_restore",
-        f"--file={tmp_path / 'bot_pg_dump.dump.restore-check.sql'}",
+        f"--file={os.devnull}",
         str(dump_path),
     )
     assert captured["env"].get("PGPASSWORD") == os.environ.get("PGPASSWORD")
+    # The offline check must not leave any scratch artefact next to the dump.
+    assert [item.name for item in tmp_path.iterdir()] == [dump_path.name]
 
 
 @pytest.mark.asyncio
@@ -504,6 +508,73 @@ async def test_verify_dump_restorable_fails_job_when_pg_restore_is_missing(
             settings=_make_settings(),
             temp_dir=tmp_path,
         )
+
+
+@pytest.mark.asyncio
+async def test_verify_dump_restorable_times_out_and_kills_pg_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "bot_pg_dump.dump"
+    dump_path.write_bytes(b"PGDMP-fake")
+    state = {"killed": 0, "reaped": 0}
+
+    class HangingRestoreProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            # Simulate a pg_restore that connects and then never answers.
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def kill(self) -> None:
+            state["killed"] += 1
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            state["reaped"] += 1
+            return self.returncode if self.returncode is not None else -9
+
+    async def fake_exec(*command: str, **kwargs: object) -> HangingRestoreProcess:
+        _ = command, kwargs
+        return HangingRestoreProcess()
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="timed out after 0.05s for main bot database dump",
+    ):
+        await backup._verify_dump_restorable(
+            dump_path=dump_path,
+            label="main bot database dump",
+            settings=_make_settings(backup_timeout_seconds=0.05),
+            temp_dir=tmp_path,
+        )
+
+    assert state == {"killed": 1, "reaped": 1}
+
+
+@pytest.mark.asyncio
+async def test_notify_backup_failure_includes_bounded_reason() -> None:
+    messages: list[str] = []
+
+    async def fake_send_message(*, chat_id: int, text: str) -> None:
+        messages.append(text)
+
+    bot_client = SimpleNamespace(send_message=fake_send_message)
+    await backup._notify_backup_failure(
+        bot=bot_client,
+        settings=SimpleNamespace(admin_user_id=42),
+        reason="pg_restore: error: " + "very-long-detail " * 100,
+    )
+
+    assert len(messages) == 1
+    assert "Суточный backup Selara завершился ошибкой." in messages[0]
+    assert "pg_restore: error:" in messages[0]
+    assert len(messages[0]) < backup._BACKUP_FAILURE_REASON_MAX_CHARS + 100
+    assert "very-long-detail " * 100 not in messages[0]
 
 
 def test_resolve_backup_restore_target_validates_configuration() -> None:
