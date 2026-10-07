@@ -27,7 +27,7 @@ async function request(method, path, body, { form = false } = {}) {
   let data = null;
   try {
     data = await response.json();
-  } catch (_error) {
+  } catch {
     data = null;
   }
   if (response.status === 401) {
