@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram import Dispatcher
 from aiogram.exceptions import TelegramBadRequest
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, ProgrammingError, StatementError
 
 from selara.application.selara_ai_product import (
     SELARA_AI_CURRENCY,
@@ -26,6 +28,7 @@ from selara.infrastructure.db.telegram_stars import (
     PaymentResult,
     PurchaseIntent,
     PreCheckoutResult,
+    SqlAlchemyTelegramStarsRepository,
 )
 from selara.presentation.handlers import premium
 from selara.presentation.handlers import private_panel
@@ -269,6 +272,7 @@ async def test_payment_persistence_retry_alerts_owner_after_three_failures(monke
             side_effect=[RuntimeError("temporary failure")] * 3
             + [PaymentResult("applied", chat_id=-100, valid_until=now + timedelta(days=30))]
         ),
+        record_unprocessable_payment=AsyncMock(return_value=1),
         get_chat_title=AsyncMock(return_value="Test group"),
     )
     monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
@@ -295,9 +299,290 @@ async def test_payment_persistence_retry_alerts_owner_after_three_failures(monke
     )
 
     assert repository.process_successful_payment.await_count == 4
+    # A transient failure that recovers on retry must never dead-letter the payment.
+    repository.record_unprocessable_payment.assert_not_awaited()
     bot.send_message.assert_awaited_once()
     assert "Charge: charge-retry" in bot.send_message.await_args.kwargs["text"]
     message.answer.assert_awaited_once()
+    assert "Test group" in message.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_poison_payment_is_dead_lettered_and_polling_can_resume(monkeypatch):
+    now = datetime.now(timezone.utc)
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(side_effect=ValueError("poison payload")),
+        record_unprocessable_payment=AsyncMock(return_value=77),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+    message = SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-poison",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    await premium.selara_ai_successful_payment(
+        message,
+        session_factory=object(),
+        settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+        bot=bot,
+    )
+
+    assert repository.process_successful_payment.await_count == premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT
+    repository.record_unprocessable_payment.assert_awaited_once()
+    assert (
+        repository.record_unprocessable_payment.await_args.kwargs["telegram_payment_charge_id"] == "charge-poison"
+    )
+    alert_texts = [call.kwargs["text"] for call in bot.send_message.await_args_list]
+    assert any("processing_failed" in text for text in alert_texts)
+    assert any("/stars_refund 77" in text for text in alert_texts)
+    message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_payment_stays_unacknowledged_while_even_the_dead_letter_write_fails(monkeypatch, caplog):
+    now = datetime.now(timezone.utc)
+    attempts = {"count": 0}
+
+    async def permanent_but_unrecordable(*_args, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT + 2:
+            raise asyncio.CancelledError()
+        raise ValueError("poison payload")
+
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(side_effect=permanent_but_unrecordable),
+        record_unprocessable_payment=AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+    message = SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-outage",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        with caplog.at_level(logging.ERROR, logger="selara.presentation.handlers.premium"):
+            await premium.selara_ai_successful_payment(
+                message,
+                session_factory=object(),
+                settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+                bot=bot,
+            )
+
+    assert repository.record_unprocessable_payment.await_count >= 2
+    assert bot.send_message.await_count == 1
+    assert "приостановлены" in bot.send_message.await_args.kwargs["text"]
+    message.answer.assert_not_awaited()
+    # The operator must be able to tell why the terminal path cannot fire.
+    dead_letter_logs = [
+        record.getMessage() for record in caplog.records if "dead-letter write failed" in record.getMessage()
+    ]
+    assert any("charge-outage" in text and "db down" in text for text in dead_letter_logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transient_error_type",
+    [OperationalError, ProgrammingError],
+    ids=["operational_error", "programming_error"],
+)
+async def test_transient_payment_failure_never_enters_the_dead_letter_path(monkeypatch, transient_error_type):
+    """A contended or unavailable database, or a deploy/schema window, must keep the
+    update retrying instead of dead-lettering an already-charged, valid payment as
+    rejected."""
+    now = datetime.now(timezone.utc)
+    attempts = {"count": 0}
+
+    async def lock_timeout_then_cancel(*_args, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT + 2:
+            raise asyncio.CancelledError()
+        raise transient_error_type("SELECT ... FOR UPDATE", {}, RuntimeError("transient database failure"))
+
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(side_effect=lock_timeout_then_cancel),
+        record_unprocessable_payment=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+    message = SimpleNamespace(
+        successful_payment=SimpleNamespace(
+            invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+            telegram_payment_charge_id="charge-contention",
+            provider_payment_charge_id="",
+            total_amount=137,
+            currency="XTR",
+        ),
+        from_user=SimpleNamespace(id=123),
+        date=now,
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        await premium.selara_ai_successful_payment(
+            message,
+            session_factory=object(),
+            settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+            bot=bot,
+        )
+
+    assert repository.process_successful_payment.await_count > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT
+    repository.record_unprocessable_payment.assert_not_awaited()
+    message.answer.assert_not_awaited()
+
+
+def test_permanent_payment_failure_classification():
+    assert premium._is_permanent_payment_failure(ValueError("charge id is required"))
+    assert premium._is_permanent_payment_failure(TypeError("unexpected payload shape"))
+    assert premium._is_permanent_payment_failure(
+        IntegrityError("INSERT INTO selara_ai_payments ...", {}, Exception("check violation"))
+    )
+    # SQLAlchemy wraps the driver error; unwrap orig/cause chains when classifying.
+    assert premium._is_permanent_payment_failure(
+        StatementError("statement raised ValueError", "stmt", {}, orig=ValueError("poison"))
+    )
+    assert not premium._is_permanent_payment_failure(
+        OperationalError("SELECT ... FOR UPDATE", {}, RuntimeError("lock timeout"))
+    )
+    # A schema/deploy window ("column ... does not exist") is deterministic for the
+    # connection, not for the payment: the deploy finishes and the statement succeeds.
+    assert not premium._is_permanent_payment_failure(
+        ProgrammingError(
+            "INSERT INTO selara_ai_payments ...",
+            {},
+            RuntimeError('column "target_scope" does not exist'),
+        )
+    )
+    # Deadlock, serialization and lock waits surface as the DBAPIError base.
+    assert not premium._is_permanent_payment_failure(DBAPIError("stmt", {}, RuntimeError("40P01 deadlock")))
+    assert not premium._is_permanent_payment_failure(RuntimeError("Telegram Stars purchase transactions require PostgreSQL"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_charge_id", ["", None], ids=["empty", "missing"])
+async def test_dead_letter_refuses_missing_charge_ids_instead_of_collapsing_distinct_payments(missing_charge_id):
+    """Two different poison payments whose charge id is missing must not share the
+    empty audit key: ON CONFLICT would file both onto one dead-letter row and
+    silently drop every payment after the first. The write is refused for each."""
+    repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
+
+    first = await repository.record_unprocessable_payment(
+        buyer_user_id=123,
+        invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        telegram_payment_charge_id=missing_charge_id,
+        provider_payment_charge_id="",
+        amount_stars=137,
+        currency="XTR",
+        payment_at=datetime.now(timezone.utc),
+    )
+    second = await repository.record_unprocessable_payment(
+        buyer_user_id=456,
+        invoice_payload="selara_ai:v1:ffffffff-ffff-4fff-8fff-ffffffffffff",
+        telegram_payment_charge_id=missing_charge_id,
+        provider_payment_charge_id="",
+        amount_stars=999,
+        currency="XTR",
+        payment_at=datetime.now(timezone.utc),
+    )
+
+    assert first is None
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_poison_payments_with_empty_charge_id_stay_unacknowledged(monkeypatch):
+    """Two distinct confirmed payments with an empty charge id must never be
+    acknowledged: the repository refuses the empty-key dead-letter write, so the
+    handler keeps both updates retrying under the owner alert instead of
+    confirming either payment as rejected."""
+    now = datetime.now(timezone.utc)
+    real_repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
+
+    for buyer_user_id, amount_stars in ((123, 137), (456, 999)):
+        attempts = {"count": 0}
+
+        async def poison_then_cancel(*_args, **_kwargs):
+            attempts["count"] += 1
+            if attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT + 2:
+                raise asyncio.CancelledError()
+            raise ValueError("poison payload")
+
+        repository = SimpleNamespace(
+            process_successful_payment=AsyncMock(side_effect=poison_then_cancel),
+            # Real refusal logic, wrapped so the handler call is still observable.
+            record_unprocessable_payment=AsyncMock(side_effect=real_repository.record_unprocessable_payment),
+        )
+        monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+        monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+        message = SimpleNamespace(
+            successful_payment=SimpleNamespace(
+                invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+                telegram_payment_charge_id="",
+                provider_payment_charge_id="",
+                total_amount=amount_stars,
+                currency="XTR",
+            ),
+            from_user=SimpleNamespace(id=buyer_user_id),
+            date=now,
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+
+        with pytest.raises(asyncio.CancelledError):
+            await premium.selara_ai_successful_payment(
+                message,
+                session_factory=object(),
+                settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+                bot=bot,
+            )
+
+        assert attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT
+        assert repository.record_unprocessable_payment.await_count >= 1
+        assert repository.record_unprocessable_payment.await_args.kwargs["telegram_payment_charge_id"] == ""
+        assert repository.record_unprocessable_payment.await_args.kwargs["buyer_user_id"] == buyer_user_id
+        assert repository.record_unprocessable_payment.await_args.kwargs["amount_stars"] == amount_stars
+        # Only the owner alert fires; no reconciliation message, the update keeps
+        # retrying and is never acknowledged as resolved.
+        assert bot.send_message.await_count == 1
+        assert "приостановлены" in bot.send_message.await_args.kwargs["text"]
+        message.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dead_letter_refuses_charge_ids_it_cannot_store_verbatim():
+    repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
+
+    recorded = await repository.record_unprocessable_payment(
+        buyer_user_id=123,
+        invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        telegram_payment_charge_id="c" * 256,
+        provider_payment_charge_id="",
+        amount_stars=137,
+        currency="XTR",
+        payment_at=datetime.now(timezone.utc),
+    )
+
+    assert recorded is None
 
 
 @pytest.mark.asyncio
@@ -397,6 +682,69 @@ async def test_payment_polling_waits_for_durable_handler_before_advancing_update
 
     assert durable_commit_finished.is_set()
     assert next_update_requested.is_set()
+
+
+@pytest.mark.asyncio
+async def test_poison_payment_update_does_not_stall_processing_of_other_updates(monkeypatch):
+    dispatcher = PaymentSafeDispatcher()
+    now = datetime.now(timezone.utc)
+    repository = SimpleNamespace(
+        process_successful_payment=AsyncMock(side_effect=ValueError("poison payload")),
+        record_unprocessable_payment=AsyncMock(return_value=31),
+    )
+    monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+    monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+
+    def poison_payment_update():
+        return SimpleNamespace(
+            pre_checkout_query=None,
+            message=SimpleNamespace(
+                successful_payment=SimpleNamespace(
+                    invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+                    telegram_payment_charge_id="charge-poison-polling",
+                    provider_payment_charge_id="",
+                    total_amount=137,
+                    currency="XTR",
+                ),
+                from_user=SimpleNamespace(id=123),
+                date=now,
+                answer=AsyncMock(),
+            ),
+        )
+
+    plain_update = SimpleNamespace(
+        pre_checkout_query=None,
+        message=SimpleNamespace(successful_payment=None),
+    )
+    processed: list[str] = []
+
+    async def process_update(*, bot, update, **_kwargs):
+        if _requires_durable_processing(update):
+            await premium.selara_ai_successful_payment(
+                update.message,
+                session_factory=object(),
+                settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+                bot=SimpleNamespace(send_message=AsyncMock()),
+            )
+            processed.append("payment")
+        else:
+            processed.append("other")
+
+    async def listen_updates(*_args, **_kwargs):
+        yield poison_payment_update()
+        yield plain_update
+
+    monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
+    monkeypatch.setattr(dispatcher, "_process_update", process_update)
+    bot = SimpleNamespace(
+        id=1,
+        me=AsyncMock(return_value=SimpleNamespace(username="test-bot")),
+    )
+
+    await asyncio.wait_for(dispatcher._polling(bot=bot, handle_as_tasks=False), timeout=5)
+
+    assert processed == ["payment", "other"]
+    repository.record_unprocessable_payment.assert_awaited_once()
 
 
 @pytest.mark.asyncio
