@@ -6614,13 +6614,14 @@ class RuntimeGameStore:
                     # it so the recovery pass cannot replay stale pointers.
                     self._game_state_version += 1
                     await self._publish_after_call(name, result, kwargs)
-                    # Last, so publishing above still finds the games it reports.
-                    self._evict_finished_games()
                 except Exception as exc:
                     if self._is_redis_error(exc):
                         self._degrade_to_in_memory(stage=f"{name}:sync", exc=exc)
                     else:
                         raise
+            # After publishing, so it still finds the games it reports. Runs for
+            # reads too: a read-only workload hydrates finished games as well.
+            self._evict_finished_games()
             return result
 
         return _wrapped

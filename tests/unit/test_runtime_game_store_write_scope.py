@@ -147,3 +147,18 @@ async def test_chat_migration_persists_the_moved_game() -> None:
     assert migrated == 1
     assert repo.saved == [game.game_id]
     assert GameStateCodec().loads(repo.payloads[game.game_id]).chat_id == -200
+
+
+@pytest.mark.asyncio
+async def test_read_only_access_also_evicts_hydrated_finished_games() -> None:
+    store, _repo = _runtime_store()
+    store._finished_game_hot_seconds = 0
+    game = await _started_dice_game(store, chat_id=100)
+    await store.finish(game_id=game.game_id, winner_text="done")
+    assert game.game_id not in store._backend._by_id
+
+    reloaded = await store.get_game(game_id=game.game_id)
+
+    assert reloaded is not None
+    assert reloaded.status == "finished"
+    assert game.game_id not in store._backend._by_id
