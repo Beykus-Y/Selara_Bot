@@ -584,6 +584,59 @@ async def test_verify_dump_restorable_rejects_implicit_target_before_starting_pr
     assert captured == {}
 
 
+@pytest.mark.parametrize("secret_key", ["sslpassword", "SSLPASSWORD"])
+def test_resolve_backup_restore_target_rejects_secret_query_parameters(
+    secret_key: str,
+) -> None:
+    # sslpassword has no PGPASSWORD-style environment variable, so it would
+    # stay inside pg_restore's --dbname argv, visible to every local process.
+    settings = _make_settings(
+        backup_restore_database_url=(
+            "postgresql://restore_user:db_secret@scratch.internal:5432/scratch"
+            f"?sslmode=require&sslkey=%2Fsecure%2Fclient.key&{secret_key}=tls_key_secret"
+        ),
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must not carry secret query parameters",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+@pytest.mark.asyncio
+async def test_verify_dump_restorable_never_passes_sslpassword_to_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "bot_pg_dump.dump"
+    dump_path.write_bytes(b"PGDMP-fake")
+    captured: dict[str, object] = {}
+    _install_fake_pg_restore(monkeypatch, captured)
+    settings = _make_settings(
+        backup_restore_database_url=(
+            "postgresql://restore_user:db_secret@scratch.internal:5432/scratch"
+            "?sslmode=require&sslkey=%2Fsecure%2Fclient.key&sslpassword=tls_key_secret"
+        ),
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must not carry secret query parameters",
+    ):
+        await backup._verify_dump_restorable(
+            dump_path=dump_path,
+            label="main bot database dump",
+            settings=settings,
+            temp_dir=tmp_path,
+        )
+
+    # The drill must fail before any child process exists, so the TLS key
+    # passphrase never reaches pg_restore's argv or the process list.
+    assert captured == {}
+    assert "tls_key_secret" not in json.dumps(captured)
+
+
 def test_resolve_backup_restore_target_ignores_production_guard_for_other_hosts() -> None:
     settings = _make_settings(
         backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/other_database",

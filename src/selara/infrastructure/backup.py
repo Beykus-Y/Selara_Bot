@@ -45,6 +45,14 @@ _PROCESS_REAP_TIMEOUT_SECONDS = 10.0
 # --clean restore onto the production database behind the guard's back.
 _LIBPQ_CONNECTION_TARGET_KEYS = frozenset({"host", "hostaddr", "port", "dbname", "service"})
 
+# libpq connection URI query parameters that carry a secret with no safe side
+# channel: the drill hands pg_restore the rendered connection string as its
+# --dbname argv, where any local process can read it, and libpq offers no
+# environment variable equivalent for these parameters (unlike the account
+# password, which moves into PGPASSWORD). The drill refuses them instead of
+# leaking the secret into the process list.
+_LIBPQ_SECRET_QUERY_KEYS = frozenset({"sslpassword"})
+
 # Telegram messages are bounded; keep the failure reason useful but short so a
 # verbose pg_restore error cannot turn the notification into a wall of text.
 _BACKUP_FAILURE_REASON_MAX_CHARS = 500
@@ -319,6 +327,7 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
         )
 
     _reject_restore_target_connection_overrides(database_url)
+    _reject_restore_target_secret_query_parameters(database_url)
     _require_explicit_restore_target_address(database_url)
     _reject_production_restore_target(settings, database_url)
 
@@ -354,6 +363,26 @@ def _reject_restore_target_connection_overrides(restore_url: URL) -> None:
             "BACKUP_RESTORE_DATABASE_URL must not override connection addressing via query "
             f"parameters ({', '.join(overrides)}): libpq applies them over the URI host, port "
             "and database, which defeats the production database guard."
+        )
+
+
+def _reject_restore_target_secret_query_parameters(restore_url: URL) -> None:
+    """Refuse secret query parameters that cannot leave the process argv.
+
+    Unlike the account password there is no PGPASSWORD-style environment
+    variable for parameters such as ``sslpassword``, so such a secret would
+    stay inside the ``--dbname`` argument of the running pg_restore, visible
+    to every local process. Fail before the child exists instead of leaking
+    it; the connection must carry its credentials another way.
+    """
+    query_keys = {key.lower() for key in restore_url.query}
+    secrets = sorted(_LIBPQ_SECRET_QUERY_KEYS & query_keys)
+    if secrets:
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL must not carry secret query parameters "
+            f"({', '.join(secrets)}): pg_restore receives the connection string in its argv, "
+            "and libpq has no environment variable to pass these secrets safely. Remove "
+            "them from the URL and provide the credentials another way."
         )
 
 
