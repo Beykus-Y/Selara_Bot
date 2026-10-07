@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
+from selara.presentation.handlers.ai_pets import router as ai_pets_router
 from selara.presentation.handlers.autoconfig import router as autoconfig_router
 from selara.presentation.handlers.aliases import router as aliases_router
 from selara.presentation.handlers.admin_broadcasts import router as admin_broadcasts_router
@@ -14,12 +15,16 @@ from selara.presentation.handlers.economy import router as economy_router
 from selara.presentation.handlers.engagement import router as engagement_router
 from selara.presentation.handlers.feedback import router as feedback_router
 from selara.presentation.handlers.game import router as game_router
+from selara.presentation.handlers.group_character import router as group_character_router
 from selara.presentation.handlers.help import router as help_router
 from selara.presentation.handlers.llm_admin import router as llm_admin_router
 from selara.presentation.handlers.message_archive import (
     router as message_archive_router,
 )
 from selara.presentation.handlers.moderation import router as moderation_router
+from selara.presentation.handlers.personal_ai import chat_router as personal_ai_chat_router
+from selara.presentation.handlers.personal_ai import router as personal_ai_router
+from selara.presentation.handlers.personal_memory import router as personal_memory_router
 from selara.presentation.handlers.private_panel import router as private_panel_router
 from selara.presentation.handlers.premium import (
     build_payment_router,
@@ -97,6 +102,8 @@ def build_router(
     application.include_router(message_archive_router)
     application.include_router(help_router)
     application.include_router(stats_router)
+    # Before chat_assistant: a bare /pet opens the AI pet, /pet with a target stays the role-play request.
+    application.include_router(ai_pets_router)
     application.include_router(chat_assistant_router)
     application.include_router(economy_router)
     application.include_router(game_router)
@@ -104,15 +111,21 @@ def build_router(
     application.include_router(relationships_router)
     application.include_router(moderation_router)
     application.include_router(settings_router)
+    application.include_router(group_character_router)
     application.include_router(aliases_router)
     application.include_router(engagement_router)
     application.include_router(feedback_router)
     application.include_router(premium_router)
     application.include_router(private_panel_router)
+    # Settings wizard: after the private panel and autoconfig (their pending inputs win), before text commands.
+    application.include_router(personal_ai_router)
+    application.include_router(personal_memory_router)
     if llm_client is not None:
         application.include_router(llm_admin_router)
         application.include_router(daily_summary_router)
     application.include_router(text_commands_router)
+    # The dialogue itself is the fallback for private text that text_commands did not recognise.
+    application.include_router(personal_ai_chat_router)
     if stt_client is not None:
         application.include_router(voice_router)
 

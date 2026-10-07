@@ -28,6 +28,8 @@ CFG_BOOL_KEYS: set[str] = {
     "chat_write_locked",
     "custom_rp_enabled",
     "family_tree_enabled",
+    "pets_enabled",
+    "pets_spontaneous_enabled",
     "persona_enabled",
     "save_message",
     "interesting_facts_enabled",
@@ -280,6 +282,21 @@ SETTING_META: dict[str, SettingMeta] = {
         description_ru="Включает команды усыновления, питомцев и генерацию древа.",
         value_hint_ru="true/false.",
     ),
+    "pets_enabled": SettingMeta(
+        title_ru="AI-питомцы",
+        short_ru="Питомцы",
+        description_ru="Разрешает AI-питомцам участников жить в этом чате. Это разрешение, а не подписка.",
+        value_hint_ru="true/false.",
+    ),
+    "pets_spontaneous_enabled": SettingMeta(
+        title_ru="Спонтанные события питомцев",
+        short_ru="События питомцев",
+        description_ru=(
+            "Питомцы иногда сами пишут в чат, когда в нём идёт общение (не чаще раза в пару часов на чат, "
+            "не ночью). Тратит лимит Selara Personal хозяина питомца, а не чата."
+        ),
+        value_hint_ru="true/false.",
+    ),
     "persona_enabled": SettingMeta(
         title_ru="Образы включены",
         short_ru="Образы",
@@ -523,6 +540,8 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "chat_write_locked",
             "custom_rp_enabled",
             "family_tree_enabled",
+            "pets_enabled",
+            "pets_spontaneous_enabled",
             "save_message",
             "interesting_facts_enabled",
             "interesting_facts_interval_minutes",
@@ -637,6 +656,8 @@ def settings_to_dict(value: ChatSettings) -> dict[str, object]:
         "chat_write_locked": value.chat_write_locked,
         "custom_rp_enabled": value.custom_rp_enabled,
         "family_tree_enabled": value.family_tree_enabled,
+        "pets_enabled": value.pets_enabled,
+        "pets_spontaneous_enabled": value.pets_spontaneous_enabled,
         "persona_enabled": value.persona_enabled,
         "persona_display_mode": value.persona_display_mode,
         "save_message": value.save_message,

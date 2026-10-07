@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import replace
+from decimal import Decimal
 
 from sqlalchemy import case, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.feature_access import (
+    PERSONAL_AIL_POOL_KEY,
     AccessReason,
     AccessTier,
+    AilSettlement,
     FeatureAccessDecision,
     FeatureQuotaPolicy,
     FeatureUsageSummary,
+    QuotaScope,
+    QuotaScopeType,
 )
+from selara.application.usage_pricing import QuotaCost
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
     AiFeatureQuotaUsageModel,
@@ -26,9 +33,32 @@ from selara.infrastructure.llm.features import AiFeature
 logger = logging.getLogger(__name__)
 
 
-def feature_quota_lock_key(*, feature: str, chat_id: int, period_start) -> int:
-    payload = f"{feature}\0{chat_id}\0{period_start.isoformat()}".encode("utf-8")
-    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+def feature_quota_lock_key(*, pool_key: str, scope_type: str, scope_id: int, period_start) -> int:
+    """Advisory lock key of one pool/scope/calendar-period bucket.
+
+    Chat buckets keep the pre-scope payload so they still serialize against
+    the previous release's reservations during a rolling deploy.
+    """
+    if str(scope_type) == QuotaScopeType.CHAT.value:
+        payload = f"{pool_key}\0{scope_id}\0{period_start.isoformat()}"
+    else:
+        payload = f"{pool_key}\0{scope_type}\0{scope_id}\0{period_start.isoformat()}"
+    return int.from_bytes(hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest(), "big", signed=True)
+
+
+def quota_usage_lock_key(usage) -> int:
+    """Lock key of the bucket one stored reservation counts against."""
+    return feature_quota_lock_key(
+        pool_key=usage.pool_key,
+        scope_type=usage.quota_scope_type,
+        scope_id=usage.quota_scope_id or usage.chat_id or 0,
+        period_start=usage.period_start,
+    )
+
+
+def _as_number(value: Decimal) -> int | float:
+    """Report whole unit totals as ints (all of today's limits) and fractions as floats."""
+    return int(value) if value == value.to_integral_value() else float(value)
 
 
 def feature_quota_idempotency_lock_key(*, idempotency_key: str) -> int:
@@ -39,8 +69,8 @@ def feature_quota_idempotency_lock_key(*, idempotency_key: str) -> int:
 class SqlAlchemyFeatureQuotaRepository:
     """PostgreSQL-backed quota reservation and usage history.
 
-    The transaction advisory lock serializes each chat/feature/calendar-period
-    check. The usage event and logical AI invocation are inserted in the same
+    The transaction advisory lock serializes each pool/scope/calendar-period
+    check (the scope is a chat or, for personal features, a user). The usage event and logical AI invocation are inserted in the same
     transaction, so neither can commit without the other.
     """
 
@@ -53,6 +83,8 @@ class SqlAlchemyFeatureQuotaRepository:
         policy: FeatureQuotaPolicy,
         access_tier: AccessTier,
         chat_id: int,
+        scope: QuotaScope,
+        cost: QuotaCost,
         chat_type: str,
         chat_title: str | None,
         actor_user_id: int | None,
@@ -65,6 +97,7 @@ class SqlAlchemyFeatureQuotaRepository:
         owner_exempt: bool,
         period_start,
         period_end,
+        model_profile: str | None = None,
     ) -> FeatureAccessDecision:
         async with self._session_factory() as session:
             async with session.begin():
@@ -77,7 +110,10 @@ class SqlAlchemyFeatureQuotaRepository:
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": self._lock_key(
-                        feature=policy.feature.value, chat_id=chat_id, period_start=period_start,
+                        pool_key=policy.pool,
+                        scope_type=scope.scope_type.value,
+                        scope_id=scope.scope_id,
+                        period_start=period_start,
                     )},
                 )
                 existing = await session.scalar(
@@ -125,15 +161,15 @@ class SqlAlchemyFeatureQuotaRepository:
                 if existing is not None:
                     if existing.feature != policy.feature.value:
                         raise RuntimeError("Feature quota idempotency key was reused across features")
-                    if existing.chat_id not in (None, chat_id):
+                    if existing.chat_id not in (None, chat_id) or self._scope_mismatch(existing, scope):
                         logger.warning(
-                            "Feature quota idempotency key reused in another chat feature=%s old_chat_id=%s chat_id=%s",
+                            "Feature quota idempotency key reused in another chat or scope feature=%s old_chat_id=%s chat_id=%s",
                             policy.feature.value, existing.chat_id, chat_id,
                         )
                         return self._decision(
                             allowed=False,
                             policy=policy,
-                            chat_id=chat_id,
+                            scope=scope,
                             access_tier=access_tier,
                             owner_exempt=False,
                             used=None,
@@ -182,7 +218,7 @@ class SqlAlchemyFeatureQuotaRepository:
                             return self._decision(
                                 allowed=False,
                                 policy=policy,
-                                chat_id=chat_id,
+                                scope=scope,
                                 access_tier=AccessTier(existing.access_tier),
                                 owner_exempt=False,
                                 used=None,
@@ -196,11 +232,11 @@ class SqlAlchemyFeatureQuotaRepository:
 
                         used = await self._count_used(
                             session,
-                            feature=policy.feature.value,
-                            chat_id=chat_id,
+                            pool_key=policy.pool,
+                            scope=scope,
                             period_start=period_start,
                         )
-                        if not owner_exempt and used >= policy.limit:
+                        if not owner_exempt and used + cost.units > policy.limit:
                             logger.info(
                                 "Released feature quota reacquire denied feature=%s chat_id=%s used=%s limit=%s",
                                 policy.feature.value, chat_id, used, policy.limit,
@@ -208,7 +244,7 @@ class SqlAlchemyFeatureQuotaRepository:
                             return self._decision(
                                 allowed=False,
                                 policy=policy,
-                                chat_id=chat_id,
+                                scope=scope,
                                 access_tier=access_tier,
                                 owner_exempt=False,
                                 used=used,
@@ -221,6 +257,11 @@ class SqlAlchemyFeatureQuotaRepository:
                             )
 
                         existing.chat_id = chat_id
+                        existing.quota_scope_type = scope.scope_type.value
+                        existing.quota_scope_id = scope.scope_id
+                        existing.pool_key = policy.pool
+                        existing.units = cost.units
+                        existing.model_profile = model_profile
                         existing.period_start = period_start
                         existing.period_end = period_end
                         existing.policy_key = policy.policy_key
@@ -232,17 +273,17 @@ class SqlAlchemyFeatureQuotaRepository:
                         existing.release_reason = None
                         existing.released_at = None
                         invocation.chat_id = chat_id
-                        invocation.scope_type = "chat"
-                        invocation.scope_id = str(chat_id)
+                        invocation.scope_type = scope.scope_type.value
+                        invocation.scope_id = str(scope.scope_id)
                         invocation.status = "running"
                         invocation.error_category = None
                         invocation.started_at = func.now()
                         invocation.completed_at = None
-                        current_used = None if owner_exempt else used + 1
+                        current_used = None if owner_exempt else used + cost.units
                         decision = self._decision(
                             allowed=True,
                             policy=policy,
-                            chat_id=chat_id,
+                            scope=scope,
                             access_tier=access_tier,
                             owner_exempt=owner_exempt,
                             used=current_used,
@@ -259,20 +300,22 @@ class SqlAlchemyFeatureQuotaRepository:
                         )
                         return decision
 
+                    existing_scope = self._row_scope(existing, fallback=scope, chat_id=chat_id)
                     used = await self._count_used(
                         session,
-                        feature=policy.feature.value,
-                        chat_id=existing.chat_id or chat_id,
+                        pool_key=existing.pool_key or policy.pool,
+                        scope=existing_scope,
                         period_start=existing.period_start,
                     )
                     allowed = existing.status == "consumed"
                     existing_policy = FeatureQuotaPolicy(
                         policy.feature, existing.policy_key, existing.quota_limit, policy.period,
+                        pool_key=existing.pool_key or policy.pool_key, unit=policy.unit,
                     )
                     decision = self._decision(
                         allowed=allowed,
                         policy=existing_policy,
-                        chat_id=existing.chat_id or chat_id,
+                        scope=existing_scope,
                         access_tier=AccessTier(existing.access_tier),
                         owner_exempt=existing.owner_exempt,
                         used=used,
@@ -290,13 +333,13 @@ class SqlAlchemyFeatureQuotaRepository:
                     return decision
 
                 used = await self._count_used(
-                    session, feature=policy.feature.value, chat_id=chat_id, period_start=period_start,
+                    session, pool_key=policy.pool, scope=scope, period_start=period_start,
                 )
-                if not owner_exempt and used >= policy.limit:
+                if not owner_exempt and used + cost.units > policy.limit:
                     decision = self._decision(
                         allowed=False,
                         policy=policy,
-                        chat_id=chat_id,
+                        scope=scope,
                         access_tier=access_tier,
                         owner_exempt=False,
                         used=used,
@@ -312,6 +355,31 @@ class SqlAlchemyFeatureQuotaRepository:
                         policy.feature.value, chat_id, used, policy.limit, period_start.isoformat(),
                     )
                     return decision
+                if not owner_exempt and policy.per_actor_limit is not None and actor_user_id is not None:
+                    # Second count under the same bucket lock: one member cannot drain the shared pool.
+                    actor_used = await self._count_used(
+                        session, pool_key=policy.pool, scope=scope, period_start=period_start,
+                        actor_user_id=actor_user_id,
+                    )
+                    if actor_used + cost.units > policy.per_actor_limit:
+                        logger.info(
+                            "Feature quota actor share denied feature=%s chat_id=%s actor_user_id=%s used=%s limit=%s",
+                            policy.feature.value, chat_id, actor_user_id, actor_used, policy.per_actor_limit,
+                        )
+                        return self._decision(
+                            allowed=False,
+                            policy=replace(policy, limit=policy.per_actor_limit),
+                            scope=scope,
+                            access_tier=access_tier,
+                            owner_exempt=False,
+                            used=actor_used,
+                            period_start=period_start,
+                            period_end=period_end,
+                            invocation_id=None,
+                            usage_id=None,
+                            reused=False,
+                            reason=AccessReason.ACTOR_QUOTA_EXHAUSTED,
+                        )
 
                 await session.execute(
                     pg_insert(ChatModel)
@@ -327,8 +395,8 @@ class SqlAlchemyFeatureQuotaRepository:
 
                 invocation = AiFeatureInvocationModel(
                     feature=policy.feature.value,
-                    scope_type="chat",
-                    scope_id=str(chat_id),
+                    scope_type=scope.scope_type.value,
+                    scope_id=str(scope.scope_id),
                     chat_id=chat_id,
                     actor_user_id=actor_user_id,
                     trigger=trigger,
@@ -342,6 +410,11 @@ class SqlAlchemyFeatureQuotaRepository:
                 usage = AiFeatureQuotaUsageModel(
                     feature=policy.feature.value,
                     chat_id=chat_id,
+                    quota_scope_type=scope.scope_type.value,
+                    quota_scope_id=scope.scope_id,
+                    pool_key=policy.pool,
+                    units=cost.units,
+                    model_profile=model_profile,
                     actor_user_id=actor_user_id,
                     invocation_id=invocation.id,
                     trigger=trigger,
@@ -358,11 +431,11 @@ class SqlAlchemyFeatureQuotaRepository:
                 )
                 session.add(usage)
                 await session.flush()
-                current_used = None if owner_exempt else used + 1
+                current_used = None if owner_exempt else used + cost.units
                 decision = self._decision(
                     allowed=True,
                     policy=policy,
-                    chat_id=chat_id,
+                    scope=scope,
                     access_tier=access_tier,
                     owner_exempt=owner_exempt,
                     used=current_used,
@@ -395,6 +468,7 @@ class SqlAlchemyFeatureQuotaRepository:
         *,
         policy: FeatureQuotaPolicy,
         chat_id: int,
+        scope: QuotaScope,
         owner_exempt: bool,
         period_start,
         period_end,
@@ -403,21 +477,22 @@ class SqlAlchemyFeatureQuotaRepository:
             if session.bind is None or session.bind.dialect.name != "postgresql":
                 raise RuntimeError("Feature quota summaries require PostgreSQL")
             used = await self._count_used(
-                session, feature=policy.feature.value, chat_id=chat_id, period_start=period_start,
+                session, pool_key=policy.pool, scope=scope, period_start=period_start,
             )
+        scope_type, scope_id = scope.scope_type.value, str(scope.scope_id)
         if owner_exempt:
             return FeatureUsageSummary(
-                policy.feature, "chat", str(chat_id), AccessTier.OWNER_INTERNAL,
+                policy.feature, scope_type, scope_id, AccessTier.OWNER_INTERNAL,
                 None, None, None, period_start, period_end, period_end, True, True, policy.policy_key,
             )
         return FeatureUsageSummary(
             policy.feature,
-            "chat",
-            str(chat_id),
+            scope_type,
+            scope_id,
             AccessTier.FREE,
             policy.limit,
-            used,
-            max(0, policy.limit - used),
+            _as_number(used),
+            _as_number(max(Decimal(0), Decimal(policy.limit) - used)),
             period_start,
             period_end,
             period_end,
@@ -450,9 +525,7 @@ class SqlAlchemyFeatureQuotaRepository:
                     return False
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                    {"lock_key": self._lock_key(
-                        feature=usage.feature, chat_id=usage.chat_id or 0, period_start=usage.period_start,
-                    )},
+                    {"lock_key": quota_usage_lock_key(usage)},
                 )
                 usage = await session.scalar(
                     select(AiFeatureQuotaUsageModel)
@@ -486,8 +559,73 @@ class SqlAlchemyFeatureQuotaRepository:
             )
             return True
 
+    async def adjust_units(self, *, invocation_id: int, actual_units: Decimal) -> AilSettlement | None:
+        """Replace a consumed AIL reservation's units by the actual cost, once.
+
+        Takes the same locks as ``reserve`` and ``release_if_no_provider_attempts`` (idempotency key,
+        then the pool bucket), so a settlement and concurrent reservations of the same user never
+        interleave. The daily limit is deliberately not checked: the provider already billed the call.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                if session.bind is None or session.bind.dialect.name != "postgresql":
+                    raise RuntimeError("Feature quota settlement requires PostgreSQL")
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel).where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                )
+                if usage is None or usage.pool_key != PERSONAL_AIL_POOL_KEY or usage.owner_exempt:
+                    return None
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": feature_quota_idempotency_lock_key(idempotency_key=usage.idempotency_key)},
+                )
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": quota_usage_lock_key(usage)},
+                )
+                usage = await session.scalar(
+                    select(AiFeatureQuotaUsageModel)
+                    .where(AiFeatureQuotaUsageModel.invocation_id == invocation_id)
+                    .execution_options(populate_existing=True)
+                    .with_for_update()
+                )
+                if usage is None or usage.status != "consumed":
+                    return None
+                reserved = Decimal(usage.units)
+                if usage.settled_at is not None:
+                    return AilSettlement(settled=False, units=reserved, reserved_units=reserved, already_settled=True)
+                usage.units = actual_units
+                usage.settled_at = func.now()
+                feature, scope_id = usage.feature, usage.quota_scope_id
+            logger.info(
+                "AIL reservation settled feature=%s scope_id=%s invocation_id=%s reserved=%s actual=%s",
+                feature, scope_id, invocation_id, reserved, actual_units,
+            )
+            return AilSettlement(settled=True, units=actual_units, reserved_units=reserved)
+
+    async def last_settled_units(self, *, scope: QuotaScope, pool_key: str) -> Decimal | None:
+        """AIL the scope's most recent settled request cost (any day), or ``None``."""
+        async with self._session_factory() as session:
+            value = await session.scalar(
+                select(AiFeatureQuotaUsageModel.units)
+                .where(
+                    AiFeatureQuotaUsageModel.pool_key == pool_key,
+                    AiFeatureQuotaUsageModel.quota_scope_type == scope.scope_type.value,
+                    AiFeatureQuotaUsageModel.quota_scope_id == scope.scope_id,
+                    AiFeatureQuotaUsageModel.status == "consumed",
+                    AiFeatureQuotaUsageModel.owner_exempt.is_(False),
+                    AiFeatureQuotaUsageModel.settled_at.is_not(None),
+                )
+                .order_by(AiFeatureQuotaUsageModel.settled_at.desc(), AiFeatureQuotaUsageModel.id.desc())
+                .limit(1)
+            )
+            return Decimal(value) if value is not None else None
+
     @staticmethod
-    async def _count_used(session, *, feature: str, chat_id: int, period_start) -> int:
+    async def _count_used(
+        session, *, pool_key: str, scope: QuotaScope, period_start, actor_user_id: int | None = None
+    ) -> Decimal:
+        """Units already spent in the pool/scope/period; a request counted once however often it was recorded."""
         logical_request = case(
             (
                 AiFeatureQuotaUsageModel.source_message_id.is_not(None),
@@ -500,26 +638,57 @@ class SqlAlchemyFeatureQuotaRepository:
             ),
             else_=func.concat("idempotency-key:", AiFeatureQuotaUsageModel.idempotency_key),
         )
-        count = await session.scalar(
-            select(func.count(func.distinct(logical_request))).where(
-                AiFeatureQuotaUsageModel.feature == feature,
-                AiFeatureQuotaUsageModel.chat_id == chat_id,
+        per_request = (
+            select(
+                logical_request.label("logical_request"),
+                func.max(AiFeatureQuotaUsageModel.units).label("units"),
+            )
+            .where(
+                AiFeatureQuotaUsageModel.pool_key == pool_key,
+                AiFeatureQuotaUsageModel.quota_scope_type == scope.scope_type.value,
+                AiFeatureQuotaUsageModel.quota_scope_id == scope.scope_id,
                 AiFeatureQuotaUsageModel.period_start == period_start,
                 AiFeatureQuotaUsageModel.owner_exempt.is_(False),
                 AiFeatureQuotaUsageModel.status == "consumed",
+                *(
+                    (AiFeatureQuotaUsageModel.actor_user_id == actor_user_id,)
+                    if actor_user_id is not None
+                    else ()
+                ),
             )
+            .group_by(logical_request)
+            .subquery()
         )
-        return int(count or 0)
+        total = await session.scalar(select(func.coalesce(func.sum(per_request.c.units), 0)))
+        return Decimal(total or 0)
+
+    @staticmethod
+    def _scope_mismatch(existing: AiFeatureQuotaUsageModel, scope: QuotaScope) -> bool:
+        if existing.quota_scope_type == "legacy_orphan":
+            return False
+        return (
+            existing.quota_scope_type != scope.scope_type.value
+            or existing.quota_scope_id != scope.scope_id
+        )
+
+    @staticmethod
+    def _row_scope(existing: AiFeatureQuotaUsageModel, *, fallback: QuotaScope, chat_id: int) -> QuotaScope:
+        if existing.quota_scope_type == QuotaScopeType.USER.value and existing.quota_scope_id is not None:
+            return QuotaScope.user(existing.quota_scope_id)
+        if existing.quota_scope_type == QuotaScopeType.CHAT.value and existing.quota_scope_id is not None:
+            return QuotaScope.chat(existing.quota_scope_id)
+        # legacy_orphan: the chat is gone, report the requested scope
+        return fallback
 
     @staticmethod
     def _decision(
         *,
         allowed: bool,
         policy: FeatureQuotaPolicy,
-        chat_id: int,
+        scope: QuotaScope,
         access_tier: AccessTier,
         owner_exempt: bool,
-        used: int | None,
+        used: Decimal | int | None,
         period_start,
         period_end,
         invocation_id: int | None,
@@ -527,15 +696,18 @@ class SqlAlchemyFeatureQuotaRepository:
         reused: bool,
         reason: AccessReason | None,
     ) -> FeatureAccessDecision:
+        used_units = None if used is None else Decimal(used)
         return FeatureAccessDecision(
             allowed=allowed,
             feature=policy.feature,
-            scope_type="chat",
-            scope_id=str(chat_id),
+            scope_type=scope.scope_type.value,
+            scope_id=str(scope.scope_id),
             access_tier=access_tier,
             quota_limit=None if owner_exempt else policy.limit,
-            quota_used=None if owner_exempt else used,
-            quota_remaining=None if owner_exempt else max(0, policy.limit - (used or 0)),
+            quota_used=None if owner_exempt or used_units is None else _as_number(used_units),
+            quota_remaining=None
+            if owner_exempt
+            else _as_number(max(Decimal(0), Decimal(policy.limit) - (used_units or Decimal(0)))),
             period_start=period_start,
             period_end=period_end,
             reason=reason,
@@ -547,5 +719,7 @@ class SqlAlchemyFeatureQuotaRepository:
         )
 
     @staticmethod
-    def _lock_key(*, feature: str, chat_id: int, period_start) -> int:
-        return feature_quota_lock_key(feature=feature, chat_id=chat_id, period_start=period_start)
+    def _lock_key(*, pool_key: str, scope_type: str, scope_id: int, period_start) -> int:
+        return feature_quota_lock_key(
+            pool_key=pool_key, scope_type=scope_type, scope_id=scope_id, period_start=period_start,
+        )

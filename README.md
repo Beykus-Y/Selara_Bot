@@ -44,7 +44,7 @@ Selara — Telegram-бот для групп и сообществ, объеди
 #### 2.4 Отношения, семья и RP-составляющая
 - `/relation`, `/pair`, `/marry`, `/breakup`, `/divorce`.
 - `/love`, `/care`, `/date`, `/gift`, `/support`, `/flirt`, `/surprise`, `/vow`.
-- `/adopt`, `/pet`, `/family`, `/title`.
+- `/adopt`, `/bepet`, `/family`, `/title`.
 
 #### 2.5 Администрирование, роли и доступы
 - Ролевой контур: `/roles`, `/roleadd`, `/roleremove`, `/roledefs`, `/roletemplates`, `/rolecreate`, `/rolesettitle`, `/rolesetrank`, `/roleperms`, `/roledelete`.
@@ -57,7 +57,8 @@ Selara — Telegram-бот для групп и сообществ, объеди
 - STT: голосовые сообщения и видео-кружки автоматически расшифровываются в текст
   (язык определяется сам, без хардкода). Опционально, выключено по умолчанию.
 - LLM: `?`/`??` — AI-ассистент модерации в группе (см. `docs/ADMIN_GUIDE.md` §13),
-  `?reset` — сброс накопленного контекста `??`. Опционально, выключено по умолчанию.
+  `?reset` — сброс накопленного контекста `??`; инструменты `web_search`/`fetch_page`
+  дают ассистенту доступ к поиску в интернете (вкл/выкл — `WEB_SEARCH_ENABLED`).
 - Обе подсистемы включаются и настраиваются через env-переменные — см. раздел 5
   и `INSTALLATION.md`.
 - Selara AI оформляется для группы через Telegram Stars командой `/premium` в

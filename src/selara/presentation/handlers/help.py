@@ -17,6 +17,7 @@ _HELP_SECTIONS_ORDER: tuple[tuple[str, str], ...] = (
     ("economy", "💰 Экономика"),
     ("relationships", "💞 Отношения"),
     ("social", "🤝 Социальное"),
+    ("pets", "🐾 Питомцы"),
     ("moderation", "🛡 Модерация"),
     ("settings", "⚙️ Настройки"),
 )
@@ -100,6 +101,16 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• Объявления: <code>объява \"текст\"</code> (по рангу команды)\n"
         "• Подписка объявлений: <code>рег</code> / <code>анрег</code>"
     ),
+    "pets": (
+        "<b>AI-питомцы</b>\n"
+        f"• {_code_join(_base_words('pets_core'))}\n"
+        "• Без /: <code>пет</code>, <code>петы</code>, <code>пет погладить Мурка</code>, <code>пет покормить</code>\n"
+        "• Поговорить: <code>Мурка, как дела?</code> или ответ на реплику питомца (лимит Selara Personal хозяина)\n"
+        "• <code>/pet_bag</code> — рюкзак и гардероб: еда и игрушки в запас, косметика (📦 в магазине)\n"
+        "• С 10 уровня: <code>/pet_travel</code> в другом чате — взять питомца в гости, <code>/pet_home</code> — сделать чат домом\n"
+        "• Питомцы работают в чатах с <code>pets_enabled</code>; завести — с Selara Personal\n"
+        "• Ролевое «стать питомцем» — <code>/bepet</code>"
+    ),
     "moderation": (
         "<b>Модерация</b>\n"
         f"• {_code_join(_base_words('admin_moderation_actions'))}\n"
@@ -116,6 +127,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('admin_aliases'))}\n"
         f"• {_code_join(_base_words('admin_smart_triggers'))}\n"
         f"• {_code_join(_base_words('admin_custom_rp_actions'))} — кастомные reply-действия с шаблонами\n"
+        "• Selara в чате: <code>/selara</code> — клички («Селя, ...»), характер и ответы участникам\n"
         "• ЛС-панель: <code>/start</code> в личке\n"
         "• Selara AI: <code>/premium</code> в личке — выбрать чат и оформить доступ\n"
         "• Условия и помощь по оплате: <code>/terms</code>, <code>/paysupport</code>\n"

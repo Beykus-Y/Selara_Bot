@@ -1,7 +1,9 @@
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from selara.core.web_auth import normalize_base_url
@@ -147,19 +149,105 @@ class Settings(BaseSettings):
     # LlmClient.chat_structured (used by the daily summary pipeline's segment/merge
     # stages, docs/DAILY_SUMMARY_TODO.md).
     llm_supports_structured_output: bool = Field(default=False, validation_alias="LLM_SUPPORTS_STRUCTURED_OUTPUT")
+    # Ask the provider for the real cost of each request (OpenRouter ``usage: {include: true}``).
+    # ``None`` detects it from the base URL; the real cost is what Personal AIL billing settles against.
+    llm_include_usage_cost: bool | None = Field(default=None, validation_alias="LLM_INCLUDE_USAGE_COST")
+    # Optional OpenRouter ``provider`` preferences as a JSON object, e.g. {"max_price": {"prompt": 0.5}}.
+    # Empty keeps provider routing untouched.
+    llm_provider_preferences_json: str = Field(default="", validation_alias="LLM_PROVIDER_PREFERENCES_JSON")
     # #3: the `?`/`??` assistant is gated on moderate_users, but nothing
     # stops the same admin repeating it immediately -- a single invocation
     # can already fan out to ~10 billed calls (up to 8 tool rounds + DM
     # summary + compression).
     llm_cooldown_seconds: float = Field(default=5.0, validation_alias="LLM_COOLDOWN_SECONDS")
 
+    # Web search tools (web_search / fetch_page) for the ?/?? assistant. The
+    # default duckduckgo provider needs no API key; api_key/base_url are
+    # reserved for key-based providers added later.
+    web_search_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
+    web_search_provider: str = Field(default="duckduckgo", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_api_key: str = Field(default="", validation_alias="WEB_SEARCH_API_KEY")
+    web_search_base_url: str = Field(default="", validation_alias="WEB_SEARCH_BASE_URL")
+    web_search_timeout_seconds: float = Field(
+        default=15.0, gt=0, validation_alias="WEB_SEARCH_TIMEOUT_SECONDS"
+    )
+    web_search_max_results: int = Field(default=5, ge=1, le=10, validation_alias="WEB_SEARCH_MAX_RESULTS")
+    web_search_max_page_chars: int = Field(default=8000, ge=1, validation_alias="WEB_SEARCH_MAX_PAGE_CHARS")
+    web_search_max_calls_per_invocation: int = Field(
+        default=4, ge=0, validation_alias="WEB_SEARCH_MAX_CALLS_PER_INVOCATION"
+    )
+
     admin_password: str | None = Field(default=None, validation_alias="ADMIN_PASSWORD")
     admin_user_id: int | None = Field(default=None, validation_alias="ADMIN_USER_ID")
     # Checkout stays disabled until the owner selects an explicit Stars price.
     selara_ai_price_stars: int | None = Field(default=None, gt=0, validation_alias="SELARA_AI_PRICE_STARS")
+    # Selara Personal (a per-user subscription) stays hidden until its own price is set.
+    selara_personal_price_stars: int | None = Field(
+        default=None, gt=0, le=10_000, validation_alias="SELARA_PERSONAL_PRICE_STARS"
+    )
+    selara_personal_duration_days: int = Field(
+        default=30, gt=0, le=365, validation_alias="SELARA_PERSONAL_DURATION_DAYS"
+    )
+    # Personal pool limits: one request = one unit. Fixed until a deliberate switch to AI Limits.
+    personal_free_daily_limit: int = Field(default=5, gt=0, le=10_000, validation_alias="PERSONAL_FREE_DAILY_LIMIT")
+    personal_paid_daily_limit: int = Field(default=150, gt=0, le=10_000, validation_alias="PERSONAL_PAID_DAILY_LIMIT")
+    # Personal memory: fact limits per tier (technical guard against prompt bloat) and optional auto-extraction.
+    # Extraction is off by default and only runs for Selara Personal users who also switched it on for themselves.
+    # AIL billing: "actual" settles each Personal request at its real cost / PERSONAL_AIL_USD_VALUE;
+    # "fixed" keeps charging the model profile multiplier.
+    personal_ail_billing: Literal["actual", "fixed"] = Field(default="actual", validation_alias="PERSONAL_AIL_BILLING")
+    personal_ail_usd_value: Decimal = Field(
+        default=Decimal("0.0005"), gt=0, le=Decimal("100"), validation_alias="PERSONAL_AIL_USD_VALUE"
+    )
+    personal_memory_free_limit: int = Field(default=20, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_FREE_LIMIT")
+    personal_memory_paid_limit: int = Field(default=200, gt=0, le=1000, validation_alias="PERSONAL_MEMORY_PAID_LIMIT")
+    personal_memory_auto_extract: bool = Field(default=False, validation_alias="PERSONAL_MEMORY_AUTO_EXTRACT")
+    personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
+    # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
+    pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
+    pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
+    pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
+    # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,
+    # how often an active chat is considered and the chance an eligible check produces an event.
+    pet_event_daily_limit: int = Field(default=6, ge=0, le=100, validation_alias="PET_EVENT_DAILY_LIMIT")
+    pet_event_chat_interval_minutes: int = Field(
+        default=120, ge=1, le=7 * 24 * 60, validation_alias="PET_EVENT_CHAT_INTERVAL_MINUTES"
+    )
+    pet_event_quiet_start_hour: int = Field(default=23, ge=0, le=23, validation_alias="PET_EVENT_QUIET_START_HOUR")
+    pet_event_quiet_end_hour: int = Field(default=8, ge=0, le=23, validation_alias="PET_EVENT_QUIET_END_HOUR")
+    pet_event_check_seconds: int = Field(default=300, ge=10, le=86_400, validation_alias="PET_EVENT_CHECK_SECONDS")
+    pet_event_chance: float = Field(default=0.3, ge=0.0, le=1.0, validation_alias="PET_EVENT_CHANCE")
+    # Member mode in groups («Селя, ...»): free for every chat, raised by Selara AI. Per day, per chat and per member.
+    group_member_free_daily_limit: int = Field(default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_DAILY_LIMIT")
+    group_member_free_per_user_daily_limit: int = Field(
+        default=5, gt=0, le=10_000, validation_alias="GROUP_MEMBER_FREE_PER_USER_DAILY_LIMIT"
+    )
+    group_member_paid_daily_limit: int = Field(default=300, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_DAILY_LIMIT")
+    group_member_paid_per_user_daily_limit: int = Field(
+        default=30, gt=0, le=10_000, validation_alias="GROUP_MEMBER_PAID_PER_USER_DAILY_LIMIT"
+    )
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
     admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_personal_limits(self):
+        if self.personal_free_daily_limit >= self.personal_paid_daily_limit:
+            raise ValueError("PERSONAL_FREE_DAILY_LIMIT must be lower than PERSONAL_PAID_DAILY_LIMIT")
+        if self.personal_memory_free_limit > self.personal_memory_paid_limit:
+            raise ValueError("PERSONAL_MEMORY_FREE_LIMIT must not exceed PERSONAL_MEMORY_PAID_LIMIT")
+        if not self.pet_talk_guest_daily_limit <= self.pet_talk_guests_daily_limit <= self.pet_talk_daily_limit:
+            raise ValueError("Pet talk limits must satisfy guest <= all guests <= daily")
+        if not (
+            self.group_member_free_per_user_daily_limit <= self.group_member_free_daily_limit
+            and self.group_member_paid_per_user_daily_limit <= self.group_member_paid_daily_limit
+            and self.group_member_free_daily_limit < self.group_member_paid_daily_limit
+            and self.group_member_free_per_user_daily_limit <= self.group_member_paid_per_user_daily_limit
+        ):
+            raise ValueError(
+                "Group member limits must satisfy per member <= per chat and free < paid (per member: free <= paid)"
+            )
+        return self
 
     @property
     def supported_chat_types(self) -> set[str]:

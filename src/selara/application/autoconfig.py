@@ -113,7 +113,7 @@ def review_text(*, title: str, baseline: dict, draft: dict, touched: list[str], 
     for key, value in patch.items():
         def show(v):
             labels = {
-                'text_commands_locale': {'ru': 'русский', 'en': 'английский'},
+                'text_commands_locale': {'ru': 'русский', 'en': 'en (пока русские команды)'},
                 'daily_summary_style': {'neutral': 'спокойный', 'lively': 'живой', 'snarky': 'с иронией'},
                 'persona_display_mode': {'image_only': 'только картинка', 'image_name': 'картинка и имя',
                     'title_image_name': 'титул, картинка и имя'},

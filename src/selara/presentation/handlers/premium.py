@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,10 +17,17 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.selara_ai_product import (
+    PRODUCT_SCOPE_CHAT,
+    PRODUCT_SCOPE_USER,
     SELARA_AI_PRODUCT_KEY,
     SELARA_AI_TERMS_VERSION,
+    SELARA_PERSONAL_PRODUCT_KEY,
+    SELARA_PERSONAL_TERMS_VERSION,
+    personal_terms_version,
     SelaraAiProductUnavailable,
+    get_product_spec,
     get_selara_ai_product,
 )
 from selara.core.config import Settings
@@ -30,7 +37,11 @@ from selara.infrastructure.db.telegram_stars import (
     SqlAlchemyTelegramStarsRepository,
 )
 from selara.infrastructure.llm.runtime import llm_runtime_config
-from selara.presentation.auth import is_telegram_chat_admin, resolve_owner_admin_exemption
+from selara.presentation.auth import (
+    is_telegram_chat_admin,
+    resolve_owner_admin_exemption,
+    resolve_owner_private_exemption,
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="premium")
@@ -69,6 +80,79 @@ def _terms_text() -> str:
     )
 
 
+def _personal_ail_terms_text(config: PersonalConfig) -> str:
+    limits = config.ail_limits
+    if config.ail_billing == "actual":
+        budget_rule = (
+            "Каждый запрос списывает AIL по его фактической стоимости: короткий ответ расходует меньше, "
+            "длинный и более дорогая модель больше; расход последнего запроса показан в /ai. "
+            "Если ответ получить не удалось, резерв возвращается, списывается не более фактической стоимости "
+            "(минимум 0.01 AIL). "
+            "Чтобы запрос начался, на балансе должен быть резерв выбранного профиля. Последний запрос "
+            "может немного превысить остаток бюджета, тогда следующие запросы будут недоступны до "
+            "обновления лимита. Физическая модель за профилем и стоимость AIL могут меняться владельцем бота. "
+        )
+    else:
+        budget_rule = (
+            "Каждый запрос списывает столько AIL, сколько стоит выбранный профиль модели. Разные профили "
+            "расходуют разное количество AIL, коэффициент может отличаться и меняться; актуальная стоимость "
+            "показана в /ai перед выбором. Физическая модель за профилем может меняться владельцем бота. "
+        )
+    return (
+        "<b>Условия покупки Selara Personal</b>\n\n"
+        "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом, "
+        "персонализация и личная память. Подписка принадлежит вам, а не чату.\n"
+        f"2. Подписка даёт суточный бюджет AI Limits (AIL): {limits.paid_daily} AIL в сутки вместо "
+        f"{limits.free_daily} бесплатных. Это бюджет, а не гарантированное количество сообщений. "
+        + budget_rule
+        + "Бюджет обновляется в начале календарных суток по времени бота.\n"
+        f"3. Срок — {config.duration_days} дней с момента оплаты. Продление не автоматическое: "
+        f"повторная покупка добавляет ещё {config.duration_days} дней к активному сроку; "
+        "после окончания остаётся бесплатный бюджет.\n"
+        "4. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
+        "5. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
+        "удалённые данные могут оставаться в резервных копиях до их ротации.\n"
+        "6. Доступен ролевой режим. Базовые ограничения накладывает провайдер модели; "
+        "бот не даёт ролевым сценариям менять правила работы и получать доп. возможности.\n"
+        "7. Работа AI зависит от доступности настроенного AI-провайдера и конфигурации бота. "
+        "При временной недоступности функции могут быть приостановлены до конца оплаченного срока.\n"
+        "8. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
+        "Нажимая кнопку принятия условий перед счётом, вы подтверждаете, что прочитали и принимаете эти условия."
+    )
+
+
+def _personal_terms_text(config: PersonalConfig) -> str:
+    if config.ail_enabled and config.ail_limits is not None:
+        return _personal_ail_terms_text(config)
+    return (
+        "<b>Условия покупки Selara Personal</b>\n\n"
+        "1. Selara Personal — личная подписка на ваш Telegram-аккаунт: AI в личных сообщениях с ботом "
+        f"(до {config.limits.paid_daily} запросов в сутки вместо {config.limits.free_daily} бесплатных), "
+        "персонализация и личная память. "
+        "Подписка принадлежит вам, а не чату.\n"
+        f"2. Срок — {config.duration_days} дней с момента оплаты. Продление не автоматическое: "
+        f"повторная покупка добавляет ещё {config.duration_days} дней к активному сроку; "
+        "после окончания остаётся бесплатный лимит. Суточный лимит фиксируется в момент оплаты и не меняется "
+        "до конца оплаченного срока. При продлении активной подписки действует больший из прежнего и нового "
+        "лимитов, оплаченные дни не урезаются.\n"
+        "3. Оплата проходит в Telegram Stars. Подписка оформляется только для себя, подарки недоступны.\n"
+        "4. История диалога в личных сообщениях и сохранённая память хранятся, пока вы сами их не удалите; "
+        "удалённые данные могут оставаться в резервных копиях до их ротации.\n"
+        "5. Доступен ролевой режим. Базовые ограничения накладывает провайдер модели; "
+        "бот не даёт ролевым сценариям менять правила работы и получать доп. возможности.\n"
+        "6. Работа AI зависит от доступности настроенного AI-провайдера и конфигурации бота. "
+        "При временной недоступности функции могут быть приостановлены до конца оплаченного срока.\n"
+        "7. Вопросы по платежу можно отправить через <code>/paysupport</code>.\n\n"
+        "Нажимая кнопку принятия условий перед счётом, вы подтверждаете, что прочитали и принимаете эти условия."
+    )
+
+
+def _personal_terms_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Вернуться к покупке", callback_data="premium:self")
+    return builder.as_markup()
+
+
 def _terms_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Вернуться к покупке", callback_data=f"premium:select:{chat_id}")
@@ -82,6 +166,31 @@ def _product_for_settings(settings: Settings):
         product_key=SELARA_AI_PRODUCT_KEY,
         price_stars=settings.selara_ai_price_stars,
     )
+
+
+def _personal_product_for_settings(settings: Settings, config: PersonalConfig):
+    if llm_runtime_config(settings) is None:
+        raise SelaraAiProductUnavailable("AI provider is not enabled")
+    return get_selara_ai_product(
+        product_key=SELARA_PERSONAL_PRODUCT_KEY,
+        price_stars=config.price_stars,
+        duration=timedelta(days=config.duration_days),
+        # Still snapshotted: it is what the subscription gets if Personal returns to requests mode.
+        paid_daily_limit=config.limits.paid_daily,
+        daily_ail=config.ail_limits.paid_daily if config.ail_enabled and config.ail_limits else None,
+    )
+
+
+def personal_offer_available(settings: Settings, config: PersonalConfig) -> bool:
+    """Selara Personal is sellable only with a configured price and an enabled AI provider."""
+    return _available(lambda value: _personal_product_for_settings(value, config), settings) is not None
+
+
+def _available(factory, settings: Settings):
+    try:
+        return factory(settings)
+    except SelaraAiProductUnavailable:
+        return None
 
 
 def _chat_label(title: str | None, chat_id: int | None = None) -> str:
@@ -119,6 +228,19 @@ def _purchase_keyboard(*, chat_id: int, price_stars: int) -> InlineKeyboardMarku
         callback_data=f"premium:accept:{chat_id}",
     )
     builder.button(text="Условия покупки", callback_data=f"premium:terms:{chat_id}")
+    builder.button(text="Отмена", callback_data="premium:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _personal_purchase_keyboard(*, price_stars: int, terms_version: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"Продолжить и оплатить — принимаю условия · {price_stars} ⭐",
+        # The version the user was shown travels with the acceptance; a mode switch in between is caught.
+        callback_data=f"premium:self_accept:{terms_version}",
+    )
+    builder.button(text="Условия покупки", callback_data="premium:terms_self")
     builder.button(text="Отмена", callback_data="premium:cancel")
     builder.adjust(1)
     return builder.as_markup()
@@ -178,12 +300,51 @@ async def _edit_callback_message(query: CallbackQuery, text: str, *, reply_marku
         logger.info("Selara AI checkout message could not be edited")
 
 
+async def _group_offer(
+    *, settings: Settings, session_factory, user_id: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Text and chat picker for buying Selara AI for a group."""
+    try:
+        product = _product_for_settings(settings)
+    except SelaraAiProductUnavailable:
+        logger.warning("Selara AI checkout unavailable reason=product_not_configured")
+        return "Покупка Selara AI пока недоступна: цена или AI-провайдер ещё не настроены.", None
+
+    repository = SqlAlchemyTelegramStarsRepository(session_factory)
+    chats = await repository.list_purchasable_chats(user_id=user_id)
+    if not chats:
+        return (
+            "Не нашёл доступных чатов. Сначала отправьте сообщение в нужной группе, "
+            "затем откройте /premium в личке с ботом.",
+            None,
+        )
+    return (
+        f"<b>{escape(product.title)}</b>\n"
+        f"Цена: <b>{product.price_stars} ⭐</b>.\n"
+        "Доступ оформляется для чата и включает автоматические итоги дня. "
+        f"Каждая повторная покупка добавляет ещё {product.duration_label}.\n"
+        "Перед счётом можно прочитать /terms; продление не автоматическое.\n\n"
+        "Выберите чат:",
+        _selection_keyboard(chats),
+    )
+
+
+def _product_choice_keyboard(*, group_available: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if group_available:
+        builder.button(text="Для группы", callback_data="premium:group")
+    builder.button(text="Для себя", callback_data="premium:self")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 @router.message(Command("premium"))
 async def premium_command(
     message: Message,
     bot: Bot,
     session_factory,
     settings: Settings,
+    personal_config: PersonalConfigProvider,
 ) -> None:
     if message.chat.type != "private":
         username = settings.bot_username.strip().lstrip("@")
@@ -198,31 +359,195 @@ async def premium_command(
         return
     if message.from_user is None:
         return
+
+    personal_config_value = await personal_config.get()
+    personal_available = (
+        _available(lambda value: _personal_product_for_settings(value, personal_config_value), settings) is not None
+    )
+    if personal_available:
+        group_available = _available(_product_for_settings, settings) is not None
+        await message.answer(
+            "<b>Selara AI</b>\n"
+            "Для группы — AI-функции чата и автоматические итоги дня.\n"
+            "Для себя — Selara Personal: личная подписка на AI в личных сообщениях.\n\n"
+            "Что оформляем?",
+            parse_mode="HTML",
+            reply_markup=_product_choice_keyboard(group_available=group_available),
+        )
+        return
+
+    # Selara Personal stays hidden until SELARA_PERSONAL_PRICE_STARS is set.
+    text, markup = await _group_offer(settings=settings, session_factory=session_factory, user_id=message.from_user.id)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data == "premium:group")
+async def show_group_offer(query: CallbackQuery, session_factory, settings: Settings) -> None:
+    await query.answer()
+    if query.message is None or query.message.chat.type != "private" or query.from_user is None:
+        return
+    text, markup = await _group_offer(settings=settings, session_factory=session_factory, user_id=query.from_user.id)
+    await _edit_callback_message(query, text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "premium:self")
+async def show_personal_offer(
+    query: CallbackQuery, session_factory, settings: Settings, personal_config: PersonalConfigProvider
+) -> None:
+    await query.answer()
+    config = await personal_config.get()
+    if query.message is None or query.message.chat.type != "private" or query.from_user is None:
+        return
+    if resolve_owner_private_exemption(user_id=query.from_user.id, admin_user_id=settings.admin_user_id):
+        await _edit_callback_message(
+            query, "Selara Personal уже доступна вам через внутренний доступ. Покупка не требуется."
+        )
+        return
     try:
-        product = _product_for_settings(settings)
+        product = _personal_product_for_settings(settings, config)
     except SelaraAiProductUnavailable:
-        await message.answer("Покупка Selara AI пока недоступна: цена или AI-провайдер ещё не настроены.")
-        logger.warning("Selara AI checkout unavailable reason=product_not_configured")
+        await _edit_callback_message(query, "Покупка временно недоступна: цена или AI-провайдер ещё не настроены.")
+        return
+    repository = SqlAlchemyTelegramStarsRepository(session_factory)
+    entitlement = await repository.get_user_entitlement(user_id=query.from_user.id)
+    now = datetime.now(timezone.utc)
+    active_until = (
+        entitlement.valid_until
+        if entitlement is not None and entitlement.status == "active" and entitlement.valid_until > now
+        else None
+    )
+    if config.ail_enabled and config.ail_limits is not None:
+        # AI Limits mode: the budget is the config's, not a request count fixed at purchase.
+        ail = config.ail_limits
+        status = (
+            f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
+            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
+            if active_until is not None
+            else f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
+        )
+        text = (
+            f"<b>{escape(product.title)}</b>\n"
+            + status
+            + f"Free: {ail.free_daily} AIL в сутки бесплатно.\n"
+            f"Selara Personal предоставляет {ail.paid_daily} AIL в сутки.\n"
+            "Разные модели расходуют разное количество AIL за запрос — стоимость видна в /ai.\n"
+            "Подписка оформляется для вашего аккаунта, а не для чата.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
+        )
+    elif active_until is not None:
+        current_limit = entitlement.paid_daily_limit or config.limits.paid_daily
+        renewed_limit = max(current_limit, config.limits.paid_daily)
+        text = (
+            f"<b>{escape(product.title)}</b>\n"
+            f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
+            f"Сейчас ваш лимит — {current_limit} запросов в сутки.\n"
+            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>; "
+            f"лимит будет {renewed_limit} (больший из текущего и предлагаемого {config.limits.paid_daily}), "
+            "оплаченные дни не урезаются.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
+        )
+    else:
+        text = (
+            f"<b>{escape(product.title)}</b>\n"
+            f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
+            f"Бесплатно в личке доступно {config.limits.free_daily} AI-запросов в сутки, "
+            f"с Selara Personal — {config.limits.paid_daily}.\n"
+            "Подписка оформляется для вашего аккаунта, а не для чата.\n"
+            "Перед оплатой нужно подтвердить принятие условий покупки."
+        )
+    await _edit_callback_message(
+        query,
+        text,
+        reply_markup=_personal_purchase_keyboard(
+            price_stars=product.price_stars, terms_version=personal_terms_version(ail_enabled=config.ail_enabled)
+        ),
+    )
+
+
+@router.callback_query(F.data == "premium:terms_self")
+async def show_personal_terms(query: CallbackQuery, personal_config: PersonalConfigProvider) -> None:
+    await query.answer()
+    if query.message is None or query.message.chat.type != "private":
+        return
+    await _edit_callback_message(
+        query, _personal_terms_text(await personal_config.get()), reply_markup=_personal_terms_keyboard()
+    )
+
+
+@router.callback_query(F.data.startswith("premium:self_accept"))
+async def accept_terms_and_buy_selara_personal(
+    query: CallbackQuery,
+    bot: Bot,
+    session_factory,
+    settings: Settings,
+    personal_config: PersonalConfigProvider,
+) -> None:
+    await query.answer()
+    config = await personal_config.get()
+    if query.message is None or query.message.chat.type != "private" or query.from_user is None:
+        return
+    if resolve_owner_private_exemption(user_id=query.from_user.id, admin_user_id=settings.admin_user_id):
+        await _edit_callback_message(
+            query, "Selara Personal уже доступна вам через внутренний доступ. Покупка не требуется."
+        )
+        return
+    current_terms = personal_terms_version(ail_enabled=config.ail_enabled)
+    # Buttons sent before this release carry no version: they were rendered with personal-v1.
+    shown_terms = (query.data or "").split(":", 2)[2] if (query.data or "").count(":") >= 2 else SELARA_PERSONAL_TERMS_VERSION
+    if shown_terms != current_terms:
+        # The limits system changed after the offer was shown: never record terms the buyer did not see.
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Открыть предложение заново", callback_data="premium:self")
+        await _edit_callback_message(
+            query,
+            "Условия Selara Personal изменились после того, как вы открыли предложение. "
+            "Проверьте предложение и условия ещё раз — счёт не создан.",
+            reply_markup=builder.as_markup(),
+        )
+        return
+    try:
+        product = _personal_product_for_settings(settings, config)
+    except SelaraAiProductUnavailable:
+        await _edit_callback_message(query, "Покупка временно недоступна: цена или AI-провайдер ещё не настроены.")
         return
 
     repository = SqlAlchemyTelegramStarsRepository(session_factory)
-    chats = await repository.list_purchasable_chats(user_id=message.from_user.id)
-    if not chats:
-        await message.answer(
-            "Не нашёл доступных чатов. Сначала отправьте сообщение в нужной группе, "
-            "затем откройте /premium в личке с ботом."
+    try:
+        intent = await repository.create_personal_purchase_intent(
+            buyer_user_id=query.from_user.id,
+            product=product,
+            # The version the buyer was shown and accepted; a later mode switch never rewrites it.
+            terms_version=current_terms,
+            terms_accepted_at=datetime.now(timezone.utc),
         )
+    except PurchaseIntentRateLimited:
+        logger.info("Selara Personal invoice creation rate limited")
+        await _edit_callback_message(query, "Счёт уже создавался недавно. Подождите минуту и попробуйте снова.")
         return
-    await message.answer(
-        f"<b>{escape(product.title)}</b>\n"
-        f"Цена: <b>{product.price_stars} ⭐</b>.\n"
-        "Доступ оформляется для чата и включает автоматические итоги дня. "
-        f"Каждая повторная покупка добавляет ещё {product.duration_label}.\n"
-        "Перед счётом можно прочитать /terms; продление не автоматическое.\n\n"
-        "Выберите чат:",
-        parse_mode="HTML",
-        reply_markup=_selection_keyboard(chats),
-    )
+    except Exception:
+        logger.exception("Selara Personal purchase intent creation failed")
+        await _edit_callback_message(query, "Не удалось создать счёт. Попробуйте позже.")
+        return
+
+    try:
+        await bot.send_invoice(
+            chat_id=query.from_user.id,
+            title=product.title,
+            description=product.description,
+            payload=intent.invoice_payload,
+            provider_token="",
+            currency=product.currency,
+            prices=[LabeledPrice(label=product.title, amount=product.price_stars)],
+        )
+        try:
+            await repository.mark_invoice_sent(intent_id=intent.id)
+        except Exception:
+            logger.exception("Selara Personal invoice sent timestamp could not be saved")
+        logger.info("Selara Personal invoice sent")
+        await _edit_callback_message(query, "Счёт отправлен отдельным сообщением в этот личный чат.")
+    except TelegramAPIError as exc:
+        logger.warning("Selara Personal invoice send failed exception_type=%s", type(exc).__name__)
+        await _edit_callback_message(query, "Не удалось отправить счёт. Отправьте /premium и попробуйте ещё раз.")
 
 
 @router.message(Command("terms"))
@@ -435,9 +760,15 @@ async def _validate_pre_checkout(
     if intent.buyer_user_id != query.from_user.id:
         logger.warning("Telegram Stars pre-checkout rejected reason=wrong_buyer")
         return False, "Этот счёт предназначен другому пользователю."
-    if intent.product_key != SELARA_AI_PRODUCT_KEY:
+    # Older stored intents and test doubles carry no scope: they are chat purchases.
+    target_scope = getattr(intent, "target_scope", PRODUCT_SCOPE_CHAT)
+    spec = get_product_spec(intent.product_key)
+    if spec is None or spec.scope != target_scope:
         logger.warning("Telegram Stars pre-checkout rejected reason=unsupported_product")
         return False, "Этот продукт больше недоступен. Отправьте /premium."
+    if target_scope == PRODUCT_SCOPE_USER and getattr(intent, "target_user_id", None) != query.from_user.id:
+        logger.warning("Telegram Stars pre-checkout rejected reason=wrong_buyer")
+        return False, "Этот счёт предназначен другому пользователю."
     if intent.amount_stars != query.total_amount:
         logger.warning("Telegram Stars pre-checkout rejected reason=wrong_amount")
         return False, "Сумма счёта не совпадает. Запустите /premium заново."
@@ -461,26 +792,28 @@ async def _validate_pre_checkout(
         logger.warning("Telegram Stars pre-checkout rejected reason=provider_unavailable")
         return False, _CHECKOUT_PROVIDER_ERROR
 
-    authorized, reason = await _is_purchase_authorized(
-        bot=bot,
-        buyer_user_id=query.from_user.id,
-        chat_id=intent.chat_id,
-    )
-    if not authorized:
-        logger.info("Telegram Stars pre-checkout authority denied chat_id=%s reason=%s", intent.chat_id, reason)
-        return False, (
-            _CHECKOUT_ACCESS_ERROR
-            if reason in {"buyer_not_admin", "bot_unavailable"}
-            else _CHECKOUT_RETRY_ERROR
+    if target_scope == PRODUCT_SCOPE_CHAT:
+        authorized, reason = await _is_purchase_authorized(
+            bot=bot,
+            buyer_user_id=query.from_user.id,
+            chat_id=intent.chat_id,
         )
+        if not authorized:
+            logger.info("Telegram Stars pre-checkout authority denied chat_id=%s reason=%s", intent.chat_id, reason)
+            return False, (
+                _CHECKOUT_ACCESS_ERROR
+                if reason in {"buyer_not_admin", "bot_unavailable"}
+                else _CHECKOUT_RETRY_ERROR
+            )
 
+    # A personal purchase belongs to the buyer: no chat admin or bot-membership check applies.
     result = await repository.accept_pre_checkout(
         invoice_payload=query.invoice_payload,
         buyer_user_id=query.from_user.id,
         amount_stars=query.total_amount,
         currency=query.currency,
         query_id=query.id,
-        checked_chat_id=intent.chat_id,
+        checked_chat_id=intent.chat_id if target_scope == PRODUCT_SCOPE_CHAT else None,
     )
     if result.reason == "target_changed" and result.chat_id is not None:
         target_authorized, target_reason = await _is_purchase_authorized(
@@ -613,6 +946,9 @@ async def selara_ai_successful_payment(
         await _notify_owner_of_rejected_payment(bot=bot, settings=settings, result=result)
         await _send_payment_reconciliation_message(message, result)
         return
+    if result.target_scope == PRODUCT_SCOPE_USER:
+        await _confirm_personal_payment(message, bot=bot, settings=settings, result=result)
+        return
     if result.chat_id is None or result.valid_until is None:
         # The update is already durably recorded. Retry delivery only; never
         # re-run the economic effect to recover this user-facing message.
@@ -656,6 +992,40 @@ async def selara_ai_successful_payment(
         logger.error(
             "Selara AI payment confirmation delivery failed chat_id=%s exception_type=%s",
             result.chat_id,
+            type(exc).__name__,
+        )
+
+
+async def _confirm_personal_payment(
+    message: Message,
+    *,
+    bot: Bot,
+    settings: Settings,
+    result: PaymentResult,
+) -> None:
+    if result.user_id is None or result.valid_until is None:
+        # Already durably recorded: retry delivery only, never the economic effect.
+        await _send_payment_owner_alert(
+            bot=bot,
+            settings=settings,
+            text=(
+                "🚨 Telegram Stars платёж Selara Personal сохранён, но подтверждение доступа не удалось собрать. "
+                f"Payment record: {result.payment_id or 'unknown'}; требуется ручная проверка."
+            ),
+            log_event="confirmation_context_missing",
+        )
+        await _send_payment_reconciliation_message(message, result)
+        return
+    until = _format_date(result.valid_until, settings.bot_timezone)
+    try:
+        async with asyncio.timeout(_PAYMENT_CONFIRMATION_TIMEOUT_SECONDS):
+            await message.answer(
+                f"✅ Selara Personal активна до <b>{until}</b>. Продление не автоматическое.",
+                parse_mode="HTML",
+            )
+    except Exception as exc:
+        logger.error(
+            "Selara Personal payment confirmation delivery failed exception_type=%s",
             type(exc).__name__,
         )
 

@@ -33,7 +33,7 @@ from selara.domain.entities import ChatSnapshot, ChatTrigger, CustomSocialAction
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission, is_telegram_chat_admin
-from selara.presentation.targeting import resolve_chat_target_user
+from selara.presentation.targeting import NOT_CHAT_MEMBER_TEXT, is_target_active_chat_member, resolve_chat_target_user
 from selara.presentation.family_tree import build_family_tree_image
 from selara.presentation.handlers.settings_common import settings_to_dict
 
@@ -1296,11 +1296,17 @@ async def _send_family_request(
         if relation_type == "parent":
             example = f"/adopt @username ({adopt_verb})"
         else:
-            example = "/pet @username"
+            example = "/bepet @username"
         await message.answer(f"Формат: reply или <code>{example}</code>.", parse_mode="HTML")
         return
     if target.telegram_user_id == message.from_user.id:
         await message.answer("Нельзя отправить запрос самому себе.")
+        return
+    if target.is_bot:
+        await message.answer("Нельзя отправить запрос боту.")
+        return
+    if not await is_target_active_chat_member(message, activity_repo, target=target):
+        await message.answer(NOT_CHAT_MEMBER_TEXT)
         return
 
     request_id = secrets.token_hex(8)
@@ -1354,12 +1360,23 @@ async def adopt_daughter_command(message: Message, command: CommandObject, activ
     )
 
 
-@router.message(Command("pet"))
+FAMILY_PET_RENAMED_HINT = "ℹ️ Команда «стать питомцем» теперь называется <code>/bepet</code>. Старая <code>/pet</code> скоро перейдёт к AI-питомцам."
+
+
+@router.message(Command("bepet"))
 async def pet_command(message: Message, command: CommandObject, activity_repo, chat_settings: ChatSettings) -> None:
     if not chat_settings.family_tree_enabled:
         await message.answer("Семейные команды отключены в этом чате.")
         return
     await _send_family_request(message, activity_repo=activity_repo, relation_type="pet", raw_args=command.args)
+
+
+@router.message(Command("pet"))
+async def legacy_pet_command(message: Message, command: CommandObject, activity_repo, chat_settings: ChatSettings) -> None:
+    # Переходный период: подсказываем новое имя и выполняем старое действие.
+    if chat_settings.family_tree_enabled:
+        await message.answer(FAMILY_PET_RENAMED_HINT, parse_mode="HTML")
+    await pet_command(message, command, activity_repo, chat_settings)
 
 
 async def _build_family_section_labels(activity_repo, *, chat_id: int, user_ids: list[int]) -> list[str]:

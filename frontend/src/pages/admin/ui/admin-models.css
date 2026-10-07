@@ -1,0 +1,59 @@
+.admin-models,
+.admin-quota,
+.admin-model-card,
+.admin-model-form {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.admin-model-card {
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color, #454553);
+  border-radius: 12px;
+}
+.admin-model-form {
+  display: grid;
+  gap: 12px;
+  margin-block: 12px;
+}
+.admin-model-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.admin-model-form input:not([type="checkbox"]),
+.admin-model-form select,
+.admin-model-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px;
+  font: inherit;
+}
+.admin-model-form .admin-model-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.admin-model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.admin-models button,
+.admin-quota button {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.admin-quota-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}

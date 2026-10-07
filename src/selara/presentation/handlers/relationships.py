@@ -24,7 +24,7 @@ from selara.domain.entities import (
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.audit import log_chat_action
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
-from selara.presentation.targeting import resolve_chat_target_user
+from selara.presentation.targeting import NOT_CHAT_MEMBER_TEXT, is_target_active_chat_member, resolve_chat_target_user
 
 router = Router(name="relationships")
 logger = logging.getLogger(__name__)
@@ -658,6 +658,9 @@ async def _send_relationship_proposal(
     if target is None:
         cmd = "/pair" if kind == "pair" else "/marry"
         await message.answer(f"Формат: reply + <code>{cmd}</code> или <code>{cmd} @username</code>.", parse_mode="HTML")
+        return
+    if not await is_target_active_chat_member(message, activity_repo, target=target):
+        await message.answer(NOT_CHAT_MEMBER_TEXT)
         return
 
     chat = ChatSnapshot(

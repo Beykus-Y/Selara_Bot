@@ -28,6 +28,10 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "auction",
         "bid",
         "growth",
+        "growth_action",
+        # Гача текстом (ключи resolver, не каталога)
+        "gacha_pull",
+        "gacha_skip",
         "title",
         # Отношения
         "pair",
@@ -44,7 +48,19 @@ _LOCKED_COMMANDS: frozenset[str] = frozenset(
         "divorce",
         # Семья
         "adopt",
+        "adoptdaughter",
+        "family_pet",
+        "bepet",
         "pet",
+        "pets",
+        "pet_new",
+        "pet_shop",
+        "pet_travel",
+        "pet_home",
+        "escape_family",
+        "escape_pet",
+        "escapefamily",
+        "escapepet",
         # Игры
         "game",
         # Прочие активности
@@ -87,11 +103,27 @@ _LOCKED_CALLBACK_PREFIXES: tuple[str, ...] = (
     "relact:",
     "famreq:",
     "famleave:",
+    "aipet:",
     "clan:",
     "cap:",
     "ipm:",
     "menu:",
 )
+
+
+# Мутирующие текстовые команды кланов (handlers/clans.py): отдельный роутер с text-фильтрами,
+# ключей каталога у них нет. Просмотр (`клан`, `кланы`) не блокируется.
+_LOCKED_CLAN_TEXT_PREFIXES: tuple[str, ...] = ("создать клан ", "вступить в клан ")
+_LOCKED_CLAN_TEXT_EXACT: frozenset[str] = frozenset({"удалить клан", "выйти из клана"})
+
+CHAT_WRITE_LOCK_ANSWER = "🔒 Чат заблокирован администратором. Команда недоступна."
+
+
+def is_write_locked_command(command_key: str | None) -> bool:
+    """Ключ команды блокируется при chat_write_locked (включая все соцдействия)."""
+    if command_key is None:
+        return False
+    return command_key in _LOCKED_COMMANDS or command_key.startswith("social_")
 
 
 class ChatWriteLockMiddleware(BaseMiddleware):
@@ -117,6 +149,10 @@ class ChatWriteLockMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         raw_text = (event.text or "").strip()
+        lowered = raw_text.lower()
+        if lowered.startswith(_LOCKED_CLAN_TEXT_PREFIXES) or lowered in _LOCKED_CLAN_TEXT_EXACT:
+            await event.answer(CHAT_WRITE_LOCK_ANSWER)
+            return None
         if raw_text.startswith("/"):
             # Извлекаем имя команды (до пробела и до @).
             command_key = raw_text[1:].split()[0].split("@")[0].lower()
@@ -124,10 +160,10 @@ class ChatWriteLockMiddleware(BaseMiddleware):
             match = match_builtin_command(raw_text)
             command_key = match.command_key if match is not None else None
 
-        if command_key not in _LOCKED_COMMANDS:
+        if not is_write_locked_command(command_key):
             return await handler(event, data)
 
-        await event.answer("🔒 Чат заблокирован администратором. Команда недоступна.")
+        await event.answer(CHAT_WRITE_LOCK_ANSWER)
         return None
 
     async def _handle_callback(

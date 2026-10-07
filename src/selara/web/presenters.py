@@ -183,7 +183,7 @@ def setting_value_display(key: str, value: Any) -> str:
     if key == "alias_mode":
         return alias_mode_label_ru(lowered)
     if key == "text_commands_locale":
-        return "русский" if lowered == "ru" else "english" if lowered == "en" else normalized
+        return "русский" if lowered == "ru" else "en (пока русские команды)" if lowered == "en" else normalized
     if key == "economy_mode":
         return "общая" if lowered == "global" else "по группе" if lowered == "local" else normalized
     if not normalized.strip():

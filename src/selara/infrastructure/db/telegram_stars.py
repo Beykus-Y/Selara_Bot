@@ -10,12 +10,29 @@ from uuid import uuid4
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.application.feature_access import AccessTier, FeatureEntitlement
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from selara.application.feature_access import (
+    AIL_UNIT,
+    AccessTier,
+    FeatureEntitlement,
+    GroupMemberQuotaLimits,
+    PersonalQuotaLimits,
+    DEFAULT_PET_TALK_DAILY_LIMIT,
+    paid_group_member_policy,
+    paid_personal_policy,
+    paid_pet_policy,
+)
+from selara.application.personal_config import PersonalConfigProvider
 from selara.application.selara_ai_product import (
+    PRODUCT_SCOPE_CHAT,
+    PRODUCT_SCOPE_USER,
     PURCHASE_INTENT_TTL,
     SELARA_AI_CURRENCY,
     SELARA_AI_PRODUCT_KEY,
+    SELARA_PERSONAL_PRODUCT_KEY,
     SelaraAiProduct,
+    get_product_spec,
     invoice_payload_for_intent,
     parse_invoice_payload,
 )
@@ -26,6 +43,8 @@ from selara.infrastructure.db.models import (
     SelaraAiPaymentModel,
     SelaraAiPurchaseIntentModel,
     UserChatActivityModel,
+    UserEntitlementModel,
+    UserModel,
 )
 from selara.infrastructure.db.selara_ai_payment_refund import SelaraAiPaymentRefundModel
 from selara.infrastructure.llm.features import AiFeature
@@ -42,8 +61,8 @@ class PurchaseIntentRateLimited(Exception):
 class PurchaseIntent:
     id: str
     buyer_user_id: int
-    source_chat_id: int
-    chat_id: int
+    source_chat_id: int | None
+    chat_id: int | None
     chat_title: str | None
     product_key: str
     amount_stars: int
@@ -57,6 +76,8 @@ class PurchaseIntent:
     consumed_at: datetime | None
     terms_version: str | None = None
     terms_accepted_at: datetime | None = None
+    target_scope: str = PRODUCT_SCOPE_CHAT
+    target_user_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +98,9 @@ class PaymentResult:
     # Set only for charge_conflict: the already stored payment that owns the charge id.
     # The conflicting update itself is not persisted, so it has no refundable payment_id.
     conflicting_payment_id: int | None = None
+    # "chat" payments activate chat_id; "user" payments (Selara Personal) activate user_id.
+    target_scope: str = PRODUCT_SCOPE_CHAT
+    user_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +119,16 @@ class PaymentTotals:
 
 def entitlement_lock_key(*, chat_id: int, product_key: str) -> int:
     payload = f"selara-ai-entitlement\0{product_key}\0{chat_id}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+
+
+def user_entitlement_lock_key(*, user_id: int, product_key: str) -> int:
+    payload = f"selara-ai-user-entitlement\0{product_key}\0{user_id}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+
+
+def _personal_intent_lock_key(buyer_user_id: int) -> int:
+    payload = f"selara-personal-intent\0{buyer_user_id}".encode("utf-8")
     return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
 
 
@@ -131,17 +165,83 @@ def _snapshot(row: SelaraAiPurchaseIntentModel) -> PurchaseIntent:
         consumed_at=row.consumed_at,
         terms_version=row.terms_version,
         terms_accepted_at=row.terms_accepted_at,
+        target_scope=row.target_scope,
+        target_user_id=row.target_user_id,
     )
+
+
+def _snapshot_limits(limits: PersonalQuotaLimits, sold_paid_limit: int | None) -> PersonalQuotaLimits:
+    """The limit a subscriber bought, never below the current free limit (and the config for old rows)."""
+    paid = sold_paid_limit if sold_paid_limit is not None else limits.paid_daily
+    return PersonalQuotaLimits(free_daily=limits.free_daily, paid_daily=max(paid, limits.free_daily + 1))
+
+
+class SqlAlchemyUserEntitlementResolver:
+    """PostgreSQL resolver for the personal (user-scoped) entitlement."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        config: PersonalConfigProvider,
+        *,
+        pet_daily_limit: int = DEFAULT_PET_TALK_DAILY_LIMIT,
+    ) -> None:
+        self._session_factory = session_factory
+        self._config = config
+        self._pet_daily_limit = pet_daily_limit
+
+    async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
+        if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
+            return FeatureEntitlement(access_tier=AccessTier.FREE)
+        limits = (await self._config.get()).active_limits
+        try:
+            async with self._session_factory() as session:
+                row = await session.scalar(
+                    select(UserEntitlementModel).where(
+                        UserEntitlementModel.user_id == user_id,
+                        UserEntitlementModel.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                        UserEntitlementModel.status == "active",
+                    )
+                )
+        except Exception:
+            logger.warning(
+                "User entitlement resolution failed feature=%s trigger=%s",
+                feature.value,
+                trigger,
+            )
+            raise
+        if row is None:
+            return FeatureEntitlement(access_tier=AccessTier.FREE)
+        return FeatureEntitlement(
+            access_tier=AccessTier.PAID,
+            valid_until=row.valid_until,
+            source="telegram_stars",
+            product_key=row.product_key,
+            quota_policy=(
+                paid_pet_policy(self._pet_daily_limit, feature)
+                if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT)
+                # The sold request limit is a requests-mode promise; AIL budgets come from the config.
+                else paid_personal_policy(
+                    limits if limits.unit == AIL_UNIT else _snapshot_limits(limits, row.paid_daily_limit)
+                )
+            ),
+        )
 
 
 class SqlAlchemyChatEntitlementResolver:
     """PostgreSQL resolver wired into the existing FeatureAccessService seam."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        group_member_limits: GroupMemberQuotaLimits | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._group_member_limits = group_member_limits
 
     async def resolve(self, *, chat_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
-        if feature not in {AiFeature.LLM_ADMIN, AiFeature.DAILY_SUMMARY}:
+        if feature not in {AiFeature.LLM_ADMIN, AiFeature.DAILY_SUMMARY, AiFeature.GROUP_MEMBER}:
             return FeatureEntitlement(access_tier=AccessTier.FREE)
         try:
             async with self._session_factory() as session:
@@ -162,11 +262,18 @@ class SqlAlchemyChatEntitlementResolver:
             raise
         if row is None:
             return FeatureEntitlement(access_tier=AccessTier.FREE)
+        quota_policy = None
+        if feature == AiFeature.GROUP_MEMBER:
+            if self._group_member_limits is None:
+                # Without configured limits the paid tier keeps the free policy rather than going unlimited.
+                return FeatureEntitlement(access_tier=AccessTier.FREE)
+            quota_policy = paid_group_member_policy(self._group_member_limits)
         return FeatureEntitlement(
             access_tier=AccessTier.PAID,
             valid_until=row.valid_until,
             source="telegram_stars",
             product_key=row.product_key,
+            quota_policy=quota_policy,
         )
 
 
@@ -222,6 +329,8 @@ class SqlAlchemyTelegramStarsRepository:
     ) -> PurchaseIntent:
         if not terms_version.strip():
             raise ValueError("Terms acceptance version is required")
+        if product.scope != PRODUCT_SCOPE_CHAT:
+            raise ValueError("Chat purchase intents require a chat-scoped product")
         current = _as_utc(now or datetime.now(timezone.utc))
         accepted_at = _as_utc(terms_accepted_at)
         intent_id = str(uuid4())
@@ -257,6 +366,7 @@ class SqlAlchemyTelegramStarsRepository:
                     chat_id=chat_id,
                     chat_title=chat_title,
                     product_key=product.key,
+                    target_scope=PRODUCT_SCOPE_CHAT,
                     amount_stars=product.price_stars,
                     currency=product.currency,
                     duration_seconds=int(product.duration.total_seconds()),
@@ -275,6 +385,69 @@ class SqlAlchemyTelegramStarsRepository:
             chat_id,
             product.key,
         )
+        return result
+
+    async def create_personal_purchase_intent(
+        self,
+        *,
+        buyer_user_id: int,
+        product: SelaraAiProduct,
+        terms_version: str,
+        terms_accepted_at: datetime,
+        now: datetime | None = None,
+    ) -> PurchaseIntent:
+        """Create an intent for the buyer's own personal subscription (gifts are off in the MVP)."""
+        if not terms_version.strip():
+            raise ValueError("Terms acceptance version is required")
+        if product.scope != PRODUCT_SCOPE_USER:
+            raise ValueError("Personal purchase intents require a user-scoped product")
+        if product.paid_daily_limit is None or product.paid_daily_limit <= 0:
+            raise ValueError("Personal purchase intents must carry the daily limit they sell")
+        current = _as_utc(now or datetime.now(timezone.utc))
+        accepted_at = _as_utc(terms_accepted_at)
+        intent_id = str(uuid4())
+        payload = invoice_payload_for_intent(intent_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                _require_postgresql(session)
+                # Serialize the cooldown check per buyer so concurrent taps cannot both pass it.
+                await _advisory_xact_lock(session, _personal_intent_lock_key(buyer_user_id))
+                recent_intent_id = await session.scalar(
+                    select(SelaraAiPurchaseIntentModel.id)
+                    .where(
+                        SelaraAiPurchaseIntentModel.buyer_user_id == buyer_user_id,
+                        SelaraAiPurchaseIntentModel.target_scope == PRODUCT_SCOPE_USER,
+                        SelaraAiPurchaseIntentModel.created_at
+                        >= current - PURCHASE_INTENT_CREATE_COOLDOWN,
+                    )
+                    .limit(1)
+                )
+                if recent_intent_id is not None:
+                    raise PurchaseIntentRateLimited
+                row = SelaraAiPurchaseIntentModel(
+                    id=intent_id,
+                    buyer_user_id=buyer_user_id,
+                    source_chat_id=None,
+                    chat_id=None,
+                    chat_title=None,
+                    target_scope=PRODUCT_SCOPE_USER,
+                    target_user_id=buyer_user_id,
+                    paid_daily_limit=product.paid_daily_limit,
+                    product_key=product.key,
+                    amount_stars=product.price_stars,
+                    currency=product.currency,
+                    duration_seconds=int(product.duration.total_seconds()),
+                    invoice_payload=payload,
+                    terms_version=terms_version,
+                    terms_accepted_at=accepted_at,
+                    status="open",
+                    created_at=current,
+                    expires_at=current + PURCHASE_INTENT_TTL,
+                )
+                session.add(row)
+                await session.flush()
+                result = _snapshot(row)
+        logger.info("Selara Personal purchase intent created product=%s", product.key)
         return result
 
     async def get_purchase_intent(self, *, invoice_payload: str) -> PurchaseIntent | None:
@@ -309,7 +482,7 @@ class SqlAlchemyTelegramStarsRepository:
         amount_stars: int,
         currency: str,
         query_id: str,
-        checked_chat_id: int,
+        checked_chat_id: int | None = None,
         now: datetime | None = None,
     ) -> PreCheckoutResult:
         intent_id = parse_invoice_payload(invoice_payload)
@@ -329,8 +502,10 @@ class SqlAlchemyTelegramStarsRepository:
                     result = PreCheckoutResult(False, "unknown_intent")
                 elif row.buyer_user_id != buyer_user_id:
                     result = PreCheckoutResult(False, "wrong_buyer")
-                elif row.product_key != SELARA_AI_PRODUCT_KEY:
+                elif not _product_matches_scope(row.product_key, row.target_scope):
                     result = PreCheckoutResult(False, "unsupported_product")
+                elif row.target_scope == PRODUCT_SCOPE_USER and row.target_user_id != buyer_user_id:
+                    result = PreCheckoutResult(False, "wrong_buyer")
                 elif row.amount_stars != amount_stars:
                     result = PreCheckoutResult(False, "wrong_amount")
                 elif row.currency != SELARA_AI_CURRENCY or currency != row.currency:
@@ -341,6 +516,12 @@ class SqlAlchemyTelegramStarsRepository:
                     result = PreCheckoutResult(False, "intent_already_used")
                 elif row.terms_version is None or row.terms_accepted_at is None:
                     result = PreCheckoutResult(False, "terms_not_accepted")
+                elif row.target_scope == PRODUCT_SCOPE_USER:
+                    # A personal purchase targets the buyer: there is no chat to check.
+                    row.pre_checkout_query_id = query_id
+                    row.pre_checkout_accepted_at = current
+                    row.status = "checkout_accepted"
+                    result = PreCheckoutResult(True)
                 elif row.chat_id != checked_chat_id:
                     result = PreCheckoutResult(False, "target_changed", chat_id=row.chat_id)
                 else:
@@ -434,6 +615,8 @@ class SqlAlchemyTelegramStarsRepository:
                         buyer_user_id=buyer_user_id,
                         source_chat_id=intent.source_chat_id if intent is not None else None,
                         target_chat_id=intent.chat_id if intent is not None else None,
+                        target_scope=intent.target_scope if intent is not None else PRODUCT_SCOPE_CHAT,
+                        target_user_id=intent.target_user_id if intent is not None else None,
                         product_key=intent.product_key if intent is not None else None,
                         amount_stars=amount_stars,
                         currency=currency,
@@ -449,9 +632,15 @@ class SqlAlchemyTelegramStarsRepository:
                             reason,
                             chat_id=intent.chat_id if intent else None,
                             payment_id=payment.id,
+                            target_scope=intent.target_scope if intent else PRODUCT_SCOPE_CHAT,
+                            user_id=intent.target_user_id if intent else None,
+                        )
+                    elif intent is not None and intent.target_scope == PRODUCT_SCOPE_USER:
+                        result = await self._apply_user_entitlement(
+                            session, intent=intent, payment_id=payment.id, paid_at=paid_at
                         )
                     else:
-                        assert intent is not None
+                        assert intent is not None and intent.chat_id is not None
                         await _advisory_xact_lock(
                             session,
                             entitlement_lock_key(chat_id=intent.chat_id, product_key=intent.product_key),
@@ -478,14 +667,7 @@ class SqlAlchemyTelegramStarsRepository:
                             session.add(entitlement)
                         else:
                             entitlement_action = "extended"
-                            if entitlement.status == "active" and entitlement.valid_until > paid_at:
-                                base = entitlement.valid_until
-                            else:
-                                base = paid_at
-                                entitlement.valid_from = paid_at
-                            entitlement.valid_until = base + duration
-                            entitlement.status = "active"
-                            entitlement.updated_at = func.now()
+                            _extend_entitlement(entitlement, paid_at=paid_at, duration=duration)
                         intent.status = "consumed"
                         intent.consumed_at = intent.consumed_at or paid_at
                         await session.flush()
@@ -499,9 +681,10 @@ class SqlAlchemyTelegramStarsRepository:
 
         if result.state == "applied":
             logger.info(
-                "Telegram Stars payment applied chat_id=%s product=%s entitlement_action=%s",
+                "Telegram Stars payment applied scope=%s chat_id=%s product=%s entitlement_action=%s",
+                result.target_scope,
                 result.chat_id,
-                SELARA_AI_PRODUCT_KEY,
+                SELARA_PERSONAL_PRODUCT_KEY if result.target_scope == PRODUCT_SCOPE_USER else SELARA_AI_PRODUCT_KEY,
                 result.entitlement_action,
             )
         elif result.state == "duplicate":
@@ -510,6 +693,73 @@ class SqlAlchemyTelegramStarsRepository:
             logger.error("Telegram Stars payment rejected reason=%s", result.reason)
         return result
 
+    async def _apply_user_entitlement(
+        self,
+        session: AsyncSession,
+        *,
+        intent: SelaraAiPurchaseIntentModel,
+        payment_id: int,
+        paid_at: datetime,
+    ) -> PaymentResult:
+        """Grant or extend the buyer's personal entitlement inside the payment transaction."""
+        assert intent.target_user_id is not None
+        user_id = intent.target_user_id
+        # The paying user normally exists already; never let a missing row lose a confirmed payment.
+        await session.execute(
+            pg_insert(UserModel)
+            .values(telegram_user_id=user_id, is_bot=False)
+            .on_conflict_do_nothing(index_elements=[UserModel.telegram_user_id])
+        )
+        await _advisory_xact_lock(
+            session,
+            user_entitlement_lock_key(user_id=user_id, product_key=intent.product_key),
+        )
+        entitlement = await session.scalar(
+            select(UserEntitlementModel)
+            .where(
+                UserEntitlementModel.user_id == user_id,
+                UserEntitlementModel.product_key == intent.product_key,
+            )
+            .with_for_update()
+        )
+        duration = timedelta(seconds=intent.duration_seconds)
+        entitlement_action: Literal["created", "extended"]
+        if entitlement is None:
+            entitlement_action = "created"
+            entitlement = UserEntitlementModel(
+                user_id=user_id,
+                product_key=intent.product_key,
+                status="active",
+                valid_from=paid_at,
+                valid_until=paid_at + duration,
+                paid_daily_limit=intent.paid_daily_limit,
+            )
+            session.add(entitlement)
+        else:
+            entitlement_action = "extended"
+            still_active = entitlement.status == "active" and entitlement.valid_until > paid_at
+            previous_limit = entitlement.paid_daily_limit
+            _extend_entitlement(entitlement, paid_at=paid_at, duration=duration)
+            # While the subscription is active the larger limit wins, so days that were
+            # already paid for are never cut by a later, lower offer; after expiry the
+            # new purchase simply sets its own limit. Config edits never touch this value.
+            if intent.paid_daily_limit is not None:
+                if still_active and previous_limit is not None:
+                    entitlement.paid_daily_limit = max(previous_limit, intent.paid_daily_limit)
+                else:
+                    entitlement.paid_daily_limit = intent.paid_daily_limit
+        intent.status = "consumed"
+        intent.consumed_at = intent.consumed_at or paid_at
+        await session.flush()
+        return PaymentResult(
+            "applied",
+            valid_until=entitlement.valid_until,
+            entitlement_action=entitlement_action,
+            payment_id=payment_id,
+            target_scope=PRODUCT_SCOPE_USER,
+            user_id=user_id,
+        )
+
     async def _duplicate_result(
         self,
         session: AsyncSession,
@@ -517,6 +767,21 @@ class SqlAlchemyTelegramStarsRepository:
     ) -> PaymentResult:
         if payment.purchase_intent_id is None or payment.product_key is None:
             return PaymentResult("duplicate", "duplicate_rejected")
+        if payment.target_scope == PRODUCT_SCOPE_USER:
+            valid_until = None
+            if payment.target_user_id is not None:
+                valid_until = await session.scalar(
+                    select(UserEntitlementModel.valid_until).where(
+                        UserEntitlementModel.user_id == payment.target_user_id,
+                        UserEntitlementModel.product_key == payment.product_key,
+                    )
+                )
+            return PaymentResult(
+                "duplicate",
+                valid_until=valid_until,
+                target_scope=PRODUCT_SCOPE_USER,
+                user_id=payment.target_user_id,
+            )
         intent = await session.scalar(
             select(SelaraAiPurchaseIntentModel).where(
                 SelaraAiPurchaseIntentModel.id == payment.purchase_intent_id
@@ -607,6 +872,17 @@ class SqlAlchemyTelegramStarsRepository:
                 )
             )
 
+    async def get_user_entitlement(
+        self, *, user_id: int, product_key: str = SELARA_PERSONAL_PRODUCT_KEY
+    ) -> UserEntitlementModel | None:
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(UserEntitlementModel).where(
+                    UserEntitlementModel.user_id == user_id,
+                    UserEntitlementModel.product_key == product_key,
+                )
+            )
+
     async def get_chat_title(self, *, chat_id: int) -> str | None:
         async with self._session_factory() as session:
             return await session.scalar(
@@ -628,6 +904,20 @@ class SqlAlchemyTelegramStarsRepository:
                         ChatEntitlementModel.product_key == SELARA_AI_PRODUCT_KEY,
                         ChatEntitlementModel.status == "active",
                         ChatEntitlementModel.valid_until > current,
+                    )
+                )
+                or 0
+            )
+
+    async def active_paid_user_count(self, *, now: datetime | None = None) -> int:
+        current = _as_utc(now or datetime.now(timezone.utc))
+        async with self._session_factory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count(UserEntitlementModel.id)).where(
+                        UserEntitlementModel.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                        UserEntitlementModel.status == "active",
+                        UserEntitlementModel.valid_until > current,
                     )
                 )
                 or 0
@@ -684,8 +974,10 @@ def _payment_rejection_reason(
         return "unknown_intent"
     if intent.buyer_user_id != buyer_user_id:
         return "wrong_buyer"
-    if intent.product_key != SELARA_AI_PRODUCT_KEY:
+    if not _product_matches_scope(intent.product_key, intent.target_scope):
         return "unsupported_product"
+    if intent.target_scope == PRODUCT_SCOPE_USER and intent.target_user_id != buyer_user_id:
+        return "wrong_buyer"
     if amount_stars != intent.amount_stars:
         return "wrong_amount"
     if currency != intent.currency or currency != SELARA_AI_CURRENCY:
@@ -693,6 +985,24 @@ def _payment_rejection_reason(
     # Expiry and live admin/bot checks apply before payment. Once Telegram has
     # confirmed payment, they must not cancel the economic effect.
     return None
+
+
+def _product_matches_scope(product_key: str | None, target_scope: str | None) -> bool:
+    """A product may only be sold into the scope its catalog entry declares."""
+    spec = get_product_spec(product_key)
+    return spec is not None and spec.scope == target_scope
+
+
+def _extend_entitlement(entitlement, *, paid_at: datetime, duration: timedelta) -> None:
+    """Add ``duration`` after the remaining active time, or restart from the payment moment."""
+    if entitlement.status == "active" and entitlement.valid_until > paid_at:
+        base = entitlement.valid_until
+    else:
+        base = paid_at
+        entitlement.valid_from = paid_at
+    entitlement.valid_until = base + duration
+    entitlement.status = "active"
+    entitlement.updated_at = func.now()
 
 
 def _payment_matches(

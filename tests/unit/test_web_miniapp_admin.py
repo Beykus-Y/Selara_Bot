@@ -21,11 +21,13 @@ from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_s
 from selara.core.logging import configure_logging
 from selara.domain.entities import UserSnapshot
 from selara.infrastructure.db.models import (
+    AiFeatureQuotaUsageModel,
     AdminBroadcastDeliveryModel,
     AdminBroadcastModel,
     AdminBroadcastReplyModel,
     AiFeatureInvocationModel,
     ChatEntitlementModel,
+    UserEntitlementModel,
     ChatMemberCountSnapshotModel,
     ChatMetricsModel,
     ChatModel,
@@ -148,8 +150,10 @@ async def _client(
             AdminBroadcastReplyModel.__table__,
             UserChatActivityModel.__table__,
             AiFeatureInvocationModel.__table__,
+            AiFeatureQuotaUsageModel.__table__,
             LlmUsageLogModel.__table__,
             ChatEntitlementModel.__table__,
+            UserEntitlementModel.__table__,
             SelaraAiPurchaseIntentModel.__table__,
             SelaraAiPaymentModel.__table__,
             SelaraAiPaymentRefundModel.__table__,
@@ -608,6 +612,7 @@ _AI_ADMIN_ROUTES = (
     "/api/miniapp/admin/monetization/payments",
     "/api/miniapp/admin/monetization/payments/1",
     "/api/miniapp/admin/monetization/entitlements",
+    "/api/miniapp/admin/monetization/personal-config",
 )
 
 
@@ -668,6 +673,7 @@ async def test_ai_summary_empty_period_is_not_an_error_and_cost_is_a_decimal_str
     assert summary["unknown_cost_calls"] == 0 and Decimal(summary["known_cost_usd"]) == 0
     assert summary["average_known_cost_per_invocation_usd"] is None
     assert breakdown["features"] == [] and breakdown["models"] == []
+    assert breakdown["ail_profiles"] == [] and breakdown["ail_consumed"] == "0"
     assert monetization["stars_revenue"] == 0 and monetization["active_paid_chats"] == 0
     assert monetization["refunds"] == {"pending": 0, "refunded": 0, "failed": 0}
     assert payments["items"] == [] and payments["next_cursor"] is None
@@ -729,3 +735,36 @@ async def test_ai_readiness_and_checkout_agree_on_invalid_llm_config(monkeypatch
     rows = {item["key"]: item for item in body["checks"]}
     assert rows["llm_provider"]["status"] == "unavailable"
     assert rows["checkout"]["status"] == "unavailable" and body["checkout"]["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_personal_config_put_is_owner_only_and_rejects_bad_values_with_422(monkeypatch) -> None:
+    url = "/api/miniapp/admin/monetization/personal-config"
+    group_admin = UserSnapshot(telegram_user_id=80, username="gadmin", first_name="G", last_name=None, is_bot=False)
+    async with _client(monkeypatch, current_user=None) as (client, _factory):
+        assert (await client.put(url, json={})).status_code == 401
+    async with _client(monkeypatch, current_user=group_admin) as (client, _factory):
+        assert (await client.put(url, json={"price_stars": 10})).status_code == 403
+
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    bad_bodies = (
+        b"[]",
+        b"not json",
+        b'{"default_units": 2}',
+        b'{"unit_weights": {"personal_chat": 4}}',
+        b'{"price_stars": NaN}',
+        b'{"price_stars": Infinity}',
+        b'{"unknown": 1}',
+        b'{"price_stars": 99999999999}',
+        b'{"duration_days": 100000}',
+        b'{"free_daily_limit": 200}',
+        b'{"price_stars": true}',
+        b'{"memory_free_limit": 99999999}',
+        b'{"memory_free_limit": 500}',
+        b'{"memory_auto_extract": "yes"}',
+        b'{"memory_extract_every": 1}',
+    )
+    async with _client(monkeypatch, current_user=admin) as (client, _factory):
+        for body in bad_bodies:
+            response = await client.put(url, content=body, headers={"content-type": "application/json"})
+            assert response.status_code == 422, body

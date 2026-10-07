@@ -17,10 +17,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Date, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
+from selara.application.feature_access import PERSONAL_AIL_POOL_KEY
+from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY, SELARA_PERSONAL_PRODUCT_KEY
 from selara.infrastructure.db.models import (
     AiFeatureInvocationModel,
+    AiFeatureQuotaUsageModel,
     ChatEntitlementModel,
+    UserEntitlementModel,
     ChatModel,
     LlmUsageLogModel,
     SelaraAiPaymentModel,
@@ -69,6 +72,7 @@ class PaymentFilters:
     chat_id: int | None = None
     buyer_user_id: int | None = None
     since: datetime | None = None
+    target_scope: str | None = None  # None = both; chat | user (Selara Personal)
 
 
 class AdminAiAnalyticsRepository:
@@ -194,6 +198,53 @@ class AdminAiAnalyticsRepository:
             )
         )
         return models[:MAX_BREAKDOWN_ROWS], int(marker_only or 0)
+
+    async def profile_breakdown(self, *, window_from: datetime, window_to: datetime) -> list[dict]:
+        """Group historical recorded profiles, never current model assignments."""
+        result = await self._session.execute(
+            select(
+                LlmUsageLogModel.model_profile,
+                func.count(LlmUsageLogModel.id),
+                func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0),
+                func.count(case((_unknown_usage_expr(), 1))),
+            )
+            .join(AiFeatureInvocationModel, LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id)
+            .where(*self._in_window(window_from, window_to))
+            .group_by(LlmUsageLogModel.model_profile)
+        )
+        return [
+            {"profile_key": profile, "provider_calls": int(calls), "known_cost_usd": Decimal(cost),
+             "unknown_cost_calls": int(unknown)}
+            for profile, calls, cost, unknown in result.all()
+        ]
+
+    async def ail_breakdown(self, *, window_from: datetime, window_to: datetime) -> list[dict]:
+        """AI Limits actually reserved, by the profile recorded on each reservation.
+
+        Sums the stored ``units`` (never current multiplier × requests), so multiplier edits do not
+        rewrite history. Owner-exempt and released reservations consumed nothing and are skipped.
+        """
+        result = await self._session.execute(
+            select(
+                AiFeatureQuotaUsageModel.model_profile,
+                func.count(AiFeatureQuotaUsageModel.id),
+                func.coalesce(func.sum(AiFeatureQuotaUsageModel.units), 0),
+            )
+            .where(
+                AiFeatureQuotaUsageModel.pool_key == PERSONAL_AIL_POOL_KEY,
+                AiFeatureQuotaUsageModel.status == "consumed",
+                AiFeatureQuotaUsageModel.owner_exempt.is_(False),
+                AiFeatureQuotaUsageModel.created_at >= window_from,
+                AiFeatureQuotaUsageModel.created_at < window_to,
+            )
+            .group_by(AiFeatureQuotaUsageModel.model_profile)
+        )
+        rows = [
+            {"profile_key": profile, "requests": int(count), "ail_consumed": Decimal(units)}
+            for profile, count, units in result.all()
+        ]
+        rows.sort(key=lambda item: item["ail_consumed"], reverse=True)
+        return rows
 
     async def stage_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
         result = await self._session.execute(
@@ -339,6 +390,26 @@ class AdminAiAnalyticsRepository:
         ).one()
         return {"active_paid_chats": int(total), "expiring_within_7_days": int(expiring)}
 
+    async def personal_entitlement_counts(self, *, now: datetime) -> dict:
+        """Active Selara Personal subscriptions (user-scoped), kept apart from chat counts."""
+        entitlement = UserEntitlementModel
+        total, expiring = (
+            await self._session.execute(
+                select(
+                    func.count(entitlement.id),
+                    func.count(case((entitlement.valid_until <= now + EXPIRING_SOON, 1))),
+                ).where(
+                    entitlement.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                    entitlement.status == "active",
+                    entitlement.valid_until > now,
+                )
+            )
+        ).one()
+        return {
+            "active_personal_subscriptions": int(total),
+            "personal_expiring_within_7_days": int(expiring),
+        }
+
     async def active_entitlements(self, *, now: datetime, limit: int = MAX_ENTITLEMENT_ROWS) -> list[dict]:
         entitlement = ChatEntitlementModel
         last_purchase = (
@@ -439,6 +510,8 @@ class AdminAiAnalyticsRepository:
             "state": payment.processing_state,
             "reason": payment.processing_reason,
             "product_key": payment.product_key,
+            "target_scope": payment.target_scope,
+            "target_user_id": payment.target_user_id,
             "refund": refund,
         }
         if detail:
@@ -467,6 +540,8 @@ class AdminAiAnalyticsRepository:
             )
         if filters.buyer_user_id is not None:
             statement = statement.where(payment.buyer_user_id == filters.buyer_user_id)
+        if filters.target_scope in {"chat", "user"}:
+            statement = statement.where(payment.target_scope == filters.target_scope)
         if filters.since is not None:
             statement = statement.where(payment.payment_at >= filters.since)
         if cursor is not None:
@@ -513,20 +588,28 @@ class AdminAiAnalyticsRepository:
                 }
         item["intent"] = intent
         entitlement = None
-        if item["chat_id"] is not None:
+        row = None
+        if item["target_scope"] == "user" and item["target_user_id"] is not None:
+            row = await self._session.scalar(
+                select(UserEntitlementModel).where(
+                    UserEntitlementModel.user_id == item["target_user_id"],
+                    UserEntitlementModel.product_key == SELARA_PERSONAL_PRODUCT_KEY,
+                )
+            )
+        elif item["chat_id"] is not None:
             row = await self._session.scalar(
                 select(ChatEntitlementModel).where(
                     ChatEntitlementModel.chat_id == item["chat_id"],
                     ChatEntitlementModel.product_key == SELARA_AI_PRODUCT_KEY,
                 )
             )
-            if row is not None:
-                valid_until = as_utc(row.valid_until)
-                entitlement = {
-                    "status": row.status,
-                    "valid_from": as_utc(row.valid_from),
-                    "valid_until": valid_until,
-                    "active_now": row.status == "active" and valid_until > now,
-                }
+        if row is not None:
+            valid_until = as_utc(row.valid_until)
+            entitlement = {
+                "status": row.status,
+                "valid_from": as_utc(row.valid_from),
+                "valid_until": valid_until,
+                "active_now": row.status == "active" and valid_until > now,
+            }
         item["entitlement"] = entitlement
         return item

@@ -16,6 +16,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import BaseModel, ValidationError
 
 from selara.infrastructure.llm.pricing import estimate_llm_cost_usd
+from selara.application.model_catalog import CatalogProvider, CatalogSnapshot, ModelCapabilities, validate_text
+from selara.application.model_router import DefaultModelRouter, ModelRouter, ResolvedModel
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +32,27 @@ _MAX_RETRY_AFTER_SECONDS = 120.0
 # cap -- a single round could otherwise produce an unbounded-length
 # completion, limited only by the provider's model-level ceiling.
 _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS = 4000
+_COST_QUANTUM = Decimal("0.000000001")
+_MAX_PROVIDER_COST_USD = Decimal("1000000")
+
+
+def _provider_reported_cost(provider_usage: object) -> Decimal | None:
+    """OpenRouter's ``usage.cost`` in USD, or ``None`` when absent or not a sane number."""
+    if provider_usage is None:
+        return None
+    raw = getattr(provider_usage, "cost", None)
+    if raw is None:
+        extra = getattr(provider_usage, "model_extra", None)
+        raw = extra.get("cost") if isinstance(extra, dict) else None
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = Decimal(str(raw))
+    except Exception:
+        return None
+    if not value.is_finite() or value < 0 or value > _MAX_PROVIDER_COST_USD:
+        return None
+    return value.quantize(_COST_QUANTUM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +63,9 @@ class LlmConfig:
     timeout_seconds: float = _DEFAULT_TIMEOUT
     summary_model: str = "gpt-4o-mini"
     supports_structured_output: bool = False
+    # OpenRouter: ask for ``usage.cost`` and optionally pass ``provider`` routing preferences.
+    include_usage_cost: bool = False
+    provider_preferences: dict | None = None
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -86,6 +112,10 @@ class LlmCallUsage:
     error_category: str | None = None
     recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     request_id: str | None = None
+    model_profile: str | None = None
+    # The cost the provider itself reported for this call (OpenRouter ``usage.cost``);
+    # when set it is also what ``estimated_cost_usd`` holds.
+    provider_cost_usd: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +130,11 @@ UsageRecorder = Callable[[LlmAccountingContext, LlmCallUsage], Awaitable[None]]
 
 class LlmClient:
     def __init__(self, config: LlmConfig, *, usage_recorder: UsageRecorder | None = None,
-                 accounting_service=None) -> None:
+                 accounting_service=None, model_catalog: CatalogProvider | None = None,
+                 model_router: ModelRouter | None = None) -> None:
         self._config = config
+        self._model_catalog = model_catalog
+        self._model_router = model_router or DefaultModelRouter(config.model, model_catalog)
         self._client = AsyncOpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
@@ -122,27 +155,61 @@ class LlmClient:
         *,
         max_tokens: int | None = _DEFAULT_MAX_TOKENS_CHAT_WITH_TOOLS,
         accounting_context: LlmAccountingContext | None = None,
+        model: str | None = None,
+        model_profile: str | None = None,
     ):
+        selected, snapshot, _ = await self._prepare_model(
+            model, model_profile, self._config.model, ModelCapabilities(supports_tools=bool(tools)),
+        )
         response, usages = await self._request_with_retries(
-            "chat_with_tools", self._config.model, accounting_context,
-            model=self._config.model, messages=messages, tools=tools or None,
+            "chat_with_tools", selected, accounting_context,
+            catalog_snapshot=snapshot, model_profile=model_profile,
+            model=selected, messages=messages, tools=tools or None,
             tool_choice="auto" if tools else None, max_tokens=max_tokens,
         )
         return LlmCallResult(response, usages)
 
+    @property
+    def model_catalog(self) -> CatalogProvider | None:
+        """The catalog this client prices and routes with (read-only use by feature code)."""
+        return self._model_catalog
+
+    @property
+    def default_model(self) -> str:
+        return self._config.model
+
     async def chat_simple(self, messages: list[dict], *, max_tokens: int | None = None,
-                          accounting_context: LlmAccountingContext | None = None) -> LlmCallResult[str]:
+                          accounting_context: LlmAccountingContext | None = None,
+                          model: str | None = None, model_profile: str | None = None,
+                          resolved_model: ResolvedModel | None = None) -> LlmCallResult[str]:
+        if resolved_model is not None:
+            # Already resolved by the caller (Personal AI): use exactly that model and its pricing
+            # snapshot instead of resolving the profile a second time.
+            if model is not None or model_profile is not None:
+                raise ValueError("Pass either resolved_model or model/model_profile")
+            validate_text(resolved_model.model_id, "model override", 255)
+            response, usages = await self._request_with_retries(
+                "chat_simple", resolved_model.model_id, accounting_context,
+                catalog_snapshot=resolved_model.catalog, model_profile=resolved_model.profile_key,
+                model=resolved_model.model_id, messages=messages, max_tokens=max_tokens,
+            )
+            return LlmCallResult(response.choices[0].message.content or "", usages)
+        selected, snapshot, _ = await self._prepare_model(model, model_profile, self._config.model)
         response, usages = await self._request_with_retries(
-            "chat_simple", self._config.model, accounting_context,
-            model=self._config.model, messages=messages, max_tokens=max_tokens,
+            "chat_simple", selected, accounting_context,
+            catalog_snapshot=snapshot, model_profile=model_profile,
+            model=selected, messages=messages, max_tokens=max_tokens,
         )
         return LlmCallResult(response.choices[0].message.content or "", usages)
 
     async def summarize(self, messages: list[dict], *, max_tokens: int | None = None,
-                        accounting_context: LlmAccountingContext | None = None) -> LlmCallResult[str]:
+                        accounting_context: LlmAccountingContext | None = None,
+                        model: str | None = None, model_profile: str | None = None) -> LlmCallResult[str]:
+        selected, snapshot, _ = await self._prepare_model(model, model_profile, self._config.summary_model)
         response, usages = await self._request_with_retries(
-            "summarize", self._config.summary_model, accounting_context,
-            model=self._config.summary_model, messages=messages, max_tokens=max_tokens,
+            "summarize", selected, accounting_context,
+            catalog_snapshot=snapshot, model_profile=model_profile,
+            model=selected, messages=messages, max_tokens=max_tokens,
         )
         return LlmCallResult(response.choices[0].message.content or "", usages)
 
@@ -153,6 +220,8 @@ class LlmClient:
         response_model: type[_StructuredModel],
         max_tokens: int | None = None,
         accounting_context: LlmAccountingContext | None = None,
+        model: str | None = None,
+        model_profile: str | None = None,
     ) -> LlmCallResult[_StructuredModel]:
         """Get a schema-validated response from the cheap summary_model.
 
@@ -166,6 +235,10 @@ class LlmClient:
         provider can claim schema support and still drift. On the first validation
         failure, one corrective follow-up round is attempted before giving up.
         """
+        selected, snapshot, native_structured = await self._prepare_model(
+            model, model_profile, self._config.summary_model,
+            ModelCapabilities(supports_structured_output=self._config.supports_structured_output),
+        )
         schema = response_model.model_json_schema()
         request_messages = list(messages)
 
@@ -173,9 +246,9 @@ class LlmClient:
         request_id = str(uuid4())
         for correction_round in range(2):
             request_kwargs = dict(
-                model=self._config.summary_model, messages=request_messages, max_tokens=max_tokens,
+                model=selected, messages=request_messages, max_tokens=max_tokens,
             )
-            if self._config.supports_structured_output:
+            if native_structured:
                 request_kwargs["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
@@ -186,7 +259,8 @@ class LlmClient:
                 }
             try:
                 response, request_usages = await self._request_with_retries(
-                    "chat_structured", self._config.summary_model, accounting_context,
+                    "chat_structured", selected, accounting_context,
+                    catalog_snapshot=snapshot, model_profile=model_profile,
                     request_id=request_id, attempt_number_start=len(usages) + 1, **request_kwargs,
                 )
             except LlmClientError as exc:
@@ -234,6 +308,40 @@ class LlmClient:
 
         raise AssertionError("unreachable")  # loop always returns or raises
 
+    async def _prepare_model(
+        self, model: str | None, profile: str | None, legacy_model: str,
+        required: ModelCapabilities = ModelCapabilities(),
+    ) -> tuple[str, CatalogSnapshot | None, bool]:
+        if model is not None and profile is not None:
+            raise ValueError("Pass either model or model_profile, not both")
+        if model is not None:
+            validate_text(model, "model override", 255)
+        if profile is not None:
+            validate_text(profile, "model_profile", 64)
+        selected = model or legacy_model
+        native_structured = self._config.supports_structured_output
+        if profile is not None:
+            resolved = await self._model_router.resolve(
+                profile_key=profile, legacy_model=legacy_model, required=required,
+            )
+            selected = resolved.model_id
+            if resolved.capabilities is not None:
+                native_structured = resolved.capabilities.supports_structured_output
+        snapshot = None
+        if self._model_catalog is not None:
+            try:
+                snapshot = await self._model_catalog.get()
+            except Exception:
+                # Telemetry must never prevent a provider call.
+                log.exception("Catalog pricing unavailable")
+        if model is not None and snapshot is not None:
+            configured = snapshot.models_by_id.get(model)
+            if configured is not None:
+                if not configured.capabilities.satisfies(required):
+                    raise ValueError("model override does not support the required capabilities")
+                native_structured = configured.capabilities.supports_structured_output
+        return selected, snapshot, native_structured
+
     async def _request_with_retries(
         self,
         method: str,
@@ -242,6 +350,8 @@ class LlmClient:
         *,
         request_id: str | None = None,
         attempt_number_start: int = 1,
+        catalog_snapshot: CatalogSnapshot | None = None,
+        model_profile: str | None = None,
         **request_kwargs,
     ) -> tuple[object, tuple[LlmCallUsage, ...]]:
         """Make up to three visible provider attempts, persisting every one.
@@ -260,10 +370,15 @@ class LlmClient:
                 # happen after a response and can fail independently.
                 await marker(invocation_id=accounting_context.invocation_id)
             try:
-                response = await self._client.chat.completions.create(**request_kwargs)
+                response = await self._client.chat.completions.create(
+                    **self._with_provider_options(
+                        request_kwargs,
+                        route=accounting_context is not None and accounting_context.feature == "personal_chat",
+                    )
+                )
             except asyncio.CancelledError:
                 usage = self._failed_usage(
-                    configured_model, attempt_number, "cancelled", request_id=request_id,
+                    configured_model, attempt_number, "cancelled", request_id=request_id, model_profile=model_profile,
                 )
                 usages.append(usage)
                 log.warning(
@@ -282,7 +397,7 @@ class LlmClient:
                     else "api_status"
                 )
                 usage = self._failed_usage(
-                    configured_model, attempt_number, category, request_id=request_id,
+                    configured_model, attempt_number, category, request_id=request_id, model_profile=model_profile,
                 )
                 usages.append(usage)
                 await self._record(accounting_context, usage)
@@ -308,12 +423,31 @@ class LlmClient:
             usage = self._usage(
                 method, response, model=self._reported_model(response, configured_model),
                 attempt=attempt_number, request_id=request_id,
+                catalog_snapshot=catalog_snapshot, model_profile=model_profile,
             )
             usages.append(usage)
             await self._record(accounting_context, usage)
             return response, tuple(usages)
 
         raise AssertionError("provider retry loop always returns or raises")
+
+    def _with_provider_options(self, request_kwargs: dict, *, route: bool = True) -> dict:
+        """Add the OpenRouter extras (real cost, provider preferences) without mutating the caller's kwargs.
+
+        Provider preferences (``max_price`` and friends) are only meant for the Personal chat turn, so ``route``
+        keeps them away from groups, ``?``/``??``, pets and the internal operations.
+        """
+        extra: dict = {}
+        if self._config.include_usage_cost:
+            extra["usage"] = {"include": True}
+        if route and self._config.provider_preferences:
+            extra["provider"] = dict(self._config.provider_preferences)
+        if not extra:
+            return request_kwargs
+        merged = dict(request_kwargs.get("extra_body") or {})
+        for key, value in extra.items():
+            merged.setdefault(key, value)
+        return {**request_kwargs, "extra_body": merged}
 
     @staticmethod
     def _reported_model(response: object, configured_model: str) -> str:
@@ -322,14 +456,26 @@ class LlmClient:
 
     @staticmethod
     def _usage(
-        method: str, response: object, *, model: str, attempt: int, request_id: str | None = None
+        method: str, response: object, *, model: str, attempt: int, request_id: str | None = None,
+        catalog_snapshot: CatalogSnapshot | None = None, model_profile: str | None = None,
     ) -> LlmCallUsage:
         _log_usage(method, response)
         provider_usage = getattr(response, "usage", None)
+        provider_cost = _provider_reported_cost(provider_usage)
         prompt = getattr(provider_usage, "prompt_tokens", None) if provider_usage is not None else None
         completion = getattr(provider_usage, "completion_tokens", None) if provider_usage is not None else None
         total = getattr(provider_usage, "total_tokens", None) if provider_usage is not None else None
-        cost = estimate_llm_cost_usd(model=model, prompt_tokens=prompt, completion_tokens=completion)
+        catalog_model = catalog_snapshot.models_by_id.get(model) if catalog_snapshot is not None else None
+        try:
+            # An explicit NULL price wins over legacy pricing; disabled models are still priced.
+            cost = (catalog_model.estimate(prompt, completion) if catalog_model is not None
+                    else estimate_llm_cost_usd(model=model, prompt_tokens=prompt, completion_tokens=completion))
+        except Exception:
+            log.exception("Model cost estimate unavailable model=%s", model)
+            cost = None
+        if provider_cost is not None:
+            # The provider's own figure beats any estimate: routing, caching and fallbacks change prices.
+            cost = provider_cost
         status = "known" if cost is not None else "unknown"
         if provider_usage is None:
             log.warning("provider response has no token usage method=%s model=%s", method, model)
@@ -337,16 +483,18 @@ class LlmClient:
             log.warning("unknown LLM pricing model=%s method=%s", model, method)
         return LlmCallUsage(
             str(uuid4()), model, prompt, completion, total, cost, status, attempt, "succeeded",
-            request_id=request_id or str(uuid4()),
+            request_id=request_id or str(uuid4()), model_profile=model_profile,
+            provider_cost_usd=provider_cost,
         )
 
     @staticmethod
     def _failed_usage(
-        model: str, attempt: int, category: str, *, request_id: str | None = None
+        model: str, attempt: int, category: str, *, request_id: str | None = None,
+        model_profile: str | None = None,
     ) -> LlmCallUsage:
         return LlmCallUsage(
             str(uuid4()), model, None, None, None, None, "unknown", attempt, "failed", category,
-            request_id=request_id or str(uuid4()),
+            request_id=request_id or str(uuid4()), model_profile=model_profile,
         )
 
     async def _record(self, context: LlmAccountingContext | None, usage: LlmCallUsage) -> None:

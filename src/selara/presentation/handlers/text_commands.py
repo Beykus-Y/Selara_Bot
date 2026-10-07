@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from aiogram import Bot, F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -59,6 +60,10 @@ from selara.domain.entities import ChatSnapshot, ChatTextAlias, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import get_role_label_ru, has_command_access, has_permission
 from selara.presentation.commands.access import parse_command_rank_phrase, resolve_command_key_input
+from selara.presentation.handlers.ai_pet_events import maybe_schedule_spontaneous_event
+from selara.presentation.handlers.ai_pet_talk import handle_pet_talk, resolve_talk_target, talk_allowed
+from selara.presentation.handlers.ai_pets import ai_pet_text_command, parse_pet_text
+from selara.presentation.handlers.group_character import handle_group_call, resolve_group_call
 from selara.presentation.commands.catalog import (
     COMMAND_KEYS_WITH_TAIL,
     SOCIAL_ACTION_18_PLUS as _SOCIAL_ACTION_18_PLUS,
@@ -72,6 +77,7 @@ from selara.presentation.commands.resolver import TextCommandResolutionError, re
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 from selara.presentation.middlewares.error_handler import notify_operational_error
+from selara.presentation.middlewares.chat_write_lock import CHAT_WRITE_LOCK_ANSWER, is_write_locked_command
 from selara.presentation.handlers.economy import (
     auction_command as economy_auction_command,
     bid_command as economy_bid_command,
@@ -5655,9 +5661,6 @@ async def photo_commands_handler(message: Message, bot: Bot, settings: Settings,
     if not chat_settings.text_commands_enabled:
         return
 
-    if chat_settings.text_commands_locale.lower() != "ru":
-        return
-
     if message.chat.type not in settings.supported_chat_types:
         return
 
@@ -5760,6 +5763,17 @@ async def photo_commands_handler(message: Message, bot: Bot, settings: Settings,
     )
 
 
+def _pass_private_text_on(message: Message) -> None:
+    """A private text that no text command recognised is not ours: let the later handlers (Personal AI) take it.
+
+    This is the single source of truth for "is this a text command": whatever the parsers above handle
+    (including their format-error replies) returns before reaching here, so new commands can never leak
+    into the AI dialogue.
+    """
+    if message.chat.type == "private":
+        raise SkipHandler()
+
+
 @router.message(F.text)
 async def text_commands_handler(
     message: Message,
@@ -5771,6 +5785,8 @@ async def text_commands_handler(
     session_factory,
     db_session=None,
     achievement_orchestrator=None,
+    personal_config=None,
+    llm_client=None,
 ) -> None:
     text = message.text or ""
     if _is_reply_profile_lookup(message, text):
@@ -5787,7 +5803,7 @@ async def text_commands_handler(
         )
         return
 
-    if message.chat.type in {"group", "supergroup"} and chat_settings.text_commands_locale.lower() == "ru":
+    if message.chat.type in {"group", "supergroup"}:
         try:
             alias_mode = await activity_repo.get_chat_alias_mode(chat_id=message.chat.id)
             aliases = await activity_repo.list_chat_aliases(chat_id=message.chat.id)
@@ -5800,6 +5816,9 @@ async def text_commands_handler(
         if rewritten is None:
             return
         text = rewritten
+
+    # chat_settings не подменяем: объект сохраняется в БД командами гачи.
+    write_locked = bool(chat_settings.chat_write_locked) and message.chat.type in {"group", "supergroup"}
 
     if _is_reply_profile_lookup(message, text):
         if not await _enforce_command_access(message, activity_repo, command_key="me"):
@@ -5864,9 +5883,58 @@ async def text_commands_handler(
     if await _handle_command_rank_phrase(message, activity_repo, text):
         return
 
+    # Chat activity may let a pet post a rare spontaneous line; it runs in the background.
+    if not write_locked:
+        maybe_schedule_spontaneous_event(
+            message,
+            chat_settings=chat_settings,
+            settings=settings,
+            session_factory=session_factory,
+            personal_config=personal_config,
+            llm_client=llm_client,
+        )
+
+    # Talking to an AI pet is plain speech, not a text command: it works even with text commands off.
+    if not write_locked and parse_pet_text(text) is None and message.chat.type in {"group", "supergroup"}:
+        talk = await resolve_talk_target(
+            message, chat_settings=chat_settings, db_session=db_session, economy_repo=economy_repo
+        )
+        if talk is not None and await talk_allowed(message, activity_repo):
+            await handle_pet_talk(
+                message,
+                pet_id=talk[0],
+                talk_text=talk[1],
+                activity_repo=activity_repo,
+                db_session=db_session,
+                economy_repo=economy_repo,
+                settings=settings,
+                session_factory=session_factory,
+                personal_config=personal_config,
+                llm_client=llm_client,
+            )
+            return
+
+    # Calling Selara by a chat call name («Селя, ...») is plain speech too; pets keep their names first.
+    if not write_locked and message.chat.type in {"group", "supergroup"}:
+        call_text = await resolve_group_call(
+            message, db_session=db_session, session_factory=session_factory, settings=settings
+        )
+        if call_text is not None:
+            await handle_group_call(
+                message,
+                text=call_text,
+                bot=bot,
+                activity_repo=activity_repo,
+                db_session=db_session,
+                settings=settings,
+                session_factory=session_factory,
+                llm_client=llm_client,
+            )
+            return
+
     if not chat_settings.text_commands_enabled:
         if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
+            if chat_settings.custom_rp_enabled and not write_locked:
                 custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
                 if custom_social_action is not None:
                     await send_custom_social_action(message, activity_repo, custom_social_action)
@@ -5875,24 +5943,12 @@ async def text_commands_handler(
                 trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
                 if trigger is not None:
                     await send_chat_trigger(message, activity_repo, trigger)
-        return
-
-    if chat_settings.text_commands_locale.lower() != "ru":
-        if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
-                custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
-                if custom_social_action is not None:
-                    await send_custom_social_action(message, activity_repo, custom_social_action)
-                    return
-            if chat_settings.smart_triggers_enabled and not text.strip().startswith("/"):
-                trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
-                if trigger is not None:
-                    await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
         return
 
     if message.chat.type not in settings.supported_chat_types:
         if message.chat.type in {"group", "supergroup"}:
-            if chat_settings.custom_rp_enabled:
+            if chat_settings.custom_rp_enabled and not write_locked:
                 custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
                 if custom_social_action is not None:
                     await send_custom_social_action(message, activity_repo, custom_social_action)
@@ -5901,6 +5957,25 @@ async def text_commands_handler(
                 trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
                 if trigger is not None:
                     await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
+        return
+
+    pet_request = parse_pet_text(text)
+    if pet_request is not None and message.chat.type in {"group", "supergroup"}:
+        if write_locked:
+            await _answer_quiet(message, CHAT_WRITE_LOCK_ANSWER)
+            return
+        if not await _enforce_command_access(message, activity_repo, command_key="pet"):
+            return
+        await ai_pet_text_command(
+            message,
+            pet_request,
+            activity_repo=activity_repo,
+            db_session=db_session,
+            economy_repo=economy_repo,
+            chat_settings=chat_settings,
+            settings=settings,
+        )
         return
 
     announce_body, announce_error = _extract_announcement_body(text)
@@ -5949,7 +6024,7 @@ async def text_commands_handler(
         )
         return
 
-    if chat_settings.custom_rp_enabled and message.chat.type in {"group", "supergroup"}:
+    if chat_settings.custom_rp_enabled and not write_locked and message.chat.type in {"group", "supergroup"}:
         custom_social_action = await match_custom_social_action(activity_repo, chat_id=message.chat.id, text=text)
         if custom_social_action is not None:
             await send_custom_social_action(message, activity_repo, custom_social_action)
@@ -5957,6 +6032,9 @@ async def text_commands_handler(
 
     social_action = _extract_social_action(text)
     if social_action is not None:
+        if write_locked:
+            await message.answer(CHAT_WRITE_LOCK_ANSWER)
+            return
         if not await _enforce_command_access(message, activity_repo, command_key=f"social_{social_action}"):
             return
         await _send_social_action(message, activity_repo, chat_settings, action_key=social_action)
@@ -6046,6 +6124,7 @@ async def text_commands_handler(
             trigger = await match_chat_trigger(activity_repo, chat_id=message.chat.id, text=text)
             if trigger is not None:
                 await send_chat_trigger(message, activity_repo, trigger)
+        _pass_private_text_on(message)
         return
 
     if intent.name in {"gacha_on", "gacha_off"}:
@@ -6073,6 +6152,10 @@ async def text_commands_handler(
 
     if intent.name == "rp_list":
         await _manage_rp_action_list(message, activity_repo, settings)
+        return
+
+    if write_locked and is_write_locked_command(intent.name):
+        await message.answer(CHAT_WRITE_LOCK_ANSWER)
         return
 
     if not await _enforce_command_access(message, activity_repo, command_key=intent.name):
@@ -6459,7 +6542,7 @@ async def text_commands_handler(
         )
         return
 
-    if intent.name == "pet":
+    if intent.name == "family_pet":
         await family_pet_command(
             message,
             command=_command_object_from_args(intent.args.get("raw_args")),  # type: ignore[arg-type]

@@ -95,6 +95,15 @@ async def lookup_owner_admin_status(
     return is_telegram_chat_admin(member)
 
 
+def resolve_owner_private_exemption(*, user_id: int | None, admin_user_id: int | None) -> bool:
+    """Owner exemption in a private chat is the owner's identity itself.
+
+    Unlike a group, there is no chat admin status to verify live: the DM belongs
+    to the user, and only the configured ``ADMIN_USER_ID`` is exempt.
+    """
+    return user_id is not None and admin_user_id is not None and user_id == admin_user_id
+
+
 async def resolve_owner_admin_exemption(
     *,
     bot: Bot | None,

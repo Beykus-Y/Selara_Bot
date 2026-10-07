@@ -8797,6 +8797,8 @@ class SqlAlchemyActivityRepository:
             entry_captcha_kick_on_fail=bool(row.entry_captcha_kick_on_fail),
             custom_rp_enabled=bool(row.custom_rp_enabled),
             family_tree_enabled=bool(row.family_tree_enabled),
+            pets_enabled=bool(row.pets_enabled),
+            pets_spontaneous_enabled=bool(row.pets_spontaneous_enabled),
             persona_enabled=bool(row.persona_enabled),
             persona_display_mode=row.persona_display_mode,
             titles_enabled=bool(row.titles_enabled),
@@ -8995,6 +8997,11 @@ class SqlAlchemyEconomyRepository:
 
     async def lock_resources(self, *resource_keys: str) -> None:
         await _lock_resources(self._session, *resource_keys)
+
+    async def ensure_chat_and_user(self, *, chat: ChatSnapshot, user: UserSnapshot) -> None:
+        """Make sure FK targets exist before inserting rows that reference them."""
+        await self._upsert_chat(chat)
+        await self._upsert_user(user)
 
     async def set_private_chat_context(self, *, user_id: int, chat_id: int) -> None:
         await self._upsert_chat(ChatSnapshot(telegram_chat_id=chat_id, chat_type="group", title=None))

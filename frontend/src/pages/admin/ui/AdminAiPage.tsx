@@ -24,6 +24,8 @@ import {
   formatUsd,
   refundLabels,
 } from '../lib/format'
+import { AdminModelsSection } from './AdminModelsSection'
+import { AdminQuotaModeSection } from './AdminQuotaModeSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
 const periods = [
@@ -196,6 +198,27 @@ function BreakdownSection({ periodDays }: { periodDays: number }) {
               ))}
             </ul>
           )}
+          <h3 className="admin-subheading">AI Limits по профилям</h3>
+          <p className="admin-footnote">AIL — продуктовая единица пользователя (реально зарезервированные units), USD — себестоимость провайдера. Это разные величины.</p>
+          {(data.ail_profiles ?? []).length === 0 ? <p className="admin-empty">AIL за период не расходовались.</p> : (
+            <ul className="admin-rows">
+              <li><div className="admin-rows__main"><strong>Всего</strong><span>{data.ail_consumed} AIL</span></div></li>
+              {(data.ail_profiles ?? []).map((row) => {
+                const usd = (data.profiles ?? []).find((item) => item.profile_key === row.profile_key)
+                return (
+                  <li key={row.profile_key ?? 'none'}>
+                    <div className="admin-rows__main">
+                      <strong className="admin-rows__name">{row.profile_key ?? 'без профиля'}</strong>
+                      <span>{row.ail_consumed} AIL</span>
+                    </div>
+                    <small>
+                      {formatCount(row.requests)} запросов · известная стоимость {formatUsd(usd?.known_cost_usd ?? '0')}
+                    </small>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
           {data.unattributed_provider_calls > 0 && (
             <p className="admin-footnote">
               Ещё {formatCount(data.unattributed_provider_calls)} попыток провайдера начаты без записи использования (модель неизвестна, стоимость неизвестна).
@@ -249,6 +272,7 @@ function StarsSection({ periodDays }: { periodDays: number }) {
             <Metric label="Выручка Stars" value={formatStars(data.stars_revenue)} note={`всего: ${formatStars(data.all_time.stars_revenue)}`} />
             <Metric label="Успешных платежей" value={formatCount(data.successful_payments)} />
             <Metric label="Активных платных чатов" value={formatCount(data.active_paid_chats)} note={`истекают за 7 дн: ${formatCount(data.expiring_within_7_days)}`} />
+            <Metric label="Активных Personal" value={formatCount(data.active_personal_subscriptions ?? 0)} note={`истекают за 7 дн: ${formatCount(data.personal_expiring_within_7_days ?? 0)}`} />
             <Metric label="Отклонённых платежей" value={formatCount(data.rejected_payments)} tone={data.rejected_payments > 0 ? 'warn' : undefined} />
           </div>
           <p className="admin-footnote">
@@ -354,7 +378,11 @@ function PaymentCard({ payment }: { payment: AdminPayment }) {
           <span className={rejected ? 'admin-badge is-warn' : 'admin-badge'}>{rejected ? '! Отклонён' : '✓ Применён'}</span>
         </span>
         <small>{formatDateTime(payment.payment_at)} · покупатель {payment.buyer_user_id}</small>
-        <small className="admin-payment__chat">{payment.chat_title ?? 'Чат недоступен'} · {payment.chat_id ?? payment.target_chat_id ?? '—'}</small>
+        <small className="admin-payment__chat">
+          {payment.target_scope === 'user'
+            ? `Selara Personal · пользователь ${payment.target_user_id ?? '—'}`
+            : `${payment.chat_title ?? 'Чат недоступен'} · ${payment.chat_id ?? payment.target_chat_id ?? '—'}`}
+        </small>
         {rejected && payment.reason && <small>Причина: {payment.reason}</small>}
         {payment.refund && <small>{refundLabels[payment.refund.status]}</small>}
       </button>
@@ -494,6 +522,8 @@ export function AdminAiPage() {
         <Link className="admin-back-link" to={routes.admin}>‹ Обзор системы</Link>
       </header>
       <ReadinessSection />
+      <AdminModelsSection />
+      <AdminQuotaModeSection />
       <PeriodSwitch value={periodDays} onChange={setPeriodDays} />
       <AiSummarySection periodDays={periodDays} />
       <BreakdownSection periodDays={periodDays} />

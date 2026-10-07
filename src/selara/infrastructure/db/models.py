@@ -84,6 +84,41 @@ class ChatEntitlementModel(Base):
     )
 
 
+class UserEntitlementModel(Base):
+    """Current time-bounded personal product access for one Telegram user.
+
+    Kept apart from ``chat_entitlements`` on purpose: that table carries the
+    group -> supergroup merge rules and chat-keyed advisory locks, and its
+    product CHECK must keep refusing personal products.
+    """
+
+    __tablename__ = "user_entitlements"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Daily limit sold with the subscription (snapshot taken at purchase); NULL = use the configured one.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_key", name="uq_user_entitlements_user_product"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_user_entitlements_paid_limit"),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_user_entitlements_status"),
+        CheckConstraint("valid_from < valid_until", name="ck_user_entitlements_validity"),
+        CheckConstraint("product_key IN ('selara_personal_monthly')", name="ck_user_entitlements_product"),
+        Index("idx_user_entitlements_active_until", "product_key", "status", "valid_until"),
+    )
+
+
 class SelaraAiPurchaseIntentModel(Base):
     """Server-side invoice context; the payload itself contains only its UUID."""
 
@@ -91,8 +126,14 @@ class SelaraAiPurchaseIntentModel(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Buyer and recipient are stored separately so gifts need no schema change;
+    # until then ``ck_..._personal_self_only`` pins the recipient to the buyer.
+    target_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="chat", server_default="chat")
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Quota terms sold with the invoice; copied onto the user entitlement when the payment is applied.
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     product_key: Mapped[str] = mapped_column(String(64), nullable=False)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -110,7 +151,28 @@ class SelaraAiPurchaseIntentModel(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        CheckConstraint("product_key IN ('selara_ai_monthly')", name="ck_selara_ai_purchase_intents_product"),
+        CheckConstraint(
+            "product_key IN ('selara_ai_monthly', 'selara_personal_monthly')",
+            name="ck_selara_ai_purchase_intents_product",
+        ),
+        CheckConstraint("target_scope IN ('chat', 'user')", name="ck_selara_ai_purchase_intents_target_scope"),
+        CheckConstraint(
+            "(target_scope = 'chat' AND chat_id IS NOT NULL AND target_user_id IS NULL) OR "
+            "(target_scope = 'user' AND target_user_id IS NOT NULL AND chat_id IS NULL)",
+            name="ck_selara_ai_purchase_intents_target_shape",
+        ),
+        CheckConstraint(
+            "(target_scope = 'chat' AND product_key = 'selara_ai_monthly') OR "
+            "(target_scope = 'user' AND product_key = 'selara_personal_monthly')",
+            name="ck_selara_ai_purchase_intents_scope_product",
+        ),
+        CheckConstraint(
+            "target_scope <> 'user' OR target_user_id = buyer_user_id",
+            name="ck_selara_ai_purchase_intents_personal_self_only",
+        ),
+        CheckConstraint(
+            "paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_ai_purchase_intents_paid_limit"
+        ),
         CheckConstraint("amount_stars > 0", name="ck_selara_ai_purchase_intents_amount"),
         CheckConstraint("duration_seconds > 0", name="ck_selara_ai_purchase_intents_duration"),
         CheckConstraint("status IN ('open', 'checkout_accepted', 'consumed')", name="ck_selara_ai_purchase_intents_status"),
@@ -122,6 +184,7 @@ class SelaraAiPurchaseIntentModel(Base):
         ),
         Index("idx_selara_ai_purchase_intents_buyer_created", "buyer_user_id", "created_at"),
         Index("idx_selara_ai_purchase_intents_chat", "chat_id", "status"),
+        Index("idx_selara_ai_purchase_intents_target_user", "target_user_id", "status"),
     )
 
 
@@ -140,6 +203,8 @@ class SelaraAiPaymentModel(Base):
     buyer_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     target_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    target_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="chat", server_default="chat")
+    target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     product_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
@@ -152,10 +217,23 @@ class SelaraAiPaymentModel(Base):
         CheckConstraint("amount_stars >= 0", name="ck_selara_ai_payments_nonnegative_amount"),
         CheckConstraint("processing_state IN ('applied', 'rejected')", name="ck_selara_ai_payments_state"),
         CheckConstraint(
-            "product_key IS NULL OR product_key IN ('selara_ai_monthly')",
+            "product_key IS NULL OR product_key IN ('selara_ai_monthly', 'selara_personal_monthly')",
             name="ck_selara_ai_payments_product",
         ),
+        CheckConstraint("target_scope IN ('chat', 'user')", name="ck_selara_ai_payments_target_scope"),
+        CheckConstraint(
+            "(target_scope = 'chat' AND target_user_id IS NULL) OR "
+            "(target_scope = 'user' AND target_user_id IS NOT NULL AND target_chat_id IS NULL)",
+            name="ck_selara_ai_payments_target_shape",
+        ),
+        CheckConstraint(
+            "product_key IS NULL OR "
+            "(target_scope = 'chat' AND product_key = 'selara_ai_monthly') OR "
+            "(target_scope = 'user' AND product_key = 'selara_personal_monthly')",
+            name="ck_selara_ai_payments_scope_product",
+        ),
         Index("idx_selara_ai_payments_target_time", "target_chat_id", "payment_at"),
+        Index("idx_selara_ai_payments_target_user_time", "target_user_id", "payment_at"),
         Index("idx_selara_ai_payments_buyer_time", "buyer_user_id", "payment_at"),
         Index("idx_selara_ai_payments_state_time", "processing_state", "payment_at"),
     )
@@ -948,6 +1026,10 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Permission for AI pets to live in this chat; not a subscription.
+    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Lets pets post rare spontaneous lines here; paid by each pet's owner, off by default.
+    pets_spontaneous_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     persona_display_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="image_name", server_default="image_name")
     save_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
@@ -1905,6 +1987,56 @@ class AdminRuntimeSettingsModel(Base):
     )
 
 
+class SelaraPersonalConfigModel(Base):
+    """Singleton row of Selara Personal overrides edited at runtime; NULL falls back to .env."""
+
+    __tablename__ = "selara_personal_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_selara_personal_config_singleton"),
+        CheckConstraint("price_stars IS NULL OR price_stars > 0", name="ck_selara_personal_config_price"),
+        CheckConstraint("duration_days IS NULL OR duration_days > 0", name="ck_selara_personal_config_duration"),
+        CheckConstraint("free_daily_limit IS NULL OR free_daily_limit > 0", name="ck_selara_personal_config_free"),
+        CheckConstraint("paid_daily_limit IS NULL OR paid_daily_limit > 0", name="ck_selara_personal_config_paid"),
+        CheckConstraint(
+            "memory_free_limit IS NULL OR memory_free_limit > 0", name="ck_selara_personal_config_memory_free"
+        ),
+        CheckConstraint(
+            "memory_paid_limit IS NULL OR memory_paid_limit > 0", name="ck_selara_personal_config_memory_paid"
+        ),
+        CheckConstraint(
+            "memory_extract_every IS NULL OR memory_extract_every BETWEEN 2 AND 40",
+            name="ck_selara_personal_config_memory_every",
+        ),
+        CheckConstraint(
+            "quota_mode IS NULL OR quota_mode IN ('requests', 'ail')", name="ck_selara_personal_config_quota_mode"
+        ),
+        CheckConstraint("free_daily_ail IS NULL OR free_daily_ail > 0", name="ck_selara_personal_config_free_ail"),
+        CheckConstraint("paid_daily_ail IS NULL OR paid_daily_ail > 0", name="ck_selara_personal_config_paid_ail"),
+        CheckConstraint(
+            "quota_mode IS DISTINCT FROM 'ail' OR (free_daily_ail IS NOT NULL AND paid_daily_ail > free_daily_ail)",
+            name="ck_selara_personal_config_ail_budgets",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    price_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    free_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_free_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_paid_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_auto_extract: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    memory_extract_every: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 'requests' (5/150) or 'ail'; NULL means requests. Switched only by the owner.
+    quota_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    free_daily_ail: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_daily_ail: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class OperationalAlertModel(Base):
     __tablename__ = "operational_alerts"
 
@@ -2203,6 +2335,11 @@ class LlmContextMessageModel(Base):
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     is_context: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Web-taint (review PR #33): rows written by an invocation whose model saw
+    # web_search/fetch_page output. Excluded from get_history (the range query
+    # has no is_context filter) so poisoned page content cannot re-enter a
+    # fresh invocation with a full tool set.
+    web_tainted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2321,7 +2458,7 @@ class DailySummaryRunModel(Base):
     # application/daily_summary/pipeline.py's DailySummaryDiagnostics and
     # docs/DAILY_SUMMARY_TODO.md's beta observability wishlist.
     diagnostics_json: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
-    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 9), nullable=False, default=0, server_default="0")
+    pipeline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(20, 9), nullable=False, default=0, server_default="0")
     pipeline_has_unknown_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     context_stt_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2376,6 +2513,19 @@ class AiFeatureInvocationModel(Base):
     )
 
 
+def _quota_scope_id_default(context) -> int | None:
+    """Chat-scoped rows default their scope id to ``chat_id`` (mirrors the DB trigger)."""
+    params = context.get_current_parameters()
+    if params.get("quota_scope_type") in (None, "chat"):
+        return params.get("chat_id")
+    return None
+
+
+def _quota_pool_default(context) -> str | None:
+    """Without an explicit pool a feature is its own pool."""
+    return context.get_current_parameters().get("feature")
+
+
 class AiFeatureQuotaUsageModel(Base):
     """One logical feature quota reservation, separate from provider-call cost."""
 
@@ -2408,14 +2558,41 @@ class AiFeatureQuotaUsageModel(Base):
     release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who pays for the request: a chat or a user. ``chat_id`` above stays "where it happened".
+    # 'legacy_orphan' marks pre-scope rows whose chat was already deleted; they are never counted.
+    quota_scope_type: Mapped[str] = mapped_column(String(16), nullable=False, default="chat", server_default="chat")
+    quota_scope_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=_quota_scope_id_default)
+    # Several features may spend one pool; today a feature is its own pool.
+    pool_key: Mapped[str] = mapped_column(String(48), nullable=False, default=_quota_pool_default)
+    units: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("1"), server_default="1")
+    # Model profile whose AIL multiplier priced this reservation (historical text, no FK).
+    model_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set once when ``units`` was replaced by the actual cost of the request (AIL settlement).
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint("period_start < period_end", name="ck_ai_feature_quota_period_bounds"),
+        CheckConstraint(
+            "quota_scope_type IN ('chat', 'user', 'legacy_orphan')", name="ck_ai_feature_quota_scope_type"
+        ),
+        CheckConstraint(
+            "quota_scope_type = 'legacy_orphan' OR quota_scope_id IS NOT NULL",
+            name="ck_ai_feature_quota_scope_id",
+        ),
+        CheckConstraint("units >= 0", name="ck_ai_feature_quota_units"),
         CheckConstraint("quota_limit > 0", name="ck_ai_feature_quota_positive_limit"),
         CheckConstraint("status IN ('consumed', 'released')", name="ck_ai_feature_quota_status"),
         UniqueConstraint("idempotency_key", name="uq_ai_feature_quota_idempotency"),
         UniqueConstraint("invocation_id", name="uq_ai_feature_quota_invocation"),
         Index("idx_ai_feature_quota_period_usage", "feature", "chat_id", "period_start", "status"),
+        Index(
+            "idx_ai_feature_quota_scope_usage",
+            "pool_key",
+            "quota_scope_type",
+            "quota_scope_id",
+            "period_start",
+            "status",
+        ),
     )
 
 
@@ -2441,12 +2618,13 @@ class LlmUsageLogModel(Base):
     )
     feature: Mapped[str] = mapped_column(String(32), nullable=False)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
-    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audio_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 9), nullable=True)
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 9), nullable=True)
     pricing_status: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="succeeded", server_default="succeeded")
     attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2458,6 +2636,7 @@ class LlmUsageLogModel(Base):
         Index("idx_llm_usage_log_message_archive", "message_archive_id"),
         Index("idx_llm_usage_log_call_id", "call_id", unique=True),
         Index("idx_llm_usage_log_request_id", "request_id"),
+        Index("idx_llm_usage_log_profile_created", "model_profile", "created_at"),
         Index("idx_llm_usage_log_invocation", "invocation_id"),
         Index("idx_llm_usage_log_feature_created", "feature", "created_at"),
         CheckConstraint("pricing_status IN ('known', 'unknown', 'legacy')", name="ck_llm_usage_log_pricing_status"),
@@ -2503,3 +2682,501 @@ class AutoConfigSessionModel(Base):
     lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PersonalAiProfileModel(Base):
+    """One user's private AI character; owned by the user and removed with them, never by a chat."""
+
+    __tablename__ = "personal_ai_profiles"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    display_name: Mapped[str] = mapped_column(String(32), nullable=False, default="Selara", server_default="Selara")
+    character_preset: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="assistant", server_default="assistant"
+    )
+    character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_form: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    formality: Mapped[str] = mapped_column(String(8), nullable=False, default="ty", server_default="ty")
+    reply_length: Mapped[str] = mapped_column(String(8), nullable=False, default="medium", server_default="medium")
+    emoji_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Opt-in for automatic fact extraction (also needs Selara Personal and the global switch).
+    auto_memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Id of the last user message already looked at by extraction; the next batch starts after it.
+    memory_extract_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # Logical model profile the user picked (never a physical model id); applied in AIL mode only.
+    model_profile_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="basic", server_default="basic"
+    )
+    # Optimistic lock for the settings wizard (and the future Mini App).
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "character_custom IS NULL OR length(character_custom) <= 500",
+            name="ck_personal_ai_profiles_custom_len",
+        ),
+        CheckConstraint("formality IN ('ty', 'vy')", name="ck_personal_ai_profiles_formality"),
+        CheckConstraint("reply_length IN ('short', 'medium', 'long')", name="ck_personal_ai_profiles_reply_length"),
+        CheckConstraint("mode IN ('assistant', 'roleplay')", name="ck_personal_ai_profiles_mode"),
+        CheckConstraint(
+            "model_profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+            name="ck_personal_ai_profiles_model_profile",
+        ),
+    )
+
+
+class PersonalAiMessageModel(Base):
+    """Private dialogue turn. Kept until the user deletes it; there is deliberately no retention job."""
+
+    __tablename__ = "personal_ai_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    thread: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_personal_ai_messages_role"),
+        CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_messages_thread"),
+        Index("idx_personal_ai_messages_user_thread_created", "user_id", "thread", "created_at"),
+    )
+
+
+class PersonalAiSummaryModel(Base):
+    """Compressed older part of a private dialogue; the same retention rule as the messages."""
+
+    __tablename__ = "personal_ai_summaries"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    thread: Mapped[str] = mapped_column(String(16), nullable=False, default="assistant", server_default="assistant")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    messages_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("thread IN ('assistant', 'roleplay')", name="ck_personal_ai_summaries_thread"),
+        Index("idx_personal_ai_summaries_user_thread_period", "user_id", "thread", "period_end"),
+    )
+
+
+class PersonalAiMemoryModel(Base):
+    """A fact about the user that their private AI may use. Kept until the user deletes it."""
+
+    __tablename__ = "personal_ai_memories"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(String(300), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("source IN ('explicit', 'extracted')", name="ck_personal_ai_memories_source"),
+        CheckConstraint("length(content) BETWEEN 1 AND 300", name="ck_personal_ai_memories_content_len"),
+        Index("idx_personal_ai_memories_user_created", "user_id", "created_at"),
+    )
+
+
+# One fact once per user whatever its letter case; the repository also serialises writers per user.
+Index(
+    "uq_personal_ai_memories_user_content",
+    PersonalAiMemoryModel.user_id,
+    func.lower(PersonalAiMemoryModel.content),
+    unique=True,
+)
+
+
+class LlmModelCatalogModel(Base):
+    __tablename__ = "llm_model_catalog"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    prompt_price_usd_per_million: Mapped[Decimal | None] = mapped_column(Numeric(16, 9), nullable=True)
+    completion_price_usd_per_million: Mapped[Decimal | None] = mapped_column(Numeric(16, 9), nullable=True)
+    supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    supports_structured_output: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint("length(trim(key)) > 0", name="ck_llm_model_catalog_key"),
+        CheckConstraint("length(trim(model_id)) > 0", name="ck_llm_model_catalog_model_id"),
+        CheckConstraint("length(trim(display_name)) > 0", name="ck_llm_model_catalog_display_name"),
+        CheckConstraint("prompt_price_usd_per_million >= 0 AND prompt_price_usd_per_million <= 1000000",
+                        name="ck_llm_model_catalog_prompt_price"),
+        CheckConstraint("completion_price_usd_per_million >= 0 AND completion_price_usd_per_million <= 1000000",
+                        name="ck_llm_model_catalog_completion_price"),
+    )
+
+
+class LlmModelIdentifierModel(Base):
+    """Canonical IDs and aliases share a single unique namespace."""
+    __tablename__ = "llm_model_identifiers"
+
+    model_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    model_key: Mapped[str] = mapped_column(
+        String(64), ForeignKey("llm_model_catalog.key", ondelete="CASCADE"), nullable=False,
+    )
+    __table_args__ = (
+        Index("idx_llm_model_identifiers_model_key", "model_key"),
+        CheckConstraint("length(trim(model_id)) > 0", name="ck_llm_model_identifiers_model_id"),
+    )
+
+
+class LlmModelProfileModel(Base):
+    __tablename__ = "llm_model_profiles"
+
+    profile_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_key: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("llm_model_catalog.key", ondelete="SET NULL"), nullable=True,
+    )
+    ail_multiplier: Mapped[Decimal] = mapped_column(Numeric(13, 9), nullable=False, default=Decimal("1"), server_default="1")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+    __table_args__ = (
+        CheckConstraint("profile_key IN ('basic', 'analytics', 'freeform', 'creative', 'fast')",
+                        name="ck_llm_model_profiles_key"),
+        CheckConstraint("length(trim(display_name)) > 0", name="ck_llm_model_profiles_display_name"),
+        CheckConstraint("ail_multiplier > 0 AND ail_multiplier <= 1000", name="ck_llm_model_profiles_multiplier"),
+        Index("idx_llm_model_profiles_model_key", "model_key"),
+    )
+
+
+class AiPetModel(Base):
+    """An AI pet owned by a user; it outlives any chat it lives in."""
+
+    __tablename__ = "ai_pets"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False
+    )
+    home_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    current_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="SET NULL"), nullable=True
+    )
+    species_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    species_custom: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    name_norm: Mapped[str] = mapped_column(String(32), nullable=False)
+    traits: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    character_custom: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    xp: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    mood: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    satiety: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    energy: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=70, server_default="70")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    dormant_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    travel_unlocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    last_tick_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("level >= 1", name="ck_ai_pets_level"),
+        CheckConstraint("xp >= 0", name="ck_ai_pets_xp"),
+        CheckConstraint("mood BETWEEN 0 AND 100", name="ck_ai_pets_mood"),
+        CheckConstraint("satiety BETWEEN 0 AND 100", name="ck_ai_pets_satiety"),
+        CheckConstraint("energy BETWEEN 0 AND 100", name="ck_ai_pets_energy"),
+        CheckConstraint("status IN ('active', 'dormant', 'released')", name="ck_ai_pets_status"),
+        Index(
+            "uq_ai_pets_owner_alive",
+            "owner_user_id",
+            unique=True,
+            postgresql_where=text("status <> 'released'"),
+            sqlite_where=text("status <> 'released'"),
+        ),
+        Index(
+            "uq_ai_pets_chat_name_active",
+            "current_chat_id",
+            "name_norm",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+
+class AiPetRelationshipModel(Base):
+    """Affinity between a pet and one person, kept per chat for privacy."""
+
+    __tablename__ = "ai_pet_relationships"
+
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    affinity: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default="0")
+    interactions: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    affinity_gained_today: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default="0")
+    # Raw XP points this person submitted today; the award curve is applied in code.
+    xp_gained_today: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    gained_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("affinity BETWEEN -100 AND 100", name="ck_ai_pet_relationships_affinity"),
+    )
+
+
+class AiPetEventModel(Base):
+    """Journal of everything that happened to a pet; also the idempotency guard."""
+
+    __tablename__ = "ai_pet_events"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    effects: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_ai_pet_events_idempotency_key"),
+        Index("idx_ai_pet_events_pet_created", "pet_id", "created_at"),
+        Index("idx_ai_pet_events_pet_actor_type", "pet_id", "actor_user_id", "event_type", "created_at"),
+    )
+
+
+class AiPetItemModel(Base):
+    """Owner-editable catalog of pet food, toys and cosmetics; prices live here, not in code."""
+
+    __tablename__ = "ai_pet_items"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # {"satiety": 20, "mood": 5, "affinity": 2}; validated in code, broken rows are not sold.
+    effects: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    min_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Where a cosmetic is worn; exactly the cosmetics have a slot.
+    slot: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('food', 'toy', 'cosmetic')", name="ck_ai_pet_items_kind"),
+        CheckConstraint(
+            "(kind = 'cosmetic' AND slot IN ('head', 'neck', 'back')) OR (kind <> 'cosmetic' AND slot IS NULL)",
+            name="ck_ai_pet_items_slot",
+        ),
+        CheckConstraint("price >= 0", name="ck_ai_pet_items_price"),
+        CheckConstraint("min_level >= 1", name="ck_ai_pet_items_min_level"),
+    )
+
+
+class AiPetMessageModel(Base):
+    """A pet's short dialogue history in one chat; also the per-guest talk counter."""
+
+    __tablename__ = "ai_pet_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    # Whether the author owned the pet when they spoke: guests have their own daily share.
+    author_is_owner: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", server_default="ok")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_ai_pet_messages_role"),
+        CheckConstraint("status IN ('pending', 'ok', 'failed')", name="ck_ai_pet_messages_status"),
+        UniqueConstraint("idempotency_key", name="uq_ai_pet_messages_idempotency_key"),
+        Index("idx_ai_pet_messages_pet_chat_created", "pet_id", "chat_id", "created_at"),
+        Index("idx_ai_pet_messages_chat_telegram", "chat_id", "telegram_message_id"),
+    )
+
+
+class AiPetMemoryModel(Base):
+    """Neutral notes a pet keeps from conversations in one chat; never carried to other chats."""
+
+    __tablename__ = "ai_pet_memories"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    subject_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    content: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="dialogue", server_default="dialogue")
+    weight: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("source IN ('aggregate', 'dialogue')", name="ck_ai_pet_memories_source"),
+        Index("idx_ai_pet_memories_pet_chat_created", "pet_id", "chat_id", "created_at"),
+    )
+
+
+class ChatAiCharacterModel(Base):
+    """Selara's character in one group and the member-mode switches set by its admins."""
+
+    __tablename__ = "chat_ai_characters"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    character_preset: Mapped[str] = mapped_column(String(32), nullable=False, default="default", server_default="default")
+    character_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    member_mode_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    member_history_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "character_custom IS NULL OR length(character_custom) <= 500",
+            name="ck_chat_ai_characters_custom_len",
+        ),
+    )
+
+
+class ChatAiCallNameModel(Base):
+    """A name members use to address Selara in a group («Селя, ...»)."""
+
+    __tablename__ = "chat_ai_call_names"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    name_display: Mapped[str] = mapped_column(String(24), nullable=False)
+    name_norm: Mapped[str] = mapped_column(String(24), nullable=False)
+    # The one name that keeps working when the chat has no Selara AI (free chats get one name).
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "name_norm", name="uq_chat_ai_call_names_chat_name"),
+        Index(
+            "uq_chat_ai_call_names_primary",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+            sqlite_where=text("is_primary = 1"),
+        ),
+    )
+
+
+class ChatMemberAiMessageModel(Base):
+    """Member-mode dialogue of one group, kept apart from the admin assistant's context."""
+
+    __tablename__ = "chat_member_ai_messages"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", server_default="ok")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_member_ai_messages_role"),
+        CheckConstraint("status IN ('pending', 'ok', 'failed')", name="ck_chat_member_ai_messages_status"),
+        UniqueConstraint("idempotency_key", name="uq_chat_member_ai_messages_idempotency_key"),
+        Index("idx_chat_member_ai_messages_chat_created", "chat_id", "created_at"),
+        Index("idx_chat_member_ai_messages_chat_telegram", "chat_id", "telegram_message_id"),
+        Index("idx_chat_member_ai_messages_author_created", "chat_id", "author_user_id", "created_at"),
+    )
+
+
+class AiPetInventoryModel(Base):
+    """What a pet owns: stored food and toys, and cosmetics it can wear. Goes with the pet."""
+
+    __tablename__ = "ai_pet_inventory"
+
+    pet_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("ai_pets.id", ondelete="CASCADE"), primary_key=True)
+    # RESTRICT: an owned item cannot vanish; the catalog disables items instead of deleting them.
+    item_code: Mapped[str] = mapped_column(
+        String(32), ForeignKey("ai_pet_items.code", ondelete="RESTRICT"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    equipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("quantity >= 0", name="ck_ai_pet_inventory_quantity"),
+        CheckConstraint("NOT equipped OR quantity > 0", name="ck_ai_pet_inventory_equipped_owned"),
+    )

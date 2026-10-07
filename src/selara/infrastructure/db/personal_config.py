@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from selara.application.personal_config import (
+    CachedPersonalConfigProvider,
+    PersonalConfig,
+    PersonalConfigOverride,
+    QUOTA_MODE_AIL,
+    QUOTA_MODES,
+    config_from_settings,
+    merge_config,
+)
+from selara.core.config import Settings
+from selara.infrastructure.db.models import SelaraPersonalConfigModel
+
+_ROW_ID = 1
+
+
+class SqlAlchemyPersonalConfigStore:
+    """Reads and saves the singleton override row and refreshes the provider cache on save."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        base: PersonalConfig,
+        provider: CachedPersonalConfigProvider | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._base = base
+        self._provider = provider
+
+    async def load_override(self) -> PersonalConfigOverride | None:
+        async with self._session_factory() as session:
+            row = await session.get(SelaraPersonalConfigModel, _ROW_ID)
+        return self._row_override(row)
+
+    async def save_override(self, override: PersonalConfigOverride, *, updated_by: int | None = None) -> PersonalConfig:
+        """Replace the stored override (``None`` fields clear it back to .env); returns the effective config.
+
+        The quota mode and AIL budgets are not part of this form: they keep their stored values and
+        change only through ``save_quota_mode``.
+        """
+        merge_config(self._base, override)  # ValueError before anything is opened or written
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(SelaraPersonalConfigModel, _ROW_ID, with_for_update=True)
+                if row is not None:
+                    override = replace(
+                        override,
+                        quota_mode=row.quota_mode,
+                        free_daily_ail=row.free_daily_ail,
+                        paid_daily_ail=row.paid_daily_ail,
+                    )
+                effective = merge_config(self._base, override)  # ValueError before anything is written
+                if row is None:
+                    row = SelaraPersonalConfigModel(id=_ROW_ID)
+                    session.add(row)
+                row.price_stars = override.price_stars
+                row.duration_days = override.duration_days
+                row.free_daily_limit = override.free_daily_limit
+                row.paid_daily_limit = override.paid_daily_limit
+                row.memory_free_limit = override.memory_free_limit
+                row.memory_paid_limit = override.memory_paid_limit
+                row.memory_auto_extract = override.memory_auto_extract
+                row.memory_extract_every = override.memory_extract_every
+                row.updated_by = updated_by
+        if self._provider is not None:
+            self._provider.invalidate()
+        return effective
+
+    async def save_quota_mode(
+        self,
+        *,
+        quota_mode: str,
+        free_daily_ail: int | None,
+        paid_daily_ail: int | None,
+        updated_by: int | None = None,
+    ) -> PersonalConfig:
+        """Switch requests/AIL and store the AIL budgets atomically; other overrides stay as they are."""
+        if quota_mode not in QUOTA_MODES:
+            raise ValueError("quota_mode must be 'requests' or 'ail'")
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(SelaraPersonalConfigModel, _ROW_ID, with_for_update=True)
+                current = self._row_override(row)
+                override = replace(
+                    current or PersonalConfigOverride(),
+                    quota_mode=quota_mode,
+                    free_daily_ail=free_daily_ail,
+                    paid_daily_ail=paid_daily_ail,
+                )
+                effective = merge_config(self._base, override)  # validates budgets; AIL needs both
+                if quota_mode == QUOTA_MODE_AIL and effective.ail_limits is None:
+                    raise ValueError("Сначала задайте Free/Paid AIL budget.")
+                if row is None:
+                    row = SelaraPersonalConfigModel(id=_ROW_ID)
+                    session.add(row)
+                row.quota_mode = quota_mode
+                row.free_daily_ail = free_daily_ail
+                row.paid_daily_ail = paid_daily_ail
+                row.updated_by = updated_by
+        if self._provider is not None:
+            self._provider.invalidate()
+        return effective
+
+    @staticmethod
+    def _row_override(row: SelaraPersonalConfigModel | None) -> PersonalConfigOverride | None:
+        if row is None:
+            return None
+        return PersonalConfigOverride(
+            price_stars=row.price_stars,
+            duration_days=row.duration_days,
+            free_daily_limit=row.free_daily_limit,
+            paid_daily_limit=row.paid_daily_limit,
+            memory_free_limit=row.memory_free_limit,
+            memory_paid_limit=row.memory_paid_limit,
+            memory_auto_extract=row.memory_auto_extract,
+            memory_extract_every=row.memory_extract_every,
+            quota_mode=row.quota_mode,
+            free_daily_ail=row.free_daily_ail,
+            paid_daily_ail=row.paid_daily_ail,
+        )
+
+
+def build_personal_config(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    *,
+    ttl_seconds: float = 15.0,
+) -> tuple[CachedPersonalConfigProvider, SqlAlchemyPersonalConfigStore]:
+    base = config_from_settings(settings)
+    store = SqlAlchemyPersonalConfigStore(session_factory, base)
+    provider = CachedPersonalConfigProvider(base, store.load_override, ttl_seconds=ttl_seconds)
+    store._provider = provider
+    return provider, store

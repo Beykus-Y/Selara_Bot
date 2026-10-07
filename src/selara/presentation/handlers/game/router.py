@@ -19,6 +19,7 @@ from selara.core.chat_settings import ChatSettings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.domain.value_objects import display_name_from_parts
 from selara.presentation.auth import has_permission
+from selara.presentation.middlewares.chat_write_lock import CHAT_WRITE_LOCK_ANSWER
 from selara.presentation.game_state import (
     GAME_DEFINITIONS,
     GAME_LAUNCHABLE_KINDS,
@@ -5959,6 +5960,10 @@ async def whoami_group_message_handler(message: Message, bot: Bot, chat_settings
         text=text,
     ):
         raise SkipHandler()
+
+    if chat_settings.chat_write_locked:
+        await message.reply(CHAT_WRITE_LOCK_ANSWER)
+        return
 
     actor_label = await _refresh_game_player_label(
         activity_repo,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -15,8 +16,18 @@ from redis.asyncio import Redis
 from sqlalchemy import case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.personal_config import (
+    MAX_DAILY_AIL,
+    QUOTA_MODE_AIL,
+    QUOTA_MODES,
+    PersonalConfig,
+    PersonalConfigOverride,
+    config_from_settings,
+)
+from selara.application.personal_models import ail_activation_problems, format_ail, profile_options
 from selara.application.selara_ai_product import SELARA_AI_PRODUCT_KEY
 from selara.application.selara_ai_status import checkout_ready
+from selara.web.admin_models import build_admin_models_router
 from selara.core.config import Settings
 from selara.core.logging import get_admin_log_buffer
 from selara.domain.entities import UserSnapshot
@@ -38,6 +49,7 @@ from selara.infrastructure.db.models import (
     UserFeatureRequestModel,
     UserModel,
 )
+from selara.infrastructure.db.personal_config import build_personal_config
 from selara.infrastructure.db.telegram_stars import SqlAlchemyChatEntitlementResolver
 from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.runtime import llm_runtime_problem
@@ -51,8 +63,11 @@ TelegramBotProbe = Callable[[], Awaitable[dict[str, Any]]]
 _PERIODS = {1, 7, 30, 90}
 _GROUP_TYPES = ("group", "supergroup")
 _PAYMENT_STATES = {"all", "applied", "rejected"}
+_PAYMENT_SCOPES = {"all", "chat", "user"}
 _REFUND_FILTERS = {"all", "none", "pending", "refunded", "failed"}
 _health_last_success: dict[str, str] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -105,6 +120,7 @@ def build_miniapp_admin_router(
             await session.commit()
 
     AdminSession = Depends(require_admin)
+    _personal_provider, personal_config_store = build_personal_config(session_factory, settings)
 
     async def _read_broadcast_payload(request: Request) -> dict[str, Any]:
         if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
@@ -724,14 +740,20 @@ def build_miniapp_admin_router(
         repository = AdminAiAnalyticsRepository(session)
         features = await repository.feature_breakdown(window_from=window_from, window_to=window_to)
         models, marker_only_calls = await repository.model_breakdown(window_from=window_from, window_to=window_to)
+        profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
+        ail_rows = await repository.ail_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
             "period_days": period_days,
             "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
             "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
             "unattributed_provider_calls": marker_only_calls,
+            "profiles": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in profiles],
             "stages": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in stages],
+            # Product units reserved from users' AI Limits budgets; never converted to USD.
+            "ail_profiles": [{**row, "ail_consumed": format_ail(row["ail_consumed"])} for row in ail_rows],
+            "ail_consumed": format_ail(sum((row["ail_consumed"] for row in ail_rows), Decimal(0))),
         }
 
     @router.get("/monetization/summary")
@@ -741,7 +763,10 @@ def build_miniapp_admin_router(
         window_from = now - timedelta(days=period_days)
         repository = AdminAiAnalyticsRepository(session)
         summary = await repository.payment_summary(window_from=window_from, window_to=now + timedelta(seconds=1))
-        counts = await repository.entitlement_counts(now=now)
+        counts = {
+            **await repository.entitlement_counts(now=now),
+            **await repository.personal_entitlement_counts(now=now),
+        }
         series = await repository.daily_stars_series(
             window_from=window_from, window_to=now + timedelta(seconds=1), timezone_name=settings.bot_timezone
         )
@@ -764,6 +789,7 @@ def build_miniapp_admin_router(
         refund: str = Query(default="all"),
         chat_id: int | None = Query(default=None),
         buyer_id: int | None = Query(default=None),
+        scope: str = Query(default="all"),
         period_days: int | None = Query(default=None),
         cursor: str | None = Query(default=None, max_length=80),
         limit: int = Query(default=20, ge=1, le=50),
@@ -773,6 +799,8 @@ def build_miniapp_admin_router(
             raise HTTPException(status_code=422, detail="Допустимые статусы: all, applied, rejected.")
         if refund not in _REFUND_FILTERS:
             raise HTTPException(status_code=422, detail="Допустимые состояния возврата: all, none, pending, refunded, failed.")
+        if scope not in _PAYMENT_SCOPES:
+            raise HTTPException(status_code=422, detail="Допустимые области: all, chat, user.")
         if period_days is not None:
             _validate_period(period_days)
         parsed_cursor: tuple[datetime, int] | None = None
@@ -788,6 +816,7 @@ def build_miniapp_admin_router(
             chat_id=chat_id,
             buyer_user_id=buyer_id,
             since=_utc_now() - timedelta(days=period_days) if period_days else None,
+            target_scope=None if scope == "all" else scope,
         )
         items, next_cursor = await AdminAiAnalyticsRepository(session).list_payments(
             filters=filters, cursor=parsed_cursor, limit=limit
@@ -850,6 +879,190 @@ def build_miniapp_admin_router(
             ],
         }
 
+    def _personal_config_json(config: PersonalConfig) -> dict[str, Any]:
+        return {
+            "price_stars": config.price_stars,
+            "duration_days": config.duration_days,
+            "free_daily_limit": config.limits.free_daily,
+            "paid_daily_limit": config.limits.paid_daily,
+            "memory_free_limit": config.memory_free_limit,
+            "memory_paid_limit": config.memory_paid_limit,
+            "memory_auto_extract": config.memory_auto_extract,
+            "memory_extract_every": config.memory_extract_every,
+        }
+
+    _EDITABLE_PERSONAL_FIELDS = frozenset(
+        {
+            "price_stars",
+            "duration_days",
+            "free_daily_limit",
+            "paid_daily_limit",
+            "memory_free_limit",
+            "memory_paid_limit",
+            "memory_auto_extract",
+            "memory_extract_every",
+        }
+    )
+
+    def _parse_personal_override(payload: dict[str, Any]) -> PersonalConfigOverride:
+        # Request weights (AI Limits) are deliberately not editable: Personal is 5/150 requests.
+        unknown = sorted(set(payload) - _EDITABLE_PERSONAL_FIELDS)
+        if unknown:
+            raise ValueError(f"fields are not editable: {', '.join(unknown)}")
+
+        def integer(key: str) -> int | None:
+            value = payload.get(key)
+            if value is None:
+                return None
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} must be an integer")
+            return value
+
+        auto_extract = payload.get("memory_auto_extract")
+        if auto_extract is not None and not isinstance(auto_extract, bool):
+            raise ValueError("memory_auto_extract must be true, false or null")
+
+        return PersonalConfigOverride(
+            price_stars=integer("price_stars"),
+            duration_days=integer("duration_days"),
+            free_daily_limit=integer("free_daily_limit"),
+            paid_daily_limit=integer("paid_daily_limit"),
+            memory_free_limit=integer("memory_free_limit"),
+            memory_paid_limit=integer("memory_paid_limit"),
+            memory_auto_extract=auto_extract,
+            memory_extract_every=integer("memory_extract_every"),
+        )
+
+    @router.get("/monetization/personal-config")
+    async def personal_config_read(session: AsyncSession = AdminSession):
+        base = config_from_settings(settings)
+        override = await personal_config_store.load_override()
+        effective = await _personal_provider.get()
+        return {
+            "ok": True,
+            "env": _personal_config_json(base),
+            "override": None
+            if override is None
+            else {
+                "price_stars": override.price_stars,
+                "duration_days": override.duration_days,
+                "free_daily_limit": override.free_daily_limit,
+                "paid_daily_limit": override.paid_daily_limit,
+                "memory_free_limit": override.memory_free_limit,
+                "memory_paid_limit": override.memory_paid_limit,
+                "memory_auto_extract": override.memory_auto_extract,
+                "memory_extract_every": override.memory_extract_every,
+            },
+            "effective": _personal_config_json(effective),
+            "applies_within_seconds": 15,
+            # Existing subscriptions keep the daily limit they bought; this applies to new purchases.
+            "paid_limit_applies_to": "new_purchases_and_free_tier",
+        }
+
+    @router.put("/monetization/personal-config")
+    async def personal_config_write(request: Request, session: AsyncSession = AdminSession):
+        """Replace the override: omitted or null fields fall back to .env. Applies without a restart."""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Ожидался JSON.") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Некорректные данные.")
+        user = await load_user(session, request)
+        try:
+            effective = await personal_config_store.save_override(
+                _parse_personal_override(payload), updated_by=user.telegram_user_id if user else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return {"ok": True, "effective": _personal_config_json(effective)}
+
+    async def _catalog_snapshot():
+        from selara.infrastructure.db.model_catalog import SqlAlchemyModelCatalogStore
+
+        try:
+            return await SqlAlchemyModelCatalogStore(session_factory).load()
+        except Exception:
+            logger.exception("Model catalog unavailable for the quota mode check")
+            return None
+
+    def _quota_mode_json(config: PersonalConfig, override: PersonalConfigOverride | None, snapshot) -> dict[str, Any]:
+        options = profile_options(snapshot, legacy_model=settings.llm_model)
+        return {
+            "quota_mode": config.quota_mode,
+            "free_daily_ail": override.free_daily_ail if override else None,
+            "paid_daily_ail": override.paid_daily_ail if override else None,
+            "requests": {"free_daily": config.limits.free_daily, "paid_daily": config.limits.paid_daily},
+            "max_daily_ail": MAX_DAILY_AIL,
+            "activation_problems": ail_activation_problems(snapshot),
+            "profiles": [
+                {
+                    "profile_key": option.profile_key,
+                    "display_name": option.display_name,
+                    "ail_multiplier": format_ail(option.ail_multiplier),
+                    "available": option.available,
+                }
+                for option in options
+            ],
+            "applies_within_seconds": 15,
+        }
+
+    @router.get("/monetization/quota-mode")
+    async def quota_mode_read(session: AsyncSession = AdminSession):
+        """Requests (5/150) or AI Limits, with the AIL budgets and why AIL could not be enabled."""
+        override = await personal_config_store.load_override()
+        effective = await _personal_provider.get()
+        return {"ok": True, **_quota_mode_json(effective, override, await _catalog_snapshot())}
+
+    @router.put("/monetization/quota-mode")
+    async def quota_mode_write(request: Request, session: AsyncSession = AdminSession):
+        """Owner-only switch; enabling AIL needs budgets, a usable basic profile and explicit confirmation."""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Ожидался JSON.") from None
+        if not isinstance(payload, dict) or set(payload) - {"quota_mode", "free_daily_ail", "paid_daily_ail", "confirm"}:
+            raise HTTPException(status_code=422, detail="Некорректные данные.")
+        mode = payload.get("quota_mode")
+        if mode not in QUOTA_MODES:
+            raise HTTPException(status_code=422, detail="Режим: requests или ail.")
+        budgets: dict[str, int | None] = {}
+        for key in ("free_daily_ail", "paid_daily_ail"):
+            value = payload.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise HTTPException(status_code=422, detail=f"{key}: целое число.")
+            if value is not None and not 0 < value <= MAX_DAILY_AIL:
+                raise HTTPException(status_code=422, detail=f"{key}: от 1 до {MAX_DAILY_AIL}.")
+            budgets[key] = value
+        current = await _personal_provider.get()
+        if mode == QUOTA_MODE_AIL:
+            if budgets["free_daily_ail"] is None or budgets["paid_daily_ail"] is None:
+                raise HTTPException(status_code=422, detail="Сначала задайте Free/Paid AIL budget.")
+            problems = ail_activation_problems(await _catalog_snapshot())
+            if problems:
+                raise HTTPException(status_code=422, detail=" ".join(problems))
+            if not current.ail_enabled and payload.get("confirm") is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "После включения разные модели будут расходовать разное количество AI Limits. "
+                        "Текущие лимиты запросов перестанут использоваться. Подтвердите включение."
+                    ),
+                )
+        user = await load_user(session, request)
+        try:
+            effective = await personal_config_store.save_quota_mode(
+                quota_mode=mode,
+                free_daily_ail=budgets["free_daily_ail"],
+                paid_daily_ail=budgets["paid_daily_ail"],
+                updated_by=user.telegram_user_id if user else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        logger.info("Personal quota mode saved mode=%s by=%s", mode, user.telegram_user_id if user else None)
+        override = await personal_config_store.load_override()
+        return {"ok": True, **_quota_mode_json(effective, override, await _catalog_snapshot())}
+
     @router.get("/ai/readiness")
     async def ai_readiness(session: AsyncSession = AdminSession):
         """Informational diagnostics only; never creates a purchase or calls the provider."""
@@ -910,4 +1123,7 @@ def build_miniapp_admin_router(
             "checks": checks,
         }
 
+    router.include_router(build_admin_models_router(
+        settings=settings, session_factory=session_factory, require_admin=require_admin,
+    ))
     return router

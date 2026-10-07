@@ -15,8 +15,11 @@ from selara.infrastructure.db.activity_event_sync import run_message_event_backf
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
+from selara.infrastructure.http.web_search import build_web_search_client
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
+from selara.infrastructure.db.personal_config import build_personal_config
+from selara.infrastructure.db.model_catalog import build_model_catalog
 from selara.infrastructure.relationship_cleanup import run_startup_relationship_cleanup
 from selara.infrastructure.stt import SttClient, SttConfig
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -40,8 +43,12 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="help", description="Справка"),
         BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
         BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
+        BotCommand(command="ai", description="Моя Selara: настройки личного AI-чата (ЛС)"),
+        BotCommand(command="ai_reset", description="Очистить историю личного AI-чата (ЛС)"),
+        BotCommand(command="memory", description="Что помнит обо мне личный AI (ЛС)"),
+        BotCommand(command="forget_all", description="Удалить все личные данные AI (ЛС)"),
         BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
-        BotCommand(command="premium", description="Купить Selara AI для чата"),
+        BotCommand(command="premium", description="Selara AI: для чата и для себя"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
         BotCommand(command="game", description="Выбрать и запустить игру в чате"),
@@ -89,7 +96,8 @@ def _build_llm_client(settings, session_factory=None) -> LlmClient | None:
             logger.warning("LLM: неверная конфигурация (%s) — AI-ассистент отключён.", problem)
         return None
     accounting = AiAccountingService(session_factory) if session_factory is not None else None
-    return LlmClient(config, accounting_service=accounting)
+    catalog, _ = build_model_catalog(session_factory) if session_factory is not None else (None, None)
+    return LlmClient(config, accounting_service=accounting, model_catalog=catalog)
 
 
 async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
@@ -140,6 +148,14 @@ async def _run_bot(settings, session_factory) -> None:
     stt_client = _build_stt_client(settings)
     llm_client = _build_llm_client(settings, session_factory)
     logger.info("LLM client: %s", "OK" if llm_client is not None else "None (disabled or misconfigured)")
+    web_search_client = build_web_search_client(
+        enabled=settings.web_search_enabled,
+        provider=settings.web_search_provider,
+        base_url=settings.web_search_base_url,
+        timeout_seconds=settings.web_search_timeout_seconds,
+    )
+    logger.info("Web search client: %s",
+                f"OK ({web_search_client.provider_name})" if web_search_client is not None else "None (disabled)")
     dispatcher = PaymentSafeDispatcher()
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
@@ -190,11 +206,18 @@ async def _run_bot(settings, session_factory) -> None:
         )
         await daily_summary_stt_queue.start()
 
-    polling_kwargs: dict = {"settings": settings, "session_factory": session_factory}
+    personal_config, _ = build_personal_config(session_factory, settings)
+    polling_kwargs: dict = {
+        "settings": settings,
+        "session_factory": session_factory,
+        "personal_config": personal_config,
+    }
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
     if llm_client is not None:
         polling_kwargs["llm_client"] = llm_client
+    if web_search_client is not None:
+        polling_kwargs["web_search_client"] = web_search_client
     if daily_summary_stt_queue is not None:
         polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 

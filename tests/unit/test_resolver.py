@@ -440,3 +440,21 @@ def test_resolver_maps_chat_gate_commands(
 def test_resolver_rejects_invalid_antiraid_window() -> None:
     with pytest.raises(TextCommandResolutionError, match=r"Формат команды: \+антирейд \[5\|10\]"):
         resolve_text_command("+антирейд 7", top_default=10, top_max=50)
+
+
+def test_resolver_maps_role_with_game_id() -> None:
+    intent = resolve_text_command("роль game_ab12", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "role"
+    assert intent.args == {"raw_args": "game_ab12"}
+
+
+def test_resolver_ignores_free_text_starting_with_role() -> None:
+    assert resolve_text_command("роль привет как дела", top_default=10, top_max=50) is None
+
+
+def test_resolver_maps_role_with_bare_game_id() -> None:
+    intent = resolve_text_command("роль ab12cd34ef", top_default=10, top_max=50)
+    assert intent is not None
+    assert intent.name == "role"
+    assert intent.args == {"raw_args": "ab12cd34ef"}

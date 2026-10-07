@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from selara.application.use_cases.economy.catalog import RECIPES
@@ -5,6 +6,9 @@ from selara.presentation.commands.aliases import EXACT_ALIASES
 from selara.presentation.commands.normalizer import normalize_text_command
 
 TextCommandKey = str
+
+# game_id в GameStore: uuid4().hex[:10]; /start-ссылки используют префикс game_.
+_ROLE_GAME_ID_PATTERN = re.compile(r"game_[0-9a-f]{4,32}|[0-9a-f]{10}")
 
 SOCIAL_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "шлепнуть": "social_slap",
@@ -517,7 +521,7 @@ PREFIX_TRIGGER_TO_COMMAND_KEY: dict[str, TextCommandKey] = {
     "титул": "title",
     "усыновить": "adopt",
     "удочерить": "adoptdaughter",
-    "стать питомцем": "pet",
+    "стать питомцем": "family_pet",
     "семья": "family",
     "сбежать из семьи": "escape_family",
     "сбежать от хозяина": "escape_pet",
@@ -587,7 +591,7 @@ COMMAND_KEY_DEFAULT_SOURCE_TRIGGER: dict[TextCommandKey, str] = {
     "title": "титул",
     "adopt": "усыновить",
     "adoptdaughter": "удочерить",
-    "pet": "стать питомцем",
+    "family_pet": "стать питомцем",
     "family": "семья",
     "escape_family": "сбежать из семьи",
     "escape_pet": "сбежать от хозяина",
@@ -789,7 +793,7 @@ COMMAND_KEYS_WITH_TAIL: set[TextCommandKey] = {
     "title",
     "adopt",
     "adoptdaughter",
-    "pet",
+    "family_pet",
     "family",
     "escape_family",
     "escape_pet",
@@ -1059,7 +1063,7 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
     if command_key == "lastseen":
         return len(tokens) == 1 and _is_user_ref_token(tokens[0])
 
-    if command_key in {"pair", "marry", "adopt", "adoptdaughter", "pet", "family"}:
+    if command_key in {"pair", "marry", "adopt", "adoptdaughter", "family_pet", "family"}:
         return len(tokens) == 1 and _is_user_ref_token(tokens[0])
 
     if command_key == "escape_family":
@@ -1083,7 +1087,7 @@ def prefix_tail_is_valid(*, command_key: TextCommandKey, tail_text: str) -> bool
         return not tokens
 
     if command_key == "role":
-        return False
+        return len(tokens) == 1 and _ROLE_GAME_ID_PATTERN.fullmatch(tokens[0]) is not None
 
     return True
 

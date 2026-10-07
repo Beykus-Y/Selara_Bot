@@ -79,6 +79,17 @@ async def build_user_snapshot_from_reply_user(activity_repo, *, chat_id: int, us
     )
 
 
+NOT_CHAT_MEMBER_TEXT = "Пользователь не является активным участником этого чата."
+
+
+async def is_target_active_chat_member(message, activity_repo, *, target: UserSnapshot) -> bool:
+    """Цель из reply всегда участник чата; остальные (ID, @username, образ) проверяем по БД."""
+    reply_user = getattr(getattr(message, "reply_to_message", None), "from_user", None)
+    if reply_user is not None and reply_user.id == target.telegram_user_id:
+        return True
+    return bool(await activity_repo.is_active_chat_member(chat_id=message.chat.id, user_id=target.telegram_user_id))
+
+
 async def build_user_snapshot_from_id(activity_repo, *, chat_id: int, user_id: int) -> UserSnapshot:
     existing = await activity_repo.get_user_snapshot(user_id=user_id)
     chat_display_name = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)

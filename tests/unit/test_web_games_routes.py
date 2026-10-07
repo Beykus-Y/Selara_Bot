@@ -762,3 +762,62 @@ async def test_web_zlob_permissions_manage_vs_member(monkeypatch) -> None:
     assert allowed.json()["ok"] is True
     assert "Карточки" in allowed.json()["message"]
     safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/miniapp/games/create", "/app/games/create"])
+async def test_web_game_create_blocked_when_chat_write_locked(monkeypatch, path: str) -> None:
+    settings = _settings()
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=92, username="gm", first_name="Game", last_name="Manager", is_bot=False),
+        manageable_groups=[_overview(-2002, "Create Chat", bot_role="game_master")],
+        chat_settings_by_chat={-2002: replace(default_chat_settings(settings), chat_write_locked=True)},
+    )
+
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        response = await client.post(
+            path,
+            data={"kind": "dice", "chat_id": "-2002"},
+            headers={"accept": "application/json"},
+        )
+        active_games = await store.list_active_games()
+
+    assert response.status_code == 423
+    assert response.json()["ok"] is False
+    assert active_games == []
+    safe_edit_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_game_action_blocked_when_chat_write_locked(monkeypatch) -> None:
+    settings = _settings()
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=111, username="viewer", first_name="View", last_name="Only", is_bot=False),
+        activity_groups=[_overview(-3301, "Locked Lobby Chat")],
+        chat_settings_by_chat={-3301: replace(default_chat_settings(settings), chat_write_locked=True)},
+    )
+
+    async with _web_client(monkeypatch, state) as (client, store, _safe_edit_mock, _send_roles_mock):
+        game, error = await store.create_lobby(
+            kind="dice",
+            chat_id=-3301,
+            chat_title="Locked Lobby Chat",
+            owner_user_id=1,
+            owner_label="owner",
+            reveal_eliminated_role=True,
+        )
+        assert error is None
+        assert game is not None
+        response = await client.post(
+            "/api/miniapp/games/action",
+            data={"callback_data": f"game:join:{game.game_id}"},
+            headers={"accept": "application/json"},
+        )
+        refreshed = await store.get_game(game.game_id)
+
+    assert response.status_code == 423
+    assert response.json()["ok"] is False
+    assert refreshed is not None
+    assert 111 not in refreshed.players

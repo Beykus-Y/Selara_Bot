@@ -32,6 +32,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -154,6 +155,7 @@ from selara.presentation.handlers.settings_common import (
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.getting_started import build_getting_started_context
 from selara.web.miniapp_admin import build_miniapp_admin_router
+from selara.web.miniapp_personal import build_miniapp_personal_router
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
     AUDIT_CATEGORY_OPTIONS,
@@ -5731,6 +5733,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=chat.chat_id)
+            if chat_settings.chat_write_locked:
+                await session.commit()
+                redirect_path = _with_message("/app/games", key="error", text="Запись в этой группе временно заблокирована.")
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Запись в этой группе временно заблокирована.",
+                        status_code=423,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
             actor_label = await game_router_module._resolve_chat_player_label(
                 activity_repo,
                 chat_id=chat.chat_id,
@@ -5836,6 +5849,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(redirect_path)
 
             chat_settings = await _chat_settings_for_game(activity_repo, chat_id=game.chat_id)
+            if chat_settings.chat_write_locked:
+                await session.commit()
+                redirect_path = _with_message(redirect_base_path, key="error", text="Запись в этой группе временно заблокирована.")
+                if prefers_json:
+                    return _json_result(
+                        ok=False,
+                        message="Запись в этой группе временно заблокирована.",
+                        status_code=423,
+                        redirect=redirect_path,
+                    )
+                return _redirect(redirect_path)
             actor_label = await game_router_module._resolve_chat_player_label(
                 activity_repo,
                 chat_id=game.chat_id,
@@ -7703,6 +7727,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "achievement": "Достижения",
         "economy": "Экономика",
         "relationship": "Отношения",
+        "pets": "AI-питомцы",
         "web": "Веб и доступ",
         "other": "Прочее",
     }
@@ -7714,6 +7739,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "achievement",
         "economy",
         "relationship",
+        "pets",
         "web",
         "other",
     ]
@@ -7726,6 +7752,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         "admin_broadcast_replies": {"title": "Ответы на админ-рассылки", "group": "web"},
         "admin_broadcasts": {"title": "Админ-рассылки", "group": "web"},
         "admin_sessions": {"title": "Админ-сессии", "group": "web"},
+        # The item catalog is edited here: prices and effects (JSON) are validated in code before sale.
+        "ai_pet_items": {"title": "Каталог товаров для питомцев", "group": "pets"},
+        "ai_pets": {"title": "AI-питомцы", "group": "pets"},
+        "ai_pet_relationships": {"title": "Отношения питомцев", "group": "pets"},
+        "ai_pet_events": {"title": "События питомцев", "group": "pets"},
+        "ai_pet_messages": {"title": "Разговоры питомцев", "group": "pets"},
+        "ai_pet_memories": {"title": "Память питомцев", "group": "pets"},
+        "ai_pet_inventory": {"title": "Рюкзаки питомцев", "group": "pets"},
         "chat_achievement_stats": {"title": "Статистика достижений чата", "group": "achievement"},
         "chat_activity_event_sync_state": {"title": "Синхронизация событий активности", "group": "activity"},
         "chat_auctions": {"title": "Аукционы чата", "group": "economy"},
@@ -7975,6 +8009,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         return labels
 
     def _coerce_admin_form_value(column, raw_value: str):
+        if isinstance(column.type, JSON):
+            # Edited as JSON text; anything unparsable leaves the stored value untouched.
+            if not raw_value.strip():
+                return None if column.nullable else _admin_invalid_form_value
+            try:
+                return json.loads(raw_value)
+            except ValueError:
+                return _admin_invalid_form_value
         if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
             try:
                 return int(raw_value) if raw_value else None
@@ -8000,6 +8042,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             except ValueError:
                 return _admin_invalid_form_value
         return raw_value
+
+    def _admin_edit_value(column, value):
+        """Show JSON columns as JSON so they round-trip through the edit form."""
+        if isinstance(column.type, JSON) and value is not None:
+            return json.dumps(value, ensure_ascii=False)
+        return value
 
     def _admin_layout_context(
         *,
@@ -9993,7 +10041,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await session.commit()
 
             # Получаем колонки и значения
-            columns = [(col.name, getattr(row, col.name, None)) for col in model_class.__table__.columns]
+            columns = [(col.name, _admin_edit_value(col, getattr(row, col.name, None))) for col in model_class.__table__.columns]
             reference_labels = await _admin_reference_labels(session, column_values=columns)
             primary_key_columns = [column.name for column in _admin_primary_key_columns(model_class)]
             record_id = _admin_primary_key_display(pk_values)
@@ -11191,6 +11239,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
+        )
+    )
+    app.include_router(
+        build_miniapp_personal_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=lambda session, request: _load_user_from_request(session, request, touch=True),
         )
     )
     return app
