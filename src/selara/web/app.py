@@ -112,7 +112,11 @@ from selara.domain.entities import (
 )
 from selara.domain.reactions import normalize_telegram_reaction_emoji
 from selara.domain.value_objects import display_name_from_parts
-from selara.infrastructure.backup import send_daily_backup
+from selara.infrastructure.backup import (
+    BackupAlreadyRunningError,
+    read_manual_backup_status,
+    start_manual_backup,
+)
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.models import (
     AdminBroadcastDeliveryModel,
@@ -9056,17 +9060,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _redirect("/app/admin/login")
 
         try:
-            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+            await start_manual_backup(bot=await _get_game_bot(), settings=settings, session_factory=session_factory)
+        except BackupAlreadyRunningError:
+            redirect_path = _with_message("/app/admin", key="error", text="Backup уже выполняется.")
+            if prefers_json:
+                return _json_result(ok=False, message="Backup уже выполняется.", status_code=409, redirect=redirect_path)
+            return _redirect(redirect_path)
         except Exception:
             logger.exception("Admin backup request failed")
-            redirect_path = _with_message("/app/admin", key="error", text="Не удалось отправить backup. Проверьте логи и конфиг.")
+            redirect_path = _with_message("/app/admin", key="error", text="Не удалось запустить backup. Проверьте логи и конфиг.")
             if prefers_json:
-                return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500, redirect=redirect_path)
+                return _json_result(ok=False, message="Не удалось запустить backup. Проверьте логи и конфиг.", status_code=500, redirect=redirect_path)
             return _redirect(redirect_path)
 
-        redirect_path = _with_message("/app/admin", key="flash", text="Backup отправлен в Telegram.")
+        redirect_path = _with_message("/app/admin", key="flash", text="Backup запущен. Архив придёт в Telegram, когда будет готов.")
         if prefers_json:
-            return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200, redirect=redirect_path)
+            return _json_result(ok=True, message="Backup запущен.", status_code=202, redirect=redirect_path)
         return _redirect(redirect_path)
 
     @app.post("/app/admin/error-alerts")
@@ -10624,12 +10633,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
 
         try:
-            await send_daily_backup(bot=await _get_game_bot(), settings=settings)
+            await start_manual_backup(bot=await _get_game_bot(), settings=settings, session_factory=session_factory)
+        except BackupAlreadyRunningError:
+            return _json_result(ok=False, message="Backup уже выполняется.", status_code=409)
         except Exception:
             logger.exception("Admin backup request failed")
-            return _json_result(ok=False, message="Не удалось отправить backup. Проверьте логи и конфиг.", status_code=500)
+            return _json_result(ok=False, message="Не удалось запустить backup. Проверьте логи и конфиг.", status_code=500)
 
-        return _json_result(ok=True, message="Backup отправлен в Telegram.", status_code=200)
+        return _json_result(ok=True, message="Backup запущен.", status_code=202)
+
+    @app.get("/api/admin/backup-status")
+    async def admin_backup_status_api(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=False)
+
+        if not _admin_auth_required(admin_user_id):
+            return _json_result(ok=False, message="Требуется вход в админку.", status_code=401, redirect="/app/admin/login")
+
+        backup = await read_manual_backup_status(session_factory=session_factory)
+        return JSONResponse(content={"ok": True, "message": "", "backup": backup}, status_code=200)
 
     @app.post("/api/admin/broadcasts/send")
     async def admin_send_broadcast_api(request: Request):
