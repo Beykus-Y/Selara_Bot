@@ -770,10 +770,8 @@ async def test_a_turn_that_loses_its_lease_before_the_model_saves_and_sends_noth
 
     assert llm.requests == []
     message.reply.assert_awaited_once_with(group_character._LEASE_LOST_TEXT)
-    assistant_rows = await member_db.scalars(
-        select(ChatMemberAiMessageModel).where(ChatMemberAiMessageModel.role == "assistant")
-    )
-    assert assistant_rows.all() == []
+    rows = (await member_db.scalars(select(ChatMemberAiMessageModel))).all()
+    assert [(row.role, row.status) for row in rows] == [("user", "failed")]
 
 
 @pytest.mark.asyncio
@@ -787,4 +785,4 @@ async def test_a_turn_that_loses_its_lease_after_the_model_answered_sends_no_ans
     assert len(llm.requests) == 2
     message.reply.assert_awaited_once_with(group_character._LEASE_LOST_TEXT)
     rows = (await member_db.scalars(select(ChatMemberAiMessageModel))).all()
-    assert [row.role for row in rows if row.status == "ok"] == []
+    assert [(row.role, row.status) for row in rows] == [("user", "failed")]
