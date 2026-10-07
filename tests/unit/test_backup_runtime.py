@@ -431,6 +431,115 @@ async def test_pg_dump_keeps_the_database_password_out_of_argv(
     assert dump.path == tmp_path / "bot_pg_dump.dump"
 
 
+class _PgDumpChild:
+    """A pg_dump stand-in that runs until it is stopped, and records how it was stopped.
+
+    `ignores_terminate` models a child that only exits when it is killed.
+    """
+
+    def __init__(self, *, temp_dir: Path, ignores_terminate: bool = False) -> None:
+        self._temp_dir = temp_dir
+        self._ignores_terminate = ignores_terminate
+        self._exited = asyncio.Event()
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self.reaped = False
+        self.temp_dir_present_at_reap: bool | None = None
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await self._exited.wait()
+        return b"", b""
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if not self._ignores_terminate:
+            self._exit(-15)
+
+    def kill(self) -> None:
+        self.killed = True
+        self._exit(-9)
+
+    def _exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exited.set()
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        self.reaped = True
+        self.temp_dir_present_at_reap = self._temp_dir.exists()
+        assert self.returncode is not None
+        return self.returncode
+
+
+async def _cancel_daily_backup_during_pg_dump(
+    monkeypatch: pytest.MonkeyPatch,
+    job_dir: Path,
+    child: _PgDumpChild,
+) -> None:
+    started = asyncio.Event()
+
+    async def fake_exec(*command: str, **kwargs: Any) -> _PgDumpChild:
+        _ = command, kwargs
+        started.set()
+        return child
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(backup.tempfile, "mkdtemp", lambda prefix: str(job_dir))
+    settings = SimpleNamespace(
+        admin_user_id=42,
+        backup_encryption_public_key=_PUBLIC_KEY,
+        backup_pg_dump_path="pg_dump",
+        backup_restore_drill_enabled=False,
+        database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
+    )
+    job = asyncio.create_task(backup.send_daily_backup(bot=SimpleNamespace(), settings=settings))
+    await asyncio.wait_for(started.wait(), 5)
+
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pg_dump_is_terminated_and_reaped_before_the_temp_dir_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    child = _PgDumpChild(temp_dir=job_dir)
+
+    await _cancel_daily_backup_during_pg_dump(monkeypatch, job_dir, child)
+
+    # A cancelled backup must not leave pg_dump reading the database, and the temp directory
+    # may go only once the child has been reaped.
+    assert child.terminated
+    assert not child.killed
+    assert child.reaped
+    assert child.temp_dir_present_at_reap
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_pg_dump_that_ignores_terminate_is_killed_after_a_bounded_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    child = _PgDumpChild(temp_dir=job_dir, ignores_terminate=True)
+    monkeypatch.setattr(backup, "_PROCESS_REAP_TIMEOUT_SECONDS", 0.05)
+
+    await _cancel_daily_backup_during_pg_dump(monkeypatch, job_dir, child)
+
+    assert child.terminated
+    assert child.killed
+    assert child.reaped
+    assert child.temp_dir_present_at_reap
+    assert not job_dir.exists()
+
+
 @pytest.mark.asyncio
 async def test_verify_dump_restorable_emits_full_sql_script_offline(
     monkeypatch: pytest.MonkeyPatch,
