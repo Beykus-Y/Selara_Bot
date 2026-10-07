@@ -48,6 +48,20 @@ docker compose -f gacha/docker-compose.yml up --build
 - схему через `alembic upgrade head` перед стартом приложения.
 
 Данные PostgreSQL хранятся в volume `selara_gacha_postgres_data`.
+API работает от UID/GID `10001:10001` с read-only корневой файловой системой,
+без Linux capabilities и с `no-new-privileges`. Временные дампы и файлы пишутся
+в `/tmp` (tmpfs, 512 MiB); память ограничена 1 GiB, CPU — одним ядром,
+число процессов — 256. Для больших дампов увеличьте лимиты `/tmp` и памяти
+через compose override, сохранив ограничения прав.
+
+Если используется SQLite, укажите абсолютный путь, например
+`GACHA_DATABASE_URL=sqlite+aiosqlite:////data/gacha.sqlite3`, и установите
+SQLite-драйвер `aiosqlite` в своём образе. `/data` — отдельный постоянный volume
+`selara_gacha_runtime_data`; новый volume наследует владельца 10001 из образа.
+Для существующего bind mount/volume заранее предоставьте этому UID права
+на каталог и файл SQLite. Конфиги и изображения в `/app` доступны только для
+чтения; обновляйте их в образе или через read-only bind mounts.
+
 Compose не запускается с паролем БД или межсервисным токеном по умолчанию: необходимо явно
 задать `GACHA_POSTGRES_PASSWORD`, `GACHA_DATABASE_URL` и `GACHA_SERVICE_TOKEN` в `gacha/.env`.
 
