@@ -150,7 +150,9 @@ async def run_spontaneous_event(
                 affinity=claim.person_affinity,
                 rng=rng,
             )
+            owner_has_personal = await service.has_active_personal(user_id=pet.owner_user_id, now=now)
             line = await _phrase(
+                owner_has_personal=owner_has_personal,
                 claim_event_id=claim.event_id,
                 pet=pet,
                 idea=idea,
@@ -178,6 +180,7 @@ async def run_spontaneous_event(
 
 async def _phrase(
     *,
+    owner_has_personal: bool,
     claim_event_id: int,
     pet,
     idea: ev.EventIdea,
@@ -190,8 +193,8 @@ async def _phrase(
     llm_client: LlmClient | None,
 ) -> str | None | bool:
     """The model's line, ``None`` to use the template, or ``False`` when the owner's pool is spent."""
-    if llm_client is None:
-        return None
+    if llm_client is None or not owner_has_personal:
+        return None  # free template: only an owner with Selara Personal pays for a model line
     access = FeatureAccessService(
         SqlAlchemyFeatureQuotaRepository(session_factory),
         user_entitlement_resolver=SqlAlchemyUserEntitlementResolver(

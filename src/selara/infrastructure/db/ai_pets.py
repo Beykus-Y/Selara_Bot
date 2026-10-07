@@ -318,8 +318,6 @@ class AiPetService:
         species_key, species_custom = m.resolve_species(species_raw)
         name = m.validate_name(name_raw)
         name_norm = m.normalize_name(name)
-        if not await self.has_active_personal(user_id=owner.telegram_user_id, now=now):
-            raise PetDomainError("Завести AI-питомца можно с подпиской Selara Personal: /premium в личке с ботом.")
 
         await _lock_resources(
             self._session,
@@ -404,8 +402,8 @@ class AiPetService:
         """Reserve one spontaneous event in this chat, or ``None`` when nothing may happen now.
 
         A chat-scoped advisory lock serialises concurrent checks, so the chat interval and
-        each pet's daily cap hold even when several updates arrive at once. Only pets whose
-        owner has an active Selara Personal qualify (§5.0).
+        each pet's daily cap hold even when several updates arrive at once. Every pet qualifies:
+        the line is a free template unless the owner has Selara Personal (which unlocks the model).
         """
         await _lock_resources(self._session, f"ai_pet:events:{chat_id}")
         last_in_chat = await self._session.scalar(
@@ -428,8 +426,6 @@ class AiPetService:
                 )
             )
             if int(today or 0) >= daily_limit:
-                continue
-            if not await self.has_active_personal(user_id=int(row.owner_user_id), now=now):
                 continue
             candidates.append(row)
         if not candidates:

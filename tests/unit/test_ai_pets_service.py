@@ -83,12 +83,11 @@ async def _create(db, name: str = "Мурка", owner: int = OWNER, chat_id: int
     return await AiPetService(db).create_pet(owner=_user(owner), chat=_chat(chat_id), species_raw="кот", name_raw=name, now=NOW)
 
 
-async def test_creation_requires_an_active_personal_subscription(session) -> None:
-    with pytest.raises(PetDomainError, match="Selara Personal"):
-        await _create(session)
-    await _grant_personal(session, valid_until=NOW - timedelta(seconds=1))
-    with pytest.raises(PetDomainError, match="Selara Personal"):
-        await _create(session)
+async def test_creation_is_free_and_needs_no_subscription(session) -> None:
+    pet = await _create(session)
+    assert pet.name == "Мурка" and pet.level == 1
+    await _grant_personal(session, GUEST, valid_until=NOW - timedelta(seconds=1))
+    assert (await _create(session, name="Барсик", owner=GUEST)).owner_user_id == GUEST
 
 
 async def test_create_pet_and_one_pet_per_owner_and_unique_name_per_chat(session) -> None:
@@ -241,3 +240,17 @@ async def test_group_upgrade_moves_pets_relationships_and_events(session) -> Non
     assert relation is not None
     events = (await session.scalars(select(AiPetEventModel.chat_id).where(AiPetEventModel.pet_id == pet.id))).all()
     assert set(events) == {-1009}
+
+
+async def test_pets_are_enabled_by_default_and_an_explicit_off_is_kept(session) -> None:
+    activity = SqlAlchemyActivityRepository(session)
+    fresh = await activity.upsert_chat_settings(chat=_chat(-1003), values={"vote_daily_limit": 5})
+    assert fresh.pets_enabled is True  # a new chat row never switches pets off by itself
+    off = await activity.upsert_chat_settings(chat=_chat(-1003), values={"pets_enabled": False})
+    assert off.pets_enabled is False
+    again = await activity.upsert_chat_settings(chat=_chat(-1003), values={"vote_daily_limit": 6})
+    assert again.pets_enabled is False  # unrelated updates do not overwrite an explicit off
+    from selara.core.chat_settings import ChatSettings
+
+    assert ChatSettings.__dataclass_fields__["pets_enabled"].default is True
+    assert ChatSettings.__dataclass_fields__["pets_spontaneous_enabled"].default is False

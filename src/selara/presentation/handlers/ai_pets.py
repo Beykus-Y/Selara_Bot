@@ -34,7 +34,7 @@ router = Router(name="ai_pets")
 _GROUP_TYPES = {"group", "supergroup"}
 CALLBACK_PREFIX = "aipet:"
 PETS_DISABLED_TEXT = (
-    "AI-питомцы в этом чате выключены. Админ может включить их: <code>/setcfg pets_enabled true</code>.\n"
+    "AI-питомцы в этом чате выключены админом. Включить: <code>/setcfg pets_enabled true</code>.\n"
     "Ролевое «стать питомцем» теперь — <code>/bepet</code>."
 )
 _FEED_WORDS = {"покормить", "кормить", "накормить"}

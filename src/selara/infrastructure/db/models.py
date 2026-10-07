@@ -1026,8 +1026,8 @@ class ChatSettingsModel(Base):
     interesting_facts_sleep_cap_minutes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1440, server_default="1440")
     custom_rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     family_tree_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
-    # Permission for AI pets to live in this chat; not a subscription.
-    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Permission for AI pets to live in this chat; not a subscription. On unless an admin turns it off.
+    pets_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # Lets pets post rare spontaneous lines here; paid by each pet's owner, off by default.
     pets_spontaneous_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     persona_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
