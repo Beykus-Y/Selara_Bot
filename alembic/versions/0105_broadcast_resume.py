@@ -1,14 +1,14 @@
 """Make Mini App broadcasts resumable: owner leases, delivery claims, cancellation and a stored photo.
 
 Revision ID: 0105_broadcast_resume
-Revises: 0103_ai_turn_leases
+Revises: 0104_interesting_fact_claims
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0105_broadcast_resume"
-down_revision = "0103_ai_turn_leases"
+down_revision = "0104_interesting_fact_claims"
 branch_labels = None
 depends_on = None
 

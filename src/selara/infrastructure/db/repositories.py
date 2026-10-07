@@ -127,6 +127,7 @@ from selara.infrastructure.db.models import (
     ChatCommandAccessRuleModel,
     ChatCustomSocialActionModel,
     ChatGlobalBoostModel,
+    ChatInterestingFactDeliveryModel,
     ChatInterestingFactStateModel,
     ChatModel,
     ChatRoleDefinitionModel,
@@ -2522,6 +2523,76 @@ class SqlAlchemyActivityRepository:
         if state is None:
             raise RuntimeError("Failed to load interesting fact state after upsert")
         return state
+
+    async def lock_chat_interesting_fact_dispatch(self, *, chat_id: int) -> None:
+        # Transaction-scoped, so it serializes claims for one chat across bot replicas until commit.
+        await _lock_resources(self._session, f"interesting_fact_dispatch:{int(chat_id)}")
+
+    async def abandon_expired_interesting_fact_claims(self, *, chat_id: int, now: datetime) -> int:
+        normalized_now = _coerce_utc_datetime(now)
+        stmt = (
+            update(ChatInterestingFactDeliveryModel)
+            .where(
+                ChatInterestingFactDeliveryModel.chat_id == chat_id,
+                ChatInterestingFactDeliveryModel.status == "claimed",
+                ChatInterestingFactDeliveryModel.lease_until <= normalized_now,
+            )
+            .values(status="abandoned", finished_at=normalized_now, error_summary="lease_expired")
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)
+
+    async def get_latest_interesting_fact_claim_at(self, *, chat_id: int, statuses: Sequence[str]) -> datetime | None:
+        stmt = select(func.max(ChatInterestingFactDeliveryModel.claimed_at)).where(
+            ChatInterestingFactDeliveryModel.chat_id == chat_id,
+            ChatInterestingFactDeliveryModel.status.in_(tuple(statuses)),
+        )
+        value = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _normalize_optional_datetime(value)
+
+    async def create_interesting_fact_claim(
+        self,
+        *,
+        chat_id: int,
+        fact_id: str,
+        claimed_at: datetime,
+        lease_until: datetime,
+    ) -> int:
+        row = ChatInterestingFactDeliveryModel(
+            chat_id=chat_id,
+            fact_id=fact_id,
+            status="claimed",
+            claimed_at=_coerce_utc_datetime(claimed_at),
+            lease_until=_coerce_utc_datetime(lease_until),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return int(row.id)
+
+    async def finish_interesting_fact_claim(
+        self,
+        *,
+        claim_id: int,
+        status: str,
+        finished_at: datetime,
+        telegram_message_id: int | None = None,
+        error_summary: str | None = None,
+    ) -> bool:
+        stmt = (
+            update(ChatInterestingFactDeliveryModel)
+            .where(
+                ChatInterestingFactDeliveryModel.id == claim_id,
+                ChatInterestingFactDeliveryModel.status == "claimed",
+            )
+            .values(
+                status=status,
+                finished_at=_coerce_utc_datetime(finished_at),
+                telegram_message_id=telegram_message_id,
+                error_summary=error_summary[:255] if error_summary else None,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return bool(result.rowcount)
 
     @staticmethod
     def _to_daily_summary_run(row: DailySummaryRunModel) -> DailySummaryRun:

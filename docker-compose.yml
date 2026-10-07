@@ -36,9 +36,10 @@ services:
     # limits. Unlike the renderer, app keeps credentials (env_file), the
     # database/redis networks and published ports.
     # Writable paths on the read-only root fs:
-    #   - /tmp (tmpfs, 1g): the daily backup writes a pg_dump and then all of
-    #     its ~45 MB split parts, and never deletes the source dump, so the
-    #     dump and the parts must fit simultaneously; also gacha reel ffmpeg
+    #   - /tmp (tmpfs, 1g): the daily backup writes a pg_dump, its encrypted
+    #     copy (the plaintext is removed once encrypted) and the ~45 MB split
+    #     parts of the encrypted copies, so the encrypted archives and their
+    #     parts must fit simultaneously; also gacha reel ffmpeg
     #     output, Playwright Chromium profiles, matplotlib/fontconfig caches
     #     (MPLCONFIGDIR/XDG_CACHE_HOME) and XDG_CONFIG_HOME.
     #   - /data/gacha_reel_cache (named volume): generated gacha reel MP4s,

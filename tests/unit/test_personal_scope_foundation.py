@@ -503,8 +503,10 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert backup_claims.down_revision == instant_stt.revision
     turn_leases = _load_migration("0103_ai_turn_leases.py")
     assert turn_leases.down_revision == backup_claims.revision
+    interesting_fact_claims = _load_migration("0104_interesting_fact_claims.py")
+    assert interesting_fact_claims.down_revision == turn_leases.revision
     broadcast_resume = _load_migration("0105_broadcast_resume.py")
-    assert broadcast_resume.down_revision == turn_leases.revision
+    assert broadcast_resume.down_revision == interesting_fact_claims.revision
     assert revisions - parents == {broadcast_resume.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32

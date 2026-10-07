@@ -370,15 +370,25 @@ def build_miniapp_personal_router(
             if payload.get("confirm") is not True:
                 raise _ApiError(422, "Подтвердите удаление: confirm должен быть true.")
             user_id = user.telegram_user_id
+            busy = "Selara ещё отвечает на ваше сообщение. Повторите через пару секунд."
             if user_id in personal_ai._inflight_users:
-                raise _ApiError(409, "Selara ещё отвечает на ваше сообщение. Повторите через пару секунд.")
+                raise _ApiError(409, busy)
             # Hold the lock a reply holds, so no turn starts from the old data in the middle of the deletion.
+            # The durable lease does the same across bot instances, where _inflight_users cannot see a running turn.
             personal_ai._inflight_users.add(user_id)
             try:
-                removed = await PersonalAiRepository(session).delete_all_user_data(user_id=user_id)
-                personal_ai._pending_inputs.pop(user_id, None)
-                personal_memory._pending_memories.pop(user_id, None)
+                # End the authentication transaction first: the lease takes its own connection, and a small pool
+                # would otherwise wait on this request's connection.
                 await session.commit()
+                async with personal_ai.ai_turn_lease(
+                    session_factory=session_factory, lease_key=f"personal_ai:{user_id}"
+                ) as acquired:
+                    if not acquired:
+                        raise _ApiError(409, busy)
+                    removed = await PersonalAiRepository(session).delete_all_user_data(user_id=user_id)
+                    personal_ai._pending_inputs.pop(user_id, None)
+                    personal_memory._pending_memories.pop(user_id, None)
+                    await session.commit()
             finally:
                 personal_ai._inflight_users.discard(user_id)
         return JSONResponse(
