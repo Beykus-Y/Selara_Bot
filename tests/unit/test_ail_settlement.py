@@ -252,4 +252,4 @@ async def test_a_provider_cost_above_the_tool_reservation_is_logged_as_our_loss(
     with caplog.at_level(logging.WARNING):
         await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.05")], user_id=5,
                                 max_units=Decimal("3"))
-    assert "above its reservation" in caplog.text
+    assert "above reservation" in caplog.text
