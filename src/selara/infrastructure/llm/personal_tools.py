@@ -363,11 +363,11 @@ class ToolTurnResult:
     rounds: int = 0
 
 
-def _spent_usd(usages: list) -> Decimal | None:
+def _spent_usd(usages: list) -> tuple[Decimal, bool]:
+    """Priced spend of the successful rounds, and whether every successful round came with a price."""
     succeeded = [usage for usage in usages if getattr(usage, "status", "succeeded") == "succeeded"]
-    if not succeeded or any(getattr(usage, "estimated_cost_usd", None) is None for usage in succeeded):
-        return None
-    return sum((Decimal(usage.estimated_cost_usd) for usage in succeeded), Decimal(0))
+    priced = [usage for usage in succeeded if getattr(usage, "estimated_cost_usd", None) is not None]
+    return sum((Decimal(usage.estimated_cost_usd) for usage in priced), Decimal(0)), len(priced) == len(succeeded)
 
 
 async def run_tool_dialogue(
@@ -455,10 +455,12 @@ async def run_tool_dialogue(
                 await repository.session.commit()
             except Exception:
                 log.warning("personal tools: commit between rounds failed", exc_info=True)
-        spent = _spent_usd(sink)
-        if spent is None and run.cost_budget_usd is not None:
-            log.warning("personal tools: spent cost unknown, only the round limit applies")
-        if run.cost_budget_usd is not None and spent is not None and spent >= run.cost_budget_usd * COST_CAP_SHARE:
+        spent, fully_priced = _spent_usd(sink)
+        if run.cost_budget_usd is not None and not fully_priced:
+            # An unpriced round hides what it cost, so the budget cannot be checked: fail closed, no more tool rounds.
+            log.warning("personal tools: a round came back without a price, tools are withdrawn")
+            wind_down = True
+        if run.cost_budget_usd is not None and spent >= run.cost_budget_usd * COST_CAP_SHARE:
             wind_down = True
     return ToolTurnResult("", run.web_used, False, run.total_rounds)
 

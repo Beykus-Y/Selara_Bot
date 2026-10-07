@@ -6470,6 +6470,10 @@ class SqlAlchemyActivityRepository:
         media_type: str | None = None,
         media_file_id: str | None = None,
         media_file_unique_id: str | None = None,
+        media_filename: str | None = None,
+        media_content: bytes | None = None,
+        lease_owner_token: str | None = None,
+        lease_expires_at: datetime | None = None,
         request_fingerprint: str | None = None,
         active_since_days: int,
         created_by_user_id: int | None,
@@ -6483,6 +6487,10 @@ class SqlAlchemyActivityRepository:
             media_type=media_type,
             media_file_id=media_file_id,
             media_file_unique_id=media_file_unique_id,
+            media_filename=media_filename,
+            media_content=media_content,
+            lease_owner_token=lease_owner_token,
+            lease_expires_at=_normalize_optional_datetime(lease_expires_at),
             active_since_days=max(1, int(active_since_days)),
             created_by_user_id=int(created_by_user_id) if created_by_user_id is not None else None,
         )
@@ -6529,6 +6537,8 @@ class SqlAlchemyActivityRepository:
         row.bot_member_status = (bot_member_status or "").strip()[:32] or None
         row.error_text = None
         row.sent_at = _coerce_utc_datetime(sent_at)
+        row.claim_token = None
+        row.claim_expires_at = None
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
@@ -6921,6 +6931,8 @@ class SqlAlchemyActivityRepository:
             return False
         row.status = "failed"
         row.error_text = " ".join((error_text or "").split())[:1000] or "send_failed"
+        row.claim_token = None
+        row.claim_expires_at = None
         row.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
         return True
@@ -6937,6 +6949,9 @@ class SqlAlchemyActivityRepository:
             return False
         row.media_file_id = (file_id or "").strip() or None
         row.media_file_unique_id = (file_unique_id or "").strip() or None
+        # Telegram now holds the photo, so the stored copy is no longer needed.
+        row.media_content = None
+        row.media_filename = None
         await self._session.flush()
         return row.media_file_id is not None
 

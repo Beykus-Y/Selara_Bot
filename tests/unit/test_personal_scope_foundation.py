@@ -505,9 +505,10 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert turn_leases.down_revision == backup_claims.revision
     interesting_fact_claims = _load_migration("0104_interesting_fact_claims.py")
     assert interesting_fact_claims.down_revision == turn_leases.revision
+    broadcast_resume = _load_migration("0105_broadcast_resume.py")
+    assert broadcast_resume.down_revision == interesting_fact_claims.revision
     activity_inbox = _load_migration("0106_activity_event_inbox.py")
-    # Temporary: 0106 sits on 0104 until #141 (0105) is on dev. Then it re-points to 0105_broadcast_resume.
-    assert activity_inbox.down_revision == interesting_fact_claims.revision
+    assert activity_inbox.down_revision == broadcast_resume.revision
     assert revisions - parents == {activity_inbox.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
