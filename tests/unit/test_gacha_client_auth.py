@@ -9,8 +9,8 @@ from selara.infrastructure.http.gacha_client import HttpGachaClient
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["pull", "purchase", "sell"])
-async def test_gacha_client_sends_service_token_for_mutating_user_calls(operation: str) -> None:
+@pytest.mark.parametrize("operation", ["pull", "purchase", "sell", "profile", "history"])
+async def test_gacha_client_sends_service_token_for_user_scoped_calls(operation: str) -> None:
     client = HttpGachaClient(
         base_url="http://gacha.local",
         timeout_seconds=5.0,
@@ -23,8 +23,12 @@ async def test_gacha_client_sends_service_token_for_mutating_user_calls(operatio
             await client.pull(user_id=10, username="user", banner="genshin")
         elif operation == "purchase":
             await client.purchase_pull(user_id=10, username="user", banner="genshin")
-        else:
+        elif operation == "sell":
             await client.sell_pull(user_id=10, pull_id=99)
+        elif operation == "profile":
+            await client.get_profile(user_id=10, banner="genshin")
+        else:
+            await client.get_history(user_id=10, banner="genshin")
 
     assert client._request.await_args.kwargs["headers"] == {
         "X-Gacha-Service-Token": "service-secret",

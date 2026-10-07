@@ -161,6 +161,7 @@ class HttpGachaClient:
             "GET",
             f"/v1/gacha/users/{user_id}/profile",
             params={"banner": banner},
+            headers=self._service_headers(),
         )
         return GachaProfileResponse.model_validate(payload)
 
@@ -204,6 +205,7 @@ class HttpGachaClient:
             "GET",
             f"/v1/gacha/users/{user_id}/history",
             params={"banner": banner, "limit": limit},
+            headers=self._service_headers(),
         )
         return GachaHistoryResponse.model_validate(payload)
 

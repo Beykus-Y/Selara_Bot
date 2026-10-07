@@ -299,6 +299,18 @@ chance(rarity) = sum(weight карт этой редкости) / sum(weight в�
 
 `GET /v1/gacha/users/{user_id}/history?banner=genshin&limit=10`
 
+Все user-scoped вызовы (`pull`, `pull/purchase`, `pulls/{pull_id}/sell`, а также read-эндпоинты
+`profile`, `history`, `collection`) требуют header:
+
+```text
+X-Gacha-Service-Token: <GACHA_SERVICE_TOKEN>
+```
+
+Per-user данные (профиль, история круток, коллекция) не публичны: Telegram user_id предсказуем,
+поэтому без токена любой клиент с сетевым доступом мог бы перечислять чужие данные (issue #77).
+`GET /v1/gacha/banners/{banner}/cards` и `GET /v1/gacha/health` остаются публичными — это
+статический каталог карт и healthcheck без пользовательских данных.
+
 Пример тела:
 
 ```json
@@ -451,11 +463,13 @@ curl -X POST http://127.0.0.1:8001/v1/gacha/pull \
 Проверка профиля игрока:
 
 ```bash
-curl "http://127.0.0.1:8001/v1/gacha/users/12345/profile?banner=genshin"
+curl -H "X-Gacha-Service-Token: $GACHA_SERVICE_TOKEN" \
+  "http://127.0.0.1:8001/v1/gacha/users/12345/profile?banner=genshin"
 ```
 
 Проверка последних круток:
 
 ```bash
-curl "http://127.0.0.1:8001/v1/gacha/users/12345/history?banner=genshin&limit=5"
+curl -H "X-Gacha-Service-Token: $GACHA_SERVICE_TOKEN" \
+  "http://127.0.0.1:8001/v1/gacha/users/12345/history?banner=genshin&limit=5"
 ```
