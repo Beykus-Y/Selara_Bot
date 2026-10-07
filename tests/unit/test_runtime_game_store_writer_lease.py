@@ -37,6 +37,7 @@ class _SharedRedis:
         self.active: dict[int, str] = {}
         self.owner: str | None = None
         self.epoch = 0
+        self.claims = 0
 
     def repo(self, token: str) -> _FakeGameRepo:
         return _FakeGameRepo(self, token)
@@ -63,6 +64,7 @@ class _FakeGameRepo:
 
     async def claim_writer_lease(self, *, ttl_ms: int, known_epoch: int | None) -> tuple[int, int]:
         shared = self._shared
+        shared.claims += 1
         counter = shared.epoch
         if shared.owner == self._token:
             return 1, counter
@@ -73,10 +75,6 @@ class _FakeGameRepo:
         shared.owner = self._token
         shared.epoch += 1
         return 2, counter
-
-    async def release_writer_lease(self) -> None:
-        if self._shared.owner == self._token:
-            self._shared.owner = None
 
     def _fence(self) -> None:
         if self._shared.owner != self._token:
@@ -276,16 +274,23 @@ async def test_heartbeat_ends_the_process_when_another_instance_takes_the_lease(
 
 
 @pytest.mark.asyncio
-async def test_clean_shutdown_hands_the_lease_to_a_successor_at_once() -> None:
+async def test_clean_shutdown_keeps_the_lease_until_its_ttl_runs_out() -> None:
     shared = _SharedRedis()
     first = _store_on(shared)
     successor = _store_on(shared)
+    successor._writer_start_timeout_seconds = 5
     try:
         await first.start_writer_lease()
         await first.close()
-        assert shared.owner is None
+        # Writes still in flight at shutdown must land, so the lease is not released early.
+        assert shared.owner == first._writer_token
 
-        await successor.start_writer_lease()
+        starting = asyncio.create_task(successor.start_writer_lease())
+        await asyncio.sleep(0.05)
+        assert not starting.done()
+
+        shared.lapse()
+        await asyncio.wait_for(starting, timeout=5)
         assert shared.owner == successor._writer_token
     finally:
         await successor.close()
@@ -338,6 +343,38 @@ class _HangingRepo(_FakeGameRepo):
     async def claim_writer_lease(self, *, ttl_ms: int, known_epoch: int | None) -> tuple[int, int]:
         await asyncio.Event().wait()
         raise AssertionError("the claim is cancelled by its timeout")
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_renewing_the_lease_while_it_reconciles() -> None:
+    shared = _SharedRedis()
+    store = _store_on(shared)
+    store._writer_heartbeat_seconds = 0.01
+    store._recovery_retry_seconds = 3600
+    try:
+        await store.start_writer_lease()
+        game = await _create_game(store, chat_id=503)
+        shared.lapse()
+        _, joined = await store.join(game_id=game.game_id, user_id=2, user_label="u2")
+        assert joined == "joined"
+        assert store.redis_recovery_state == "degraded"
+
+        renewals_during_reconcile: list[int] = []
+
+        async def slow_reconcile(repo) -> int:
+            # Longer than several heartbeats: the lease must be renewed under the pass.
+            before = shared.claims
+            await asyncio.sleep(0.1)
+            renewals_during_reconcile.append(shared.claims - before)
+            return 1
+
+        store._reconcile_degraded_state = slow_reconcile  # type: ignore[method-assign]
+        await store._attempt_recovery()
+
+        assert store.redis_recovery_state == "connected"
+        assert renewals_during_reconcile[0] >= 2
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

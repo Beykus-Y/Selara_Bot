@@ -5619,15 +5619,6 @@ redis.call('INCR', KEYS[2])
 return {2, counter}
 """
 
-# KEYS[1] is the lease, ARGV[1] the owner token. The lease is deleted only while
-# this owner still holds it, so a stale release never frees a successor's lease.
-_RELEASE_WRITER_LEASE_LUA = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-"""
-
 # A game write is one script: the lease check and the writes are atomic, so a
 # process that lost the lease cannot land a payload or pointer after its successor
 # has written. KEYS: lease, game payload, chat active pointer, then one recent-games
@@ -5784,9 +5775,6 @@ class RedisGameStateRepository:
             "" if known_epoch is None else str(known_epoch),
         )
         return int(status), int(counter)
-
-    async def release_writer_lease(self) -> None:
-        await self._client.eval(_RELEASE_WRITER_LEASE_LUA, 1, self._WRITER_LEASE_KEY, self._writer_token)
 
     async def _run_fenced(self, script: str, keys: list[str], args: list[str]) -> None:
         applied = await self._client.eval(script, len(keys), *keys, *args)
@@ -6089,6 +6077,9 @@ class RuntimeGameStore:
         # process last saw it, so a re-claim can prove nobody else acquired it.
         self._writer_token = uuid4().hex
         self._writer_epoch: int | None = None
+        # The repo the lease was last claimed through: the heartbeat renews it, and
+        # during a recovery attempt that is the candidate, not yet the live repo.
+        self._lease_repo: RedisGameStateRepository | None = None
         self._writer_lease_enabled = False
         self._writer_heartbeat_task: asyncio.Task[None] | None = None
         self._writer_fatal: Exception | None = None
@@ -6159,6 +6150,7 @@ class RuntimeGameStore:
         self._closed = False
         self._writer_lease_enabled = False
         self._writer_epoch = None
+        self._lease_repo = None
         self._stop_writer_heartbeat()
         self._game_revisions = {}
         self._chat_write_locks = {}
@@ -6176,6 +6168,7 @@ class RuntimeGameStore:
         self._redis_url = None
         self._writer_lease_enabled = False
         self._writer_epoch = None
+        self._lease_repo = None
         self._stop_writer_heartbeat()
         self._redis_degraded = False
         self._degraded_owned_chats = set()
@@ -6202,13 +6195,8 @@ class RuntimeGameStore:
             except asyncio.CancelledError:
                 pass
         self._stop_writer_heartbeat()
-        if self._state_repo is not None and self._writer_lease_enabled:
-            # Hand the lease over at once so a successor does not wait out the TTL.
-            try:
-                async with asyncio.timeout(self._writer_claim_timeout_seconds):
-                    await self._state_repo.release_writer_lease()
-            except Exception:
-                logger.debug("Failed to release the game writer lease on shutdown", exc_info=True)
+        # Not released here: a release would fence writes still in flight at
+        # shutdown. The lease runs out on its TTL and a successor waits for it.
         self._writer_lease_enabled = False
         if self._broker is not None:
             await self._broker.close()
@@ -6453,6 +6441,7 @@ class RuntimeGameStore:
             raise self._writer_fatal
 
     async def _claim_writer_lease(self, repo: RedisGameStateRepository) -> None:
+        self._lease_repo = repo
         async with asyncio.timeout(self._writer_claim_timeout_seconds):
             status, counter = await repo.claim_writer_lease(
                 ttl_ms=self._writer_lease_ttl_ms,
@@ -6484,9 +6473,10 @@ class RuntimeGameStore:
     async def _writer_heartbeat_loop(self) -> None:
         while self._writer_lease_enabled and not self._closed:
             await asyncio.sleep(self._writer_heartbeat_seconds)
-            repo = self._state_repo
+            # Renew through the repo the lease was last claimed on, so the lease is
+            # kept alive while a recovery attempt reconciles on its candidate repo.
+            repo = self._lease_repo
             if repo is None or not self._writer_lease_enabled or self._closed:
-                # Degraded: the recovery loop claims the lease again before writing.
                 continue
             try:
                 await self._claim_writer_lease(repo)

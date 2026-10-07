@@ -69,9 +69,10 @@ async def test_writer_lease_fences_stale_owners_on_real_redis():
                 int((game.started_at or game.created_at).timestamp())
             )
 
-            await owner.release_writer_lease()
+            # The owner's TTL runs out (the lease key expires), then the rival takes the free lease.
+            await client.delete(RedisGameStateRepository._WRITER_LEASE_KEY)
             assert await rival.claim_writer_lease(ttl_ms=30_000, known_epoch=None) == (2, 1)
-            await rival.release_writer_lease()
+            await client.delete(RedisGameStateRepository._WRITER_LEASE_KEY)
 
             # The owner last held the lease at epoch 1; an acquisition since then
             # must not be taken over silently, and the lease stays free for it.
