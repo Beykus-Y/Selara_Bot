@@ -127,7 +127,28 @@ async def test_activity_tracker_enqueues_after_successful_handler() -> None:
         raw_message_json=None,
         snapshot_hash=None,
         reply_to_telegram_message_id=None,
+        session=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_passes_the_request_session_to_the_batcher() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    handler = AsyncMock(return_value="handled")
+    request_session = object()
+
+    await middleware(
+        handler,
+        _event(),
+        {
+            "settings": SimpleNamespace(supported_chat_types={"private", "group", "supergroup"}),
+            "db_session": request_session,
+        },
+    )
+
+    _, kwargs = batcher.enqueue_message.await_args
+    assert kwargs["session"] is request_session
 
 
 @pytest.mark.asyncio
@@ -199,6 +220,7 @@ async def test_activity_tracker_enqueues_archive_payload_when_save_message_enabl
         raw_message_json=raw_payload,
         snapshot_hash=expected_hash,
         reply_to_telegram_message_id=None,
+        session=None,
     )
 
 
@@ -246,6 +268,7 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
         raw_message_json=raw_payload,
         snapshot_hash=expected_hash,
         reply_to_telegram_message_id=None,
+        session=None,
     )
 
 

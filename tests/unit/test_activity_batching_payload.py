@@ -32,13 +32,29 @@ def _event(**overrides: object) -> ActivityBatchMessage:
     return ActivityBatchMessage(**values)
 
 
+def _restore(payload: dict, event: ActivityBatchMessage) -> ActivityBatchMessage:
+    # The inbox row's own columns supply the chat identity, so the payload never carries a copy of it.
+    return activity_batch_message_from_payload(
+        payload,
+        chat_id=event.chat_id,
+        chat_type=event.chat_type,
+        chat_title=event.chat_title,
+    )
+
+
 def test_payload_roundtrip_keeps_every_field() -> None:
     event = _event(edited_at=datetime(2026, 10, 7, 9, 31, tzinfo=timezone(timedelta(hours=3))))
 
     payload = activity_batch_message_to_payload(event)
 
     assert isinstance(payload["event_at"], str)
-    assert activity_batch_message_from_payload(payload) == event
+    assert _restore(payload, event) == event
+
+
+def test_chat_identity_is_left_to_the_inbox_columns() -> None:
+    payload = activity_batch_message_to_payload(_event())
+
+    assert not {"chat_id", "chat_type", "chat_title"} & payload.keys()
 
 
 def test_naive_datetimes_are_stored_as_utc() -> None:
@@ -47,14 +63,15 @@ def test_naive_datetimes_are_stored_as_utc() -> None:
     payload = activity_batch_message_to_payload(event)
 
     assert payload["event_at"] == "2026-10-07T09:30:00+00:00"
-    assert activity_batch_message_from_payload(payload).event_at == datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc)
+    assert _restore(payload, event).event_at == datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc)
 
 
 def test_unknown_payload_keys_are_ignored_for_forward_compatibility() -> None:
-    payload = activity_batch_message_to_payload(_event())
+    event = _event()
+    payload = activity_batch_message_to_payload(event)
     payload["field_from_a_newer_release"] = 1
 
-    assert activity_batch_message_from_payload(payload) == _event()
+    assert _restore(payload, event) == event
 
 
 def test_archive_free_events_roundtrip_without_snapshot_fields() -> None:
@@ -70,4 +87,4 @@ def test_archive_free_events_roundtrip_without_snapshot_fields() -> None:
         snapshot_hash=None,
     )
 
-    assert activity_batch_message_from_payload(activity_batch_message_to_payload(event)) == event
+    assert _restore(activity_batch_message_to_payload(event), event) == event

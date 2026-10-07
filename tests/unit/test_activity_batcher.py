@@ -353,3 +353,39 @@ async def test_enqueue_after_close_is_rejected() -> None:
         await batcher.enqueue_message(**_archived_message(chat_id=8008, user_id=904, message_id=1))
     assert await _count(session_factory, ActivityEventInboxModel) == 0
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_with_the_request_session_takes_no_second_connection_and_follows_its_commit() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    class NoSecondConnectionFactory:
+        def __call__(self):
+            raise AssertionError("enqueue must reuse the request session, not open a second pooled connection")
+
+    batcher = ActivityBatcher(
+        session_factory=NoSecondConnectionFactory(),
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+    )
+    async with session_factory() as request_session:
+        await batcher.enqueue_message(
+            **_archived_message(chat_id=9009, user_id=905, message_id=1),
+            session=request_session,
+        )
+        await request_session.rollback()
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+
+    async with session_factory() as request_session:
+        await batcher.enqueue_message(
+            **_archived_message(chat_id=9009, user_id=905, message_id=2),
+            session=request_session,
+        )
+        await request_session.commit()
+    assert await _count(session_factory, ActivityEventInboxModel) == 1
+    await engine.dispose()
