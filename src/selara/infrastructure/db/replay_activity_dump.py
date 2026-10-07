@@ -116,7 +116,10 @@ def main() -> None:
     parser.add_argument(
         "dump_path",
         type=Path,
-        help="Path to a JSON array of activity batch payloads, e.g. rows exported from activity_event_inbox.payload",
+        help=(
+            "Path to a JSON array of activity batch objects: chat_id, chat_type and chat_title from an "
+            "activity_event_inbox row, merged with that row's payload."
+        ),
     )
     parser.add_argument("--chunk-size", type=int, default=500, help="How many events to replay per transaction.")
     args = parser.parse_args()

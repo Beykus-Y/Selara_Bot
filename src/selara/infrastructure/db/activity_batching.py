@@ -38,11 +38,15 @@ class ActivityBatchFlushResult:
 
 
 _PAYLOAD_DATETIME_FIELDS = ("event_at", "snapshot_at", "sent_at", "edited_at")
+# The chat is stored in the inbox row's own columns, so a chat migration retargets a pending row without rewriting it.
+_CHAT_FIELDS = frozenset({"chat_id", "chat_type", "chat_title"})
 
 
 def activity_batch_message_to_payload(event: ActivityBatchMessage) -> dict[str, Any]:
     """Serialize an event for the activity inbox, storing datetimes as UTC ISO-8601 strings."""
-    payload: dict[str, Any] = {item.name: getattr(event, item.name) for item in fields(event)}
+    payload: dict[str, Any] = {
+        item.name: getattr(event, item.name) for item in fields(event) if item.name not in _CHAT_FIELDS
+    }
     for name in _PAYLOAD_DATETIME_FIELDS:
         value = payload[name]
         if value is not None:
@@ -50,15 +54,24 @@ def activity_batch_message_to_payload(event: ActivityBatchMessage) -> dict[str, 
     return payload
 
 
-def activity_batch_message_from_payload(payload: Mapping[str, Any]) -> ActivityBatchMessage:
-    """Inverse of `activity_batch_message_to_payload`. Unknown keys are dropped so older code can read newer rows."""
-    known_fields = {item.name for item in fields(ActivityBatchMessage)}
+def activity_batch_message_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+) -> ActivityBatchMessage:
+    """Inverse of `activity_batch_message_to_payload`. The chat comes from the inbox row's columns.
+
+    Unknown keys are dropped so older code can read newer rows.
+    """
+    known_fields = {item.name for item in fields(ActivityBatchMessage)} - _CHAT_FIELDS
     values: dict[str, Any] = {key: value for key, value in payload.items() if key in known_fields}
     for name in _PAYLOAD_DATETIME_FIELDS:
         value = values.get(name)
         if isinstance(value, str):
             values[name] = datetime.fromisoformat(value)
-    return ActivityBatchMessage(**values)
+    return ActivityBatchMessage(chat_id=chat_id, chat_type=chat_type, chat_title=chat_title, **values)
 
 
 def _as_utc(value: datetime) -> datetime:
