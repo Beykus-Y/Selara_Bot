@@ -245,3 +245,48 @@ def test_generated_public_key_parses_back_to_same_fingerprint() -> None:
     assert backup_encryption.public_key_fingerprint(recipient) == backup_encryption.public_key_fingerprint(
         identity.public_key()
     )
+
+
+def test_failed_restore_removes_archives_it_already_wrote(
+    small_frames: None,
+    tmp_path: Path,
+) -> None:
+    identity, recipient = _key_pair()
+    entries = []
+    for name in ("bot_pg_dump.dump", "gacha_pg_dump.dump"):
+        source = tmp_path / name
+        source.write_bytes(b"0123456789abcdef")
+        encrypted = tmp_path / f"{name}.enc"
+        backup_encryption.encrypt_file(source=source, destination=encrypted, recipient=recipient)
+        parts, entry = backup._split_backup_file(
+            BackupFile(path=encrypted, archive_name=encrypted.name),
+            tmp_path,
+            40,
+        )
+        entries.append(entry)
+        if name == "gacha_pg_dump.dump":
+            # The first archive restores fine; the second one has a corrupt part.
+            corrupted = bytearray(parts[0].path.read_bytes())
+            corrupted[0] ^= 0xFF
+            parts[0].path.write_bytes(bytes(corrupted))
+    manifest_path = backup._write_backup_manifest(
+        temp_dir=tmp_path,
+        created_at="20260315T000000Z",
+        chunk_size_bytes=40,
+        files=entries,
+        encryption={
+            "format": backup_encryption.ENCRYPTION_FORMAT,
+            "recipient_sha256": backup_encryption.public_key_fingerprint(recipient),
+        },
+    )
+    output_dir = tmp_path / "restored"
+
+    with pytest.raises(BackupCryptoError, match="checksum mismatch"):
+        backup_encryption.restore_backup_set(
+            manifest_path=manifest_path,
+            parts_dir=tmp_path,
+            identity=identity,
+            output_dir=output_dir,
+        )
+
+    assert list(output_dir.iterdir()) == []

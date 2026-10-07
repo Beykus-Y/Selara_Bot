@@ -203,16 +203,26 @@ def restore_backup_set(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     restored: list[Path] = []
-    for entry in manifest["files"]:
-        encrypted_name = _safe_name(entry["filename"])
-        if not encrypted_name.endswith(ENCRYPTED_SUFFIX):
-            raise BackupCryptoError(f"Unexpected archive name in manifest: {encrypted_name}")
-        encrypted_path = output_dir / encrypted_name
-        _reassemble_parts(entry=entry, parts_dir=parts_dir, destination=encrypted_path)
-        plain_path = output_dir / encrypted_name[: -len(ENCRYPTED_SUFFIX)]
-        decrypt_file(source=encrypted_path, destination=plain_path, private_key=identity)
-        encrypted_path.unlink()
-        restored.append(plain_path)
+    created: list[Path] = []
+    try:
+        for entry in manifest["files"]:
+            encrypted_name = _safe_name(entry["filename"])
+            if not encrypted_name.endswith(ENCRYPTED_SUFFIX):
+                raise BackupCryptoError(f"Unexpected archive name in manifest: {encrypted_name}")
+            encrypted_path = output_dir / encrypted_name
+            created.append(encrypted_path)
+            _reassemble_parts(entry=entry, parts_dir=parts_dir, destination=encrypted_path)
+            plain_path = output_dir / encrypted_name[: -len(ENCRYPTED_SUFFIX)]
+            created.append(plain_path)
+            decrypt_file(source=encrypted_path, destination=plain_path, private_key=identity)
+            encrypted_path.unlink()
+            restored.append(plain_path)
+    except BaseException:
+        # Remove everything this call created, so a retry with the same output
+        # directory does not trip over leftovers from a failed attempt.
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
     return restored
 
 
