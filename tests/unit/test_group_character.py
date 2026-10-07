@@ -436,8 +436,10 @@ def _settings():
     return Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", llm_cooldown_seconds=0)
 
 
-async def _ask(db, message, llm):
+async def _ask(db, message, llm, *, admin_user_id=None):
     settings = _settings()
+    if admin_user_id is not None:
+        settings = settings.model_copy(update={"admin_user_id": admin_user_id})
     text = await group_character.resolve_group_call(message, db_session=db, session_factory=object(), settings=settings)
     if text is None:
         return None
@@ -489,6 +491,15 @@ async def test_member_tool_rounds_depend_on_subscription_and_last_round_is_tool_
     last = llm.requests[-1]
     assert last["tools"] == [] and last["messages"][-1]["content"] == LAST_ROUND_NOTICE
     assert all(r["max_tokens"] == 500 for r in llm.requests)
+
+
+@pytest.mark.asyncio
+async def test_only_the_bot_owner_personally_is_exempt_from_member_limits(member_db):
+    llm = _Llm()
+    await _ask(member_db, _member_message("Селя, привет", message_id=1, user_id=_MEMBER), llm, admin_user_id=_MEMBER)
+    await _ask(member_db, _member_message("Селя, привет", message_id=2, user_id=32), llm, admin_user_id=_MEMBER)
+    await _ask(member_db, _member_message("Селя, привет", message_id=3, user_id=_MEMBER), llm, admin_user_id=None)
+    assert [r["owner_exempt"] for r in _Access.reservations] == [True, False, False]
 
 
 @pytest.mark.asyncio
