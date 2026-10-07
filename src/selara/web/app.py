@@ -155,6 +155,7 @@ from selara.presentation.handlers.settings_common import (
 from selara.web.admin_docs import build_admin_docs_context
 from selara.web.getting_started import build_getting_started_context
 from selara.web.miniapp_admin import build_miniapp_admin_router
+from selara.web.miniapp_gacha import build_miniapp_gacha_router
 from selara.web.miniapp_personal import build_miniapp_personal_router
 from selara.web.presenters import (
     AUDIT_ACTOR_OPTIONS,
@@ -11345,6 +11346,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     )
     app.include_router(
         build_miniapp_personal_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=lambda session, request: _load_user_from_request(session, request, touch=True),
+        )
+    )
+    app.include_router(
+        build_miniapp_gacha_router(
             settings=settings,
             session_factory=session_factory,
             load_user=lambda session, request: _load_user_from_request(session, request, touch=True),

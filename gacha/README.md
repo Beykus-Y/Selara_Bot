@@ -299,6 +299,20 @@ chance(rarity) = sum(weight карт этой редкости) / sum(weight в�
 
 `GET /v1/gacha/users/{user_id}/history?banner=genshin&limit=10`
 
+Все user-scoped вызовы (`pull`, `pull/purchase`, `pulls/{pull_id}/sell`, а также read-эндпоинты
+`profile`, `history`, `collection`) требуют header:
+
+```text
+X-Gacha-Service-Token: <GACHA_SERVICE_TOKEN>
+```
+
+Per-user данные (профиль, история круток, коллекция) не публичны: Telegram user_id предсказуем,
+поэтому без токена любой клиент с сетевым доступом мог бы перечислять чужие данные (issue #77).
+`GET /v1/gacha/banners/{banner}/cards` и `GET /v1/gacha/health` остаются публичными — это
+статический каталог карт и healthcheck без пользовательских данных. Mini App читает per-user
+данные не напрямую, а через авторизованный app-прокси `GET /api/miniapp/gacha/*` (см. ниже),
+поэтому на публичном краю токен не подставляется.
+
 Пример тела:
 
 ```json
@@ -365,10 +379,11 @@ GACHA_PG_DUMP_PATH=/usr/bin/pg_dump
 }
 ```
 
-Для команды вида `моя гача геншин` основной бот позже может вызывать:
+Для команды вида `моя гача геншин` основной бот вызывает:
 
 ```text
 GET /v1/gacha/users/12345/profile?banner=genshin
+X-Gacha-Service-Token: <GACHA_SERVICE_TOKEN>
 ```
 
 Этот endpoint возвращает:
@@ -378,6 +393,17 @@ GET /v1/gacha/users/12345/profile?banner=genshin
 - очки и примогемы;
 - количество уникальных карт и копий;
 - последние крутки по выбранному баннеру.
+
+## Mini App
+
+Telegram Mini App не обращается к per-user gacha-эндпоинтам напрямую: браузер не должен
+держать `GACHA_SERVICE_TOKEN`, а публичный nginx-прокси `/miniapp/gacha/` намеренно ничего не
+подставляет. Экран коллекции ходит в основной app по `GET /api/miniapp/gacha/profile` и
+`GET /api/miniapp/gacha/collection`; app определяет Telegram user_id из Mini App-сессии
+(клиентский `user_id` игнорируется) и уже от себя вызывает gacha-сервис с service-токеном.
+
+Публичным через `/miniapp/gacha/` остаётся только статический каталог карт
+(`GET /v1/gacha/banners/{banner}/cards`) и картинки `/images/...` — пользовательских данных там нет.
 
 ## Интеграция с Selara позже
 
@@ -451,11 +477,13 @@ curl -X POST http://127.0.0.1:8001/v1/gacha/pull \
 Проверка профиля игрока:
 
 ```bash
-curl "http://127.0.0.1:8001/v1/gacha/users/12345/profile?banner=genshin"
+curl -H "X-Gacha-Service-Token: $GACHA_SERVICE_TOKEN" \
+  "http://127.0.0.1:8001/v1/gacha/users/12345/profile?banner=genshin"
 ```
 
 Проверка последних круток:
 
 ```bash
-curl "http://127.0.0.1:8001/v1/gacha/users/12345/history?banner=genshin&limit=5"
+curl -H "X-Gacha-Service-Token: $GACHA_SERVICE_TOKEN" \
+  "http://127.0.0.1:8001/v1/gacha/users/12345/history?banner=genshin&limit=5"
 ```
