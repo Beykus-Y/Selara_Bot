@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 # margin for differences between decimal MB and MiB and for future API changes.
 BACKUP_CHUNK_SIZE_BYTES = 45 * 1024 * 1024
 
+# Full restore drills write into one shared scratch database; serialize them
+# so a scheduled backup and an admin-triggered request cannot interleave their
+# `--clean` drop/create phases against the same database.
+_RESTORE_DRILL_LOCK = asyncio.Lock()
+
+# SQLite database files always start with this 16-byte header string.
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+
 
 class BackupJobError(RuntimeError):
     pass
@@ -216,9 +224,10 @@ async def _verify_dump_restorable(
 ) -> None:
     """Fail the backup job when the produced dump cannot be restored.
 
-    PostgreSQL custom-format dumps are validated with pg_restore: either a
-    cheap archive/TOC listing (no database server required) or, when
-    BACKUP_RESTORE_DATABASE_URL points at a disposable database, a full
+    PostgreSQL custom-format dumps are validated with pg_restore: either by
+    emitting the whole SQL script offline (pg_restore parses and decompresses
+    every archive data block; no database server required) or, when
+    BACKUP_RESTORE_DATABASE_URL points at a disposable database, by a full
     restore drill into it. SQLite dumps are validated with an equivalent
     integrity check.
     """
@@ -252,19 +261,24 @@ async def _verify_pg_dump_restorable(
             f"--dbname={database_url}",
             str(dump_path),
         ]
-    else:
-        password = None
-        toc_path = temp_dir / f"{dump_path.name}.restore-check"
-        args = [
-            "--list",
-            f"--file={toc_path}",
-            str(dump_path),
-        ]
+        async with _RESTORE_DRILL_LOCK:
+            await _run_pg_restore_verification(
+                label=label,
+                settings=settings,
+                args=args,
+                password=password,
+            )
+        return
+
+    # Offline check without a database server: emitting the SQL script forces
+    # pg_restore to parse and decompress every archive data block, unlike
+    # `--list`, which only reads the table of contents.
+    sql_path = temp_dir / f"{dump_path.name}.restore-check.sql"
     await _run_pg_restore_verification(
         label=label,
         settings=settings,
-        args=args,
-        password=password,
+        args=[f"--file={sql_path}", str(dump_path)],
+        password=None,
     )
 
 
@@ -284,6 +298,11 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
             "Backup restore drill supports only PostgreSQL for BACKUP_RESTORE_DATABASE_URL."
         )
 
+    _reject_production_restore_target(settings, database_url)
+
+    # Keep libpq options such as sslmode so the drill connects the same way
+    # the configured URL does; only the password moves into PGPASSWORD.
+    query = {key: value for key, value in database_url.query.items() if key != "password"}
     rendered_url = URL.create(
         drivername="postgresql",
         username=database_url.username,
@@ -291,11 +310,50 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
         host=database_url.host,
         port=database_url.port,
         database=database_url.database,
+        query=query,
     ).render_as_string(hide_password=False)
     return rendered_url, database_url.password
 
 
+def _reject_production_restore_target(settings: Settings, restore_url: URL) -> None:
+    raw_production_url = getattr(settings, "database_url", None) or ""
+    if not raw_production_url:
+        return
+    try:
+        production_url = make_url(raw_production_url)
+    except ArgumentError:
+        return
+    if production_url.get_backend_name() != "postgresql":
+        return
+
+    # The drill drops and recreates every object in its target database, so a
+    # misconfigured alias for the live database would destroy production data.
+    if _postgres_endpoint(restore_url) == _postgres_endpoint(production_url):
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL must not point at the production DATABASE_URL: "
+            "the restore drill drops and recreates all objects in its target."
+        )
+
+
+def _postgres_endpoint(url: URL) -> tuple[str, int, str]:
+    return (
+        (url.host or "").lower(),
+        url.port if url.port is not None else 5432,
+        url.database or "",
+    )
+
+
 def _verify_sqlite_dump_restorable(dump_path: Path, label: str) -> None:
+    if dump_path.stat().st_size == 0:
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: dump file is empty."
+        )
+    with dump_path.open("rb") as handle:
+        header = handle.read(len(_SQLITE_HEADER_MAGIC))
+    if header != _SQLITE_HEADER_MAGIC:
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: file is not a SQLite database."
+        )
     try:
         connection = sqlite3.connect(dump_path)
     except sqlite3.Error as exc:

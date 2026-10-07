@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -258,6 +259,7 @@ class _FakePgRestoreProcess:
 
 def _make_settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
+        "database_url": "postgresql://bot_user:bot_pass@db.internal:5432/selara",
         "backup_pg_restore_path": "pg_restore",
         "backup_restore_database_url": None,
     }
@@ -286,7 +288,7 @@ def _install_fake_pg_restore(
 
 
 @pytest.mark.asyncio
-async def test_verify_dump_restorable_runs_pg_restore_archive_list_check(
+async def test_verify_dump_restorable_emits_full_sql_script_offline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -302,10 +304,11 @@ async def test_verify_dump_restorable_runs_pg_restore_archive_list_check(
         temp_dir=tmp_path,
     )
 
+    # Emitting the SQL script makes pg_restore decompress every archive data
+    # block, unlike `--list`, which only reads the table of contents.
     assert captured["command"] == (
         "pg_restore",
-        "--list",
-        f"--file={tmp_path / 'bot_pg_dump.dump.restore-check'}",
+        f"--file={tmp_path / 'bot_pg_dump.dump.restore-check.sql'}",
         str(dump_path),
     )
     assert captured["env"].get("PGPASSWORD") == os.environ.get("PGPASSWORD")
@@ -322,7 +325,7 @@ async def test_verify_dump_restorable_runs_full_restore_drill_when_configured(
     _install_fake_pg_restore(monkeypatch, captured)
 
     settings = _make_settings(
-        backup_restore_database_url="postgresql://restore_user:restore_pass@localhost:5433/selara_restore",
+        backup_restore_database_url="postgresql://restore_user:restore_pass@restore-db.internal:5433/selara_restore",
     )
 
     await backup._verify_dump_restorable(
@@ -339,10 +342,116 @@ async def test_verify_dump_restorable_runs_full_restore_drill_when_configured(
         "--exit-on-error",
         "--clean",
         "--if-exists",
-        "--dbname=postgresql://restore_user@localhost:5433/selara_restore",
+        "--dbname=postgresql://restore_user@restore-db.internal:5433/selara_restore",
         str(dump_path),
     )
     assert captured["env"]["PGPASSWORD"] == "restore_pass"
+
+
+@pytest.mark.asyncio
+async def test_verify_dump_restorable_preserves_restore_url_query_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "bot_pg_dump.dump"
+    dump_path.write_bytes(b"PGDMP-fake")
+    captured: dict[str, object] = {}
+    _install_fake_pg_restore(monkeypatch, captured)
+
+    settings = _make_settings(
+        backup_restore_database_url=(
+            "postgresql://restore_user:restore_pass@restore-db.internal:5433/selara_restore"
+            "?sslmode=verify-full&sslrootcert=/etc/ssl/ca.crt"
+        ),
+    )
+
+    await backup._verify_dump_restorable(
+        dump_path=dump_path,
+        label="main bot database dump",
+        settings=settings,
+        temp_dir=tmp_path,
+    )
+
+    assert captured["command"] == (
+        "pg_restore",
+        "--no-owner",
+        "--no-privileges",
+        "--exit-on-error",
+        "--clean",
+        "--if-exists",
+        # SQLAlchemy percent-encodes query values; libpq decodes them again
+        # when it parses the connection URI.
+        (
+            "--dbname=postgresql://restore_user@restore-db.internal:5433/selara_restore"
+            "?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fca.crt"
+        ),
+        str(dump_path),
+    )
+    assert captured["env"]["PGPASSWORD"] == "restore_pass"
+
+
+def test_resolve_backup_restore_target_rejects_production_database() -> None:
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/selara",
+    )
+
+    with pytest.raises(backup.BackupJobError, match="must not point at the production DATABASE_URL"):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_resolve_backup_restore_target_ignores_production_guard_for_other_hosts() -> None:
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/other_database",
+    )
+
+    target = backup._resolve_backup_restore_target(settings)
+
+    assert target is not None
+    rendered_url, password = target
+    assert "other_database" in rendered_url
+    assert password == "restore_pass"
+
+
+@pytest.mark.asyncio
+async def test_restore_drills_sharing_one_database_run_serialized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    drill_state = {"active": 0, "max_active": 0}
+
+    class SlowRestoreProcess:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            drill_state["active"] += 1
+            drill_state["max_active"] = max(drill_state["max_active"], drill_state["active"])
+            await asyncio.sleep(0.01)
+            drill_state["active"] -= 1
+            return b"", b""
+
+    async def fake_exec(*command: str, **kwargs: object) -> SlowRestoreProcess:
+        _ = command, kwargs
+        return SlowRestoreProcess()
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@restore-db.internal:5433/selara_restore",
+    )
+
+    async def verify(dump_name: str) -> None:
+        dump_path = tmp_path / dump_name
+        dump_path.write_bytes(b"PGDMP-fake")
+        await backup._verify_pg_dump_restorable(
+            dump_path=dump_path,
+            label=f"dump {dump_name}",
+            settings=settings,
+            temp_dir=tmp_path,
+        )
+
+    await asyncio.gather(verify("bot_pg_dump.dump"), verify("gacha_pg_dump.dump"))
+
+    assert drill_state["max_active"] == 1
 
 
 @pytest.mark.asyncio
@@ -449,12 +558,34 @@ def test_verify_sqlite_dump_restorable_passes_on_healthy_sqlite_file(tmp_path: P
     backup._verify_sqlite_dump_restorable(dump_path, "gacha dump")
 
 
+def test_verify_sqlite_dump_restorable_rejects_empty_sqlite_file(tmp_path: Path) -> None:
+    dump_path = tmp_path / "gacha_pg_dump.sqlite3"
+    dump_path.write_bytes(b"")
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="Backup restore verification failed for gacha dump: dump file is empty",
+    ):
+        backup._verify_sqlite_dump_restorable(dump_path, "gacha dump")
+
+
 def test_verify_sqlite_dump_restorable_fails_on_corrupt_sqlite_file(tmp_path: Path) -> None:
     dump_path = tmp_path / "gacha_pg_dump.sqlite3"
     dump_path.write_bytes(b"definitely not a sqlite database")
 
     with pytest.raises(
         backup.BackupJobError,
-        match="Backup restore verification failed for gacha dump",
+        match="Backup restore verification failed for gacha dump: file is not a SQLite database",
+    ):
+        backup._verify_sqlite_dump_restorable(dump_path, "gacha dump")
+
+
+def test_verify_sqlite_dump_restorable_fails_on_truncated_sqlite_header(tmp_path: Path) -> None:
+    dump_path = tmp_path / "gacha_pg_dump.sqlite3"
+    dump_path.write_bytes(b"SQLite format 3")
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="Backup restore verification failed for gacha dump: file is not a SQLite database",
     ):
         backup._verify_sqlite_dump_restorable(dump_path, "gacha dump")

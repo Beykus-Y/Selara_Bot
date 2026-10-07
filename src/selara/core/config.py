@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     # Optional disposable PostgreSQL database for full backup restore drills;
-    # when unset, only the cheap pg_restore --list archive check runs.
+    # when unset, pg_restore validates the archive offline without a server.
     backup_restore_database_url: str | None = Field(
         default=None, validation_alias="BACKUP_RESTORE_DATABASE_URL"
     )
