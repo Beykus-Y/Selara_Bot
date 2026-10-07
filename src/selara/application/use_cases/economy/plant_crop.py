@@ -4,7 +4,13 @@ from datetime import datetime, timedelta, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import get_crop, get_plot_slots, get_size_tier
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+    to_meta_json,
+)
 from selara.application.use_cases.economy.results import PlantResult
 
 
@@ -49,6 +55,8 @@ async def execute(
             new_balance=None,
         )
 
+    # One account lock covers farm state and every plot in batch operations.
+    await lock_economy_resources(repo, account_lock_key(scope=scope, user_id=user_id))
     account, farm = await get_account_or_error(repo, scope=scope, user_id=user_id)
     plots_by_no = {plot.plot_no: plot for plot in await repo.list_plots(account_id=account.id)}
 
