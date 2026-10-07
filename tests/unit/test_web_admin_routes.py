@@ -1355,7 +1355,16 @@ async def test_admin_table_page_renders_compact_messages_view(monkeypatch) -> No
     data_session = FakeSession(
         execute_results=[
             FakeExecuteResult(
-                rows=[delayed_message, followup_message, archived_message, created_snapshot]
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=4,
+                        last_snapshot_at=datetime(2026, 4, 8, 18, 40),
+                        last_text="later answer",
+                        last_caption=None,
+                        last_message_type="text",
+                    )
+                ]
             ),
             FakeExecuteResult(
                 rows=[delayed_message, followup_message, archived_message, created_snapshot]
@@ -1457,7 +1466,26 @@ async def test_admin_archive_applies_and_preserves_extended_filters(monkeypatch)
     )
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[archived_message, other_chat_message]),
+            FakeExecuteResult(
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=1,
+                        last_snapshot_at=datetime(2026, 4, 8, 18, 25, tzinfo=timezone.utc),
+                        last_text="answer text",
+                        last_caption=None,
+                        last_message_type="text",
+                    ),
+                    SimpleNamespace(
+                        chat_id=-100700,
+                        snapshot_count=1,
+                        last_snapshot_at=datetime(2026, 4, 7, 12, 0, tzinfo=timezone.utc),
+                        last_text=None,
+                        last_caption="other chat",
+                        last_message_type="photo",
+                    ),
+                ]
+            ),
             FakeExecuteResult(rows=[archived_message]),
             FakeExecuteResult(scalar_value=1),
             FakeExecuteResult(
@@ -1613,7 +1641,18 @@ async def test_admin_archive_uses_stable_cursor_pagination(monkeypatch) -> None:
     ]
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[archived_messages[0]]),
+            FakeExecuteResult(
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=51,
+                        last_snapshot_at=first_snapshot_at,
+                        last_text="message 0",
+                        last_caption=None,
+                        last_message_type="text",
+                    )
+                ]
+            ),
             FakeExecuteResult(rows=archived_messages),
             FakeExecuteResult(scalar_value=120),
             FakeExecuteResult(
@@ -1685,7 +1724,18 @@ async def test_admin_archive_applies_cursor_boundary_and_builds_newer_link(monke
     )
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[older_message]),
+            FakeExecuteResult(
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=120,
+                        last_snapshot_at=boundary_at,
+                        last_text="older message",
+                        last_caption=None,
+                        last_message_type="text",
+                    )
+                ]
+            ),
             FakeExecuteResult(rows=[older_message]),
             FakeExecuteResult(scalar_value=120),
             FakeExecuteResult(
@@ -1924,7 +1974,18 @@ async def test_admin_archive_highlight_param_renders_jump_target_and_context_lin
     )
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=1,
+                        last_snapshot_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+                        last_text="findable answer",
+                        last_caption=None,
+                        last_message_type="text",
+                    )
+                ]
+            ),
             FakeExecuteResult(rows=[message]),
             FakeExecuteResult(scalar_value=1),
             FakeExecuteResult(
@@ -2000,7 +2061,18 @@ async def test_admin_archive_context_jump_link_hidden_without_active_filters(
     )
     data_session = FakeSession(
         execute_results=[
-            FakeExecuteResult(rows=[message]),
+            FakeExecuteResult(
+                rows=[
+                    SimpleNamespace(
+                        chat_id=-100500,
+                        snapshot_count=1,
+                        last_snapshot_at=datetime(2026, 4, 8, 18, 30, tzinfo=timezone.utc),
+                        last_text="plain answer",
+                        last_caption=None,
+                        last_message_type="text",
+                    )
+                ]
+            ),
             FakeExecuteResult(rows=[message]),
             FakeExecuteResult(scalar_value=1),
             FakeExecuteResult(
@@ -2315,6 +2387,7 @@ async def test_admin_archive_shows_filtered_empty_state_with_reset_link(monkeypa
             FakeExecuteResult(rows=[]),
             FakeExecuteResult(rows=[]),
             FakeExecuteResult(scalar_value=0),
+            FakeExecuteResult(scalar_value=0),
             FakeExecuteResult(
                 rows=[ChatModel(telegram_chat_id=-100500, type="supergroup", title="Archive Chat")]
             ),
@@ -2346,3 +2419,140 @@ async def test_admin_archive_shows_filtered_empty_state_with_reset_link(monkeypa
     assert "По этим фильтрам ничего не найдено" in response.text
     assert "Сбросить фильтры" in response.text
     assert 'href="/app/admin/table/messages_compact?chat_id=-100500"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_navigation_covers_all_save_message_chats_beyond_top250(
+    monkeypatch,
+) -> None:
+    """Regression #98: навигация архива не ограничена top-250 глобальными снимками.
+
+    Чат A (тихий, старый снимок), чат B (>250 более свежих снимков в других чатах)
+    и чат C (save_message включён, снимков ещё нет) должны все присутствовать в
+    навигации, а счётчик снимков должен быть реальным, а не «в недавней выборке».
+    """
+    settings = _settings()
+    auth_session = FakeSession()
+    # Результат агрегатного запроса: все чаты с save_message=true,
+    # отсортированные по последней активности (NULLS LAST).
+    navigation_rows = [
+        SimpleNamespace(
+            chat_id=-100700,
+            snapshot_count=300,
+            last_snapshot_at=datetime(2026, 4, 8, 18, 40, tzinfo=timezone.utc),
+            last_text="busy chat latest",
+            last_caption=None,
+            last_message_type="text",
+        ),
+        SimpleNamespace(
+            chat_id=-100500,
+            snapshot_count=2,
+            last_snapshot_at=datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+            last_text="old quiet message",
+            last_caption=None,
+            last_message_type="text",
+        ),
+        SimpleNamespace(
+            chat_id=-100900,
+            snapshot_count=0,
+            last_snapshot_at=None,
+            last_text=None,
+            last_caption=None,
+            last_message_type=None,
+        ),
+    ]
+    busy_messages = [
+        MessageArchiveModel(
+            id=index + 1,
+            chat_id=-100700,
+            user_id=202,
+            telegram_message_id=3000 + index,
+            snapshot_kind="created",
+            snapshot_at=datetime(2026, 4, 8, 18, 40 - index, tzinfo=timezone.utc),
+            sent_at=datetime(2026, 4, 8, 18, 40 - index, tzinfo=timezone.utc),
+            edited_at=None,
+            message_type="text",
+            text=f"busy message {index}",
+            caption=None,
+            raw_message_json={"message_id": 3000 + index, "text": f"busy message {index}"},
+            snapshot_hash=f"hash-busy-{index}",
+            created_at=datetime(2026, 4, 8, 18, 40 - index, tzinfo=timezone.utc),
+        )
+        for index in range(2)
+    ]
+    data_session = FakeSession(
+        execute_results=[
+            FakeExecuteResult(rows=navigation_rows),
+            FakeExecuteResult(rows=busy_messages),
+            FakeExecuteResult(scalar_value=300),
+            FakeExecuteResult(
+                rows=[
+                    UserModel(
+                        telegram_user_id=202,
+                        username="bob",
+                        first_name="Bob",
+                        last_name=None,
+                        is_bot=False,
+                    )
+                ]
+            ),
+            FakeExecuteResult(
+                rows=[
+                    ChatModel(telegram_chat_id=-100500, type="supergroup", title="Quiet Chat"),
+                    ChatModel(telegram_chat_id=-100700, type="supergroup", title="Busy Chat"),
+                    ChatModel(telegram_chat_id=-100900, type="supergroup", title="Empty Chat"),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "SqlAlchemyAdminAuthRepository",
+        lambda session: FakeAdminAuthRepo(settings.admin_user_id),
+    )
+
+    app = web_app_module.create_web_app(
+        settings=settings,
+        session_factory=QueueSessionFactory(auth_session, data_session),
+    )
+    transport = httpx.ASGITransport(app=app)
+    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client.cookies.set(settings.admin_session_cookie_name, "admin-session")
+    try:
+        response = await client.get("/app/admin/table/messages_compact")
+    finally:
+        await client.aclose()
+        await getattr(app.router, "shutdown", app.router._shutdown)()
+
+    assert response.status_code == 200
+
+    # Навигация строится от chat_settings.save_message (join на chats),
+    # с реальным COUNT/MAX и latest preview, без глобального LIMIT.
+    navigation_statement = str(data_session.execute_calls[0])
+    assert "chat_settings.save_message IS" in navigation_statement
+    assert "JOIN chats" in navigation_statement
+    assert "count(messages.id)" in navigation_statement
+    assert "max(messages.snapshot_at)" in navigation_statement
+    assert "row_number() OVER" in navigation_statement
+    assert "NULLS LAST" in navigation_statement
+    assert "LIMIT" not in navigation_statement.upper()
+    # Список сообщений выбранного чата фильтруется по chat_id.
+    assert "messages.chat_id" in str(data_session.execute_calls[1])
+
+    # Чат A (тихий, старый снимок) присутствует в навигации.
+    assert 'href="/app/admin/table/messages_compact?chat_id=-100500"' in response.text
+    assert "old quiet message" in response.text
+    assert "10:00" in response.text
+    assert "Снимков в архиве: 2" in response.text
+
+    # Чат B (самый активный) присутствует с реальным счётчиком > 250
+    # и выбран автоматически как самый свежий.
+    assert 'href="/app/admin/table/messages_compact?chat_id=-100700"' in response.text
+    assert "Снимков в архиве: 300" in response.text
+    assert "Busy Chat" in response.text
+    assert response.text.count('class="archive-message archive-author-') == 2
+
+    # Чат C (save_message включён, снимков нет) виден с понятным empty-state.
+    assert 'href="/app/admin/table/messages_compact?chat_id=-100900"' in response.text
+    assert "Сообщений в архиве пока нет" in response.text
+    assert "Снимков пока нет" in response.text

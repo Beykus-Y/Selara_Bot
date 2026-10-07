@@ -117,6 +117,7 @@ from selara.infrastructure.db.models import (
     AdminBroadcastModel,
     AdminRuntimeSettingsModel,
     ChatModel,
+    ChatSettingsModel,
     EconomyAccountModel,
     MessageArchiveModel,
     UserChatActivityModel,
@@ -8201,10 +8202,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         }
 
     def _compact_message_text(row: MessageArchiveModel) -> str:
-        value = (row.text or row.caption or "").strip()
+        return _compact_preview_text(
+            text=row.text,
+            caption=row.caption,
+            message_type=row.message_type,
+        )
+
+    def _compact_preview_text(
+        *,
+        text: str | None,
+        caption: str | None,
+        message_type: str | None,
+    ) -> str:
+        value = (text or caption or "").strip()
         if value:
             return value
-        return f"[{row.message_type}]"
+        return f"[{message_type}]"
 
     def _admin_archive_highlight_segments(
         value: str,
@@ -9662,14 +9675,75 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     filter_errors.append("ID автора должен быть целым числом.")
 
             async with session_factory() as session:
-                navigation_stmt = (
-                    select(MessageArchiveModel)
-                    .order_by(MessageArchiveModel.snapshot_at.desc(), MessageArchiveModel.id.desc())
-                    .limit(250)
+                # Навигация архива — это чаты с включённым save_message (issue #98),
+                # а не глобальный top-250 последних снимков: иначе тихий чат «моргает»,
+                # исчезая из списка, когда активные чаты выталкивают его снимки
+                # за пределы top-250. Агрегаты архива (реальный COUNT и MAX) и
+                # latest preview достраиваются поверх этого списка.
+                archive_aggregates = (
+                    select(
+                        MessageArchiveModel.chat_id.label("chat_id"),
+                        func.count(MessageArchiveModel.id).label("snapshot_count"),
+                        func.max(MessageArchiveModel.snapshot_at).label("last_snapshot_at"),
+                    )
+                    .group_by(MessageArchiveModel.chat_id)
+                    .subquery()
                 )
-                navigation_rows = (await session.execute(navigation_stmt)).scalars().all()
-                if selected_chat_id is None and navigation_rows:
-                    selected_chat_id = int(navigation_rows[0].chat_id)
+                latest_ranked = (
+                    select(
+                        MessageArchiveModel.chat_id.label("chat_id"),
+                        MessageArchiveModel.text.label("last_text"),
+                        MessageArchiveModel.caption.label("last_caption"),
+                        MessageArchiveModel.message_type.label("last_message_type"),
+                        func.row_number()
+                        .over(
+                            partition_by=MessageArchiveModel.chat_id,
+                            order_by=(
+                                MessageArchiveModel.snapshot_at.desc(),
+                                MessageArchiveModel.id.desc(),
+                            ),
+                        )
+                        .label("snapshot_rank"),
+                    )
+                    .subquery()
+                )
+                navigation_stmt = (
+                    select(
+                        ChatSettingsModel.chat_id.label("chat_id"),
+                        archive_aggregates.c.snapshot_count.label("snapshot_count"),
+                        archive_aggregates.c.last_snapshot_at.label("last_snapshot_at"),
+                        latest_ranked.c.last_text.label("last_text"),
+                        latest_ranked.c.last_caption.label("last_caption"),
+                        latest_ranked.c.last_message_type.label("last_message_type"),
+                    )
+                    # Явный FROM: иначе левая часть join выводится из первой колонки
+                    # select, и перестановка списка колонок молча меняет цель join.
+                    .select_from(ChatSettingsModel)
+                    .join(ChatModel, ChatModel.telegram_chat_id == ChatSettingsModel.chat_id)
+                    .join(
+                        archive_aggregates,
+                        archive_aggregates.c.chat_id == ChatSettingsModel.chat_id,
+                        isouter=True,
+                    )
+                    .join(
+                        latest_ranked,
+                        (latest_ranked.c.chat_id == ChatSettingsModel.chat_id)
+                        & (latest_ranked.c.snapshot_rank == 1),
+                        isouter=True,
+                    )
+                    .where(ChatSettingsModel.save_message.is_(True))
+                    .order_by(
+                        archive_aggregates.c.last_snapshot_at.desc().nulls_last(),
+                        ChatModel.title.asc().nulls_last(),
+                        ChatSettingsModel.chat_id.asc(),
+                    )
+                )
+                navigation_rows = (await session.execute(navigation_stmt)).all()
+                if selected_chat_id is None:
+                    for navigation_row in navigation_rows:
+                        if navigation_row.last_snapshot_at is not None:
+                            selected_chat_id = int(navigation_row.chat_id)
+                            break
 
                 stmt = select(MessageArchiveModel)
                 count_stmt = select(func.count()).select_from(MessageArchiveModel)
@@ -9761,10 +9835,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 total = int((await session.execute(count_stmt)).scalar() or 0)
 
                 user_ids = sorted({int(row.user_id) for row in rows})
+                navigation_chat_ids = {int(row.chat_id) for row in navigation_rows}
                 chat_ids = sorted(
-                    {int(row.chat_id) for row in navigation_rows}
+                    navigation_chat_ids
                     | ({selected_chat_id} if selected_chat_id is not None else set())
                 )
+                selected_chat_snapshot_count: int | None = None
+                if selected_chat_id is not None and selected_chat_id not in navigation_chat_ids:
+                    # Чат с выключенным save_message можно открыть прямой ссылкой:
+                    # показываем его в навигации с настоящим числом снимков.
+                    selected_chat_count_result = await session.execute(
+                        select(func.count())
+                        .select_from(MessageArchiveModel)
+                        .where(MessageArchiveModel.chat_id == selected_chat_id)
+                    )
+                    selected_chat_snapshot_count = int(selected_chat_count_result.scalar() or 0)
                 user_rows = (
                     await session.execute(select(UserModel).where(UserModel.telegram_user_id.in_(user_ids)))
                 ).scalars().all() if user_ids else []
@@ -9807,23 +9892,32 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             navigation_by_chat: dict[int, dict[str, object]] = {}
             for row in navigation_rows:
                 chat_id = int(row.chat_id)
-                summary = navigation_by_chat.get(chat_id)
-                if summary is None:
-                    navigation_by_chat[chat_id] = {
-                        "chat_id": chat_id,
-                        "last_preview": _compact_message_text(row),
-                        "last_time": row.snapshot_at.strftime("%H:%M"),
-                        "snapshot_count": 1,
-                    }
-                else:
-                    summary["snapshot_count"] = int(summary["snapshot_count"]) + 1
+                last_snapshot_at = row.last_snapshot_at
+                navigation_by_chat[chat_id] = {
+                    "chat_id": chat_id,
+                    "last_preview": (
+                        _compact_preview_text(
+                            text=row.last_text,
+                            caption=row.last_caption,
+                            message_type=row.last_message_type,
+                        )
+                        if last_snapshot_at is not None
+                        else "Сообщений в архиве пока нет"
+                    ),
+                    "last_time": last_snapshot_at.strftime("%H:%M") if last_snapshot_at else "—",
+                    "snapshot_count": int(row.snapshot_count or 0),
+                }
 
             if selected_chat_id is not None and selected_chat_id not in navigation_by_chat:
                 navigation_by_chat[selected_chat_id] = {
                     "chat_id": selected_chat_id,
                     "last_preview": _compact_message_text(rows[0]) if rows else "Нет сообщений в текущей выборке",
                     "last_time": rows[0].snapshot_at.strftime("%H:%M") if rows else "—",
-                    "snapshot_count": len(rows),
+                    "snapshot_count": (
+                        selected_chat_snapshot_count
+                        if selected_chat_snapshot_count is not None
+                        else len(rows)
+                    ),
                 }
 
             chat_summaries = [
