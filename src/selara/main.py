@@ -13,6 +13,7 @@ from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
+from selara.infrastructure.db.market_expiry_sweeper import run_market_expiry_scheduler
 from selara.infrastructure.db.message_archive_retention import run_message_archive_retention_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
@@ -199,6 +200,10 @@ async def _run_bot(settings, session_factory) -> None:
         run_chat_member_count_snapshot_scheduler(bot=bot, session_factory=session_factory),
         name="chat-member-count-snapshots",
     )
+    market_expiry_task = asyncio.create_task(
+        run_market_expiry_scheduler(session_factory=session_factory),
+        name="market-expiry-sweep",
+    )
     message_archive_retention_task = asyncio.create_task(
         run_message_archive_retention_scheduler(
             session_factory=session_factory,
@@ -254,6 +259,8 @@ async def _run_bot(settings, session_factory) -> None:
         await asyncio.gather(gacha_warmup_task, return_exceptions=True)
         chat_member_snapshot_task.cancel()
         await asyncio.gather(chat_member_snapshot_task, return_exceptions=True)
+        market_expiry_task.cancel()
+        await asyncio.gather(market_expiry_task, return_exceptions=True)
         message_archive_retention_task.cancel()
         await asyncio.gather(message_archive_retention_task, return_exceptions=True)
         if daily_summary_task is not None:

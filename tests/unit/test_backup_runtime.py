@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -49,6 +50,22 @@ def _install_dump_verifier(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return verified
 
 
+def _install_restore_drill(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    drilled: list[str] = []
+
+    async def fake_drill_bot_database_dump(*, dump_path: Path, settings: SimpleNamespace) -> None:
+        _ = settings
+        drilled.append(dump_path.name)
+
+    async def fake_drill_gacha_dump(*, dump_path: Path, settings: SimpleNamespace) -> None:
+        _ = settings
+        drilled.append(dump_path.name)
+
+    monkeypatch.setattr(backup, "_drill_bot_database_dump", fake_drill_bot_database_dump)
+    monkeypatch.setattr(backup, "_drill_gacha_dump", fake_drill_gacha_dump)
+    return drilled
+
+
 @pytest.mark.asyncio
 async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_originals(
     monkeypatch: pytest.MonkeyPatch,
@@ -59,7 +76,8 @@ async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_origina
     calls: list[str] = []
     sent: list[dict[str, object]] = []
     verified = _install_dump_verifier(monkeypatch)
-    bot_plaintext = b"BOT-PLAINTEXT-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    drilled = _install_restore_drill(monkeypatch)
+    bot_plaintext =b"BOT-PLAINTEXT-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     gacha_plaintext = b"GACHA-PLAINTEXT-0123"
 
     async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
@@ -99,13 +117,18 @@ async def test_send_daily_backup_uploads_only_ciphertext_and_restores_to_origina
 
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
+    settings = SimpleNamespace(
+        admin_user_id=42,
+        backup_encryption_public_key=_PUBLIC_KEY,
+        backup_restore_drill_enabled=True,
+    )
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     await backup.send_daily_backup(bot=bot_client, settings=settings)
 
     assert calls == ["bot", "gacha"]
     assert verified == ["main bot database dump", "gacha dump"]
+    assert drilled == ["bot_pg_dump.dump", "gacha_pg_dump.dump"]
     assert [item["chat_id"] for item in sent] == [42] * len(sent)
     assert all(item["caption"].startswith("Selara daily backup") for item in sent[:-1])
 
@@ -208,6 +231,7 @@ async def test_send_daily_backup_sends_nothing_when_encryption_fails(
     job_dir.mkdir()
     sent: list[object] = []
     _install_dump_verifier(monkeypatch)
+    _install_restore_drill(monkeypatch)
 
     async def fake_create_bot_database_dump(*, settings, temp_dir: Path) -> BackupFile:
         _ = settings
@@ -236,7 +260,11 @@ async def test_send_daily_backup_sends_nothing_when_encryption_fails(
     monkeypatch.setattr(backup, "encrypt_file", failing_encrypt_file)
     monkeypatch.setattr(backup.asyncio, "to_thread", fake_to_thread)
 
-    settings = SimpleNamespace(admin_user_id=42, backup_encryption_public_key=_PUBLIC_KEY)
+    settings = SimpleNamespace(
+        admin_user_id=42,
+        backup_encryption_public_key=_PUBLIC_KEY,
+        backup_restore_drill_enabled=True,
+    )
     bot_client = SimpleNamespace(send_document=fake_send_document)
 
     with pytest.raises(backup.BackupJobError, match="Backup encryption failed for bot_pg_dump.dump: disk full"):
@@ -374,6 +402,33 @@ def _install_fake_pg_restore(
         return _FakePgRestoreProcess(returncode=returncode, stderr=stderr_bytes)
 
     monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+
+
+@pytest.mark.asyncio
+async def test_pg_dump_keeps_the_database_password_out_of_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_exec(*command: str, **kwargs: Any) -> _FakePgRestoreProcess:
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return _FakePgRestoreProcess(returncode=0)
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    settings = _make_settings(
+        database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
+        backup_pg_dump_path="pg_dump",
+    )
+
+    dump = await backup._create_bot_database_dump(settings=settings, temp_dir=tmp_path)
+
+    # argv is readable by every local user through /proc, so the password travels only in PGPASSWORD.
+    assert not any("s3cret" in argument for argument in captured["command"])
+    assert "--dbname=postgresql://selara@db.internal:5432/selara" in captured["command"]
+    assert captured["env"]["PGPASSWORD"] == "s3cret"
+    assert dump.path == tmp_path / "bot_pg_dump.dump"
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram import Bot
 from aiogram.types import FSInputFile
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +32,14 @@ from selara.infrastructure.backup_encryption import (
     encrypt_file,
     parse_public_key,
     public_key_fingerprint,
+)
+from selara.infrastructure.backup_drill import (
+    GACHA_DATABASE_TARGET,
+    MAIN_DATABASE_TARGET,
+    drill_postgres_dump,
+    drill_sqlite_snapshot,
+    libpq_url,
+    read_live_schema_head,
 )
 from selara.infrastructure.db.backup_claims import (
     BACKUP_SLOT_COMPLETED,
@@ -462,6 +470,14 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
             settings=settings,
         )
 
+        # Restore both dumps into scratch databases before anything is encrypted or
+        # sent: a dump that parses offline can still fail to restore.
+        if settings.backup_restore_drill_enabled:
+            await _drill_bot_database_dump(dump_path=bot_dump.path, settings=settings)
+            await _drill_gacha_dump(dump_path=gacha_dump.path, settings=settings)
+        else:
+            logger.warning("Backup restore drill is disabled; dumps are sent without a restore check")
+
         # Encrypt both archives before the first upload, so a failure here cannot
         # leave a partial backup set in Telegram.
         encrypted_files = [
@@ -509,7 +525,7 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
         await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
 
-async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> BackupFile:
+def _bot_database_url(settings: Settings) -> URL:
     try:
         database_url = make_url(settings.database_url)
     except ArgumentError as exc:
@@ -517,6 +533,11 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
 
     if database_url.get_backend_name() != "postgresql":
         raise BackupJobError("Daily backup currently supports only PostgreSQL for the main bot.")
+    return database_url
+
+
+async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> BackupFile:
+    database_url = _bot_database_url(settings)
 
     output_path = temp_dir / "bot_pg_dump.dump"
     command = [
@@ -526,7 +547,8 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
         "--no-owner",
         "--no-privileges",
         f"--file={output_path}",
-        f"--dbname={database_url.set(drivername='postgresql', password=None).render_as_string(hide_password=False)}",
+        # The password travels in PGPASSWORD below: argv is readable by every local user through /proc.
+        f"--dbname={libpq_url(database_url, database_url.database)}",
     ]
     env = os.environ.copy()
     if database_url.password is not None:
@@ -744,6 +766,48 @@ async def _kill_verification_process(process: asyncio.subprocess.Process) -> Non
         await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
     except TimeoutError:  # pragma: no cover - a killed child must exit
         logger.warning("Backup restore verification process did not exit after being killed")
+
+
+async def _drill_bot_database_dump(*, dump_path: Path, settings: Settings) -> None:
+    """Restore the main bot dump into a scratch database and require the live schema head.
+
+    The live head is read first, so a dump of a schema other than the one the running bot
+    uses fails the drill instead of being sent.
+    """
+    database_url = _bot_database_url(settings)
+    async with _BACKUP_VERIFICATION_LOCK:
+        live_head = await read_live_schema_head(database_url, label=MAIN_DATABASE_TARGET.label)
+        await drill_postgres_dump(
+            admin_url=database_url,
+            dump_path=dump_path,
+            target=replace(MAIN_DATABASE_TARGET, expected_head=live_head),
+            pg_restore_path=settings.backup_pg_restore_path,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
+
+
+async def _drill_gacha_dump(*, dump_path: Path, settings: Settings) -> None:
+    """Restore the gacha dump into a scratch database on the bot's own PostgreSQL server.
+
+    The bot holds no gacha database credentials, but a logical dump restores anywhere,
+    so the copy made here tests the same archive that is about to be sent.
+    """
+    if dump_path.suffix.lower() == ".sqlite3":
+        await asyncio.to_thread(
+            drill_sqlite_snapshot,
+            snapshot_path=dump_path,
+            target=GACHA_DATABASE_TARGET,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
+        return
+    async with _BACKUP_VERIFICATION_LOCK:
+        await drill_postgres_dump(
+            admin_url=_bot_database_url(settings),
+            dump_path=dump_path,
+            target=GACHA_DATABASE_TARGET,
+            pg_restore_path=settings.backup_pg_restore_path,
+            timeout_seconds=settings.backup_restore_drill_timeout_seconds,
+        )
 
 
 def _split_backup_file(
