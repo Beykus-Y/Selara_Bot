@@ -77,6 +77,7 @@
               {% endfor %}
               <td class="admin-actions-col">
                 <span class="admin-row-actions">
+                  {% if table_writable %}
                   <a class="button button-small" href="/app/admin/table/{{ table_name }}/edit?{{ entry.pk_query }}" aria-label="Редактировать запись {{ entry.delete_label }}">✏️</a>
                   <button
                     type="button"
@@ -85,6 +86,9 @@
                     data-delete-label="{{ entry.delete_label }}"
                     aria-label="Удалить запись {{ entry.delete_label }}"
                   >🗑️</button>
+                  {% else %}
+                  <span class="text-muted">только чтение</span>
+                  {% endif %}
                 </span>
               </td>
             </tr>

@@ -420,3 +420,26 @@ async def test_admin_read_only_table_rejects_update_and_delete_without_mutating(
 
     await engine.dispose()
 
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_refuses_parent_row_with_read_only_dependents() -> None:
+    client, engine, session_factory = await _seeded_client()
+    try:
+        response = await client.post(
+            "/app/admin/table/users/delete",
+            data={"telegram_user_id": "901"},
+            follow_redirects=False,
+        )
+    finally:
+        await client.aclose()
+
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+
+    async with session_factory() as session:
+        row = await session.get(UserModel, 901)
+        assert row is not None
+        assert row.username == "crud_author"
+
+    await engine.dispose()

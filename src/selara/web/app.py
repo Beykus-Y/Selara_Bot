@@ -7879,9 +7879,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "ai_feature_invocations",
             "ai_feature_quota_usage",
             "chat_audit_logs",
+            "chat_auctions",
             "chat_entitlements",
             "economy_accounts",
             "economy_ledger",
+            "economy_market_listings",
             "economy_market_trades",
             "economy_transfer_daily",
             "entitlement_grants",
@@ -8090,6 +8092,26 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         # Явный allowlist: таблица должна быть описана в ADMIN_TABLE_META, иначе новая ORM-модель
         # автоматически стала бы редактируемой.
         return table_name in ADMIN_TABLE_META and table_name not in ADMIN_READONLY_TABLES
+
+    def _admin_table_delete_is_safe(table_name: str) -> bool:
+        # Удаление родителя каскадно стирает дочерние строки. Если через FK (прямо или через
+        # промежуточные таблицы) зависит таблица только для чтения, удаление запрещено.
+        from selara.infrastructure.db.models import Base
+
+        pending = [table_name]
+        seen = {table_name}
+        while pending:
+            current = pending.pop()
+            for child in Base.metadata.tables.values():
+                if child.name in seen:
+                    continue
+                if not any(fk.column.table.name == current for fk in child.foreign_keys):
+                    continue
+                if child.name in ADMIN_READONLY_TABLES:
+                    return False
+                seen.add(child.name)
+                pending.append(child.name)
+        return True
 
     def _admin_is_secret_column(column_name: str) -> bool:
         return column_name.lower().endswith(ADMIN_SECRET_COLUMN_SUFFIXES)
@@ -10253,6 +10275,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ),
             table_name=table_name,
             table_title=_admin_table_title(table_name),
+            table_writable=_admin_table_is_writable(table_name),
             columns=columns,
             row_entries=row_entries,
             page=page,
@@ -10404,6 +10427,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_table_is_writable(table_name):
             return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Таблица доступна только для чтения."))
+
+        if not _admin_table_delete_is_safe(table_name):
+            return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Нельзя удалить запись: от неё зависят таблицы только для чтения."))
 
         form = await _parse_form(request)
 
@@ -11170,6 +11196,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         if not _admin_table_is_writable(table_name):
             return _json_result(ok=False, message="Таблица доступна только для чтения.", status_code=403)
+
+        if not _admin_table_delete_is_safe(table_name):
+            return _json_result(ok=False, message="Нельзя удалить запись: от неё зависят таблицы только для чтения.", status_code=409)
 
         form = await _parse_form(request)
 
