@@ -743,9 +743,11 @@ def build_miniapp_admin_router(
         profiles = await repository.profile_breakdown(window_from=window_from, window_to=window_to)
         stages = await repository.stage_breakdown(window_from=window_from, window_to=window_to)
         ail_rows = await repository.ail_breakdown(window_from=window_from, window_to=window_to)
+        chats = await repository.chat_breakdown(window_from=window_from, window_to=window_to)
         return {
             "ok": True,
             "period_days": period_days,
+            "chats": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in chats],
             "features": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in features],
             "models": [{**row, "known_cost_usd": _decimal_str(row["known_cost_usd"])} for row in models],
             "unattributed_provider_calls": marker_only_calls,

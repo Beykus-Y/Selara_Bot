@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.ai_character import ProfileValidationError
 from selara.application.ai_character.group import (
+    LAST_ROUND_NOTICE,
     CallName,
     GroupCharacter,
     MemberTurn,
@@ -471,6 +472,23 @@ async def test_member_is_answered_with_read_only_tools_and_can_continue_by_reply
     assert await _ask(member_db, follow_up, llm) == "спасибо"
     history = llm.requests[-1]["messages"]
     assert history[-1]["content"].endswith("спасибо") and any(m.get("content") == "Сейчас всё спокойно!" for m in history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subscribed, rounds", [(False, 4), (True, 8)])
+async def test_member_tool_rounds_depend_on_subscription_and_last_round_is_tool_free(
+    member_db, monkeypatch, subscribed, rounds
+):
+    monkeypatch.setattr(group_character, "chat_has_selara_ai", AsyncMock(return_value=subscribed))
+    llm = _Llm()
+    llm.script = [_ToolMessage(tool_calls=[_call("get_current_time", {}, f"c{i}")]) for i in range(rounds - 1)]
+    llm.script.append(_ToolMessage(content="Готово"))
+    await _ask(member_db, _member_message("Селя, что там?"), llm)
+    assert len(llm.requests) == rounds
+    assert all(r["tools"] for r in llm.requests[:-1])
+    last = llm.requests[-1]
+    assert last["tools"] == [] and last["messages"][-1]["content"] == LAST_ROUND_NOTICE
+    assert all(r["max_tokens"] == 500 for r in llm.requests)
 
 
 @pytest.mark.asyncio

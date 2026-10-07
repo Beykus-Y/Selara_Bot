@@ -463,8 +463,18 @@ Stars, активные платные чаты, ближайшие истече
 
 Лимиты в сутки (время бота): бесплатно — `GROUP_MEMBER_FREE_DAILY_LIMIT`
 (30) на чат и `GROUP_MEMBER_FREE_PER_USER_DAILY_LIMIT` (5) на участника; с
-Selara AI — `GROUP_MEMBER_PAID_DAILY_LIMIT` (300) и
+Selara AI — `GROUP_MEMBER_PAID_DAILY_LIMIT` (100) и
 `GROUP_MEMBER_PAID_PER_USER_DAILY_LIMIT` (30). Когда лимит исчерпан, Selara
 отвечает подсказкой без AI не чаще раза в час. Между обращениями одного
 участника — пауза `LLM_COOLDOWN_SECONDS`; слишком частые обращения молча
 пропускаются.
+
+Ходы модели на один запрос (`?`/`??` и обращение по кличке): без подписки
+группы `GROUP_TOOL_ROUNDS_FREE` (4), с Selara AI `GROUP_TOOL_ROUNDS_PAID` (8).
+Ход — один вызов модели, на котором она может вызвать инструменты. На
+последнем ходу инструменты не предлагаются, а модель получает указание, что
+ход последний, и пишет ответ по уже собранным данным. Потолок ответа:
+`LLM_ADMIN_MAX_TOKENS` (800) и `GROUP_MEMBER_MAX_TOKENS` (500). Провайдера
+OpenRouter для групповых функций можно закрепить через
+`LLM_GROUP_PROVIDER_PREFERENCES_JSON`. Расход по чатам виден в Mini App
+(админка → AI → «По чатам»).

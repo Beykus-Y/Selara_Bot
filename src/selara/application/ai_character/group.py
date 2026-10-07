@@ -21,7 +21,18 @@ FREE_CALL_NAMES = 1
 PAID_CALL_NAMES = 5
 MAX_MEMBER_TEXT_LENGTH = 1000
 MEMBER_RECENT_MESSAGES = 12
-MEMBER_REPLY_MAX_TOKENS = 700
+MEMBER_REPLY_MAX_TOKENS = 500
+
+LAST_ROUND_NOTICE = (
+    "Это ПОСЛЕДНИЙ ход: инструменты и документы больше недоступны, не пытайся их вызывать. "
+    "Напиши итоговый ответ сейчас, опираясь только на уже полученные данные; если данных не хватает, "
+    "скажи об этом честно."
+)
+
+
+def group_tool_rounds(settings, *, has_subscription: bool) -> int:
+    """Model turns allowed for «?» and the nickname, the last one being the tool-free answer turn."""
+    return settings.group_tool_rounds_paid if has_subscription else settings.group_tool_rounds_free
 
 # key -> (title for admins, description handed to the model as style data)
 GROUP_PRESETS: dict[str, tuple[str, str]] = {

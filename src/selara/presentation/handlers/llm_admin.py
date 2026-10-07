@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from selara.application.ai_character.group import group_character_block
+from selara.application.ai_character.group import LAST_ROUND_NOTICE, group_character_block, group_tool_rounds
 from selara.application.feature_access import AccessReason, FeatureAccessService, message_idempotency_key
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
@@ -54,14 +54,13 @@ from selara.infrastructure.llm.web_tools import (
     restrict_tools_after_web,
 )
 from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.handlers.group_character import chat_has_selara_ai
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
 
 router = Router(name="llm_admin")
-
-_MAX_TOOL_ROUNDS = 8
 
 
 @router.message(
@@ -403,7 +402,13 @@ async def _handle(
         web_tainted = False
         web_withdrawal = False
 
-        for _round in range(_MAX_TOOL_ROUNDS):
+        # 4 model turns without a group subscription, 8 with one; the last turn offers no tools and says so.
+        has_ai = await chat_has_selara_ai(session_factory, chat_id=message.chat.id, settings=settings)
+        total_rounds = group_tool_rounds(settings, has_subscription=has_ai)
+        for _round in range(total_rounds):
+            is_last_round = _round == total_rounds - 1
+            if is_last_round and total_rounds > 1:
+                messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
             # Allowlist snapshot for THIS round: every tool call in the batch
             # is checked against the same set the provider was offered, so a
             # withdrawal triggered by an earlier call in the batch cannot
@@ -417,7 +422,11 @@ async def _handle(
             except Exception:
                 pass
             try:
-                request_kwargs: dict[str, Any] = {"messages": messages, "tools": available_tools}
+                request_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "tools": [] if is_last_round else available_tools,
+                    "max_tokens": settings.llm_admin_max_tokens,
+                }
                 # `tools` is always passed, [] included: LlmClient normalizes
                 # it to tools=None / tool_choice=None (a required positional
                 # -- omitting the key would raise TypeError on the real
@@ -462,7 +471,8 @@ async def _handle(
 
             # Some compatible providers report stop even with executable tool calls.
             # Actual calls take precedence over that metadata.
-            if not msg.tool_calls:
+            if not msg.tool_calls or is_last_round:
+                # On the last round tools were not offered: a stray call is ignored, the text is the answer.
                 if (msg.content or "").strip():
                     final_answer = msg.content
                     break

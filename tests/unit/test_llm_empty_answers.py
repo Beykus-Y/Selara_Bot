@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from selara.application.ai_character.group import LAST_ROUND_NOTICE
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
 from selara.infrastructure.llm.tools import ToolResult
@@ -102,9 +103,31 @@ async def test_recovered_artifact_delivery_is_terminal_and_not_repeated():
 
 
 async def test_empty_recovery_stays_inside_total_round_budget():
-    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * handler._MAX_TOOL_ROUNDS)
-    assert c.chat_with_tools.await_count == handler._MAX_TOOL_ROUNDS
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 4)
+    assert c.chat_with_tools.await_count == 4
     assert 'полученные данные' in sent.call_args.args[2]
+
+
+async def test_last_round_offers_no_tools_tells_the_model_and_caps_tokens():
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 3 + [response('Итог без документов')])
+    assert c.chat_with_tools.await_count == 4 and execute.await_count == 3
+    last = c.chat_with_tools.await_args_list[-1].kwargs
+    assert last['tools'] == [] and last['messages'][-1]['content'] == LAST_ROUND_NOTICE
+    assert all(call_.kwargs['tools'] for call_ in c.chat_with_tools.await_args_list[:-1])
+    assert all(call_.kwargs['max_tokens'] == 800 for call_ in c.chat_with_tools.await_args_list)
+    assert sent.call_args.args[2] == 'Итог без документов'
+
+
+async def test_stray_tool_call_on_the_last_round_is_not_executed():
+    c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 4)
+    assert execute.await_count == 3
+
+
+async def test_subscribed_chat_gets_eight_rounds():
+    with patch.object(handler, 'chat_has_selara_ai', AsyncMock(return_value=True)):
+        c, execute, sent, _, _ = await run([response(calls=[call('get_top')])] * 7 + [response('Итог')])
+    assert c.chat_with_tools.await_count == 8 and execute.await_count == 7
+    assert c.chat_with_tools.await_args_list[-1].kwargs['tools'] == []
 
 
 async def test_private_summary_does_not_invent_delivery_or_call_a_model():

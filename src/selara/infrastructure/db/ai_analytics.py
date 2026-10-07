@@ -246,6 +246,43 @@ class AdminAiAnalyticsRepository:
         rows.sort(key=lambda item: item["ail_consumed"], reverse=True)
         return rows
 
+    async def chat_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
+        """Chats ranked by known provider cost (group features only: rows without a chat are Personal/internal)."""
+        cost = func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0)
+        calls = func.count(LlmUsageLogModel.id)
+        result = await self._session.execute(
+            select(
+                LlmUsageLogModel.chat_id,
+                ChatModel.title,
+                calls,
+                cost,
+                func.count(func.distinct(LlmUsageLogModel.invocation_id)),
+                func.count(case((_unknown_usage_expr(), 1))),
+                func.count(case((AiFeatureInvocationModel.feature == "llm_admin", 1))),
+                func.count(case((AiFeatureInvocationModel.feature == "group_member", 1))),
+            )
+            .select_from(LlmUsageLogModel)
+            .join(AiFeatureInvocationModel, LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id)
+            .outerjoin(ChatModel, ChatModel.telegram_chat_id == LlmUsageLogModel.chat_id)
+            .where(*self._in_window(window_from, window_to), LlmUsageLogModel.chat_id.is_not(None))
+            .group_by(LlmUsageLogModel.chat_id, ChatModel.title)
+            .order_by(cost.desc(), calls.desc(), LlmUsageLogModel.chat_id)
+            .limit(limit)
+        )
+        return [
+            {
+                "chat_id": int(chat_id),
+                "title": title,
+                "provider_calls": int(call_count),
+                "known_cost_usd": Decimal(total),
+                "invocations": int(invocations),
+                "unknown_cost_calls": int(unknown),
+                "question_calls": int(question_calls),
+                "nickname_calls": int(nickname_calls),
+            }
+            for chat_id, title, call_count, total, invocations, unknown, question_calls, nickname_calls in result.all()
+        ]
+
     async def stage_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
         result = await self._session.execute(
             select(

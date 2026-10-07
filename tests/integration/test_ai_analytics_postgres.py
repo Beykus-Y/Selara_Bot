@@ -358,3 +358,43 @@ async def test_postgres_payment_history_pagination_filters_and_canonical_chat():
             assert await repository.payment_detail(payment_id=10_000_000, now=_NOW) is None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_postgres_chat_breakdown_ranks_group_chats_by_known_cost():
+    engine, factory = await _database()
+    try:
+        async with factory() as session:
+            inside = _FROM + timedelta(hours=1)
+            session.add_all(
+                [
+                    ChatModel(telegram_chat_id=-100, type="supergroup", title="Дорогой"),
+                    ChatModel(telegram_chat_id=-200, type="supergroup", title="Дешёвый"),
+                ]
+            )
+            invocations = [
+                _invocation("llm_admin", "succeeded", inside),
+                _invocation("group_member", "succeeded", inside),
+                _invocation("group_member", "succeeded", inside),
+                _invocation("llm_admin", "succeeded", _FROM - timedelta(days=1)),
+            ]
+            session.add_all(invocations)
+            await session.flush()
+            usages = [
+                _usage(invocations[0].id, model="m", stage="tool_round", cost="0.01", pricing="known"),
+                _usage(invocations[1].id, model="m", stage="member_round", cost="0.002", pricing="known"),
+                _usage(invocations[2].id, model="m", stage="member_round", cost="0.001", pricing="known"),
+                _usage(invocations[3].id, model="m", stage="tool_round", cost="5", pricing="known"),
+            ]
+            for usage, chat_id in zip(usages, (-100, -100, -200, -100)):
+                usage.chat_id = chat_id
+            session.add_all(usages)
+            await session.commit()
+            rows = await AdminAiAnalyticsRepository(session).chat_breakdown(window_from=_FROM, window_to=_NOW)
+        assert [row["chat_id"] for row in rows] == [-100, -200]
+        top = rows[0]
+        assert top["title"] == "Дорогой" and top["known_cost_usd"] == Decimal("0.012")
+        assert top["question_calls"] == 1 and top["nickname_calls"] == 1 and top["provider_calls"] == 2
+    finally:
+        await engine.dispose()

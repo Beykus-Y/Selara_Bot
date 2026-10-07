@@ -13,16 +13,16 @@ from typing import Any
 from selara.infrastructure.llm.client import LlmConfig
 
 
-def _provider_preferences(raw: str) -> dict | None:
+def _provider_preferences(raw: str, name: str = "LLM_PROVIDER_PREFERENCES_JSON") -> dict | None:
     text = (raw or "").strip()
     if not text:
         return None
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("LLM_PROVIDER_PREFERENCES_JSON должен быть валидным JSON.") from exc
+        raise ValueError(f"{name} должен быть валидным JSON.") from exc
     if not isinstance(value, dict):
-        raise ValueError("LLM_PROVIDER_PREFERENCES_JSON должен быть JSON-объектом.")
+        raise ValueError(f"{name} должен быть JSON-объектом.")
     return value
 
 
@@ -47,6 +47,9 @@ def llm_runtime_problem(settings: Any) -> tuple[LlmConfig | None, str | None]:
             supports_structured_output=settings.llm_supports_structured_output,
             include_usage_cost=_include_usage_cost(settings),
             provider_preferences=_provider_preferences(getattr(settings, "llm_provider_preferences_json", "")),
+            group_provider_preferences=_provider_preferences(
+                getattr(settings, "llm_group_provider_preferences_json", ""), "LLM_GROUP_PROVIDER_PREFERENCES_JSON"
+            ),
         )
     except ValueError as exc:
         return None, str(exc)
