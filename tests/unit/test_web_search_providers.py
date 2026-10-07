@@ -19,10 +19,7 @@ DDG_HTML = (
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    async def fake_sleep(_):
-        return None
-
-    monkeypatch.setattr(providers.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(providers, "_RETRY_DELAY_SECONDS", 0)
 
 
 def _transport(statuses, body="", calls=None):
@@ -38,27 +35,107 @@ def _transport(statuses, body="", calls=None):
 
 
 @pytest.mark.asyncio
-async def test_ddg_202_challenge_is_reported_as_block_after_one_retry():
+async def test_ddg_202_challenge_is_reported_as_block_without_retry():
     calls = []
     provider = DuckDuckGoProvider(transport=_transport([202], "anomaly", calls))
     with pytest.raises(WebSearchError) as exc:
         await provider.search("погода", max_results=5)
     assert "отклоняет" in exc.value.message
     assert "202" not in exc.value.message
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_ddg_transient_202_then_200_succeeds():
-    seq = [202, 200]
+async def test_ddg_transient_503_then_200_succeeds_and_403_is_not_retried():
+    seq = [503, 200]
 
     def handler(request):
         status = seq.pop(0)
         return httpx.Response(status, text=DDG_HTML if status == 200 else "")
 
-    provider = DuckDuckGoProvider(transport=httpx.MockTransport(handler))
-    items = await provider.search("x", max_results=5)
+    items = await DuckDuckGoProvider(transport=httpx.MockTransport(handler)).search("x", max_results=5)
     assert [i.url for i in items] == ["https://example.com/a"]
+
+    calls = []
+    with pytest.raises(WebSearchError):
+        await DuckDuckGoProvider(transport=_transport([403], "", calls)).search("x", max_results=5)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_keyed_5xx_retries_then_succeeds_and_truncates_to_max_results():
+    seq = [502, 200]
+
+    def handler(request):
+        if seq.pop(0) == 502:
+            return httpx.Response(502)
+        return httpx.Response(200, json={"results": [
+            {"title": f"T{i}", "url": f"https://t.example/{i}", "content": ""} for i in range(5)]})
+
+    provider = TavilyProvider(api_key="k", base_url="https://x", timeout_seconds=5,
+                              transport=httpx.MockTransport(handler))
+    assert len(await provider.search("q", max_results=2)) == 2
+
+
+@pytest.mark.asyncio
+async def test_keyed_timeout_falls_back_and_key_never_leaks(caplog):
+    def boom(request):
+        raise httpx.ReadTimeout("slow")
+
+    keyed = TavilyProvider(api_key="SECRET-KEY", base_url="https://x", timeout_seconds=5,
+                           transport=httpx.MockTransport(boom))
+    ddg = DuckDuckGoProvider(transport=_transport([200], DDG_HTML))
+    with caplog.at_level("DEBUG"):
+        assert (await FallbackProvider([keyed, ddg]).search("q", max_results=5))[0].title == "Title A"
+        failing = FallbackProvider([keyed])
+        with pytest.raises(WebSearchError) as exc:
+            await failing.search("q", max_results=5)
+    assert "SECRET-KEY" not in exc.value.message
+    assert "SECRET-KEY" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_brave_missing_web_section_returns_empty():
+    provider = BraveProvider(api_key="k", base_url="https://x", timeout_seconds=5,
+                             transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"web": None})))
+    assert await provider.search("q", max_results=3) == []
+
+
+def test_base_url_goes_only_to_ddg_never_to_keyed_provider():
+    client = build_web_search_client(enabled=True, provider="tavily", api_key="k",
+                                     base_url="https://my-ddg-proxy", searxng_url="http://s:1")
+    keyed, ddg = client._provider._providers
+    assert str(keyed._base_url) == "https://api.tavily.com"
+    assert ddg._base_url == "https://my-ddg-proxy"
+    auto = build_web_search_client(enabled=True, provider="auto", base_url="https://my-ddg-proxy",
+                                   searxng_url="http://s:1")
+    searx, ddg = auto._provider._providers
+    assert searx._base_url == "http://s:1"
+    assert ddg._base_url == "https://my-ddg-proxy"
+
+
+@pytest.mark.asyncio
+async def test_client_search_has_overall_deadline():
+    import asyncio
+
+    from selara.infrastructure.http.web_search import WebSearchClient
+
+    class Slow:
+        name = "slow"
+
+        async def search(self, query, *, max_results):
+            await asyncio.sleep(10)
+
+    client = WebSearchClient(provider=Slow(), timeout_seconds=0.01)
+    with pytest.raises(WebSearchError) as exc:
+        await client.search("q", max_results=3)
+    assert exc.value.is_timeout
+
+
+@pytest.mark.asyncio
+async def test_empty_fallback_raises_web_search_error():
+    with pytest.raises(WebSearchError):
+        await FallbackProvider([]).search("q", max_results=1)
 
 
 @pytest.mark.asyncio

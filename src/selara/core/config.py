@@ -162,8 +162,9 @@ class Settings(BaseSettings):
     llm_cooldown_seconds: float = Field(default=5.0, validation_alias="LLM_COOLDOWN_SECONDS")
 
     # Web search tools (web_search / fetch_page) for the ?/?? assistant. The
-    # default duckduckgo provider needs no API key; api_key/base_url are
-    # reserved for key-based providers added later.
+    # default "auto" uses SearXNG (compose) then DuckDuckGo, no key needed;
+    # web_search_api_key is for tavily/brave, web_search_base_url is the
+    # DuckDuckGo gateway only, web_search_searxng_url is the SearXNG address.
     web_search_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
     web_search_provider: str = Field(default="auto", validation_alias="WEB_SEARCH_PROVIDER")
     web_search_searxng_url: str = Field(default="http://searxng:8080", validation_alias="WEB_SEARCH_SEARXNG_URL")

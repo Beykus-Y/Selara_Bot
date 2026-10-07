@@ -147,7 +147,16 @@ class WebSearchClient:
         clean_query = query.strip()
         if not clean_query:
             raise WebSearchError("Пустой поисковый запрос.")
-        return await self._provider.search(clean_query, max_results=max_results)
+        # httpx timeouts are per phase; one overall deadline bounds the whole
+        # provider chain (retries + fallbacks) so a group `?` cannot hang.
+        try:
+            return await asyncio.wait_for(
+                self._provider.search(clean_query, max_results=max_results),
+                timeout=self._timeout_seconds * 2,
+            )
+        except asyncio.TimeoutError as exc:
+            raise WebSearchError("Поиск не ответил вовремя. Попробуй позже или переформулируй запрос.",
+                                 is_timeout=True) from exc
 
     async def fetch_page(self, url: str, *, max_chars: int) -> PageContent:
         current = _validate_public_http_url(url)
@@ -265,10 +274,10 @@ def build_web_search_client(
     if not enabled:
         return None
     normalized = (provider or "auto").strip().lower() or "auto"
-    ddg = DuckDuckGoProvider(
-        base_url=base_url if normalized == "duckduckgo" and base_url else DEFAULT_DUCKDUCKGO_BASE_URL,
-        timeout_seconds=timeout_seconds,
-    )
+    # WEB_SEARCH_BASE_URL is the DuckDuckGo gateway only (also for the fallback).
+    # Keyed providers always use their own fixed hosts so an API key never goes
+    # to a gateway; SearXNG has its own WEB_SEARCH_SEARXNG_URL.
+    ddg = DuckDuckGoProvider(base_url=base_url or DEFAULT_DUCKDUCKGO_BASE_URL, timeout_seconds=timeout_seconds)
     search_provider: SearchProvider
     if normalized == "duckduckgo":
         search_provider = ddg
@@ -281,12 +290,11 @@ def build_web_search_client(
             log.warning("WEB_SEARCH: для провайдера %s нужен WEB_SEARCH_API_KEY — используется duckduckgo.", normalized)
             search_provider = ddg
         else:
-            keyed_cls, default_url = (
+            keyed_cls, fixed_url = (
                 (TavilyProvider, DEFAULT_TAVILY_BASE_URL) if normalized == "tavily"
                 else (BraveProvider, DEFAULT_BRAVE_BASE_URL)
             )
-            keyed = keyed_cls(api_key=api_key.strip(), base_url=base_url or default_url,
-                              timeout_seconds=timeout_seconds)
+            keyed = keyed_cls(api_key=api_key.strip(), base_url=fixed_url, timeout_seconds=timeout_seconds)
             search_provider = FallbackProvider([keyed, ddg])
     else:
         log.warning("WEB_SEARCH: неизвестный провайдер %r — поиск отключён.", provider)

@@ -1,8 +1,9 @@
 """Search provider abstraction: a provider turns a query into result items.
 
 duckduckgo is the built-in implementation (unofficial lite HTML endpoint, no
-API key). Key-based providers (e.g. Tavily) can be added here later; the
-WEB_SEARCH_* config already reserves api_key/base_url for them.
+API key; WEB_SEARCH_BASE_URL points it at a gateway). Tavily/Brave use
+WEB_SEARCH_API_KEY and always talk to their own fixed hosts, SearXNG uses
+WEB_SEARCH_SEARXNG_URL: a credential is never sent to another provider's URL.
 """
 from __future__ import annotations
 
@@ -25,9 +26,10 @@ DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com"
 DEFAULT_BRAVE_BASE_URL = "https://api.search.brave.com"
 DEFAULT_SEARXNG_URL = "http://searxng:8080"  # compose service name, internal network only
 
-# One delayed retry for statuses that can clear up by themselves (5xx, 202).
+# One delayed retry for 5xx. 202/403/429 from DuckDuckGo are anti-bot blocks and
+# are not retried (immediate retries only worsen the bot score).
 _RETRY_DELAY_SECONDS = 1.5
-_RETRYABLE_STATUSES = frozenset({202, 500, 502, 503, 504})
+_RETRYABLE_STATUSES = frozenset({500, 502, 503, 504})
 _BODY_LOG_CHARS = 200
 
 
@@ -254,5 +256,6 @@ class FallbackProvider:
                 continue
             self._down_until.pop(id(provider), None)
             return result
-        assert last_error is not None
+        if last_error is None:
+            raise WebSearchError("Поисковый сервис не настроен.")
         raise last_error
