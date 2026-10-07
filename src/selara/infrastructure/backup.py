@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -27,6 +28,7 @@ from selara.infrastructure.db.backup_claims import (
     BACKUP_SLOT_COMPLETED,
     BACKUP_SLOT_FAILED,
     finish_backup_slot,
+    read_backup_slot_status,
     renew_backup_slot_lease,
     try_claim_backup_slot,
 )
@@ -145,30 +147,47 @@ async def run_scheduled_daily_backup(
     session_factory: async_sessionmaker[AsyncSession],
     slot_key: str,
 ) -> None:
-    """Run the scheduled backup for one slot unless another instance already owns it."""
-    owner_token = uuid4().hex
-    claimed = await try_claim_backup_slot(
-        session_factory=session_factory,
-        slot_key=slot_key,
-        owner_token=owner_token,
-        lease_seconds=_BACKUP_LEASE_SECONDS,
-    )
-    if not claimed:
-        logger.info("Daily backup slot is already claimed by another instance; skipping", extra={"slot_key": slot_key})
-        return
+    """Run the scheduled backup for one slot, taking it over if its owner crashes.
 
+    A losing instance waits while the slot is running elsewhere. It returns once the
+    slot is completed or failed, or claims it after the owner's lease has expired.
+    """
+    owner_token = uuid4().hex
+    while True:
+        claimed = await try_claim_backup_slot(
+            session_factory=session_factory,
+            slot_key=slot_key,
+            owner_token=owner_token,
+            lease_seconds=_BACKUP_LEASE_SECONDS,
+        )
+        if claimed:
+            break
+        status = await read_backup_slot_status(session_factory=session_factory, slot_key=slot_key)
+        if status in (BACKUP_SLOT_COMPLETED, BACKUP_SLOT_FAILED):
+            logger.info("Daily backup slot already finished on another instance; skipping", extra={"slot_key": slot_key})
+            return
+        # Still running on another instance: look again once its lease could have expired.
+        await asyncio.sleep(_BACKUP_LEASE_SECONDS + 1)
+
+    lease_lost = asyncio.Event()
+    job = asyncio.create_task(send_daily_backup(bot=bot, settings=settings), name="daily-backup-job")
     lease = asyncio.create_task(
         _keep_backup_lease_alive(
             session_factory=session_factory,
             slot_key=slot_key,
             owner_token=owner_token,
+            on_lost=lambda: _abort_lost_backup(job, lease_lost),
         ),
         name="daily-backup-lease",
     )
     try:
-        await send_daily_backup(bot=bot, settings=settings)
+        await job
     except asyncio.CancelledError:
-        lease.cancel()
+        await _stop_task(lease)
+        if lease_lost.is_set():
+            # Another instance now owns the slot; this run must not record its outcome.
+            logger.error("Daily backup stopped after losing its lease", extra={"slot_key": slot_key})
+            return
         raise
     except Exception as exc:
         await _stop_task(lease)
@@ -190,11 +209,17 @@ async def run_scheduled_daily_backup(
     )
 
 
+def _abort_lost_backup(job: asyncio.Task[None], lease_lost: asyncio.Event) -> None:
+    lease_lost.set()
+    job.cancel()
+
+
 async def _keep_backup_lease_alive(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     slot_key: str,
     owner_token: str,
+    on_lost: Callable[[], None],
 ) -> None:
     while True:
         await asyncio.sleep(_BACKUP_LEASE_RENEW_SECONDS)
@@ -211,7 +236,8 @@ async def _keep_backup_lease_alive(
             logger.exception("Could not renew daily backup lease", extra={"slot_key": slot_key})
             continue
         if not renewed:
-            logger.error("Daily backup lease was lost; another instance may take over this slot", extra={"slot_key": slot_key})
+            logger.error("Daily backup lease was lost; stopping this run", extra={"slot_key": slot_key})
+            on_lost()
             return
 
 

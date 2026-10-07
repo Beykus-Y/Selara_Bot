@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,6 +70,17 @@ async def try_claim_backup_slot(
         )
         await session.commit()
         return result.rowcount == 1
+
+
+async def read_backup_slot_status(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    slot_key: str,
+) -> str | None:
+    async with session_factory() as session:
+        return await session.scalar(
+            select(BackupJobClaimModel.status).where(BackupJobClaimModel.slot_key == slot_key)
+        )
 
 
 async def renew_backup_slot_lease(
