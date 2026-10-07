@@ -2543,12 +2543,12 @@ async def test_admin_archive_navigation_covers_all_save_message_chats_beyond_top
     assert 'href="/app/admin/table/messages_compact?chat_id=-100500"' in response.text
     assert "old quiet message" in response.text
     assert "10:00" in response.text
-    assert "2 снимков в архиве" in response.text
+    assert "Снимков в архиве: 2" in response.text
 
     # Чат B (самый активный) присутствует с реальным счётчиком > 250
     # и выбран автоматически как самый свежий.
     assert 'href="/app/admin/table/messages_compact?chat_id=-100700"' in response.text
-    assert "300 снимков в архиве" in response.text
+    assert "Снимков в архиве: 300" in response.text
     assert "Busy Chat" in response.text
     assert response.text.count('class="archive-message archive-author-') == 2
 

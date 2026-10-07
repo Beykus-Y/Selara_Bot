@@ -9606,6 +9606,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         latest_ranked.c.last_caption.label("last_caption"),
                         latest_ranked.c.last_message_type.label("last_message_type"),
                     )
+                    # Явный FROM: иначе левая часть join выводится из первой колонки
+                    # select, и перестановка списка колонок молча меняет цель join.
+                    .select_from(ChatSettingsModel)
                     .join(ChatModel, ChatModel.telegram_chat_id == ChatSettingsModel.chat_id)
                     .join(
                         archive_aggregates,
