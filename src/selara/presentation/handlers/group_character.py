@@ -58,7 +58,7 @@ from selara.infrastructure.llm.client import LlmAccountingContext, LlmCallResult
 from selara.infrastructure.llm.features import AiFeature
 from selara.infrastructure.llm.group_member_tools import execute_member_tool, member_tool_definitions
 from selara.infrastructure.llm.tools import ToolCall
-from selara.presentation.auth import has_permission, resolve_owner_admin_exemption
+from selara.presentation.auth import has_permission, resolve_owner_private_exemption
 from selara.presentation.commands.catalog import match_builtin_command
 from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
@@ -245,7 +245,8 @@ async def handle_group_call(
         entitlement_resolver=SqlAlchemyChatEntitlementResolver(session_factory, group_member_limits=limits),
         group_member_limits=limits,
     )
-    owner_exempt = await resolve_owner_admin_exemption(bot=bot, chat_id=chat_id, admin_user_id=settings.admin_user_id)
+    # Only the bot owner personally is exempt here (identity, not chat admin status), so other members keep their limits.
+    owner_exempt = resolve_owner_private_exemption(user_id=user.id, admin_user_id=settings.admin_user_id)
     try:
         decision = await access_service.reserve_feature_usage(
             feature=AiFeature.GROUP_MEMBER,
