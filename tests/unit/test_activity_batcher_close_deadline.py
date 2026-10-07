@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,20 +54,37 @@ async def _engine_and_session_factory():
 
 
 @pytest.mark.asyncio
-async def test_close_returns_when_a_flush_never_finishes(monkeypatch) -> None:
-    _engine, session_factory = await _engine_and_session_factory()
+async def test_close_returns_when_a_flush_never_finishes(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.ERROR, logger="selara.infrastructure.db.activity_batcher")
+    engine, session_factory = await _engine_and_session_factory()
 
     async def _stuck_flush(self, events):
         # Stands in for a database call that never answers, such as a connection to a dead server.
         await asyncio.Event().wait()
 
     monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", _stuck_flush)
-    batcher = ActivityBatcher(session_factory=session_factory, catalog=_catalog(), flush_seconds=60, max_events=1000)
+    batcher = ActivityBatcher(
+        session_factory=session_factory,
+        catalog=_catalog(),
+        flush_seconds=60,
+        max_events=1000,
+        close_grace_seconds=0.2,
+    )
     await batcher.start()
     await batcher.enqueue_message(**_event(1))
 
-    # Before the fix close() awaits the flusher with no bound, so this timeout is what fails the test.
-    await asyncio.wait_for(batcher.close(), timeout=2)
+    started = time.monotonic()
+    await asyncio.wait_for(batcher.close(), timeout=5)
+    assert time.monotonic() - started < 3
+
+    # The stuck batch never committed, so its event is still in the inbox for the next start, and shutdown logs it.
+    async with session_factory() as session:
+        pending = await session.scalar(select(func.count()).select_from(ActivityEventInboxModel))
+    assert pending == 1
+    unflushed = [record for record in caplog.records if "not fully applied" in record.getMessage()]
+    assert len(unflushed) == 1
+    assert unflushed[0].inbox_pending == 1
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

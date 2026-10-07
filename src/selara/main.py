@@ -145,6 +145,7 @@ async def _run_bot(settings, session_factory) -> None:
         catalog=achievement_catalog,
         flush_seconds=settings.activity_batch_flush_seconds,
         max_events=settings.activity_batch_max_events,
+        close_grace_seconds=settings.activity_batch_close_grace_seconds,
         live_event_publisher=GAME_STORE.publish_event,
     )
     stt_client = _build_stt_client(settings)
