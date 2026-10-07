@@ -51,9 +51,10 @@ jobs:
         run: pip-audit --progress-spinner off
 
       - name: Install snapshot fonts
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg
 
       - name: Install headless Chromium
         run: python -m playwright install --with-deps chromium
