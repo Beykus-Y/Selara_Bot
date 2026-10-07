@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from selara.application.ai_character.group import (
+    FREE_CALL_NAMES,
+    MAX_GROUP_CUSTOM_LENGTH,
+    MAX_MEMBER_TEXT_LENGTH,
+    PAID_CALL_NAMES,
+)
+from selara.application.feature_access import resolve_feature_policy
+from selara.core.chat_settings import ChatSettings
+from selara.core.config import Settings
 from selara.domain.entities import UserChatOverview
+from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.commands.catalog import build_social_action_docs
 from selara.presentation.commands.command_catalog import get_command_spec
 from selara.presentation.handlers.settings_common import SETTING_META
@@ -69,6 +79,21 @@ def _docs_section(
         "items": numbered_items,
     }
 
+
+def _default(field: str) -> int:
+    return int(Settings.model_fields[field].default)
+
+
+def _policy_limit(feature: AiFeature, trigger: str) -> int:
+    policy = resolve_feature_policy(feature=feature, trigger=trigger)
+    assert policy is not None  # these features have an explicit free quota
+    return policy.limit
+
+
+_ADMIN_AI_LIMIT = _policy_limit(AiFeature.LLM_ADMIN, "telegram_message")
+_MANUAL_SUMMARY_LIMIT = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
+_SUMMARY_HOUR = ChatSettings.__dataclass_fields__["daily_summary_hour"].default
+_SUMMARY_MIN_MESSAGES = ChatSettings.__dataclass_fields__["daily_summary_min_messages"].default
 
 # Single source for both RP-action trigger lists below — derived from
 # selara.presentation.commands.catalog so this page cannot drift out of sync
@@ -433,6 +458,104 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
                 "`объява` доступна только тем ролям, которым в чате разрешена эта команда.",
                 "`рег` и `анрег` включают или выключают ваш пинг в объявлениях.",
                 "`жмых` используется как подпись к фото: чем выше уровень 1..6, тем сильнее искажение картинки.",
+            ),
+        ),
+    ),
+    _docs_section(
+        "user-docs-ai",
+        "AI в группе",
+        "Ассистент для админов, обращения к Selara по кличке, питомцы, итоги дня, AI-настройка и как всё это связано с подпиской Selara AI.",
+        _docs_item(
+            "Ассистент админов: ? и ??",
+            text=(
+                "Вопрос ассистенту начинается с `?` или `??`. `?` каждый раз начинает с чистого листа, "
+                "`??` учитывает контекст прошлых `??` в этом чате."
+            ),
+            badges=("группа", "AI", "админы"),
+            commands=("? вопрос", "?? вопрос", "?reset"),
+            notes=(
+                "Работает, если в чате включена настройка `llm_enabled` (по умолчанию выключена).",
+                "Доступ: senior_admin и выше или кастомная роль с правом использования AI-ассистента. `?reset` сбрасывает контекст и требует право модерации.",
+                "Ассистент показывает топы, статистику, журнал модерации, словарь чата и ищет в интернете (если поиск включён у бота); действия (варн, бан, роли) выполняются только при наличии нужного права у спрашивающего.",
+                f"Лимит: {_ADMIN_AI_LIMIT} запросов в сутки на весь чат (сутки по времени бота). Selara AI этот лимит не меняет.",
+                "Между запросами одного человека действует короткая пауза; при исчерпании лимита бот пишет, сколько использовано и когда лимит обновится.",
+            ),
+        ),
+        _docs_item(
+            "Обращение к Selara по кличке",
+            text=(
+                "Если админы включили ответы участникам и добавили кличку, любой участник может написать "
+                "«Селя, что думаешь?» — кличка должна стоять в самом начале сообщения. Ответ на реплику Selara продолжает разговор."
+            ),
+            badges=("группа", "AI"),
+            commands=(
+                "/selara",
+                "/selara помощь",
+                "/selara кличка Селя",
+                "/selara убрать Селя",
+                "/selara основная Селя",
+                "/selara участники вкл|выкл",
+                "/selara характер",
+                "/selara характер свой текст",
+                "/selara история вкл|выкл",
+                "/selara сброс",
+            ),
+            notes=(
+                "Менять настройки могут админы с правом настройки чата; `/selara` без аргументов показывает текущее состояние всем.",
+                "Ответы участникам по умолчанию выключены: включите `/selara участники вкл`.",
+                f"Кличек: {FREE_CALL_NAMES} без Selara AI и до {PAID_CALL_NAMES} с ним; вопрос — до {MAX_MEMBER_TEXT_LENGTH} символов; свой характер — до {MAX_GROUP_CUSTOM_LENGTH} символов.",
+                "С `/selara история вкл` Selara может читать недавние сообщения чата (до суток), отвечая участникам; для этого нужен включённый `save_message`.",
+                f"Лимит обращений в сутки по умолчанию: {_default('group_member_free_daily_limit')} на чат и {_default('group_member_free_per_user_daily_limit')} на участника; с Selara AI — {_default('group_member_paid_daily_limit')} и {_default('group_member_paid_per_user_daily_limit')}. Значения может изменить администратор бота.",
+                "Когда лимит чата исчерпан, Selara отвечает сообщением о лимите (в чате без подписки — с подсказкой про `/premium`); когда исчерпан личный лимит участника — просит вернуться завтра.",
+            ),
+        ),
+        _docs_item(
+            "AI-питомцы в группе",
+            text=(
+                "Питомец отвечает, если написать ему по имени («Мурка, как дела?») или ответить на его реплику. "
+                "Работает в чатах с включённой настройкой `pets_enabled`. Сам питомец пишет только при включённой `pets_spontaneous_enabled` (по умолчанию выключена; ночью по умолчанию молчит)."
+            ),
+            badges=("группа", "AI", "питомцы"),
+            commands=("/pets", "/pet_bag", "/pet_forget"),
+            notes=(
+                "Разговоры оплачивает хозяин питомца из Selara Personal, а не чат.",
+                f"По умолчанию: {_default('pet_talk_daily_limit')} AI-реплик в сутки на питомца (разговоры и самостоятельные сообщения расходуют один общий лимит), гостям из них — {_default('pet_talk_guests_daily_limit')} всего и {_default('pet_talk_guest_daily_limit')} на человека.",
+                "Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без AI-лимита (у ухода свои кулдауны).",
+            ),
+        ),
+        _docs_item(
+            "Итоги дня и AI-настройка",
+            text=(
+                "Итоги дня можно собрать вручную или включить по расписанию. Настройку группы можно описать словами в личке с ботом."
+            ),
+            badges=("группа", "ЛС", "AI"),
+            commands=(
+                "/summary",
+                "/setcfg daily_summary_enabled true",
+                "/setcfg daily_summary_hour 21",
+                "/setcfg daily_summary_style lively",
+                "/autocfg",
+                "/autocfgcancel",
+            ),
+            notes=(
+                f"`/summary` доступна с правом настройки чата и ограничена {_MANUAL_SUMMARY_LIMIT} запусками в месяц на чат; Selara AI этот лимит не меняет.",
+                f"Автоматические итоги работают только с Selara AI. Час — `daily_summary_hour` (по умолчанию {_SUMMARY_HOUR}, время бота), стиль — neutral, lively или snarky.",
+                f"Нужны включённый `save_message` и не меньше {_SUMMARY_MIN_MESSAGES} сообщений за сутки (порог — `daily_summary_min_messages`).",
+                "`daily_summary_include_voice` и `daily_summary_include_video_notes` добавляют в итоги расшифровку голосовых и кружков.",
+                "`/autocfg` работает в личке: выберите группу и опишите, что изменить. Черновик живёт 24 часа и применяется только после сводки и кнопки «Сохранить»; `/autocfgcancel` его отменяет. Лимиты подписки не тратятся.",
+            ),
+        ),
+        _docs_item(
+            "Подписка Selara AI для чата",
+            text=(
+                "Подписка оформляется на конкретный чат командой `/premium` в личке с ботом (оплата Telegram Stars)."
+            ),
+            badges=("ЛС", "подписка"),
+            commands=("/premium", "/terms", "/paysupport"),
+            notes=(
+                f"Даёт: до {PAID_CALL_NAMES} кличек, повышенные лимиты обращений по кличке и автоматические итоги дня.",
+                "Не меняет: лимит `?`/`??`, ручной `/summary` и лимиты питомцев (они идут по Selara Personal хозяина).",
+                "После окончания подписки лимиты возвращаются к бесплатным, лишние клички перестают работать (не удаляются, основная продолжает), автоматические итоги прекращаются; настройки чата сохраняются.",
             ),
         ),
     ),
