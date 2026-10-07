@@ -9,9 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  backend:
+  backend-checks:
+    name: Backend checks (audit, migrations, gacha, images)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       redis:
         image: redis:7-alpine
@@ -48,41 +54,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Set up locked Python resolver
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.11.33"
-          enable-cache: true
-
-      - name: Check Python lock matches manifests
-        run: uv lock --check
-
-      - name: Install locked Python dependencies
-        run: |
-          uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
-          uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
-          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Backend setup
+        uses: ./.github/actions/backend-setup
 
       - name: Audit Python dependencies
         run: pip-audit --progress-spinner off
-
-      - name: Verify installed CI graph matches lock
-        run: python scripts/check_locked_python_runtime.py uv.lock selara
-
-      - name: Install snapshot fonts
-        timeout-minutes: 10
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg
-
-      - name: Install headless Chromium
-        run: python -m playwright install --with-deps chromium
 
       - name: Create gacha test database
         run: >-
@@ -121,22 +97,196 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src gacha/src
 
-      - name: Run main unit tests
-        run: python -m pytest -q tests/unit
-
-      - name: Run main integration tests
-        run: python -m pytest -q tests/integration
-
       - name: Run gacha tests
         working-directory: gacha
         run: python -m pytest -q tests
 
-  frontend:
+  backend-unit:
+    name: Unit tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: selara_test
+          POSTGRES_USER: selara_test
+          POSTGRES_PASSWORD: selara_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U selara_test -d selara_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TZ: UTC
+      BOT_TOKEN: 123456:CI_TOKEN
+      DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
+      TEST_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
+      TEST_GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Backend setup
+        uses: ./.github/actions/backend-setup
+
+      - name: Install snapshot fonts
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 5
+          done
+          exit 1
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - name: Install headless Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Create gacha test database
+        run: >-
+          docker exec ${{ job.services.postgres.id }}
+          psql -U selara_test -d selara_test
+          -c "CREATE DATABASE selara_gacha_test"
+
+      - name: Apply main migrations
+        run: python -m alembic upgrade head
+
+      - name: Run Unit tests shard
+        run: >-
+          python -m pytest -q $(python scripts/ci_test_shard.py tests/unit ${{ matrix.shard }} 4)
+
+  backend-integration:
+    name: Integration tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: selara_test
+          POSTGRES_USER: selara_test
+          POSTGRES_PASSWORD: selara_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U selara_test -d selara_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TZ: UTC
+      BOT_TOKEN: 123456:CI_TOKEN
+      DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
+      TEST_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_test
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
+      TEST_GACHA_DATABASE_URL: postgresql+asyncpg://selara_test:selara_test@127.0.0.1:5432/selara_gacha_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Backend setup
+        uses: ./.github/actions/backend-setup
+
+      - name: Install snapshot fonts
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && timeout 240 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 5
+          done
+          exit 1
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - name: Install headless Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Create gacha test database
+        run: >-
+          docker exec ${{ job.services.postgres.id }}
+          psql -U selara_test -d selara_test
+          -c "CREATE DATABASE selara_gacha_test"
+
+      - name: Apply main migrations
+        run: python -m alembic upgrade head
+
+      - name: Run Integration tests shard
+        run: >-
+          python -m pytest -q $(python scripts/ci_test_shard.py tests/integration ${{ matrix.shard }} 4)
+
+  backend:
+    name: backend
+    if: ${{ always() }}
+    needs: [backend-checks, backend-unit, backend-integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every backend job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = "success" ] || { echo "A backend job did not succeed ($result)" >&2; exit 1; }
+          done
+
+  frontend-static:
+    name: Frontend lint, build and audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -153,6 +303,52 @@ jobs:
 
       - name: Audit production frontend dependencies (high/critical)
         run: npm audit --omit=dev --audit-level=high
+
+      - name: Set up Python for lint tooling
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up locked Python resolver for browser tooling
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.33"
+          enable-cache: true
+
+      - name: Install locked Playwright and Jinja2 browser tooling
+        working-directory: .
+        run: |
+          uv sync --locked --only-group browser --no-build
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Lint frontend
+        env:
+          SELARA_PYTHON: python
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+  frontend-browser:
+    name: Mini App browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Set up Python for Mini App browser regression
         uses: actions/setup-python@v5
@@ -171,14 +367,14 @@ jobs:
           uv sync --locked --only-group browser --no-build
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Install browser from locked Playwright version
-        run: |
-          python -m playwright install --with-deps chromium
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browser-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
-      - name: Lint frontend
-        env:
-          SELARA_PYTHON: python
-        run: npm run lint
+      - name: Install browser from locked Playwright version
+        run: python -m playwright install --with-deps chromium
 
       - name: Build frontend
         run: npm run build
@@ -194,3 +390,18 @@ jobs:
 
       - name: Test Mini App model configuration in mobile browser
         run: python ../scripts/test_miniapp_admin_models_browser.py
+
+  frontend:
+    name: frontend
+    if: ${{ always() }}
+    needs: [frontend-static, frontend-browser]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every frontend job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = "success" ] || { echo "A frontend job did not succeed ($result)" >&2; exit 1; }
+          done
