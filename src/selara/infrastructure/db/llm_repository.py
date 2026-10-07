@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,7 @@ from selara.infrastructure.db.models import (
     LlmChatGlossaryModel,
     LlmContextMessageModel,
     LlmContextSummaryModel,
+    LlmToolConfirmationModel,
 )
 
 
@@ -260,6 +262,132 @@ class LlmRepository:
             return
         row.rolled_back_at = None
         row.rolled_back_by_user_id = None
+        await self._session.flush()
+
+    # --- Tool confirmations (#51) ---
+
+    async def create_tool_confirmation(
+        self,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        tool_name: str,
+        arguments: dict,
+        payload_hash: str,
+        action_description: str,
+        ttl_seconds: int,
+    ) -> LlmToolConfirmationModel:
+        row = LlmToolConfirmationModel(
+            token=secrets.token_urlsafe(24),
+            chat_id=chat_id,
+            actor_user_id=actor_user_id,
+            tool_name=tool_name,
+            arguments_json=arguments,
+            payload_hash=payload_hash,
+            action_description=action_description,
+            status="pending",
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def find_active_tool_confirmation(
+        self,
+        *,
+        chat_id: int,
+        actor_user_id: int,
+        tool_name: str,
+        payload_hash: str,
+    ) -> LlmToolConfirmationModel | None:
+        """Dedupe: the same proposed action (same chat/admin/tool/payload)
+        still pending -- return it instead of stacking identical rows when
+        the model repeats a call across rounds."""
+        stmt = (
+            select(LlmToolConfirmationModel)
+            .where(
+                LlmToolConfirmationModel.chat_id == chat_id,
+                LlmToolConfirmationModel.actor_user_id == actor_user_id,
+                LlmToolConfirmationModel.tool_name == tool_name,
+                LlmToolConfirmationModel.payload_hash == payload_hash,
+                LlmToolConfirmationModel.status == "pending",
+                LlmToolConfirmationModel.expires_at > datetime.now(timezone.utc),
+            )
+            .order_by(LlmToolConfirmationModel.id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_tool_confirmation(self, *, token: str) -> LlmToolConfirmationModel | None:
+        stmt = (
+            select(LlmToolConfirmationModel)
+            .where(LlmToolConfirmationModel.token == token)
+            # Always fresh: claim/release below bypass the identity map
+            # (synchronize_session=False), so a cached instance could show a
+            # stale status within the same session.
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def claim_tool_confirmation(
+        self,
+        *,
+        token: str,
+        resolved_by_user_id: int,
+        new_status: str = "confirmed",
+    ) -> bool:
+        """Atomically resolve a pending confirmation (the #35 pattern):
+        a single UPDATE ... WHERE status='pending' AND not expired, so at
+        most one concurrent click can ever observe rowcount == 1 and drive
+        the side effect; the second click finds the row already resolved."""
+        stmt = (
+            update(LlmToolConfirmationModel)
+            .where(
+                LlmToolConfirmationModel.token == token,
+                LlmToolConfirmationModel.status == "pending",
+                LlmToolConfirmationModel.expires_at > datetime.now(timezone.utc),
+            )
+            .values(
+                status=new_status,
+                resolved_at=datetime.now(timezone.utc),
+                resolved_by_user_id=resolved_by_user_id,
+            )
+            # Pure DB-side resolution: the in-session instance is refreshed
+            # via get_tool_confirmation's populate_existing instead.
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def release_tool_confirmation(self, *, token: str) -> None:
+        """Re-arm a confirmation claimed by claim_tool_confirmation when the
+        guarded side effect then failed (authorization/execution) and nothing
+        actually happened, mirroring clear_rollback_claim -- lets the admin
+        retry once the underlying condition changes."""
+        stmt = (
+            update(LlmToolConfirmationModel)
+            .where(
+                LlmToolConfirmationModel.token == token,
+                LlmToolConfirmationModel.status == "confirmed",
+            )
+            .values(status="pending", resolved_at=None, resolved_by_user_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
+    async def mark_tool_confirmation_expired(self, *, token: str) -> None:
+        stmt = (
+            update(LlmToolConfirmationModel)
+            .where(
+                LlmToolConfirmationModel.token == token,
+                LlmToolConfirmationModel.status == "pending",
+            )
+            .values(status="expired", resolved_at=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.execute(stmt)
         await self._session.flush()
 
     # --- Glossary ---

@@ -487,7 +487,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert feature_routes.down_revision == settlement.revision
     member_actions = _load_migration("0095_group_member_actions.py")
     assert member_actions.down_revision == feature_routes.revision
-    assert revisions - parents == {member_actions.revision}
+    tool_confirmations = _load_migration("0096_llm_tool_confirmations.py")
+    assert tool_confirmations.down_revision == member_actions.revision
+    assert revisions - parents == {tool_confirmations.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32
