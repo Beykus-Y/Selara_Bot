@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -22,6 +22,7 @@ from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.models import (
     AiFeatureQuotaUsageModel,
+    AiTurnLeaseModel,
     ChatAiCallNameModel,
     ChatAiCharacterModel,
     ChatEntitlementModel,
@@ -46,6 +47,8 @@ async def factory():
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
         pytest.skip("TEST_DATABASE_URL is not set")
+    # The busy note is rate-limited per process: each test starts with a fresh window.
+    group_character._busy_reply_sent_at.clear()
     engine = create_async_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -261,15 +264,97 @@ async def test_a_second_call_in_the_chat_does_not_run_beside_the_running_turn(fa
         db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селя", name_norm="селя", is_primary=True))
         await db.commit()
     llm = _HeldLlm()
-    first = asyncio.create_task(
+    first = _group_message("первый вопрос", message_id=1, user_id=MEMBERS[0])
+    turn = asyncio.create_task(_call_group(factory, first, llm, "первый вопрос"))
+    await asyncio.wait_for(llm.started.wait(), timeout=10)
+    try:
+        # Another member asks while the first answer is in flight: it gets a note and no model call beside the turn.
+        second = _group_message("второй вопрос", message_id=2, user_id=MEMBERS[1])
+        await asyncio.wait_for(_call_group(factory, second, llm, "второй вопрос"), timeout=10)
+        assert llm.calls == 1
+        second.reply.assert_awaited_once_with(group_character._BUSY_TEXT)
+    finally:
+        llm.release.set()
+        await asyncio.wait_for(turn, timeout=10)
+    first.reply.assert_awaited_once()
+    async with factory() as db:
+        rows = (await db.scalars(select(ChatMemberAiMessageModel).order_by(ChatMemberAiMessageModel.id))).all()
+    # Only the first question was admitted, and its answer is saved for the next turn to read.
+    assert [(row.role, row.status) for row in rows] == [("user", "ok"), ("assistant", "ok")]
+
+
+async def test_turns_in_different_chats_do_not_block_each_other(factory) -> None:
+    other = CHAT - 1
+    async with factory() as db:
+        db.add(ChatModel(telegram_chat_id=other, type="supergroup", title="Other"))
+        await db.flush()
+        db.add_all(ChatAiCharacterModel(chat_id=chat_id, member_mode_enabled=True) for chat_id in (CHAT, other))
+        db.add_all(
+            ChatAiCallNameModel(chat_id=chat_id, name_display="Селя", name_norm="селя", is_primary=True)
+            for chat_id in (CHAT, other)
+        )
+        await db.commit()
+    llm = _HeldLlm()
+    turn = asyncio.create_task(
         _call_group(factory, _group_message("первый вопрос", message_id=1, user_id=MEMBERS[0]), llm, "первый вопрос")
     )
     await asyncio.wait_for(llm.started.wait(), timeout=10)
     try:
-        # Another member asks while the first answer is still in flight: it must not start a model call beside it.
-        second = _group_message("второй вопрос", message_id=2, user_id=MEMBERS[1])
-        await asyncio.wait_for(_call_group(factory, second, llm, "второй вопрос"), timeout=10)
-        assert llm.calls == 1
+        elsewhere = _group_message("вопрос в другом чате", message_id=3, user_id=MEMBERS[2], chat_id=other)
+        await asyncio.wait_for(_call_group(factory, elsewhere, llm, "вопрос в другом чате"), timeout=10)
+        assert llm.calls == 2
+        elsewhere.reply.assert_awaited_once()
+        assert elsewhere.reply.await_args.args[0] != group_character._BUSY_TEXT
     finally:
         llm.release.set()
-        await asyncio.wait_for(first, timeout=10)
+        await asyncio.wait_for(turn, timeout=10)
+
+
+async def test_a_turn_whose_lease_was_taken_over_saves_and_sends_nothing(factory) -> None:
+    async with factory() as db:
+        db.add(ChatAiCharacterModel(chat_id=CHAT, member_mode_enabled=True))
+        db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селя", name_norm="селя", is_primary=True))
+        await db.commit()
+    llm = _HeldLlm()
+    message = _group_message("вопрос", message_id=1, user_id=MEMBERS[0])
+    turn = asyncio.create_task(_call_group(factory, message, llm, "вопрос"))
+    await asyncio.wait_for(llm.started.wait(), timeout=10)
+    try:
+        # Another instance takes the key over while this turn waits for its model.
+        async with factory() as db:
+            await db.execute(
+                update(AiTurnLeaseModel)
+                .where(AiTurnLeaseModel.lease_key == f"group_member_turn:{CHAT}")
+                .values(owner_token="other-instance", lease_expires_at=func.now() + timedelta(seconds=60))
+            )
+            await db.commit()
+    finally:
+        llm.release.set()
+        await asyncio.wait_for(turn, timeout=10)
+    message.reply.assert_awaited_once_with(group_character._LEASE_LOST_TEXT)
+    async with factory() as db:
+        rows = (
+            await db.scalars(select(ChatMemberAiMessageModel).where(ChatMemberAiMessageModel.chat_id == CHAT))
+        ).all()
+    assert [row.role for row in rows if row.status == "ok"] == []
+
+
+async def test_a_lease_left_by_a_dead_instance_does_not_block_the_chat(factory) -> None:
+    async with factory() as db:
+        db.add(ChatAiCharacterModel(chat_id=CHAT, member_mode_enabled=True))
+        db.add(ChatAiCallNameModel(chat_id=CHAT, name_display="Селя", name_norm="селя", is_primary=True))
+        db.add(
+            AiTurnLeaseModel(
+                lease_key=f"group_member_turn:{CHAT}",
+                owner_token="dead-instance",
+                lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+    llm = _HeldLlm()
+    llm.release.set()
+    message = _group_message("вопрос", message_id=1, user_id=MEMBERS[0])
+    await asyncio.wait_for(_call_group(factory, message, llm, "вопрос"), timeout=10)
+    assert llm.calls == 1
+    message.reply.assert_awaited_once()
+    assert message.reply.await_args.args[0] != group_character._BUSY_TEXT
