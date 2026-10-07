@@ -120,7 +120,8 @@ class Settings(BaseSettings):
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     # Restore drill: each dump is restored into a scratch database on the bot's PostgreSQL server before it is encrypted.
-    backup_restore_drill_enabled: bool = Field(default=True, validation_alias="BACKUP_RESTORE_DRILL_ENABLED")
+    # Opt-in: it needs CREATEDB and free disk for a copy of the database, and a failure stops every backup.
+    backup_restore_drill_enabled: bool = Field(default=False, validation_alias="BACKUP_RESTORE_DRILL_ENABLED")
     backup_restore_drill_timeout_seconds: float = Field(
         default=1800.0,
         validation_alias="BACKUP_RESTORE_DRILL_TIMEOUT_SECONDS",

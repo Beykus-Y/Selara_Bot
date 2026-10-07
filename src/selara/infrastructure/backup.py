@@ -38,6 +38,7 @@ from selara.infrastructure.backup_drill import (
     MAIN_DATABASE_TARGET,
     drill_postgres_dump,
     drill_sqlite_snapshot,
+    libpq_url,
     read_live_schema_head,
 )
 from selara.infrastructure.db.backup_claims import (
@@ -546,7 +547,8 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
         "--no-owner",
         "--no-privileges",
         f"--file={output_path}",
-        f"--dbname={database_url.set(drivername='postgresql', password=None).render_as_string(hide_password=False)}",
+        # The password travels in PGPASSWORD below: argv is readable by every local user through /proc.
+        f"--dbname={libpq_url(database_url, database_url.database)}",
     ]
     env = os.environ.copy()
     if database_url.password is not None:

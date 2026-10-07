@@ -2,7 +2,8 @@
 
 A PostgreSQL dump is restored into a scratch database that exists only for the
 drill. The restored alembic head, the critical tables and their row counts are
-checked, then the scratch database is dropped. SQLite snapshots are opened
+checked, then the scratch database is dropped. A scratch database that a killed
+drill left behind is dropped by the next drill. SQLite snapshots are opened
 read-only and checked the same way. The drill never needs the backup private
 key: the bot runs it on each plaintext dump before encryption, and the operator
 runs it on a decrypted backup set through `scripts/backup_restore.py drill`.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -20,6 +22,7 @@ import uuid
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 
@@ -36,6 +39,11 @@ from selara.infrastructure.backup_encryption import restore_backup_set
 logger = logging.getLogger(__name__)
 
 SCRATCH_DATABASE_PREFIX = "selara_restore_drill_"
+# Scratch names end in the UTC start time, so a database a killed drill left behind can be aged.
+_SCRATCH_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
+_SCRATCH_NAME_PATTERN = re.compile(re.escape(SCRATCH_DATABASE_PREFIX) + r"(\d{14})_[0-9a-f]{16}")
+# A live drill finishes within its restore timeout, so older scratch databases belong to a killed drill.
+_STALE_SCRATCH_GRACE = timedelta(hours=1)
 
 # Every SQLite database file starts with this 16-byte header.
 _SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
@@ -180,13 +188,13 @@ async def _drop_scratch_database(engine: AsyncEngine, name: str) -> None:
     try:
         async with engine.connect() as connection:
             await connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-    except SQLAlchemyError:
+    except Exception:
         # A leftover copy of the data must not disappear silently; the log names it so it can be dropped by hand.
         logger.exception("Could not drop backup restore drill database", extra={"database": name})
 
 
-def _libpq_url(admin_url: URL, database: str) -> str:
-    # pg_restore receives this URL in argv, so the password is left out and travels in PGPASSWORD instead.
+def libpq_url(admin_url: URL, database: str | None) -> str:
+    # pg_dump and pg_restore receive this URL in argv, so the password is left out and travels in PGPASSWORD instead.
     return URL.create(
         "postgresql",
         username=admin_url.username,
@@ -211,7 +219,7 @@ async def _run_pg_restore(
         "--no-owner",
         "--no-privileges",
         "--exit-on-error",
-        f"--dbname={_libpq_url(admin_url, scratch_name)}",
+        f"--dbname={libpq_url(admin_url, scratch_name)}",
         str(dump_path),
     ]
     env = os.environ.copy()
@@ -241,10 +249,15 @@ async def _run_pg_restore(
 
     if process.returncode == 0:
         return
-    detail = _last_line(stderr)
-    if detail:
-        raise BackupDrillError(f"Backup restore drill could not restore {label}: {detail}")
-    raise BackupDrillError(f"Backup restore drill could not restore {label}.")
+    # pg_restore quotes dump rows in its errors (COPY failures do), so its output stays in the log, not in Telegram.
+    logger.error(
+        "Backup restore drill pg_restore failed",
+        extra={"label": label, "returncode": process.returncode, "stderr_tail": _stderr_tail(stderr)},
+    )
+    raise BackupDrillError(
+        f"Backup restore drill could not restore {label}: pg_restore exited with code {process.returncode}, "
+        "see the bot log."
+    )
 
 
 async def _kill_process(process: asyncio.subprocess.Process) -> None:
@@ -257,11 +270,48 @@ async def _kill_process(process: asyncio.subprocess.Process) -> None:
         logger.warning("Backup restore drill process did not exit after being killed")
 
 
-def _last_line(raw: bytes) -> str:
-    decoded = raw.decode("utf-8", errors="ignore").strip()
-    if not decoded:
-        return ""
-    return decoded.splitlines()[-1]
+def _stderr_tail(raw: bytes, limit: int = 2000) -> str:
+    return raw.decode("utf-8", errors="replace").strip()[-limit:]
+
+
+def _new_scratch_name(now: datetime) -> str:
+    """Name a scratch database after the time its drill starts; `now` must be in UTC."""
+    return f"{SCRATCH_DATABASE_PREFIX}{now.strftime(_SCRATCH_TIMESTAMP_FORMAT)}_{uuid.uuid4().hex[:16]}"
+
+
+def stale_scratch_databases(names: Iterable[str], *, now: datetime, max_age: timedelta) -> list[str]:
+    """Pick the scratch databases of drills that started more than `max_age` before `now`.
+
+    Only names in the drill's own format qualify, so no other database on the server is ever picked.
+    """
+    stale: list[str] = []
+    for name in names:
+        match = _SCRATCH_NAME_PATTERN.fullmatch(name)
+        if match is None:
+            continue
+        try:
+            started = datetime.strptime(match.group(1), _SCRATCH_TIMESTAMP_FORMAT).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        if now - started > max_age:
+            stale.append(name)
+    return stale
+
+
+async def _drop_stale_scratch_databases(admin_engine: AsyncEngine, *, max_age: timedelta) -> None:
+    """Drop the scratch databases that killed drills left behind, so a copy of user data does not linger.
+
+    Best effort: a failure is logged and the drill goes on, because the cleanup must not block a backup.
+    """
+    try:
+        async with admin_engine.connect() as connection:
+            names = (await connection.execute(text("SELECT datname FROM pg_database"))).scalars().all()
+    except Exception:
+        logger.exception("Could not list backup restore drill databases for cleanup")
+        return
+    for name in stale_scratch_databases(names, now=datetime.now(UTC), max_age=max_age):
+        logger.warning("Dropping stale backup restore drill database", extra={"database": name})
+        await _drop_scratch_database(admin_engine, name)
 
 
 async def drill_postgres_dump(
@@ -274,12 +324,15 @@ async def drill_postgres_dump(
 ) -> DrillResult:
     """Restore a custom-format dump into a new scratch database, check it, and drop the database again.
 
-    Only the scratch database is written. `admin_url` must be allowed to create databases on its server.
+    Scratch databases that killed drills left behind are dropped first. Only the scratch database is written.
+    `admin_url` must be allowed to create databases on its server.
     """
-    scratch_name = f"{SCRATCH_DATABASE_PREFIX}{uuid.uuid4().hex}"
+    scratch_name = _new_scratch_name(datetime.now(UTC))
+    stale_after = timedelta(seconds=2 * timeout_seconds) + _STALE_SCRATCH_GRACE
     admin_engine = _create_engine(admin_url, autocommit=True)
     created = False
     try:
+        await _drop_stale_scratch_databases(admin_engine, max_age=stale_after)
         await _create_scratch_database(admin_engine, scratch_name)
         created = True
         await _run_pg_restore(

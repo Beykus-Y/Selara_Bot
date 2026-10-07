@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.engine import make_url
 
+from selara.core.config import Settings
 from selara.infrastructure import backup, backup_drill, backup_encryption
 from selara.infrastructure.backup import BackupFile
 from selara.infrastructure.backup_drill import BackupDrillError, DrillTarget
@@ -62,6 +64,10 @@ def test_find_restore_problems_accepts_a_complete_restore() -> None:
     )
 
     assert problems == []
+
+
+def test_restore_drill_is_opt_in() -> None:
+    assert Settings.model_fields["backup_restore_drill_enabled"].default is False
 
 
 def test_target_for_archive_maps_each_archive_to_its_database() -> None:
@@ -185,7 +191,7 @@ async def test_pg_restore_targets_the_scratch_database_and_keeps_the_password_ou
 
 
 @pytest.mark.asyncio
-async def test_pg_restore_failure_reports_the_last_stderr_line(
+async def test_pg_restore_failure_keeps_stderr_out_of_the_error_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -195,11 +201,12 @@ async def test_pg_restore_failure_reports_the_last_stderr_line(
         monkeypatch,
         _FakeRestoreProcess(
             returncode=1,
-            stderr=b"pg_restore: connecting to database\npg_restore: error: permission denied to create database\n",
+            stderr=b"pg_restore: error: COPY users line 4: 42\tsecret-row-value\n",
         ),
     )
 
-    with pytest.raises(BackupDrillError, match="permission denied to create database"):
+    # pg_restore quotes dump rows in its errors, and the admin reads this message in Telegram.
+    with pytest.raises(BackupDrillError, match="pg_restore exited with code 1") as excinfo:
         await backup_drill._run_pg_restore(
             admin_url=make_url("postgresql+asyncpg://selara:pw@db:5432/selara"),
             scratch_name="selara_restore_drill_abc",
@@ -208,6 +215,8 @@ async def test_pg_restore_failure_reports_the_last_stderr_line(
             pg_restore_path="pg_restore",
             timeout_seconds=60.0,
         )
+
+    assert "secret-row-value" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -235,10 +244,14 @@ async def test_postgres_drill_drops_the_scratch_database_when_the_check_fails(
         _ = engine
         events.append(f"drop {name}")
 
+    async def fake_drop_stale(engine: object, *, max_age: object) -> None:
+        _ = engine, max_age
+
     monkeypatch.setattr(backup_drill, "_create_scratch_database", fake_create)
     monkeypatch.setattr(backup_drill, "_run_pg_restore", fake_restore)
     monkeypatch.setattr(backup_drill, "check_restored_database", fake_check)
     monkeypatch.setattr(backup_drill, "_drop_scratch_database", fake_drop)
+    monkeypatch.setattr(backup_drill, "_drop_stale_scratch_databases", fake_drop_stale)
 
     with pytest.raises(BackupDrillError, match="table users is missing"):
         await backup_drill.drill_postgres_dump(
@@ -345,3 +358,28 @@ async def test_send_daily_backup_sends_nothing_when_restore_drill_fails(
 
     assert sent == []
     assert not job_dir.exists()
+
+
+def test_scratch_name_starts_with_the_prefix_and_the_utc_start_time() -> None:
+    name = backup_drill._new_scratch_name(datetime(2026, 10, 7, 3, 0, 5, tzinfo=UTC))
+
+    assert name.startswith(f"{backup_drill.SCRATCH_DATABASE_PREFIX}20261007030005_")
+    assert len(name) == len(backup_drill.SCRATCH_DATABASE_PREFIX) + len("20261007030005_") + 16
+
+
+def test_stale_scratch_databases_picks_only_old_drill_databases() -> None:
+    now = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
+    old = backup_drill._new_scratch_name(now - timedelta(hours=5))
+    fresh = backup_drill._new_scratch_name(now - timedelta(hours=1))
+    names = [
+        "postgres",
+        "selara",
+        f"{backup_drill.SCRATCH_DATABASE_PREFIX}test_0123456789abcdef",
+        "selara_restore_drill_20261399999999_0123456789abcdef",
+        fresh,
+        old,
+    ]
+
+    stale = backup_drill.stale_scratch_databases(names, now=now, max_age=timedelta(hours=4))
+
+    assert stale == [old]

@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -401,6 +402,33 @@ def _install_fake_pg_restore(
         return _FakePgRestoreProcess(returncode=returncode, stderr=stderr_bytes)
 
     monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+
+
+@pytest.mark.asyncio
+async def test_pg_dump_keeps_the_database_password_out_of_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_exec(*command: str, **kwargs: Any) -> _FakePgRestoreProcess:
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return _FakePgRestoreProcess(returncode=0)
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    settings = _make_settings(
+        database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
+        backup_pg_dump_path="pg_dump",
+    )
+
+    dump = await backup._create_bot_database_dump(settings=settings, temp_dir=tmp_path)
+
+    # argv is readable by every local user through /proc, so the password travels only in PGPASSWORD.
+    assert not any("s3cret" in argument for argument in captured["command"])
+    assert "--dbname=postgresql://selara@db.internal:5432/selara" in captured["command"]
+    assert captured["env"]["PGPASSWORD"] == "s3cret"
+    assert dump.path == tmp_path / "bot_pg_dump.dump"
 
 
 @pytest.mark.asyncio
