@@ -594,6 +594,32 @@ class ChatInterestingFactStateModel(Base):
     )
 
 
+class ChatInterestingFactDeliveryModel(Base):
+    """One claim per interesting-fact send attempt; written before Telegram is called.
+
+    status: claimed (send in flight or outcome not recorded), sent, failed (Telegram
+    rejected the send, state untouched), abandoned (claim outlived its lease without
+    a recorded outcome; still counts toward cooldown so the slot is not re-sent).
+    """
+
+    __tablename__ = "chat_interesting_fact_deliveries"
+    __table_args__ = (Index("ix_chat_interesting_fact_deliveries_chat_claimed", "chat_id", "claimed_at"),)
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fact_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class UserKarmaVoteModel(Base):
     __tablename__ = "user_karma_votes"
 
