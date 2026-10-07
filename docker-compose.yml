@@ -87,6 +87,26 @@ services:
     networks:
       - artifact_rendering
 
+  # Optional self-hosted metasearch for the ?/?? web tools. Not started by the
+  # deploy workflow and not required by app: start it with
+  #   docker compose up -d searxng
+  # (needs SELARA_SEARXNG_SECRET). No published port: reachable only as
+  # http://searxng:8080 from the compose network. Without it the bot falls back
+  # to DuckDuckGo.
+  searxng:
+    image: ${SELARA_SEARXNG_IMAGE:-searxng/searxng:latest}
+    container_name: selara-searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SELARA_SEARXNG_SECRET:-}
+      SEARXNG_BASE_URL: http://searxng:8080/
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    networks:
+      - selara_internal
+
   web:
     image: ${SELARA_WEB_IMAGE:-selara-web:local}
     build:
