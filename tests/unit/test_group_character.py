@@ -436,8 +436,10 @@ def _settings():
     return Settings(_env_file=None, bot_token="1:x", database_url="sqlite:///", llm_cooldown_seconds=0)
 
 
-async def _ask(db, message, llm):
+async def _ask(db, message, llm, *, admin_user_id=None):
     settings = _settings()
+    if admin_user_id is not None:
+        settings = settings.model_copy(update={"admin_user_id": admin_user_id})
     text = await group_character.resolve_group_call(message, db_session=db, session_factory=object(), settings=settings)
     if text is None:
         return None
@@ -521,6 +523,15 @@ async def test_member_can_perform_one_action_per_answer_and_switch_off_actions(m
     await _ask(member_db, _member_message("Селя, привет", message_id=720), llm2)
     assert "perform_action" not in {t["function"]["name"] for t in llm2.requests[0]["tools"]}
     assert "perform_action" not in llm2.requests[0]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_bot_owner_personally_is_exempt_from_member_limits(member_db):
+    llm = _Llm()
+    await _ask(member_db, _member_message("Селя, привет", message_id=1, user_id=_MEMBER), llm, admin_user_id=_MEMBER)
+    await _ask(member_db, _member_message("Селя, привет", message_id=2, user_id=32), llm, admin_user_id=_MEMBER)
+    await _ask(member_db, _member_message("Селя, привет", message_id=3, user_id=_MEMBER), llm, admin_user_id=None)
+    assert [r["owner_exempt"] for r in _Access.reservations] == [True, False, False]
 
 
 @pytest.mark.asyncio
