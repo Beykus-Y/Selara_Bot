@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from selara.application.ai_character.group import FREE_CALL_NAMES, MAX_MEMBER_TEXT_LENGTH, PAID_CALL_NAMES
+from selara.application.ai_character.group import (
+    FREE_CALL_NAMES,
+    MAX_GROUP_CUSTOM_LENGTH,
+    MAX_MEMBER_TEXT_LENGTH,
+    PAID_CALL_NAMES,
+)
 from selara.application.feature_access import resolve_feature_policy
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
@@ -464,14 +469,14 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             "Ассистент админов: ? и ??",
             text=(
                 "Вопрос ассистенту начинается с `?` или `??`. `?` каждый раз начинает с чистого листа, "
-                "`??` учитывает контекст прошлых запросов к ассистенту в этом чате."
+                "`??` учитывает контекст прошлых `??` в этом чате."
             ),
             badges=("группа", "AI", "админы"),
             commands=("? вопрос", "?? вопрос", "?reset"),
             notes=(
                 "Работает, если в чате включена настройка `llm_enabled` (по умолчанию выключена).",
                 "Доступ: senior_admin и выше или кастомная роль с правом использования AI-ассистента. `?reset` сбрасывает контекст и требует право модерации.",
-                "Ассистент показывает топы, статистику, журнал модерации, словарь чата и ищет в интернете; действия (варн, бан, роли) выполняются только при наличии нужного права у спрашивающего.",
+                "Ассистент показывает топы, статистику, журнал модерации, словарь чата и ищет в интернете (если поиск включён у бота); действия (варн, бан, роли) выполняются только при наличии нужного права у спрашивающего.",
                 f"Лимит: {_ADMIN_AI_LIMIT} запросов в сутки на весь чат (сутки по времени бота). Selara AI этот лимит не меняет.",
                 "Между запросами одного человека действует короткая пауза; при исчерпании лимита бот пишет, сколько использовано и когда лимит обновится.",
             ),
@@ -498,7 +503,7 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             notes=(
                 "Менять настройки могут админы с правом настройки чата; `/selara` без аргументов показывает текущее состояние всем.",
                 "Ответы участникам по умолчанию выключены: включите `/selara участники вкл`.",
-                f"Кличек: {FREE_CALL_NAMES} без Selara AI и до {PAID_CALL_NAMES} с ним; вопрос — до {MAX_MEMBER_TEXT_LENGTH} символов; свой характер — до 500 символов.",
+                f"Кличек: {FREE_CALL_NAMES} без Selara AI и до {PAID_CALL_NAMES} с ним; вопрос — до {MAX_MEMBER_TEXT_LENGTH} символов; свой характер — до {MAX_GROUP_CUSTOM_LENGTH} символов.",
                 "С `/selara история вкл` Selara может читать недавние сообщения чата (до суток), отвечая участникам; для этого нужен включённый `save_message`.",
                 f"Лимит обращений в сутки по умолчанию: {_default('group_member_free_daily_limit')} на чат и {_default('group_member_free_per_user_daily_limit')} на участника; с Selara AI — {_default('group_member_paid_daily_limit')} и {_default('group_member_paid_per_user_daily_limit')}. Значения может изменить администратор бота.",
                 "Когда лимит чата исчерпан, Selara отвечает сообщением о лимите (в чате без подписки — с подсказкой про `/premium`); когда исчерпан личный лимит участника — просит вернуться завтра.",
@@ -507,15 +512,15 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
         _docs_item(
             "AI-питомцы в группе",
             text=(
-                "Питомец отвечает, если написать ему по имени («Мурка, как дела?») или ответить на его реплику, "
+                "Питомец отвечает, если написать ему по имени («Мурка, как дела?») или ответить на его реплику. "
                 "Работает в чатах с включённой настройкой `pets_enabled`. Сам питомец пишет только при включённой `pets_spontaneous_enabled` (по умолчанию выключена; ночью по умолчанию молчит)."
             ),
             badges=("группа", "AI", "питомцы"),
-            commands=("/pets", "/pet_bag", "/bepet"),
+            commands=("/pets", "/pet_bag", "/pet_forget"),
             notes=(
                 "Разговоры оплачивает хозяин питомца из Selara Personal, а не чат.",
                 f"По умолчанию: {_default('pet_talk_daily_limit')} AI-реплик в сутки на питомца (разговоры и самостоятельные сообщения расходуют один общий лимит), гостям из них — {_default('pet_talk_guests_daily_limit')} всего и {_default('pet_talk_guest_daily_limit')} на человека.",
-                "Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без лимита.",
+                "Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без AI-лимита (у ухода свои кулдауны).",
             ),
         ),
         _docs_item(

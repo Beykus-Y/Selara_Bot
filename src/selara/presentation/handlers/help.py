@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from selara.application.ai_character.group import (
+    MAX_GROUP_CUSTOM_LENGTH,
     FREE_CALL_NAMES,
     MAX_MEMBER_TEXT_LENGTH,
     PAID_CALL_NAMES,
@@ -167,11 +168,11 @@ def _ai_help_text(settings: Settings) -> str:
         "\n"
         "<b>Ассистент админов: ? и ??</b>\n"
         "• <code>? вопрос</code> — запрос с чистого листа, без памяти прошлых запросов\n"
-        "• <code>?? вопрос</code> — с контекстом прошлых запросов к ассистенту в этом чате\n"
+        "• <code>?? вопрос</code> — с контекстом прошлых <code>??</code> в этом чате\n"
         "• <code>?reset</code> — сбросить накопленный контекст (нужно право модерации)\n"
         "• Работает, если в чате включено <code>llm_enabled</code> (по умолчанию выключено)\n"
         "• Кто может: senior_admin и выше или кастомная роль с правом AI-ассистента\n"
-        "• Умеет: топы и статистика, участники, журнал модерации, словарь чата, поиск в интернете; "
+        "• Умеет: топы и статистика, участники, журнал модерации, словарь чата, поиск в интернете (если включён у бота); "
         "действия (варн, бан, роли) — только если право есть у спрашивающего\n"
         f"• Лимит: {admin_limit} запросов в сутки на весь чат (сутки по времени бота), "
         "Selara AI этот лимит не меняет; пауза между запросами одного человека "
@@ -185,7 +186,7 @@ def _ai_help_text(settings: Settings) -> str:
         "• Админ с правом настройки чата: <code>/selara кличка Селя</code>, <code>/selara убрать Селя</code>, "
         "<code>/selara основная Селя</code>\n"
         "• <code>/selara участники вкл</code> — включить ответы участникам (по умолчанию выключено)\n"
-        "• <code>/selara характер</code> — пресеты, <code>/selara характер свой текст</code> — свой (до 500 символов)\n"
+        f"• <code>/selara характер</code> — пресеты, <code>/selara характер свой текст</code> — свой (до {MAX_GROUP_CUSTOM_LENGTH} символов)\n"
         "• <code>/selara история вкл</code> — разрешить читать недавние сообщения чата (нужен <code>save_message true</code>); "
         "<code>/selara сброс</code> — забыть разговор\n"
         f"• Кличек: {FREE_CALL_NAMES} без Selara AI, до {PAID_CALL_NAMES} с ним; вопрос до {MAX_MEMBER_TEXT_LENGTH} символов\n"
@@ -199,7 +200,7 @@ def _ai_help_text(settings: Settings) -> str:
         "• Разговоры оплачивает хозяин из Selara Personal, не чат: "
         f"{settings.pet_talk_daily_limit} AI-реплик в сутки на питомца (разговоры и самостоятельные сообщения расходуют один лимит), из них гостям — "
         f"{settings.pet_talk_guests_daily_limit} всего и {settings.pet_talk_guest_daily_limit} на человека\n"
-        "• Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без лимита"
+        "• Без Selara Personal у хозяина питомец отвечает заготовкой; гладить и кормить можно без AI-лимита (у ухода свои кулдауны)"
     )
 
 

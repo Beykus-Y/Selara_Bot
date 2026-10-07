@@ -1,4 +1,5 @@
 from selara.core.config import Settings
+from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.commands.command_catalog import GAME_RULES_RU
 from selara.presentation.game_state import GAME_LAUNCHABLE_KINDS
 from selara.presentation.handlers.help import (
@@ -6,6 +7,7 @@ from selara.presentation.handlers.help import (
     _HELP_SECTIONS_ORDER,
     _build_help_keyboard,
     _parse_help_callback_data,
+    _policy_limit,
     _resolve_help_payload,
 )
 
@@ -114,7 +116,7 @@ def test_help_ai_sections_are_reachable_and_fit_a_telegram_message() -> None:
 
 def test_help_ai_section_documents_assistant_call_names_and_limits() -> None:
     text, _ = _resolve_help_payload(_settings(), section="ai")
-    for fragment in ("? вопрос", "?? вопрос", "?reset", "/selara кличка", "llm_enabled", "10 запросов в сутки"):
+    for fragment in ("? вопрос", "?? вопрос", "?reset", "/selara кличка", "llm_enabled", f"{_policy_limit(AiFeature.LLM_ADMIN, 'telegram_message')} запросов в сутки"):
         assert fragment in text, fragment
     settings = _settings()
     assert f"{settings.group_member_free_daily_limit} на чат" in text
@@ -123,5 +125,5 @@ def test_help_ai_section_documents_assistant_call_names_and_limits() -> None:
 
 def test_help_ai_plus_section_documents_subscription_summary_and_autocfg() -> None:
     text, _ = _resolve_help_payload(_settings(), section="ai_plus")
-    for fragment in ("/premium", "/summary", "daily_summary_enabled", "/autocfg", "/autocfgcancel", "10 раз в месяц"):
+    for fragment in ("/premium", "/summary", "daily_summary_enabled", "/autocfg", "/autocfgcancel", f"{_policy_limit(AiFeature.DAILY_SUMMARY, 'manual')} раз в месяц"):
         assert fragment in text, fragment
