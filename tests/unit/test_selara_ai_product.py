@@ -479,6 +479,96 @@ def test_permanent_payment_failure_classification():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_charge_id", ["", None], ids=["empty", "missing"])
+async def test_dead_letter_refuses_missing_charge_ids_instead_of_collapsing_distinct_payments(missing_charge_id):
+    """Two different poison payments whose charge id is missing must not share the
+    empty audit key: ON CONFLICT would file both onto one dead-letter row and
+    silently drop every payment after the first. The write is refused for each."""
+    repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
+
+    first = await repository.record_unprocessable_payment(
+        buyer_user_id=123,
+        invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+        telegram_payment_charge_id=missing_charge_id,
+        provider_payment_charge_id="",
+        amount_stars=137,
+        currency="XTR",
+        payment_at=datetime.now(timezone.utc),
+    )
+    second = await repository.record_unprocessable_payment(
+        buyer_user_id=456,
+        invoice_payload="selara_ai:v1:ffffffff-ffff-4fff-8fff-ffffffffffff",
+        telegram_payment_charge_id=missing_charge_id,
+        provider_payment_charge_id="",
+        amount_stars=999,
+        currency="XTR",
+        payment_at=datetime.now(timezone.utc),
+    )
+
+    assert first is None
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_poison_payments_with_empty_charge_id_stay_unacknowledged(monkeypatch):
+    """Two distinct confirmed payments with an empty charge id must never be
+    acknowledged: the repository refuses the empty-key dead-letter write, so the
+    handler keeps both updates retrying under the owner alert instead of
+    confirming either payment as rejected."""
+    now = datetime.now(timezone.utc)
+    real_repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
+
+    for buyer_user_id, amount_stars in ((123, 137), (456, 999)):
+        attempts = {"count": 0}
+
+        async def poison_then_cancel(*_args, **_kwargs):
+            attempts["count"] += 1
+            if attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT + 2:
+                raise asyncio.CancelledError()
+            raise ValueError("poison payload")
+
+        repository = SimpleNamespace(
+            process_successful_payment=AsyncMock(side_effect=poison_then_cancel),
+            # Real refusal logic, wrapped so the handler call is still observable.
+            record_unprocessable_payment=AsyncMock(side_effect=real_repository.record_unprocessable_payment),
+        )
+        monkeypatch.setattr(premium, "SqlAlchemyTelegramStarsRepository", lambda _factory: repository)
+        monkeypatch.setattr(premium.asyncio, "sleep", AsyncMock())
+        message = SimpleNamespace(
+            successful_payment=SimpleNamespace(
+                invoice_payload="selara_ai:v1:5f22bc5f-3cae-4ecf-a136-7b1a5d20a74e",
+                telegram_payment_charge_id="",
+                provider_payment_charge_id="",
+                total_amount=amount_stars,
+                currency="XTR",
+            ),
+            from_user=SimpleNamespace(id=buyer_user_id),
+            date=now,
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+
+        with pytest.raises(asyncio.CancelledError):
+            await premium.selara_ai_successful_payment(
+                message,
+                session_factory=object(),
+                settings=SimpleNamespace(admin_user_id=900, bot_timezone="UTC"),
+                bot=bot,
+            )
+
+        assert attempts["count"] > premium._PAYMENT_RETRY_DEADLETTER_ATTEMPT
+        assert repository.record_unprocessable_payment.await_count >= 1
+        assert repository.record_unprocessable_payment.await_args.kwargs["telegram_payment_charge_id"] == ""
+        assert repository.record_unprocessable_payment.await_args.kwargs["buyer_user_id"] == buyer_user_id
+        assert repository.record_unprocessable_payment.await_args.kwargs["amount_stars"] == amount_stars
+        # Only the owner alert fires; no reconciliation message, the update keeps
+        # retrying and is never acknowledged as resolved.
+        assert bot.send_message.await_count == 1
+        assert "приостановлены" in bot.send_message.await_args.kwargs["text"]
+        message.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_dead_letter_refuses_charge_ids_it_cannot_store_verbatim():
     repository = SqlAlchemyTelegramStarsRepository(SimpleNamespace())
 

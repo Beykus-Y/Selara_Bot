@@ -782,11 +782,25 @@ class SqlAlchemyTelegramStarsRepository:
         The charge id is the key Telegram accepts for refunds, so an id longer
         than the audit column is refused instead of truncated: a truncated value
         could both collide with another charge on the unique index and fail every
-        later ``/stars_refund``. Scope, target, and product are copied from the
-        resolvable intent so a failed personal purchase stays visible in the
-        user-scoped payment views instead of being filed as a chat purchase.
+        later ``/stars_refund``. A missing or empty charge id is refused as well:
+        an empty value cannot key a unique audit row, so distinct poison payments
+        would collapse onto a single dead-letter record and every payment after
+        the first would be silently lost. Scope, target, and product are copied
+        from the resolvable intent so a failed personal purchase stays visible in
+        the user-scoped payment views instead of being filed as a chat purchase.
         """
         charge_id = telegram_payment_charge_id
+        if not charge_id or not charge_id.strip():
+            # The audit index keys on the charge id, so an empty value would make
+            # ON CONFLICT DO NOTHING file every such payment onto one dead-letter
+            # row and silently lose all but the first. Refuse the write instead:
+            # the caller keeps the update unacknowledged and retrying.
+            logger.error(
+                "Telegram Stars dead-letter refused: charge id is missing, so it "
+                "cannot key a unique dead-letter row; keeping the update "
+                "unacknowledged",
+            )
+            return None
         if len(charge_id) > 255:
             logger.error(
                 "Telegram Stars dead-letter refused: charge id exceeds the audit "

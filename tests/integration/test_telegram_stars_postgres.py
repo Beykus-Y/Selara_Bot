@@ -403,6 +403,49 @@ async def test_unprocessable_payment_is_dead_lettered_once_and_stays_refundable(
 @pytest.mark.integration
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_dead_letter_refuses_empty_charge_ids_so_distinct_payments_are_not_collapsed():
+    """Two different poison payments with an empty charge id must not share the
+    empty audit key: the write is refused for each, no dead-letter row exists,
+    and the caller keeps both updates unacknowledged."""
+    engine, factory = await _database()
+    try:
+        repository = SqlAlchemyTelegramStarsRepository(factory)
+
+        first_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER,
+            invoice_payload="selara_ai:v1:ffffffff-ffff-4fff-8fff-ffffffffffff",
+            telegram_payment_charge_id="",
+            provider_payment_charge_id="",
+            amount_stars=137,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+        second_id = await repository.record_unprocessable_payment(
+            buyer_user_id=_BUYER + 1,
+            invoice_payload="selara_ai:v1:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            telegram_payment_charge_id="",
+            provider_payment_charge_id="",
+            amount_stars=999,
+            currency="XTR",
+            payment_at=_NOW,
+        )
+
+        assert first_id is None
+        assert second_id is None
+        async with factory() as session:
+            dead_lettered = await session.scalar(
+                select(func.count(SelaraAiPaymentModel.id)).where(
+                    SelaraAiPaymentModel.processing_reason == "processing_failed"
+                )
+            )
+        assert dead_lettered == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_dead_letter_preserves_intent_scope_target_and_product():
     engine, factory = await _database()
     try:
