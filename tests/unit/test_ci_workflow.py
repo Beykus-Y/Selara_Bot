@@ -45,8 +45,10 @@ def test_ci_workflow_checks_backend_gacha_and_frontend() -> None:
     assert "ci_test_shard.py tests/integration" in integration
     for command in (unit, integration):
         assert "pytest" in command
-        assert "playwright install --with-deps chromium" in command
         assert "alembic upgrade head" in command
+    # Only the unit shards run browser/snapshot tests, so only they need Chromium and fonts.
+    assert "playwright install --with-deps chromium" in unit
+    assert "playwright install" not in integration
     assert "npm ci" in frontend_commands
     assert "uv sync --locked --only-group browser" in frontend_commands
     assert "npm run lint" in frontend_commands

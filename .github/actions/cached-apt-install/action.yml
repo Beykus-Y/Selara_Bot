@@ -1,0 +1,108 @@
+name: Cached apt packages
+description: >-
+  Installs apt packages for the snapshot and browser tests. The downloaded .deb
+  files are cached, apt is tried without `apt-get update` first, every call has
+  a hard timeout, and the last attempt falls back to the public Ubuntu mirror.
+
+inputs:
+  packages:
+    description: Space-separated apt packages to install.
+    required: true
+  cache-name:
+    description: Short name that keeps this package set's cache separate.
+    required: true
+  cache-version:
+    description: Extra cache key part, for example a hash of what decides the package list.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: Read runner image version
+      id: image
+      shell: bash
+      run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached packages
+      id: debs-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/debs-${{ inputs.cache-name }}
+        key: debs-${{ inputs.cache-name }}-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ inputs.cache-version }}
+
+    - name: Install packages
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.debs-cache.outputs.cache-hit }}
+        PKGS: ${{ inputs.packages }}
+        CACHE_NAME: ${{ inputs.cache-name }}
+      run: |
+        set -u
+        DEBS="$HOME/debs-$CACHE_NAME"
+        APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dir::Cache::archives=$DEBS"
+
+        if [ "$CACHE_HIT" = "true" ] && ls "$DEBS"/*.deb >/dev/null 2>&1; then
+          echo "Installing from cached packages"
+          if timeout 180 sudo dpkg -i "$DEBS"/*.deb; then
+            exit 0
+          fi
+          echo "Cached packages did not install, falling back to apt" >&2
+        fi
+
+        mkdir -p "$DEBS"
+        export DEBS APT_OPTS
+        finish() {
+          sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+          rm -rf "$DEBS/partial" "$DEBS/lock"
+        }
+
+        # Download the .debs ourselves, 8 at a time. The hosted mirror stalls
+        # for tens of seconds per file on bad days, and parallel downloads
+        # overlap those stalls; apt then installs from the local files.
+        fetch() {
+          local base
+          base=$(head -1 /etc/apt/apt-mirrors.txt 2>/dev/null | sed 's#/*$##')
+          # shellcheck disable=SC2086
+          sudo apt-get $APT_OPTS --print-uris -qq install -y --no-install-recommends $PKGS 2>/dev/null \
+            | sed -n "s/^'\([^']*\)' \([^ ]*\) .*/\1 \2/p" \
+            | sed "s#^mirror+file:/etc/apt/apt-mirrors.txt#$base#" \
+            | grep -E '^https?://' \
+            | DEBS="$DEBS" xargs -P 8 -L1 sh -c \
+                'if [ ! -s "$DEBS/$1" ]; then curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 -o "$DEBS/$1.part" "$0" && mv "$DEBS/$1.part" "$DEBS/$1"; fi' \
+            || true
+        }
+
+        for attempt in 1 2 3; do
+          if [ "$attempt" = "3" ]; then
+            echo "Switching to archive.ubuntu.com for the last attempt"
+            # Hosted runners list their mirror in apt-mirrors.txt (mirror+file: URI).
+            sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
+              /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          fi
+          # The runner image already has a package index, so the first attempt
+          # skips `apt-get update` and its mirror round trips.
+          if [ "$attempt" != "1" ]; then
+            # shellcheck disable=SC2086
+            timeout 60 sudo apt-get $APT_OPTS update || true
+          fi
+          # Every step is bounded so a stalled mirror fails an attempt in ~5 minutes at most.
+          timeout 150 bash -c "$(declare -f fetch); fetch" || true
+          # shellcheck disable=SC2086
+          if timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
+            finish
+            exit 0
+          fi
+          echo "apt attempt $attempt failed" >&2
+          # timeout only stops sudo; stop the apt it started so the next try can take the dpkg lock.
+          sudo pkill -x apt-get || true
+          sleep 5
+        done
+        exit 1
+
+    - name: Save packages to cache
+      if: ${{ steps.debs-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ~/debs-${{ inputs.cache-name }}
+        key: debs-${{ inputs.cache-name }}-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ inputs.cache-version }}
