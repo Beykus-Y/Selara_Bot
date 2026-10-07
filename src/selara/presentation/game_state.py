@@ -5719,9 +5719,15 @@ class RuntimeGameStore:
       wired in and covers every mutation that interleaved with the first pass
       (its own write was skipped because the repo was not wired yet). Only
       after both passes is recovery declared complete.
-    * A failed, cancelled or timed-out probe/reconcile closes the candidate
-      repo/broker and leaves the store degraded; a half-open Redis can never
-      pin the single recovery task forever.
+    * Active-pointer re-assertion never replays a stale snapshot: each chat's
+      decision is read from the live in-memory state right before its write
+      and validated against a mutation version after the write, so a game
+      finished and replaced in a chat while the pass was awaiting another
+      chat's Redis write keeps its freshly persisted pointer instead of being
+      cleared from an outdated copy.
+    * A failed, cancelled or timed-out probe/reconcile — including the second
+      pass — closes the candidate repo/broker and leaves the store degraded; a
+      half-open Redis can never pin the single recovery task forever.
     * ``close()`` is terminal: it cancels the recovery loop, sets ``_closed``
       and no later Redis error can re-arm recovery or start a new task.
     """
@@ -5738,6 +5744,10 @@ class RuntimeGameStore:
         self._redis_url: str | None = None
         self._redis_ttl: timedelta = timedelta(hours=24)
         self._recovery_in_progress = False
+        # Bumped after every in-memory mutation or hydration. The pointer
+        # re-assertion pass uses it to detect mutations that interleaved with
+        # its Redis writes (see `_reassert_active_pointers`).
+        self._game_state_version = 0
         self._recovery_task: asyncio.Task[None] | None = None
         self._recovery_retry_seconds = self._RECOVERY_RETRY_SECONDS
         self._recovery_attempt_timeout_seconds = self._RECOVERY_ATTEMPT_TIMEOUT_SECONDS
@@ -5912,7 +5922,11 @@ class RuntimeGameStore:
         closed and the store stays degraded so the loop retries later.
         The probe+reconcile is bounded by
         ``_recovery_attempt_timeout_seconds`` so a half-open Redis cannot pin
-        the single recovery task forever.
+        the single recovery task forever. The bound covers both passes: the
+        second pass (final sync + pointer re-assertion) runs under its own
+        ``asyncio.timeout`` budget, so a Redis that starts hanging only after
+        the probe fails the attempt, degrades the store back to memory and
+        lets the loop retry later.
         """
         if self._closed or self._redis_url is None:
             return
@@ -5939,8 +5953,9 @@ class RuntimeGameStore:
             self._broker = broker
             self._redis_degraded = False
             try:
-                await self._sync_cached_state()
-                await self._reassert_active_pointers(repo)
+                async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
+                    await self._sync_cached_state()
+                    await self._reassert_active_pointers(repo)
             except asyncio.CancelledError:
                 self._degrade_to_in_memory(stage="recovery:final-sync", exc=asyncio.CancelledError())
                 await self._close_candidates_quietly(repo, broker)
@@ -5994,6 +6009,17 @@ class RuntimeGameStore:
         pointer is touched only when it targets a game this process has in
         memory; a pointer to an unknown game is preserved, so it cannot be
         orphaned by this process.
+
+        Each chat's decision is read from the live in-memory state right
+        before its write and validated against ``_game_state_version`` after
+        the write. Handlers keep mutating games while these Redis writes are
+        awaited (the final recovery pass runs with the live repo wired in), so
+        a decision computed once from a snapshot is not trusted: if the state
+        changed while the write was in flight, the chat is redone from the
+        fresh state. Without this, finishing B and creating C in B's chat
+        while the pass waited on another chat's write would clear the pointer
+        C's own sync had just persisted, leaving C active in memory but
+        undiscoverable after a restart.
         """
         if games is None:
             games = dict(self._backend._by_id)
@@ -6001,19 +6027,29 @@ class RuntimeGameStore:
         claimable_chats = set(self._degraded_owned_chats) | set(active_by_chat)
         known_chats = {game.chat_id for game in games.values()}
         for chat_id in sorted(known_chats | claimable_chats):
-            active_id = active_by_chat.get(chat_id)
-            active_game = games.get(active_id) if active_id is not None else None
-            if active_game is not None and active_game.status != "finished":
-                await repo.set_active_game_id(chat_id=chat_id, game_id=active_game.game_id)
-                continue
-            if chat_id in claimable_chats:
-                await repo.set_active_game_id(chat_id=chat_id, game_id=None)
-                continue
-            pointer = await repo.load_active_game_id(chat_id)
-            if pointer is not None and pointer in games:
-                # Memory wins for games it knows; a pointer to an unknown game
-                # belongs to another epoch and is left untouched.
-                await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+            while True:
+                version = self._game_state_version
+                # Live read: a game finished/created while earlier writes were
+                # awaited must be seen here, not replayed from the snapshot.
+                active_id = self._backend._active_by_chat.get(chat_id)
+                active_game = self._backend._by_id.get(active_id) if active_id is not None else None
+                if active_game is not None and active_game.status != "finished":
+                    await repo.set_active_game_id(chat_id=chat_id, game_id=active_game.game_id)
+                elif chat_id in claimable_chats:
+                    await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                else:
+                    pointer = await repo.load_active_game_id(chat_id)
+                    if pointer is not None and pointer in games:
+                        # Memory wins for games it knows; a pointer to an unknown game
+                        # belongs to another epoch and is left untouched.
+                        await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                if self._game_state_version == version:
+                    break
+                # A mutation interleaved with the write above: its own sync
+                # re-asserts the newer pointer, and this chat is redone from
+                # the fresh state so the stale decision never lands after it.
+                # A pathological mutation storm is bounded by the recovery
+                # attempt timeout around the final pass.
 
     async def publish_event(
         self,
@@ -6051,6 +6087,9 @@ class RuntimeGameStore:
         self._backend._by_id[game_id] = game
         if game.status != "finished":
             self._backend._active_by_chat[game.chat_id] = game.game_id
+        # Hydration changes the state pointer re-assertion reads; bump the
+        # version so an in-flight pointer write for this chat is retried.
+        self._game_state_version += 1
 
     async def _hydrate_active_for_chat(self, chat_id: int) -> None:
         if self._state_repo is None:
@@ -6147,6 +6186,10 @@ class RuntimeGameStore:
             if name not in _READ_ONLY_GAMESTORE_METHODS:
                 try:
                     await self._sync_cached_state()
+                    # The mutation (and its persisted sync) is now visible in
+                    # memory; invalidate any pointer decision computed before
+                    # it so the recovery pass cannot replay stale pointers.
+                    self._game_state_version += 1
                     await self._publish_after_call(name, result, kwargs)
                 except Exception as exc:
                     if self._is_redis_error(exc):

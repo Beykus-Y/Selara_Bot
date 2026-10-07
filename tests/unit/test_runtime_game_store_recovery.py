@@ -637,3 +637,170 @@ async def test_close_is_terminal_and_blocks_recovery(
     assert built == []
     assert store._recovery_task is None
 
+
+class _GatedPointerRepo(_RecordingRepo):
+    """Blocks the n-th ``set_active_game_id`` call until the test releases it."""
+
+    def __init__(self, *, gate_on_call: int) -> None:
+        super().__init__()
+        self._gate_on_call = gate_on_call
+        self._pointer_calls = 0
+        self.gate_entered = asyncio.Event()
+        self.release_gate = asyncio.Event()
+
+    async def set_active_game_id(self, *, chat_id: int, game_id: str | None) -> None:
+        self._pointer_calls += 1
+        if self._pointer_calls == self._gate_on_call:
+            self.gate_entered.set()
+            await self.release_gate.wait()
+        await super().set_active_game_id(chat_id=chat_id, game_id=game_id)
+
+
+@pytest.mark.asyncio
+async def test_final_pointer_pass_keeps_replacement_game_of_finished_game(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1: a B->C replacement during the final pass must not orphan C.
+
+    While the final pointer pass is awaiting the write for chat 401, a live
+    handler finishes B and starts C in chat 402 (the store is already wired to
+    the live repo, so those mutations persist themselves). The pass must not
+    clear C's freshly persisted pointer from its stale snapshot.
+    """
+    store = _degraded_store(monkeypatch=monkeypatch)
+
+    game_a = await _make_started_game(store, chat_id=401)
+    game_b = await _make_started_game(store, chat_id=402)
+
+    # Pass one writes one pointer per known chat (2 calls); the gated call is
+    # the final pass's first write (chat 401).
+    repo = _GatedPointerRepo(gate_on_call=3)
+    broker = _RecordingBroker()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    task = asyncio.create_task(store._attempt_recovery())
+    await asyncio.wait_for(repo.gate_entered.wait(), timeout=5)
+
+    # Fires while the final pass is suspended in `set_active_game_id` for
+    # chat 401, exactly like a concurrent handler would.
+    await store.finish(game_id=game_b.game_id, winner_text="b done")
+    game_c = await _make_started_game(store, chat_id=402)
+
+    repo.release_gate.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert store.redis_recovery_state == "connected"
+    # C replaced the finished B and keeps its Redis pointer ...
+    assert repo.active_pointers.get(402) == game_c.game_id
+    # ... while chat 401 still points at its untouched active game.
+    assert repo.active_pointers.get(401) == game_a.game_id
+
+    # Restart simulation: C must be discovered as the chat's active game.
+    restarted = RuntimeGameStore(backend=GameStore())
+    restarted._state_repo = repo  # type: ignore[assignment]
+    await restarted._hydrate_active_for_chat(chat_id=402)
+    active_after_restart = await restarted.backend.get_active_game_for_chat(chat_id=402)
+    assert active_after_restart is not None
+    assert active_after_restart.game_id == game_c.game_id
+
+    await store.close()
+    await restarted.close()
+
+
+class _HangingSecondPassRepo(_RecordingRepo):
+    """Pass-one saves succeed; the second-pass resync hangs like a half-open Redis."""
+
+    def __init__(self, *, games_expected: int) -> None:
+        super().__init__()
+        self._pass_one_saves = games_expected
+        self._saves_since_ping = 0
+        self.hang = True
+        self.hung_pass_twos = 0
+
+    async def ping(self) -> None:
+        self._saves_since_ping = 0
+        await super().ping()
+
+    async def save_game(self, game, *, is_active: bool) -> None:
+        self._saves_since_ping += 1
+        if self.hang and self._saves_since_ping > self._pass_one_saves:
+            self.hung_pass_twos += 1
+            await asyncio.Event().wait()
+        await super().save_game(game, is_active=is_active)
+
+
+@pytest.mark.asyncio
+async def test_second_pass_hang_is_bounded_by_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: ping and pass one succeed, the second pass hangs -> attempt times out.
+
+    The attempt must fail closed: candidate clients closed and the store back
+    in degraded, so the recovery loop can retry it later.
+    """
+    store = _degraded_store(monkeypatch=monkeypatch)
+    store._recovery_attempt_timeout_seconds = 0.05
+
+    await _make_started_game(store, chat_id=501)
+
+    repo = _HangingSecondPassRepo(games_expected=1)
+    broker = _RecordingBroker()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    with pytest.raises(TimeoutError):
+        await store._attempt_recovery()
+
+    assert repo.hung_pass_twos >= 1
+    assert repo.closed is True
+    assert broker.closed is True
+    assert store._state_repo is None
+    assert store._broker is None
+    assert store.redis_recovery_state == "degraded"
+    assert store._recovery_in_progress is False
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_loop_retries_after_second_pass_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: a second pass that hangs fails the attempt and the loop retries it."""
+    monkeypatch.setattr(game_state_module, "_RedisError", _FakeRedisError)
+    store = RuntimeGameStore(backend=GameStore())
+    store._redis_url = "redis://unit-test"
+    store._recovery_retry_seconds = 0.02
+    store._recovery_attempt_timeout_seconds = 0.2
+    store._state_repo = _BrokenSaveRepo()  # type: ignore[assignment]
+
+    game = await _make_started_game(store, chat_id=502)
+
+    repo = _HangingSecondPassRepo(games_expected=1)
+    broker = _RecordingBroker()
+    store._build_redis_runtime = lambda: (repo, broker)  # type: ignore[method-assign]
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while repo.hung_pass_twos < 1:
+        assert loop.time() < deadline, "second pass never hung"
+        await asyncio.sleep(0.01)
+
+    repo.hang = False
+
+    deadline = loop.time() + 5
+    while store.redis_recovery_state != "connected":
+        assert loop.time() < deadline, "recovery loop did not retry after a second-pass timeout"
+        await asyncio.sleep(0.01)
+
+    assert repo.ping_calls >= 2
+    assert store._state_repo is repo
+    saved_game, _ = _saved_by_id(repo)[game.game_id]
+    assert saved_game.status == "started"
+
+    deadline = loop.time() + 5
+    while store._recovery_task is not None:
+        assert loop.time() < deadline, "recovery loop did not stop after recovery"
+        await asyncio.sleep(0.01)
+
+    await store.close()
+
