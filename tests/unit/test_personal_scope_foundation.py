@@ -509,7 +509,9 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert broadcast_resume.down_revision == interesting_fact_claims.revision
     activity_inbox = _load_migration("0106_activity_event_inbox.py")
     assert activity_inbox.down_revision == broadcast_resume.revision
-    assert revisions - parents == {activity_inbox.revision}
+    message_archive_index = _load_migration("0107_message_archive_index.py")
+    assert message_archive_index.down_revision == activity_inbox.revision
+    assert revisions - parents == {message_archive_index.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32

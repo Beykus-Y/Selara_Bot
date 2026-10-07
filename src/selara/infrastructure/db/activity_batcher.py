@@ -20,6 +20,7 @@ from selara.infrastructure.db.activity_batching import (
     ActivityBatchMessage,
 )
 from selara.infrastructure.db.activity_inbox import (
+    ActivityInboxBacklog,
     ActivityInboxRow,
     claim_activity_inbox_batch,
     claim_activity_inbox_row,
@@ -38,6 +39,10 @@ DEFAULT_MAX_ROW_ATTEMPTS = 5
 _BACKLOG_LOG_INTERVAL_SECONDS = 300
 # A backlog whose oldest row is older than this is logged as a warning rather than info.
 _BACKLOG_ALERT_AGE_SECONDS = 600
+# Shutdown waits this long for the flusher. Rows it has not applied by then stay in the inbox for the next start.
+DEFAULT_CLOSE_GRACE_SECONDS = 5.0
+# A cancelled flusher, and the final backlog read, get this long to finish before close() stops waiting for them.
+_CLOSE_UNWIND_SECONDS = 1.0
 
 
 class _BatchFailed(Exception):
@@ -87,6 +92,7 @@ class ActivityBatcher:
         max_events: int,
         max_inflight_writes: int = 8,
         max_row_attempts: int = DEFAULT_MAX_ROW_ATTEMPTS,
+        close_grace_seconds: float = DEFAULT_CLOSE_GRACE_SECONDS,
         live_event_publisher: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -94,6 +100,7 @@ class ActivityBatcher:
         self._flush_seconds = max(1, int(flush_seconds))
         self._max_events = max(1, int(max_events))
         self._max_row_attempts = max(1, int(max_row_attempts))
+        self._close_grace_seconds = max(0.0, float(close_grace_seconds))
         self._write_slots = asyncio.Semaphore(max(1, int(max_inflight_writes)))
         self._live_event_publisher = live_event_publisher
         self._unflushed_hint = 0
@@ -177,14 +184,45 @@ class ActivityBatcher:
             self._wake_event.set()
 
     async def close(self) -> None:
-        # Stops accepting events, applies what is in the inbox and returns. If the database is failing, the
-        # remaining rows stay in the inbox and the next start applies them.
+        # Stops accepting events and applies the inbox for at most close_grace_seconds. A batch cut short by the
+        # deadline rolls back, so its rows stay in the inbox and the next start applies them.
         self._closed = True
         self._wake_event.set()
         task = self._task
         self._task = None
-        if task is not None:
-            await task
+        if task is None:
+            return
+        done, _ = await asyncio.wait({task}, timeout=self._close_grace_seconds)
+        if task in done:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("Activity batcher stopped with an error", exc_info=task.exception())
+            return
+        # The flusher is still stuck, usually in a database call. Cancel it, but wait only briefly: a stuck call
+        # may not unwind at all, and shutdown must still finish.
+        task.cancel()
+        await asyncio.wait({task}, timeout=_CLOSE_UNWIND_SECONDS)
+        await self._log_unflushed_at_close()
+
+    async def _log_unflushed_at_close(self) -> None:
+        reader = asyncio.create_task(self._read_backlog_for_close())
+        done, _ = await asyncio.wait({reader}, timeout=_CLOSE_UNWIND_SECONDS)
+        backlog: ActivityInboxBacklog | None = None
+        if reader in done and not reader.cancelled() and reader.exception() is None:
+            backlog = reader.result()
+        else:
+            reader.cancel()
+        logger.error(
+            "Activity inbox was not fully applied before shutdown; the rest waits in the inbox for the next start",
+            extra={
+                "close_grace_seconds": self._close_grace_seconds,
+                "inbox_pending": None if backlog is None else backlog.pending,
+                "inbox_dead_letters": None if backlog is None else backlog.dead_letters,
+            },
+        )
+
+    async def _read_backlog_for_close(self) -> ActivityInboxBacklog:
+        async with self._session_factory() as session:
+            return await read_activity_inbox_backlog(session)
 
     async def _run(self) -> None:
         retry = False
