@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -38,6 +39,10 @@ class ToolResult:
     undo_payload: dict | None = None
     success: bool = True
     db_action_id: int | None = None
+    # #51: set when the call was parked as a pending admin confirmation
+    # instead of executing; the handler commits the row and posts the
+    # confirm/cancel buttons for it.
+    pending_confirmation_token: str | None = None
 
 
 @dataclass
@@ -46,6 +51,22 @@ class ToolDefinition:
     schema: dict
     executor: Callable
     status_text: str = ""
+
+
+@dataclass(frozen=True)
+class ToolConfirmationGrant:
+    """An admin's explicit approval that lets a confirmation-required tool
+    call past the gate (#51). kind="pending" carries the token of an
+    llm_tool_confirmations row created by the preview phase; it is re-verified
+    (status/TTL/actor/chat/payload hash) and atomically claimed before the
+    side effect runs. kind="direct" is for flows where the admin's own click
+    IS the explicit approval (rollback buttons) -- no pending row exists."""
+
+    token: str = ""
+    kind: str = "pending"
+
+
+DIRECT_ADMIN_CONFIRMATION = ToolConfirmationGrant(token="", kind="direct")
 
 
 _TOOL_REGISTRY: dict[str, ToolDefinition] = {}
@@ -93,6 +114,18 @@ MUTATING_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# #51: high-impact actions -- at minimum ban and rank/permission changes.
+# These never run straight from a model tool call: the first (preview) call
+# stores the exact payload for the initiating admin and returns "pending";
+# the side effect happens only through a second execute_tool() call carrying
+# the admin's ToolConfirmationGrant (chat button), which is verified and
+# atomically claimed first. Everything else stays immediate (read-only) or
+# immediate + rollback (reversible low-impact actions).
+CONFIRMATION_REQUIRED_TOOL_NAMES: frozenset[str] = frozenset({"ban_user", "set_rank"})
+
+# How long a pending confirmation stays approvable.
+TOOL_CONFIRMATION_TTL_SECONDS = 300
+
 
 def register_tool(name: str, schema: dict, status_text: str = "") -> Callable:
     def decorator(fn: Callable) -> Callable:
@@ -122,7 +155,12 @@ def get_tool_status(name: str, arguments: dict) -> str:
         return definition.status_text
 
 
-async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
+async def execute_tool(
+    call: ToolCall,
+    *,
+    confirmation: ToolConfirmationGrant | None = None,
+    **ctx: Any,
+) -> ToolResult:
     definition = _TOOL_REGISTRY.get(call.name)
     if definition is None:
         return ToolResult(
@@ -133,6 +171,15 @@ async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
             success=False,
         )
     try:
+        # #51: a high-impact tool call arriving without an admin's explicit
+        # approval never reaches its executor -- it is parked as a pending
+        # confirmation instead. The model has no way to mark its own action
+        # approved: only this parameter, fed from the chat-button callback,
+        # gets past the gate.
+        if call.name in CONFIRMATION_REQUIRED_TOOL_NAMES:
+            gate_result = await _confirmation_gate(call, confirmation=confirmation, ctx=ctx)
+            if gate_result is not None:
+                return gate_result
         if call.name in _MODERATION_TARGET_TOOLS:
             authorization_error = await _moderation_target_error(
                 target_value=call.arguments.get("target", ""),
@@ -141,13 +188,22 @@ async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
                 activity_repo=ctx["activity_repo"],
             )
             if authorization_error is not None:
-                return _err(call.call_id, call.name, authorization_error)
+                result = _err(call.call_id, call.name, authorization_error)
+                await _release_failed_confirmation(confirmation, ctx, result)
+                return result
         result = await definition.executor(call, **ctx)
+        await _release_failed_confirmation(confirmation, ctx, result)
         log.info("llm tool %s ok: success=%s db_action_id=%s undo=%s",
                  call.name, result.success, result.db_action_id, result.undo_payload is not None)
         return result
     except Exception as exc:
         log.exception("llm tool %s failed: %s", call.name, exc)
+        # Same contract as the rollback flow: if the exception hit after the
+        # claim, re-arm the pending confirmation so the admin can retry.
+        await _release_failed_confirmation(
+            confirmation, ctx,
+            ToolResult(call_id=call.call_id, name=call.name, result_text="", action_description="", success=False),
+        )
         return ToolResult(
             call_id=call.call_id,
             name=call.name,
@@ -155,6 +211,171 @@ async def execute_tool(call: ToolCall, **ctx: Any) -> ToolResult:
             action_description=f"Ошибка инструмента {call.name}",
             success=False,
         )
+
+
+async def _release_failed_confirmation(
+    confirmation: ToolConfirmationGrant | None,
+    ctx: dict,
+    result: ToolResult,
+) -> None:
+    """#51: a pending-confirmation action that failed validation or
+    authorization at click time had NO side effect -- re-arm the confirmation
+    (the clear_rollback_claim pattern) so the admin can retry once the
+    underlying condition changes."""
+    if confirmation is None or confirmation.kind != "pending" or result.success:
+        return
+    llm_repo = ctx.get("llm_repo")
+    if llm_repo is None:
+        return
+    try:
+        await llm_repo.release_tool_confirmation(token=confirmation.token)
+    except Exception:
+        log.exception("llm confirm: could not re-arm confirmation after failure")
+
+
+def _confirmation_payload_hash(tool_name: str, arguments: dict) -> str:
+    """Binds an approval to the exact previewed payload: the confirm path
+    re-hashes the call it is about to execute and compares against the hash
+    stored at preview time, so a quietly altered arguments_json is rejected
+    instead of executed."""
+    canonical = json.dumps(
+        {"tool": tool_name, "arguments": arguments},
+        ensure_ascii=False, sort_keys=True, default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _confirmation_description(call: ToolCall) -> str:
+    target = str(call.arguments.get("target", "")).strip()
+    if call.name == "ban_user":
+        base = f"Бан {target}"
+    elif call.name == "set_rank":
+        base = f"Роль {target} → {call.arguments.get('rank', '')}"
+    else:
+        base = call.name
+    reason = str(call.arguments.get("reason", "")).strip()
+    if reason:
+        base = f"{base}: {reason[:200]}"
+    return base
+
+
+async def _confirmation_authorization_error(call: ToolCall, ctx: dict) -> str | None:
+    """Preview-time authorization with the exact checks the side effect would
+    run: a pending confirmation is not even created for a call the actor
+    could not make anyway."""
+    if call.name == "set_rank":
+        error, _ = await _set_rank_authorization_error(
+            call.arguments,
+            chat_snapshot=ctx["chat_snapshot"],
+            actor_snapshot=ctx["actor_snapshot"],
+            activity_repo=ctx["activity_repo"],
+        )
+        return error
+    if call.name in _MODERATION_TARGET_TOOLS:
+        return await _moderation_target_error(
+            target_value=call.arguments.get("target", ""),
+            chat_snapshot=ctx["chat_snapshot"],
+            actor_snapshot=ctx["actor_snapshot"],
+            activity_repo=ctx["activity_repo"],
+        )
+    return None
+
+
+async def _confirmation_gate(
+    call: ToolCall,
+    *,
+    confirmation: ToolConfirmationGrant | None,
+    ctx: dict,
+) -> ToolResult | None:
+    """The #51 choke point for confirmation-required tools.
+
+    Returns a ToolResult to short-circuit (the pending-confirmation preview,
+    or an error), or None to proceed to the guarded executor.
+    """
+    llm_repo = ctx.get("llm_repo")
+    chat_snapshot = ctx.get("chat_snapshot")
+    actor_snapshot = ctx.get("actor_snapshot")
+    if llm_repo is None or chat_snapshot is None or actor_snapshot is None:
+        # No confirmation infrastructure wired in: fail closed.
+        return _err(call.call_id, call.name, "Подтверждение недоступно, действие не выполнено.")
+
+    if confirmation is not None and confirmation.kind == "direct":
+        # The admin's own click is the explicit approval (rollback buttons);
+        # the regular authorization checks below still apply.
+        return None
+
+    if confirmation is None:
+        # Preview phase: authorize, then persist the exact proposed payload
+        # for the initiating admin. No side effect here.
+        authorization_error = await _confirmation_authorization_error(call, ctx)
+        if authorization_error is not None:
+            return _err(call.call_id, call.name, authorization_error)
+
+        payload_hash = _confirmation_payload_hash(call.name, call.arguments)
+        pending = await llm_repo.find_active_tool_confirmation(
+            chat_id=chat_snapshot.telegram_chat_id,
+            actor_user_id=actor_snapshot.telegram_user_id,
+            tool_name=call.name,
+            payload_hash=payload_hash,
+        )
+        if pending is None:
+            pending = await llm_repo.create_tool_confirmation(
+                chat_id=chat_snapshot.telegram_chat_id,
+                actor_user_id=actor_snapshot.telegram_user_id,
+                tool_name=call.name,
+                arguments=call.arguments,
+                payload_hash=payload_hash,
+                action_description=_confirmation_description(call),
+                ttl_seconds=TOOL_CONFIRMATION_TTL_SECONDS,
+            )
+        return ToolResult(
+            call_id=call.call_id,
+            name=call.name,
+            result_text=json.dumps({
+                "pending_confirmation": True,
+                "description": pending.action_description,
+                "expires_in_seconds": TOOL_CONFIRMATION_TTL_SECONDS,
+                "message": (
+                    "Действие НЕ выполнено: ожидает подтверждения администратора кнопкой в чате. "
+                    "Не считай его выполненным и не сообщай об успехе."
+                ),
+            }, ensure_ascii=False),
+            action_description=f"Ожидает подтверждения: {pending.action_description}",
+            success=True,
+            pending_confirmation_token=pending.token,
+        )
+
+    # Confirm phase: verify the grant against the stored preview, claim it
+    # atomically (double-click idempotency), only then execute.
+    row = await llm_repo.get_tool_confirmation(token=confirmation.token)
+    if row is None:
+        return _err(call.call_id, call.name, "Подтверждение не найдено; действие не выполнено.")
+    if row.status != "pending":
+        return _err(call.call_id, call.name, "Подтверждение уже обработано.")
+
+    expires_at = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        await llm_repo.mark_tool_confirmation_expired(token=confirmation.token)
+        return _err(call.call_id, call.name, "Срок подтверждения истёк; действие не выполнено.")
+
+    claimed = await llm_repo.claim_tool_confirmation(
+        token=confirmation.token,
+        resolved_by_user_id=actor_snapshot.telegram_user_id,
+    )
+    if not claimed:
+        # A concurrent click won the claim: single execution guarantee.
+        return _err(call.call_id, call.name, "Подтверждение уже обработано.")
+
+    if (
+        row.tool_name != call.name
+        or row.chat_id != chat_snapshot.telegram_chat_id
+        or row.actor_user_id != actor_snapshot.telegram_user_id
+        or row.payload_hash != _confirmation_payload_hash(call.name, call.arguments)
+    ):
+        # Binding mismatch (tampered preview payload or forged grant): the
+        # confirmation stays consumed and nothing executes.
+        return _err(call.call_id, call.name, "Подтверждение не соответствует действию; выполнение запрещено.")
+    return None
 
 
 _UNDO_TOOL_TO_REGISTERED: dict[str, str] = {
@@ -989,6 +1210,50 @@ async def _exec_get_current_time(call: ToolCall, **_: Any) -> ToolResult:
     )
 
 
+async def _set_rank_authorization_error(
+    arguments: dict,
+    *,
+    chat_snapshot: ChatSnapshot,
+    actor_snapshot: UserSnapshot,
+    activity_repo: Any,
+) -> tuple[str | None, UserSnapshot | None]:
+    """All pre-side-effect validation of set_rank, shared by the executor and
+    the #51 confirmation preview/confirm paths (the confirm path re-runs it,
+    so permissions lost between preview and click still block the action).
+    Returns (error, resolved_target): error is None only when the target was
+    resolved and every rank/permission check passed."""
+    target_str = arguments.get("target", "")
+    rank = arguments.get("rank", "participant")
+
+    target = await _resolve_target(target_str, chat_id=chat_snapshot.telegram_chat_id, activity_repo=activity_repo)
+    if target is None:
+        return f"Пользователь '{target_str}' не найден в чате.", None
+
+    chat_id = chat_snapshot.telegram_chat_id
+    actor_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_id,
+        user_id=actor_snapshot.telegram_user_id,
+    )
+    target_role = await activity_repo.get_effective_role_definition(
+        chat_id=chat_id,
+        user_id=target.telegram_user_id,
+    )
+    new_role = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=rank)
+
+    if actor_role is None or "manage_roles" not in set(actor_role.permissions):
+        return "Недостаточно прав для управления ролями.", target
+    if new_role is None:
+        return f"Роль '{rank}' не найдена.", target
+    if target.telegram_user_id == actor_snapshot.telegram_user_id and actor_role.role_code != "owner":
+        return "Нельзя менять свою роль, если вы не владелец.", target
+    if actor_role.role_code != "owner":
+        if target_role is not None and actor_role.rank <= target_role.rank:
+            return "Недостаточно уровня доступа для этого пользователя.", target
+        if actor_role.rank <= new_role.rank:
+            return "Нельзя назначить роль своего уровня или выше.", target
+    return None, target
+
+
 @register_tool(
     "set_rank",
     schema={
@@ -1016,40 +1281,23 @@ async def _exec_set_rank(
     target_str = call.arguments.get("target", "")
     rank = call.arguments.get("rank", "participant")
 
-    target = await _resolve_target(target_str, chat_id=chat_snapshot.telegram_chat_id, activity_repo=activity_repo)
-    if target is None:
-        return _err(call.call_id, call.name, f"Пользователь '{target_str}' не найден в чате.")
+    authorization_error, target = await _set_rank_authorization_error(
+        call.arguments,
+        chat_snapshot=chat_snapshot,
+        actor_snapshot=actor_snapshot,
+        activity_repo=activity_repo,
+    )
+    if authorization_error is not None:
+        return _err(call.call_id, call.name, authorization_error)
 
     chat_id = chat_snapshot.telegram_chat_id
-    actor_role = await activity_repo.get_effective_role_definition(
-        chat_id=chat_id,
-        user_id=actor_snapshot.telegram_user_id,
-    )
-    target_role = await activity_repo.get_effective_role_definition(
-        chat_id=chat_id,
-        user_id=target.telegram_user_id,
-    )
-    new_role = await activity_repo.get_chat_role_definition(chat_id=chat_id, role_code=rank)
-
-    if actor_role is None or "manage_roles" not in set(actor_role.permissions):
-        return _err(call.call_id, call.name, "Недостаточно прав для управления ролями.")
-    if new_role is None:
-        return _err(call.call_id, call.name, f"Роль '{rank}' не найдена.")
-    if target.telegram_user_id == actor_snapshot.telegram_user_id and actor_role.role_code != "owner":
-        return _err(call.call_id, call.name, "Нельзя менять свою роль, если вы не владелец.")
-    if actor_role.role_code != "owner":
-        if target_role is not None and actor_role.rank <= target_role.rank:
-            return _err(call.call_id, call.name, "Недостаточно уровня доступа для этого пользователя.")
-        if actor_role.rank <= new_role.rank:
-            return _err(call.call_id, call.name, "Нельзя назначить роль своего уровня или выше.")
-
     previous_role = await activity_repo.get_bot_role(chat_id=chat_id, user_id=target.telegram_user_id)
     previous_rank = str(previous_role) if previous_role else "participant"
 
     await activity_repo.set_bot_role(
         chat=chat_snapshot,
         target=target,
-        role=new_role.role_code,
+        role=rank,
         assigned_by_user_id=actor_snapshot.telegram_user_id,
     )
 
