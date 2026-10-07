@@ -233,7 +233,7 @@ async def test_release_starts_the_retry_cooldown(monkeypatch: pytest.MonkeyPatch
 
     await queue._release(job, 42)
 
-    release.assert_awaited_once_with(archive_row_id=42)
+    release.assert_awaited_once_with(archive_row_id=42, claim_at=None)
     assert (_CHAT_ID, 12) in queue._cooldown_until
     assert queue.enqueue(job) is False
 

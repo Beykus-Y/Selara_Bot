@@ -2592,8 +2592,8 @@ class SqlAlchemyActivityRepository:
         """Membership/persona info for exactly the given user_ids in this chat --
         used to build the author-token map and alias index for one daily summary
         run (see application/daily_summary/sanitize.py). Callers pass the set of
-        user_ids that actually authored messages in the analysed window, not
-        "every member ever" -- a member who never posted needs no token."""
+        user_ids that authored messages or were mentioned via text_mention in the
+        analysed window, not "every member ever"."""
         from selara.application.daily_summary.participants import ChatMemberInfo
 
         if not user_ids:
@@ -2656,6 +2656,20 @@ class SqlAlchemyActivityRepository:
 
     @staticmethod
     def _to_archived_message_view(row: MessageArchiveModel) -> ArchivedMessageView:
+        text_mentions: list[tuple[int, int, int]] = []
+        raw = row.raw_message_json
+        entities = raw.get("entities") if isinstance(raw, dict) else None
+        if row.text and isinstance(entities, list):
+            for entity in entities:
+                if not isinstance(entity, dict) or entity.get("type") != "text_mention":
+                    continue
+                user = entity.get("user")
+                if not isinstance(user, dict):
+                    continue
+                offset, length, user_id = entity.get("offset"), entity.get("length"), user.get("id")
+                if all(type(value) is int for value in (offset, length, user_id)):
+                    if offset >= 0 and length > 0 and user_id > 0:
+                        text_mentions.append((offset, length, user_id))
         return ArchivedMessageView(
             telegram_message_id=int(row.telegram_message_id),
             user_id=int(row.user_id),
@@ -2665,6 +2679,7 @@ class SqlAlchemyActivityRepository:
             reply_to_telegram_message_id=(
                 int(row.reply_to_telegram_message_id) if row.reply_to_telegram_message_id is not None else None
             ),
+            text_mentions=tuple(text_mentions),
         )
 
     async def get_message_context(
@@ -3310,15 +3325,16 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         return int(row_id) if row_id is not None else None
 
-    async def release_transcription_claim(self, *, archive_row_id: int) -> None:
+    async def release_transcription_claim(self, *, archive_row_id: int, claim_at: datetime | None = None) -> None:
         """Undo a claim after a failed/skipped transcription attempt, so a later
         recovery scan can retry this message. A no-op if the row somehow already
         has a real transcript (never clobber a finished result)."""
-        await self._session.execute(
-            update(MessageArchiveModel)
-            .where(MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None))
-            .values(transcribed_at=None)
+        statement = update(MessageArchiveModel).where(
+            MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None),
         )
+        if claim_at is not None:
+            statement = statement.where(MessageArchiveModel.transcribed_at == _coerce_utc_datetime(claim_at))
+        await self._session.execute(statement.values(transcribed_at=None))
         await self._session.flush()
 
     async def finalize_message_transcript(
@@ -8840,6 +8856,7 @@ class SqlAlchemyActivityRepository:
             daily_summary_style=str(getattr(row, "daily_summary_style", "neutral") or "neutral"),
             daily_summary_include_voice=bool(getattr(row, "daily_summary_include_voice", False)),
             daily_summary_include_video_notes=bool(getattr(row, "daily_summary_include_video_notes", False)),
+            instant_stt_enabled=bool(getattr(row, "instant_stt_enabled", True)),
         )
 
     @staticmethod

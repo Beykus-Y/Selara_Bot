@@ -7,6 +7,8 @@
 ### 1.1 Обязательные компоненты
 - Python **3.11+**.
 - PostgreSQL (рекомендуется 16).
+- `postgresql-client` (`pg_dump`/`pg_restore` в `PATH`) — нужен суточному backup;
+  Docker-образ уже его ставит.
 - Redis (рекомендуется 7).
 - Доступ к Telegram Bot API (токен от `@BotFather`).
 
@@ -27,9 +29,10 @@
 git clone <URL_вашего_репозитория>
 cd Selara_Bot
 cp .env.example .env
-python -m venv .venv
+# Установите uv 0.11.33, затем используйте committed lock.
+uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
+uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
 source .venv/bin/activate
-pip install -e .[dev]
 docker compose up -d postgres redis
 alembic upgrade head
 python -m selara.main
@@ -38,6 +41,9 @@ python -m selara.main
 После запуска:
 - Telegram-бот работает в polling-режиме;
 - web-панель доступна по адресу `http://127.0.0.1:8080/login`.
+
+Обновление зависимостей и правила воспроизводимых Python builds:
+[PYTHON_DEPENDENCIES.md](docs/PYTHON_DEPENDENCIES.md).
 
 ---
 
@@ -57,7 +63,11 @@ WEB_SESSION_COOKIE_SECURE=false
 ### 3.2 Важные замечания
 - `WEB_AUTH_SECRET` обязателен: без него (или если он совпадает с `BOT_TOKEN`) процесс завершается с `pydantic_core.ValidationError` ещё до старта бота и веб-панели (настройки проверяются при загрузке конфигурации) — независимо от `APP_ENV`. Fallback на `BOT_TOKEN` существует только для локальной разработки и включается явным флагом `WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true` (с предупреждением в лог); по умолчанию он выключен, поэтому «свежий» deployment из `.env.example` не может тихо получить небезопасную конфигурацию.
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
-- При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
+- Для HTTPS и публичного домена обе session cookies автоматически получают
+  `Secure=true`. HTTP localhost/loopback по умолчанию сохраняет `Secure=false`.
+  Не переносите dev override `WEB_SESSION_COOKIE_SECURE=false` или
+  `ADMIN_SESSION_COOKIE_SECURE=false` в HTTPS production: запуск завершится
+  ошибкой конфигурации. Для явного значения выставляйте обе переменные в `true`.
 
 ### 3.3 Опционально: AI-ассистент и голос (STT/LLM)
 
@@ -83,6 +93,14 @@ LLM_COOLDOWN_SECONDS=5
 Оба блока принимают любой OpenAI-совместимый API (OpenAI, Groq и т.д.) —
 достаточно поменять `*_BASE_URL`/`*_MODEL`/`*_API_KEY` под своего
 провайдера. Полный список параметров — в `.env.example`.
+
+Мгновенное распознавание голосовых и кружков использует общий cooldown
+`STT_COOLDOWN_SECONDS` на пару `(chat_id, user_id)` в `REDIS_URL`.
+Атомарный `SET NX PX` сохраняет ограничение при рестарте приложения и разделяет
+его между репликами; Redis автоматически удаляет истёкшие ключи. При недоступном
+Redis запрос отклоняется до скачивания файла и вызова провайдера (fail-closed,
+с предупреждением в логах). `STT_COOLDOWN_SECONDS=0` явно отключает ограничение.
+Очередь транскрипций для «Итогов дня» работает отдельно от этого cooldown.
 
 ### 3.4 Опционально: веб-поиск для AI-ассистента
 
@@ -118,6 +136,31 @@ searxng не запускает.
 Альтернатива — ключевой провайдер: задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
 `WEB_SEARCH_API_KEY`; при сбое такого провайдера бот пробует DuckDuckGo.
 
+### 3.5 Бэкапы и проверка восстанавливаемости
+
+Суточный backup (ночное расписание и кнопка в `/app/admin`) перед отправкой в
+Telegram проверяет каждый дамп: PostgreSQL custom-формат разбирается
+`pg_restore` офлайн — без подключения к базе данных весь SQL-скрипт дампа
+выводится в null device, — а SQLite-дампы gacha (`*.sqlite3`) проходят
+`PRAGMA integrity_check`. Если проверка не прошла, **дамп не отправляется**,
+а в Telegram приходит причина сбоя.
+
+Для этого `pg_restore` должен быть доступен в `PATH` runtime-контейнера:
+Docker-образ ставит пакет `postgresql-client`; при запуске без Docker его нужно
+установить отдельно (`apt install postgresql-client` или аналог). Проверка
+`pg_restore` ограничена `BACKUP_TIMEOUT_SECONDS` (по умолчанию 300): по
+истечении таймаута дочерний процесс убивается, backup завершается ошибкой.
+
+```env
+BACKUP_TIMEOUT_SECONDS=300
+BACKUP_PG_DUMP_PATH=pg_dump
+BACKUP_PG_RESTORE_PATH=pg_restore
+```
+
+Офлайн-проверка подтверждает, что архив целиком разбирается и распаковывается,
+но не исполняет восстановленный SQL: совместимость расширений и логическая
+полнота данных проверяются только при реальном восстановлении.
+
 ---
 
 ## 4. Локальный запуск через Docker Compose
@@ -136,10 +179,13 @@ docker compose logs -f app
 ### 4.2 Проверка web health endpoint
 
 ```bash
-curl -i http://127.0.0.1:8080/healthz
+curl -i http://127.0.0.1:8080/livez
+curl -i http://127.0.0.1:8080/readyz
 ```
 
-Ожидается успешный HTTP-ответ.
+`/livez` показывает жизнь процесса. `/readyz` (и alias `/healthz`) проверяет
+БД, Redis и polling heartbeat; во время startup или outage отвечает 503.
+Подробности: [RUNTIME_READINESS.md](docs/RUNTIME_READINESS.md).
 
 ### 4.3 Важная особенность compose-конфига
 В `docker-compose.yml` используется внешняя сеть `edge`. На «чистом» сервере её нужно создать заранее:
@@ -206,6 +252,11 @@ docker compose logs -f app
 
 ### 5.1 Публикация образа
 
+Для production используйте `Publish Docker Image` после CI на `main`: он
+сохраняет единый digest manifest app/web/gacha. Номер успешного запуска —
+release ID для deploy. Команды ниже публикуют только удобный mutable alias
+для ручных экспериментов, без production release manifest.
+
 ```bash
 docker build -t ghcr.io/<your-user>/selara:latest .
 docker push ghcr.io/<your-user>/selara:latest
@@ -214,7 +265,9 @@ docker push ghcr.io/<your-user>/selara:latest
 ### 5.2 Настройка окружения на VPS
 
 ```env
-SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
+# Digest из release manifest; workflow задаёт образы из manifest самостоятельно.
+SELARA_IMAGE=ghcr.io/<your-user>/selara@sha256:<digest>
+SELARA_WEB_IMAGE=ghcr.io/<your-user>/selara-web@sha256:<digest>
 SELARA_POSTGRES_DB=selara
 SELARA_POSTGRES_USER=selara
 SELARA_POSTGRES_PASSWORD=<сгенерированный_пароль_БД>
@@ -241,11 +294,15 @@ openssl rand -hex 32
 WEB_AUTH_SECRET=<сгенерированный_секрет>
 ```
 
-Только после этого выполняйте обновление:
+Только после этого запустите `Deploy To VPS` с `release_run_id` успешного
+publisher на `main`. Workflow загрузит фиксированный manifest, проверит
+запущенные image IDs/digests и сохранит previous release для rollback.
+Подробности и ограничения срока хранения: [IMMUTABLE_DEPLOY.md](docs/IMMUTABLE_DEPLOY.md).
+
+При ручном обновлении с тем же manifest:
 
 ```bash
-docker compose pull app
-docker compose up -d app
+python3 scripts/release_manifest.py deploy /path/to/manifest.json
 ```
 
 ---

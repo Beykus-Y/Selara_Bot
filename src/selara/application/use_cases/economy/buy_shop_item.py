@@ -4,7 +4,13 @@ from datetime import date
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import UPGRADE_MAX_LEVEL, build_daily_shop_offers, inventory_stack_limit
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+    to_meta_json,
+)
 from selara.application.use_cases.economy.results import BuyShopResult
 from selara.domain.economy_entities import EconomyAccount, EconomyScope, ShopOffer
 
@@ -50,6 +56,8 @@ async def execute(
     if scope is None:
         return BuyShopResult(accepted=False, reason=error or "Не удалось определить режим экономики", offer=None, new_balance=None)
 
+    # Protect offer level, stack capacity, payment and inventory as one purchase.
+    await lock_economy_resources(repo, account_lock_key(scope=scope, user_id=user_id))
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
     offers = build_shop_offers(scope=scope, user_id=user_id, current_day=current_day, account=account)
 

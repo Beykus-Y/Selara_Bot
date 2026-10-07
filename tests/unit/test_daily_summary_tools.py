@@ -165,3 +165,25 @@ async def test_repo_exception_is_caught_and_reported_as_tool_failure() -> None:
 
     assert result.success is False
     assert "boom" in result.result_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name,arguments,rows_field", [
+    ("get_message_context", {"around_telegram_message_id": 7}, "message_context_rows"),
+    ("get_reply_thread", {"root_telegram_message_id": 7}, "reply_thread_rows"),
+    ("search_messages", {"query": "герой"}, "search_rows"),
+])
+async def test_analyst_tools_redact_arbitrary_anchor_without_exposing_entities(tool_name, arguments, rows_field):
+    row = ArchivedMessageView(7, 1, _WINDOW_FROM, "😀 герой и друг", "герой", None, ((3, 5, 2), (11, 4, 1)))
+    repo = _FakeRepo(**{rows_field: [row]})
+    context = DailySummaryToolContext(
+        repo=repo, scope=ToolScope(chat_id=-100999, window_from=_WINDOW_FROM, window_to=_WINDOW_TO),
+        author_tokens={1: "Вася", 2: "Участник #1"}, alias_index={}, text_mention_tokens={2: "Участник #1"},
+    )
+    result = await execute_daily_summary_tool(
+        DailySummaryToolCall(name=tool_name, arguments=arguments, call_id="c1"), context=context,
+    )
+    message = json.loads(result.result_text)["messages"][0]
+    assert message["text"] == "😀 Участник #1 и друг"
+    assert message["transcript"] == "герой"  # text entities never apply to STT output
+    assert set(message) == {"message_id", "author", "sent_at", "text", "transcript", "reply_to_message_id"}

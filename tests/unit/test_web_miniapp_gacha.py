@@ -26,6 +26,8 @@ def _settings(**overrides) -> Settings:
         "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
         "WEB_AUTH_SECRET": "test-secret",
         "WEB_BASE_URL": "http://testserver",
+        "WEB_SESSION_COOKIE_SECURE": False,
+        "ADMIN_SESSION_COOKIE_SECURE": False,
         "BOT_USERNAME": "selara_test_bot",
         "GACHA_BASE_URL": "http://gacha.local",
         "GACHA_SERVICE_TOKEN": "service-secret",

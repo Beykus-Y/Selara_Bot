@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from selara.application.daily_summary.participants import ChatMemberInfo, build_participant_directory
 
@@ -75,7 +76,7 @@ def redact_known_aliases(text: str, *, alias_index: dict[str, int], tokens: dict
 def redact_text_mentions(
     text: str,
     *,
-    entities: list[tuple[int, int, int]],
+    entities: Sequence[tuple[int, int, int]],
     tokens: dict[int, str],
 ) -> str:
     """Replace exact (offset, length) spans that Telegram tagged as a text_mention.
@@ -85,10 +86,24 @@ def redact_text_mentions(
     user_id has a known token (i.e. is a departed member tracked this run) are
     touched; everything else is left untouched.
     """
+    # Python indexes code points; Telegram indexes UTF-16 code units. Only
+    # accept boundaries between code points, never the middle of a surrogate pair.
+    boundaries = {0: 0}
+    units = 0
+    for index, character in enumerate(text, start=1):
+        units += 2 if ord(character) > 0xFFFF else 1
+        boundaries[units] = index
+
     result = text
+    previous_start = len(text)
     for offset, length, user_id in sorted(entities, key=lambda entity: entity[0], reverse=True):
         token = tokens.get(user_id)
         if token is None:
             continue
-        result = result[:offset] + token + result[offset + length :]
+        start = boundaries.get(offset)
+        end = boundaries.get(offset + length)
+        if start is None or end is None or length <= 0 or end > previous_start:
+            continue
+        result = result[:start] + token + result[end:]
+        previous_start = start
     return result

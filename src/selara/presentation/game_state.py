@@ -1250,14 +1250,19 @@ class GameStore:
         if self._active_by_chat.get(game.chat_id) == game.game_id:
             self._active_by_chat.pop(game.chat_id, None)
 
-    async def _cache_hydrated_game(self, game: GroupGame) -> None:
-        """Publish a game loaded from Redis into the local registry."""
+    async def _cache_hydrated_game(self, game: GroupGame) -> bool:
+        """Publish a game loaded from Redis into the local registry.
+
+        Returns ``False`` when the game is already in memory: the in-memory
+        copy is authoritative, so the loaded payload must not replace it.
+        """
         async with self._registry_lock:
             if game.game_id in self._by_id:
-                return
+                return False
             self._by_id[game.game_id] = game
             if game.status != "finished":
                 self._active_by_chat[game.chat_id] = game.game_id
+            return True
 
     @asynccontextmanager
     async def _lock_active_game(self, chat_id: int) -> AsyncIterator[GroupGame | None]:
@@ -5573,6 +5578,9 @@ class RedisGameStateRepository:
     def ttl_seconds(self) -> int:
         return max(300, int(self._ttl.total_seconds()))
 
+    async def ping(self) -> None:
+        await self._client.ping()
+
     def _game_key(self, game_id: str) -> str:
         return f"{self._GAME_KEY_PREFIX}:{game_id}"
 
@@ -5617,6 +5625,19 @@ class RedisGameStateRepository:
         if value is not None:
             await self._client.expire(self._active_key(chat_id), self.ttl_seconds)
         return value
+
+    async def set_active_game_id(self, *, chat_id: int, game_id: str | None) -> None:
+        """Deterministically point the chat's active-game key at `game_id`.
+
+        Used by the post-outage reconciliation so a stale Redis pointer can
+        never resurrect a game this process has already finished or replaced.
+        Passing `game_id=None` clears the key.
+        """
+        active_key = self._active_key(chat_id)
+        if game_id is None:
+            await self._client.delete(active_key)
+            return
+        await self._client.set(active_key, game_id, ex=self.ttl_seconds)
 
     async def list_active_game_ids(self, *, chat_ids: set[int] | None = None) -> list[str]:
         if chat_ids:
@@ -5781,13 +5802,111 @@ def _event_type_for_method(name: str) -> str:
     return "game_updated"
 
 
+class _RecoverySupersededError(Exception):
+    """A recovery attempt lost ownership of its candidate Redis runtime."""
+
+
 class RuntimeGameStore:
+    """In-memory game store with best-effort Redis persistence.
+
+    Failure model (see issue #65): a Redis outage degrades the runtime to
+    memory-only; mutations keep working against the in-memory backend while
+    Redis keeps a stale snapshot. A background recovery loop periodically
+    probes Redis and, once it answers, reconciles the diverged state before
+    switching back. Conflict resolution is deterministic: the in-memory view
+    always wins — Redis is never read over a game this process already has,
+    so a restart after recovery cannot resurrect a stale phase or a finished
+    game.
+
+    Guarantees of the recovery path:
+
+    * Active-game pointers are re-asserted from memory only for chats this
+      process actually owned or observed (present in the in-memory active map
+      when the store degraded, or holding an in-memory active game at
+      reconciliation time), plus chats whose Redis pointer targets a game this
+      process has in memory. A pointer to a game this process has never seen
+      is left untouched, so a live game from another epoch is never orphaned.
+    * Reconciliation runs in two passes: the first pushes the memory snapshot
+      while still degraded, the second runs after the live repo/broker are
+      wired in and covers every mutation that interleaved with the first pass
+      (its own write was skipped because the repo was not wired yet). Only
+      after both passes is recovery declared complete.
+    * Redis writes of one chat (its games' payloads and its active pointer)
+      are serialized in this process by a per-chat write lock shared by the
+      recovery passes and the handlers' own syncs. A payload is serialized
+      only after its writer holds the lock and the lock is held until Redis
+      answered, so a handler's write is always ordered after any in-flight
+      recovery write: a stale SET can no longer land on top of a confirmed
+      newer state, even when the recovery attempt is cancelled or times out
+      before it could repair it. Within that order every save also records
+      the game's revision and rewrites from the live object if a mutation
+      moved it while the write was in flight.
+    * A recovery attempt is bound to the runtime generation it started for:
+      if ``configure_runtime``/``use_in_memory``/``close`` replaces the
+      runtime while an attempt is mid-flight, the cancelled attempt only
+      closes its own candidate clients and never degrades or reschedules
+      the freshly installed runtime.
+    * Recovery only declares success while it still owns the runtime: if a
+      concurrent handler degraded the store (e.g. a broker error) or the
+      runtime was replaced during the second pass, the attempt fails, closes
+      its own candidate repo/broker and the loop retries with a fresh pair.
+    * Active-pointer re-assertion never replays a stale snapshot: each chat's
+      decision is read from the live in-memory state right before its write
+      and validated against a mutation version after the write, so a game
+      finished and replaced in a chat while the pass was awaiting another
+      chat's Redis write keeps its freshly persisted pointer instead of being
+      cleared from an outdated copy.
+    * A failed, cancelled or timed-out probe/reconcile — including the second
+      pass — closes the candidate repo/broker and leaves the store degraded; a
+      half-open Redis can never pin the single recovery task forever.
+    * ``close()`` is terminal: it cancels the recovery loop, sets ``_closed``
+      and no later Redis error can re-arm recovery or start a new task.
+
+    Lock order across layers: a game lock (``GameStore._lock_game``) may take
+    ``GameStore._registry_lock`` and nothing else, and no game lock is ever
+    held across a Redis call. The per-chat write lock wraps Redis I/O only and
+    is never held while a game or registry lock is taken; handler syncs take
+    it after their mutation has released its game lock. Nothing nests in the
+    reverse direction, so the two layers cannot deadlock.
+    """
+
+    _RECOVERY_RETRY_SECONDS = 15.0
+    _RECOVERY_ATTEMPT_TIMEOUT_SECONDS = 30.0
+
     def __init__(self, backend: InMemoryGameStore | None = None) -> None:
         self._backend = backend or InMemoryGameStore()
         self._codec = GameStateCodec()
         self._state_repo: RedisGameStateRepository | None = None
         self._broker: LiveEventBroker | None = None
         self._redis_degraded = False
+        self._redis_url: str | None = None
+        self._redis_ttl: timedelta = timedelta(hours=24)
+        self._recovery_in_progress = False
+        # Bumped after every in-memory mutation or hydration. The pointer
+        # re-assertion pass uses it to detect mutations that interleaved with
+        # its Redis writes (see `_reassert_active_pointers`).
+        self._game_state_version = 0
+        # Bumped for every known game right after an in-memory mutation (and
+        # therefore before that mutation's own Redis sync). Payload writers
+        # record it when serializing and retry from the live object when it
+        # moved under an in-flight write (see `_save_game_until_stable`).
+        self._game_revisions: dict[str, int] = {}
+        # Bumped whenever the runtime components (backend/repo/broker/mode)
+        # are replaced. Recovery attempts capture it and a cancelled attempt
+        # may only degrade the runtime generation it was serving.
+        self._runtime_generation = 0
+        # Serializes this process's Redis writes per chat (payloads of the
+        # chat's games and its active pointer); see `_chat_write_lock`.
+        self._chat_write_locks: dict[int, asyncio.Lock] = {}
+        # Number of handler/recovery syncs currently writing through a repo,
+        # and repos to close as soon as their last sync is done.
+        self._repo_sync_leases: dict[Any, int] = {}
+        self._repos_closing_after_sync: set[Any] = set()
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_retry_seconds = self._RECOVERY_RETRY_SECONDS
+        self._recovery_attempt_timeout_seconds = self._RECOVERY_ATTEMPT_TIMEOUT_SECONDS
+        self._degraded_owned_chats: set[int] = set()
+        self._closed = False
 
     @staticmethod
     def _is_redis_error(exc: Exception) -> bool:
@@ -5799,11 +5918,18 @@ class RuntimeGameStore:
         self._broker = None
         if was_using_redis and not self._redis_degraded:
             self._redis_degraded = True
+            # Remember which chats had an active-game pointer when the store
+            # degraded: only those pointers are ours to re-assert (a chat this
+            # process later learns about through a cached non-active game may
+            # still have a live pointer owned by another epoch).
+            self._degraded_owned_chats = set(self._backend._active_by_chat)
             logger.warning(
                 "Redis is unavailable during %s; falling back to in-memory game store. Error: %s",
                 stage,
                 exc,
             )
+        if self._redis_degraded:
+            self._schedule_recovery()
 
     @property
     def backend(self) -> InMemoryGameStore:
@@ -5813,24 +5939,329 @@ class RuntimeGameStore:
     def live_broker(self) -> LiveEventBroker | None:
         return self._broker
 
+    @property
+    def redis_recovery_state(self) -> Literal["disabled", "connected", "degraded", "recovering"]:
+        """Operator-visible Redis mode of the game store."""
+        if self._redis_url is None:
+            return "disabled"
+        if self._recovery_in_progress:
+            return "recovering"
+        if self._redis_degraded:
+            return "degraded"
+        return "connected"
+
     def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
         ttl = timedelta(hours=max(1, ttl_hours))
         self._backend = InMemoryGameStore()
         self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
         self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
+        self._redis_url = redis_url
+        self._redis_ttl = ttl
         self._redis_degraded = False
+        self._degraded_owned_chats = set()
+        self._closed = False
+        self._game_revisions = {}
+        self._chat_write_locks = {}
+        # Invalidate the generation *before* cancelling: the cancelled
+        # recovery task must observe that the runtime it was serving is gone
+        # and leave this fresh configuration untouched in its handler.
+        self._runtime_generation += 1
+        self._cancel_recovery_task()
 
     def use_in_memory(self) -> None:
         self._backend = InMemoryGameStore()
         self._state_repo = None
         self._broker = None
+        self._redis_url = None
         self._redis_degraded = False
+        self._degraded_owned_chats = set()
+        self._game_revisions = {}
+        self._chat_write_locks = {}
+        self._runtime_generation += 1
+        self._cancel_recovery_task()
 
     async def close(self) -> None:
+        # Closing is terminal: no later Redis error may re-arm recovery, and
+        # no recovery task may be created after shutdown.
+        self._closed = True
+        # Same generation guard as reconfiguration: a cancelled recovery must
+        # not null the live repo/broker references out from under this close,
+        # which closes them itself right below.
+        self._runtime_generation += 1
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if self._broker is not None:
             await self._broker.close()
         if self._state_repo is not None:
-            await self._state_repo.close()
+            if self._repo_sync_leases.get(self._state_repo):
+                # An in-flight handler sync still writes through it; that
+                # sync closes the repo once its writes are done.
+                self._repos_closing_after_sync.add(self._state_repo)
+            else:
+                await self._state_repo.close()
+
+    def _schedule_recovery(self) -> None:
+        if self._closed or self._redis_url is None or self._recovery_task is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - degrade only happens in async context
+            return
+        self._recovery_task = loop.create_task(self._recovery_loop(), name="game-store-redis-recovery")
+
+    def _cancel_recovery_task(self) -> None:
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _recovery_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while (
+                not self._closed
+                and self._redis_degraded
+                and self._state_repo is None
+                and self._redis_url is not None
+            ):
+                await asyncio.sleep(self._recovery_retry_seconds)
+                if self._closed or not (self._redis_degraded and self._state_repo is None and self._redis_url is not None):
+                    break
+                try:
+                    await self._attempt_recovery()
+                except Exception as exc:
+                    # A timed-out attempt is an ordinary failed attempt: the
+                    # candidates were closed, the store stays degraded and the
+                    # next iteration retries.
+                    if isinstance(exc, (TimeoutError, _RecoverySupersededError)) or self._is_redis_error(exc):
+                        logger.info("Redis recovery attempt failed; will retry. Error: %s", exc)
+                    else:
+                        logger.warning("Redis recovery attempt crashed; will retry.", exc_info=True)
+        finally:
+            if self._recovery_task is current_task:
+                self._recovery_task = None
+
+    def _build_redis_runtime(self) -> tuple[RedisGameStateRepository, RedisLiveEventBroker]:
+        assert self._redis_url is not None
+        return (
+            RedisGameStateRepository.from_url(redis_url=self._redis_url, codec=self._codec, ttl=self._redis_ttl),
+            RedisLiveEventBroker.from_url(redis_url=self._redis_url),
+        )
+
+    @staticmethod
+    async def _close_quietly(component: Any) -> None:
+        close = getattr(component, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Failed to close replaced Redis game store component", exc_info=True)
+
+    @classmethod
+    async def _close_candidates_quietly(cls, *components: Any) -> None:
+        """Close every candidate component, surviving a concurrent cancel.
+
+        A cancellation that lands mid-probe must not leak the freshly created
+        redis.asyncio clients, so the closes are best-effort even while the
+        task is being cancelled.
+        """
+        for component in components:
+            if component is None:
+                continue
+            try:
+                await cls._close_quietly(component)
+            except asyncio.CancelledError:
+                # Keep closing the remaining candidates; the caller re-raises
+                # the original CancelledError.
+                continue
+
+    async def _discard_components(self, *components: Any) -> None:
+        """Close dropped repo/broker components, deferring repos still in use.
+
+        A repo some handler sync is still writing through is closed by that
+        sync once it finishes (see ``_sync_cached_state``) instead of being
+        closed under it.
+        """
+        to_close: list[Any] = []
+        for component in components:
+            if component is not None and self._repo_sync_leases.get(component):
+                self._repos_closing_after_sync.add(component)
+            else:
+                to_close.append(component)
+        await self._close_candidates_quietly(*to_close)
+
+    async def _attempt_recovery(self) -> None:
+        """Probe Redis and, if it answers, reconcile before switching back.
+
+        Fail-closed: the fresh repo/broker are only wired in after the whole
+        resync succeeded; otherwise (error, cancellation or timeout) they are
+        closed and the store stays degraded so the loop retries later.
+        The probe+reconcile is bounded by
+        ``_recovery_attempt_timeout_seconds`` so a half-open Redis cannot pin
+        the single recovery task forever. The bound covers both passes: the
+        second pass (final sync + pointer re-assertion) runs under its own
+        ``asyncio.timeout`` budget, so a Redis that starts hanging only after
+        the probe fails the attempt, degrades the store back to memory and
+        lets the loop retry later.
+        """
+        if self._closed or self._redis_url is None:
+            return
+        # This attempt may only touch the runtime generation current at its
+        # start; a reconfigure/close meanwhile installs a different runtime
+        # and the handlers below must leave that one alone.
+        generation = self._runtime_generation
+        self._recovery_in_progress = True
+        try:
+            repo, broker = self._build_redis_runtime()
+            try:
+                async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
+                    await repo.ping()
+                    synced_games = await self._reconcile_degraded_state(repo)
+            except asyncio.CancelledError:
+                await self._discard_components(repo, broker)
+                raise
+            except Exception:
+                await self._discard_components(repo, broker)
+                raise
+
+            # Wire the live runtime first so mutations landing from now on
+            # persist themselves, then push a second pass over memory. A
+            # mutation that interleaved with the pass above had its own write
+            # skipped (`_state_repo` was still None); this pass is what keeps
+            # it from reverting on the next restart.
+            self._state_repo = repo
+            self._broker = broker
+            self._redis_degraded = False
+            try:
+                async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
+                    await self._sync_cached_state()
+                    await self._reassert_active_pointers(repo)
+            except asyncio.CancelledError:
+                if self._runtime_generation == generation:
+                    self._degrade_to_in_memory(stage="recovery:final-sync", exc=asyncio.CancelledError())
+                await self._discard_components(repo, broker)
+                raise
+            except Exception as exc:
+                if self._runtime_generation == generation:
+                    self._degrade_to_in_memory(stage="recovery:final-sync", exc=exc)
+                await self._discard_components(repo, broker)
+                raise
+            if not (
+                self._runtime_generation == generation
+                and self._state_repo is repo
+                and self._broker is broker
+                and not self._redis_degraded
+            ):
+                # A concurrent handler degraded the store (e.g. a broker
+                # publish error on another connection) or the runtime was
+                # replaced while the second pass ran: the candidates were
+                # dropped without being closed and nobody else owns them now.
+                # This attempt is not a success; close whatever is not the
+                # installed runtime and let the loop retry with a fresh pair.
+                await self._discard_components(
+                    *(component for component in (repo, broker) if component not in (self._state_repo, self._broker))
+                )
+                raise _RecoverySupersededError("Redis runtime was degraded or replaced during the final recovery pass")
+            logger.warning(
+                "Redis connectivity restored; re-synced %d in-memory game(s) and re-enabled the Redis game store.",
+                synced_games,
+            )
+        finally:
+            self._recovery_in_progress = False
+
+    async def _reconcile_degraded_state(self, repo: RedisGameStateRepository) -> int:
+        """Push the in-memory view over the stale Redis snapshot.
+
+        The in-memory backend kept accepting mutations during the outage, so
+        it is strictly newer for every game this process knows. All known game
+        payloads are re-saved from memory, and active-game pointers are
+        re-asserted only for chats this process owned/observed (see
+        ``_reassert_active_pointers``); a chat this process merely knows by a
+        cached non-active game keeps the pointer Redis holds, so a live game
+        from another epoch is never orphaned. Chats unknown to this process
+        are left untouched so their games stay hydratable after a restart.
+
+        This is pass one of two: mutations can still interleave while these
+        writes are awaited, so ``_attempt_recovery`` runs a second push after
+        the live repo/broker are wired in.
+        """
+        _, games = await self._backend._games_snapshot()
+        for game in games.values():
+            await self._save_game_until_stable(repo, game)
+        await self._reassert_active_pointers(repo, games=games)
+        return len(games)
+
+    async def _reassert_active_pointers(
+        self,
+        repo: RedisGameStateRepository,
+        *,
+        games: dict[str, GroupGame] | None = None,
+    ) -> None:
+        """Re-assert only the active-game pointers this process is authoritative for.
+
+        A chat is claimable when it had an active pointer at degradation time
+        (``_degraded_owned_chats``) or holds an in-memory active game now. For
+        claimable chats the pointer is rewritten from memory (set to the active
+        game, or cleared when memory has none). For any other known chat the
+        pointer is touched only when it targets a game this process has in
+        memory; a pointer to an unknown game is preserved, so it cannot be
+        orphaned by this process.
+
+        Each chat's decision is read from the live in-memory state right
+        before its write and validated against ``_game_state_version`` after
+        the write. Handlers keep mutating games while these Redis writes are
+        awaited (the final recovery pass runs with the live repo wired in), so
+        a decision computed once from a snapshot is not trusted: if the state
+        changed while the write was in flight, the chat is redone from the
+        fresh state. Without this, finishing B and creating C in B's chat
+        while the pass waited on another chat's write would clear the pointer
+        C's own sync had just persisted, leaving C active in memory but
+        undiscoverable after a restart.
+        """
+        if games is None:
+            games = dict(self._backend._by_id)
+        active_by_chat = dict(self._backend._active_by_chat)
+        claimable_chats = set(self._degraded_owned_chats) | set(active_by_chat)
+        known_chats = {game.chat_id for game in games.values()}
+        for chat_id in sorted(known_chats | claimable_chats):
+            while True:
+                # Under the chat's write lock: a handler's own pointer write for
+                # this chat is ordered strictly after this one, so an
+                # interrupted pass can never leave a stale pointer on top of it.
+                async with self._chat_write_lock(chat_id):
+                    version = self._game_state_version
+                    # Live read: a game finished/created while earlier writes were
+                    # awaited must be seen here, not replayed from the snapshot.
+                    active_id = self._backend._active_by_chat.get(chat_id)
+                    active_game = self._backend._by_id.get(active_id) if active_id is not None else None
+                    if active_game is not None and active_game.status != "finished":
+                        await repo.set_active_game_id(chat_id=chat_id, game_id=active_game.game_id)
+                    elif chat_id in claimable_chats:
+                        await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                    else:
+                        pointer = await repo.load_active_game_id(chat_id)
+                        if pointer is not None and pointer in games:
+                            # Memory wins for games it knows; a pointer to an unknown game
+                            # belongs to another epoch and is left untouched.
+                            await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                if self._game_state_version == version:
+                    break
+                # A mutation interleaved with the write above: its own sync
+                # re-asserts the newer pointer, and this chat is redone from
+                # the fresh state so the stale decision never lands after it.
+                # A pathological mutation storm is bounded by the recovery
+                # attempt timeout around the final pass.
 
     async def publish_event(
         self,
@@ -5867,7 +6298,13 @@ class RuntimeGameStore:
         game = await self._state_repo.load_game(game_id)
         if game is None:
             return
-        await self._backend._cache_hydrated_game(game)
+        # The in-memory copy always wins: a game another task registered while
+        # this load was in flight is kept, and the loaded payload is dropped.
+        if not await self._backend._cache_hydrated_game(game):
+            return
+        # Hydration changes the state pointer re-assertion reads; bump the
+        # version so an in-flight pointer write for this chat is retried.
+        self._game_state_version += 1
 
     async def _hydrate_active_for_chat(self, chat_id: int) -> None:
         if self._state_repo is None:
@@ -5920,11 +6357,89 @@ class RuntimeGameStore:
                 await self._hydrate_active_for_chat(chat_id)
 
     async def _sync_cached_state(self) -> None:
-        if self._state_repo is None:
+        repo = self._state_repo
+        if repo is None:
             return
-        active_ids, games = await self._backend._games_snapshot()
-        for game in games.values():
-            await self._state_repo.save_game(game, is_active=game.game_id in active_ids)
+        # A sync that started against the live repo finishes its writes
+        # through it even if the store degrades or recovery fails while it
+        # waits for a chat write lock: memory is the newest state, so these
+        # writes are what keep a stale recovery payload from surviving. The
+        # lease defers closing the repo until the last such sync is done.
+        self._repo_sync_leases[repo] = self._repo_sync_leases.get(repo, 0) + 1
+        try:
+            _, games = await self._backend._games_snapshot()
+            for game in games.values():
+                await self._save_game_until_stable(repo, game)
+        finally:
+            remaining = self._repo_sync_leases.pop(repo) - 1
+            if remaining:
+                self._repo_sync_leases[repo] = remaining
+            elif repo in self._repos_closing_after_sync:
+                self._repos_closing_after_sync.discard(repo)
+                await self._close_quietly(repo)
+
+    def _chat_write_lock(self, chat_id: int) -> asyncio.Lock:
+        """Return the lock ordering this process's Redis writes for ``chat_id``.
+
+        Redis keeps no revision of its own, so the order in which writes land
+        is the only thing protecting a confirmed newer payload/pointer. Every
+        writer of a chat's keys -- both recovery passes and every handler sync
+        -- holds this lock from serialization until Redis answered, so a
+        writer can only start after the previous one finished or was
+        cancelled, and it always serializes the newest in-memory state.
+        """
+        lock = self._chat_write_locks.get(chat_id)
+        if lock is None:
+            lock = self._chat_write_locks[chat_id] = asyncio.Lock()
+        return lock
+
+    async def _save_game_until_stable(self, repo: RedisGameStateRepository, game: GroupGame) -> None:
+        """Persist ``game``, re-serializing while it mutates under the write.
+
+        ``save_game`` serializes the game before its Redis SET is even sent,
+        so a mutation that happens (and persists itself through its own
+        connection) while that write is in flight would be overwritten by
+        the older serialized payload as soon as the delayed SET lands. Each
+        attempt therefore records the game's revision, writes the payload
+        serialized at that revision, and starts over from the live object if
+        the revision moved while the write was in flight. The loop only
+        stops once a write landed for a revision that is still current: any
+        mutation after that point bumps the revision before its own SET is
+        serialized, so its write is ordered after ours and carries the newer
+        state. A pathological mutation storm is bounded by the recovery
+        attempt timeout around the caller.
+
+        Each attempt runs under the chat's write lock (``_chat_write_lock``),
+        so the revision check is only the in-order repair; ordering is what
+        keeps an interrupted stale write from surviving a newer one.
+        """
+        while True:
+            async with self._chat_write_lock(game.chat_id):
+                revision = self._game_revisions.get(game.game_id, 0)
+                await repo.save_game(
+                    game,
+                    # _active_by_chat maps chat_id -> game_id: look the game up by
+                    # its chat, not by its own id.
+                    is_active=self._backend._active_by_chat.get(game.chat_id) == game.game_id,
+                )
+                if self._game_revisions.get(game.game_id, 0) == revision:
+                    return
+            # The game mutated while the write above was in flight: the
+            # payload just written may already be stale. Re-serialize the
+            # current object and write again.
+
+    def _bump_game_revisions(self) -> None:
+        """Invalidate payload freshness for every known game.
+
+        Called right after a backend mutation returns and before that
+        mutation's own Redis sync: the in-memory objects are now newer than
+        every payload serialized before this point, and a writer whose SET
+        only lands while this sync is still running must be able to detect
+        that. Bumping before the sync (not only after it) closes the window
+        where a stale write could return without seeing the mutation.
+        """
+        for game_id in self._backend._by_id:
+            self._game_revisions[game_id] = self._game_revisions.get(game_id, 0) + 1
 
     async def _publish_after_call(self, name: str, result: Any, kwargs: dict[str, Any]) -> None:
         if self._broker is None:
@@ -5963,8 +6478,17 @@ class RuntimeGameStore:
                     raise
             result = await attr(*args, **kwargs)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
+                # The mutation is in: invalidate payload freshness right away
+                # (not only after the sync below) so any write already in
+                # flight for these games detects it and re-serializes instead
+                # of landing a stale payload over a confirmed newer state.
+                self._bump_game_revisions()
                 try:
                     await self._sync_cached_state()
+                    # The mutation (and its persisted sync) is now visible in
+                    # memory; invalidate any pointer decision computed before
+                    # it so the recovery pass cannot replay stale pointers.
+                    self._game_state_version += 1
                     await self._publish_after_call(name, result, kwargs)
                 except Exception as exc:
                     if self._is_redis_error(exc):

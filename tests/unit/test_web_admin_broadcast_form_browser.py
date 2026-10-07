@@ -1,7 +1,8 @@
+import asyncio
 from pathlib import Path
 
 import pytest
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 from selara.web.rendering import create_template_environment
 
@@ -131,6 +132,8 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
+        request_started = asyncio.Event()
+        release_response = asyncio.Event()
         try:
             await _goto_admin_page(page)
             await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
@@ -179,6 +182,8 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
             )
 
             async def handle_send(route):
+                request_started.set()
+                await release_response.wait()
                 await route.fulfill(
                     status=400,
                     content_type="application/json",
@@ -187,10 +192,13 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
 
             await page.route("**/api/admin/broadcasts/send", handle_send)
 
+            submit_button = form.locator("[data-broadcast-submit]")
+            default_submit_text = await submit_button.inner_text()
             await form.locator('button[type="submit"]').click()
             confirm_dialog = form.locator("[data-broadcast-confirm-dialog]")
             assert await confirm_dialog.is_visible()
             await confirm_dialog.locator("[data-broadcast-confirm-submit]").click()
+            await asyncio.wait_for(request_started.wait(), timeout=10)
 
             compiled = await page.evaluate("window.submittedBroadcastBody")
             assert compiled == (
@@ -200,9 +208,13 @@ async def test_server_admin_broadcast_composer_handles_photo_and_reactions() -> 
                 "👎 = Не согласен\n"
                 "[/reactions]"
             )
-            assert await form.locator("[data-broadcast-submit]").is_disabled()
-            assert await form.locator("[data-broadcast-submit]").inner_text() == "Отправка…"
+            await expect(submit_button).to_be_disabled()
+            await expect(submit_button).to_have_text("Отправка…")
+            release_response.set()
+            await expect(submit_button).to_be_enabled()
+            await expect(submit_button).to_have_text(default_submit_text)
         finally:
+            release_response.set()
             await browser.close()
 
 

@@ -1,8 +1,10 @@
 import warnings
+from ipaddress import ip_address, ip_network
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -103,6 +105,7 @@ class Settings(BaseSettings):
     web_enabled: bool = Field(default=True, validation_alias="WEB_ENABLED")
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(default=8080, validation_alias="WEB_PORT")
+    web_forwarded_allow_ips: str = Field(default="127.0.0.1,::1", validation_alias="WEB_FORWARDED_ALLOW_IPS")
     web_domain: str | None = Field(default=None, validation_alias="WEB_DOMAIN")
     web_base_url: str = Field(default="http://127.0.0.1:8080", validation_alias="WEB_BASE_URL")
     gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
@@ -115,6 +118,7 @@ class Settings(BaseSettings):
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
+    backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
     # to BOT_TOKEN. Defaults to false so a fresh production install (including
@@ -126,7 +130,7 @@ class Settings(BaseSettings):
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
     web_session_cookie_name: str = Field(default="selara_session", validation_alias="WEB_SESSION_COOKIE_NAME")
-    web_session_cookie_secure: bool = Field(default=False, validation_alias="WEB_SESSION_COOKIE_SECURE")
+    web_session_cookie_secure: bool = Field(default=True, validation_alias="WEB_SESSION_COOKIE_SECURE")
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
@@ -270,7 +274,43 @@ class Settings(BaseSettings):
     llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
-    admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+    admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_trusted_web_proxies(self):
+        for host in self.web_forwarded_allow_ips.split(","):
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                network = ip_network(host)
+            except ValueError:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS accepts explicit proxy IPs/CIDRs; wildcard trust is forbidden") from None
+            if network.prefixlen == 0:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS must not trust every client")
+        return self
+
+    @model_validator(mode="after")
+    def _check_session_cookie_security(self):
+        url = urlsplit(self.resolved_web_base_url)
+        hostname = (url.hostname or "").lower()
+        local = hostname == "localhost" or hostname.endswith(".localhost")
+        try:
+            local = local or ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        https = url.scheme.lower() == "https"
+        default_secure = https or not local
+        for field_name, env_name in (
+            ("web_session_cookie_secure", "WEB_SESSION_COOKIE_SECURE"),
+            ("admin_session_cookie_secure", "ADMIN_SESSION_COOKIE_SECURE"),
+        ):
+            if field_name not in self.model_fields_set:
+                # Only HTTP loopback defaults to insecure cookies for local dev.
+                object.__setattr__(self, field_name, default_secure)
+            elif self.web_enabled and https and not getattr(self, field_name):
+                raise ValueError(f"{env_name} must be true for an HTTPS web panel")
+        return self
 
     @model_validator(mode="after")
     def _check_personal_limits(self):

@@ -1109,6 +1109,7 @@ class ChatSettingsModel(Base):
     daily_summary_min_messages: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50, server_default="50")
     daily_summary_style: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral", server_default="neutral")
     daily_summary_include_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    instant_stt_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     daily_summary_include_video_notes: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
@@ -2254,6 +2255,20 @@ class ChatMemberCountSnapshotModel(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class BackupJobClaimModel(Base):
+    """One row per scheduled backup slot; the claim is what stops a second bot instance from dumping again."""
+
+    __tablename__ = "backup_job_claims"
+
+    slot_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class GlobalMetricsModel(Base):
     __tablename__ = "global_metrics"
 
@@ -2755,6 +2770,29 @@ class LlmUsageLogModel(Base):
             "status IN ('succeeded', 'failed', 'validation_failed')",
             name="ck_llm_usage_log_status",
         ),
+    )
+
+
+class SttBudgetReservationModel(Base):
+    """Durable, millisecond-precise admission and completed STT budget charges."""
+
+    __tablename__ = "stt_budget_reservations"
+    token: Mapped[str] = mapped_column(String(36), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False)
+    archive_row_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    claim_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reserved_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="reserved", server_default="reserved")
+    usage_log_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("llm_usage_log.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("reserved_ms > 0", name="ck_stt_budget_reserved_ms"),
+        CheckConstraint("status IN ('reserved', 'consumed')", name="ck_stt_budget_status"),
+        Index("idx_stt_budget_chat_created", "chat_id", "created_at"),
+        Index("idx_stt_budget_archive_lease", "archive_row_id", "lease_expires_at"),
+        Index("idx_stt_budget_usage_log", "usage_log_id", unique=True),
     )
 
 
