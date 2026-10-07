@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat, TelegramRetryAfter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.core.chat_settings import ChatSettings
@@ -25,6 +26,9 @@ _CLAIM_LEASE_SECONDS = 300
 # A claim cools the chat down unless Telegram definitively rejected it. Ambiguous outcomes
 # (crash, DB error after send, lease expiry) therefore never re-send the same slot.
 _COOLDOWN_CLAIM_STATUSES = ("claimed", "sent", "abandoned")
+# Telegram answered without delivering the message, so the slot may be retried. Anything else
+# (network error, timeout, 5xx) may have delivered it and must not be retried.
+_DEFINITE_SEND_REJECTIONS = (TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat, TelegramRetryAfter)
 
 
 @dataclass(frozen=True)
@@ -243,8 +247,15 @@ class InterestingFactsScheduler:
             # Left as "claimed": it cools the chat down and is abandoned once its lease expires.
             raise
         except Exception as exc:
-            logger.exception("Failed to send interesting fact", extra={"chat_id": chat.telegram_chat_id})
-            await self._finish_claim(claim, status="failed", error_summary=type(exc).__name__)
+            if isinstance(exc, _DEFINITE_SEND_REJECTIONS):
+                logger.exception("Failed to send interesting fact", extra={"chat_id": chat.telegram_chat_id})
+                await self._finish_claim(claim, status="failed", error_summary=type(exc).__name__)
+            else:
+                # Outcome unknown: the claim stays "claimed" and cools the chat down until it is abandoned.
+                logger.exception(
+                    "Interesting fact send outcome unknown; slot stays claimed",
+                    extra={"chat_id": chat.telegram_chat_id, "claim_id": claim.claim_id},
+                )
             return False
 
         message_id = getattr(sent_message, "message_id", None)
