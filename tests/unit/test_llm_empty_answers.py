@@ -118,10 +118,14 @@ async def test_last_round_offers_no_tools_tells_the_model_and_caps_tokens():
     assert sent.call_args.args[2] == 'Итог без документов'
 
 
+def skill_call(skill):
+    return SimpleNamespace(id='read_skill', function=SimpleNamespace(name='read_skill', arguments=json.dumps({'name': skill})))
+
+
 async def test_cap_is_raised_only_after_the_artifacts_skill_was_read():
     execute = AsyncMock(return_value=ToolResult('read_skill', 'read_skill', '{}', 'Навык прочитан'))
     c, _, _, _, _ = await run([
-        response(calls=[call('read_skill', name='artifacts')]), response(calls=[call('read_skill', name='other')]),
+        response(calls=[skill_call('artifacts')]), response(calls=[skill_call('other')]),
         response('Готово')], execute)
     caps = [call_.kwargs['max_tokens'] for call_ in c.chat_with_tools.await_args_list]
     assert caps == [800, 4000, 4000]
