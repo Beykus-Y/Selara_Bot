@@ -10202,9 +10202,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     setattr(row, col.name, value)
                     updated_fields.append(col.name)
 
-            await session.commit()
-            
-            # Логирование действия
+            # Логирование действия — до commit, чтобы audit-запись коммитилась
+            # атомарно с мутацией (и откатывалась вместе с ней при сбое).
             await log_chat_action(
                 SqlAlchemyActivityRepository(session),
                 chat_id=0,
@@ -10217,6 +10216,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 ),
                 actor_user_id=admin_user_id,
             )
+
+            await session.commit()
 
         return _redirect(_with_message(f"/app/admin/table/{table_name}", key="flash", text=f"Запись обновлена. Изменены поля: {', '.join(updated_fields)}"))
 
@@ -10250,9 +10251,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _redirect(_with_message(f"/app/admin/table/{table_name}", key="error", text="Запись не найдена."))
 
             await session.delete(row)
-            await session.commit()
-            
-            # Логирование действия
+
+            # Логирование действия — до commit, чтобы audit-запись коммитилась
+            # атомарно с удалением (и откатывалась вместе с ним при сбое).
             await log_chat_action(
                 SqlAlchemyActivityRepository(session),
                 chat_id=0,
@@ -10262,6 +10263,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 description=f"Admin {admin_user_id} deleted record {_admin_primary_key_display(pk_values)} from {table_name}",
                 actor_user_id=admin_user_id,
             )
+
+            await session.commit()
 
         return _redirect(_with_message(f"/app/admin/table/{table_name}", key="flash", text="Запись удалена."))
 
@@ -10960,8 +10963,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     setattr(row, col.name, value)
                     updated_fields.append(col.name)
 
-            await session.commit()
-
+            # Логирование действия — до commit, чтобы audit-запись коммитилась
+            # атомарно с мутацией (и откатывалась вместе с ней при сбое).
             await log_chat_action(
                 SqlAlchemyActivityRepository(session),
                 chat_id=0,
@@ -10974,6 +10977,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 ),
                 actor_user_id=admin_user_id,
             )
+
+            await session.commit()
 
         return _json_result(ok=True, message=f"Запись обновлена. Изменены поля: {', '.join(updated_fields)}", status_code=200)
 
@@ -11006,8 +11011,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return _json_result(ok=False, message="Запись не найдена.", status_code=404)
 
             await session.delete(row)
-            await session.commit()
 
+            # Логирование действия — до commit, чтобы audit-запись коммитилась
+            # атомарно с удалением (и откатывалась вместе с ним при сбое).
             await log_chat_action(
                 SqlAlchemyActivityRepository(session),
                 chat_id=0,
@@ -11017,6 +11023,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 description=f"Admin {admin_user_id} deleted record {_admin_primary_key_display(pk_values)} from {table_name}",
                 actor_user_id=admin_user_id,
             )
+
+            await session.commit()
 
         return _json_result(ok=True, message="Запись удалена.", status_code=200)
 
