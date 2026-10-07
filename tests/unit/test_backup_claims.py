@@ -284,7 +284,7 @@ async def test_start_manual_backup_rejects_overlap_and_reports_completion(monkey
         assert (await backup.read_manual_backup_status(session_factory=session_factory))["status"] == "running"
 
         gate.set()
-        await asyncio.gather(*list(backup._manual_backup_tasks))
+        await asyncio.gather(*list(backup._manual_backup_tasks.values()))
 
         assert sent == ["sent"]
         status = await backup.read_manual_backup_status(session_factory=session_factory)
@@ -305,7 +305,7 @@ async def test_failed_manual_backup_is_recorded_and_reported_to_admin(monkeypatc
     bot = _RecordingBot()
     try:
         await backup.start_manual_backup(bot=bot, settings=SimpleNamespace(admin_user_id=42), session_factory=session_factory)
-        await asyncio.gather(*list(backup._manual_backup_tasks))
+        await asyncio.gather(*list(backup._manual_backup_tasks.values()))
 
         status = await backup.read_manual_backup_status(session_factory=session_factory)
         assert status["status"] == "failed"
@@ -348,7 +348,7 @@ async def test_failure_alert_is_sent_even_when_recording_the_failure_fails(monke
     bot = _RecordingBot()
     try:
         await backup.start_manual_backup(bot=bot, settings=SimpleNamespace(admin_user_id=42), session_factory=session_factory)
-        await asyncio.gather(*list(backup._manual_backup_tasks))
+        await asyncio.gather(*list(backup._manual_backup_tasks.values()))
 
         assert len(bot.messages) == 1 and "database is unavailable" in bot.messages[0]
     finally:
@@ -365,9 +365,9 @@ async def test_stop_manual_backups_cancels_the_running_job_and_records_it_as_fai
     monkeypatch.setattr(backup, "send_daily_backup", endless_send_daily_backup)
     try:
         await backup.start_manual_backup(bot=_RecordingBot(), settings=SimpleNamespace(admin_user_id=42), session_factory=session_factory)
-        await backup.stop_manual_backups()
+        await backup.stop_manual_backups(session_factory=session_factory)
 
-        assert backup._manual_backup_tasks == set()
+        assert backup._manual_backup_tasks == {}
         status = await backup.read_manual_backup_status(session_factory=session_factory)
         assert status["status"] == "failed"
         assert "остановкой сервиса" in (status["error"] or "")

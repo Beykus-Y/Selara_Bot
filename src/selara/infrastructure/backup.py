@@ -77,8 +77,8 @@ class BackupAlreadyRunningError(BackupJobError):
     pass
 
 
-# Manual backup jobs are not owned by any request, so keep a reference until they finish.
-_manual_backup_tasks: set[asyncio.Task[None]] = set()
+# Manual backup jobs are not owned by any request, so keep them (by job id) until they finish.
+_manual_backup_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 @dataclass(slots=True)
@@ -292,8 +292,8 @@ async def start_manual_backup(
         ),
         name="manual-backup-job",
     )
-    _manual_backup_tasks.add(task)
-    task.add_done_callback(_manual_backup_tasks.discard)
+    _manual_backup_tasks[job_id] = task
+    task.add_done_callback(lambda _done, jid=job_id: _manual_backup_tasks.pop(jid, None))
     return job_id
 
 
@@ -372,13 +372,25 @@ async def _record_manual_backup_result(
         logger.exception("Could not record manual backup result", extra={"job_id": job_id, "status": status})
 
 
-async def stop_manual_backups() -> None:
-    """Cancel manual backups still running; call before the bot session they send through is closed."""
-    tasks = tuple(_manual_backup_tasks)
-    for task in tasks:
+async def stop_manual_backups(*, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Cancel manual backups still running and record each as failed; call before their bot session closes.
+
+    A job cancelled before it first runs never reaches its own failure path, so the
+    record is written here. finish_backup_slot only updates a row that is still running,
+    so a job that already finished keeps its result.
+    """
+    jobs = tuple(_manual_backup_tasks.items())
+    for _job_id, task in jobs:
         task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if jobs:
+        await asyncio.gather(*(task for _job_id, task in jobs), return_exceptions=True)
+    for job_id, _task in jobs:
+        await _record_manual_backup_result(
+            session_factory=session_factory,
+            job_id=job_id,
+            status=BACKUP_SLOT_FAILED,
+            error="Backup прерван остановкой сервиса.",
+        )
 
 
 async def read_manual_backup_status(

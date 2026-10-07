@@ -711,7 +711,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             await asyncio.gather(*miniapp_broadcast_tasks.values(), return_exceptions=True)
         miniapp_broadcast_tasks.clear()
         # Manual backups send through game_bot, so stop them before its session closes.
-        await stop_manual_backups()
+        await stop_manual_backups(session_factory=session_factory)
         if game_bot is not None:
             await game_bot.session.close()
             game_bot = None
@@ -8848,6 +8848,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ],
             extra_scripts=[
                 "admin-overview.js",
+                "admin-backup-status.js",
                 "admin-feedback.js",
                 "admin-broadcast.js",
                 "admin-table-search.js",
