@@ -148,6 +148,11 @@ _HELP_SECTION_TEXT: dict[str, str] = {
 
 
 
+def _summary_defaults() -> tuple[int, int]:
+    fields = ChatSettings.__dataclass_fields__
+    return fields["daily_summary_hour"].default, fields["daily_summary_min_messages"].default
+
+
 def _policy_limit(feature: AiFeature, trigger: str) -> int:
     policy = resolve_feature_policy(feature=feature, trigger=trigger)
     assert policy is not None  # these two features have an explicit free quota
@@ -200,7 +205,7 @@ def _ai_help_text(settings: Settings) -> str:
 
 def _ai_plus_help_text(settings: Settings) -> str:
     manual_limit = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
-    summary_defaults = ChatSettings()
+    summary_hour, summary_min = _summary_defaults()
     return (
         "<b>Подписка, итоги и AI-настройка</b>\n"
         "\n"
@@ -218,9 +223,9 @@ def _ai_plus_help_text(settings: Settings) -> str:
         "<b>Итоги дня</b>\n"
         f"• <code>/summary</code> — собрать итоги сейчас (право настройки чата), {manual_limit} раз в месяц на чат\n"
         "• Автоматические: <code>/setcfg daily_summary_enabled true</code>, только с Selara AI; "
-        f"час — <code>daily_summary_hour</code> (по умолчанию {summary_defaults.daily_summary_hour}, время бота), "
+        f"час — <code>daily_summary_hour</code> (по умолчанию {summary_hour}, время бота), "
         "стиль — <code>daily_summary_style</code> (neutral, lively, snarky)\n"
-        f"• Нужны <code>save_message true</code> и не меньше {summary_defaults.daily_summary_min_messages} сообщений за сутки "
+        f"• Нужны <code>save_message true</code> и не меньше {summary_min} сообщений за сутки "
         "(порог — <code>daily_summary_min_messages</code>)\n"
         "• <code>daily_summary_include_voice</code> и <code>daily_summary_include_video_notes</code> — "
         "учитывать голосовые и кружки\n"

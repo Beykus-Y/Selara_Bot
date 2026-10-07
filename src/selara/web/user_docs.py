@@ -87,7 +87,8 @@ def _policy_limit(feature: AiFeature, trigger: str) -> int:
 
 _ADMIN_AI_LIMIT = _policy_limit(AiFeature.LLM_ADMIN, "telegram_message")
 _MANUAL_SUMMARY_LIMIT = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
-_SUMMARY_DEFAULTS = ChatSettings()
+_SUMMARY_HOUR = ChatSettings.__dataclass_fields__["daily_summary_hour"].default
+_SUMMARY_MIN_MESSAGES = ChatSettings.__dataclass_fields__["daily_summary_min_messages"].default
 
 # Single source for both RP-action trigger lists below — derived from
 # selara.presentation.commands.catalog so this page cannot drift out of sync
@@ -533,8 +534,8 @@ _USER_DOC_SECTIONS: tuple[dict[str, Any], ...] = (
             ),
             notes=(
                 f"`/summary` доступна с правом настройки чата и ограничена {_MANUAL_SUMMARY_LIMIT} запусками в месяц на чат; Selara AI этот лимит не меняет.",
-                f"Автоматические итоги работают только с Selara AI. Час — `daily_summary_hour` (по умолчанию {_SUMMARY_DEFAULTS.daily_summary_hour}, время бота), стиль — neutral, lively или snarky.",
-                f"Нужны включённый `save_message` и не меньше {_SUMMARY_DEFAULTS.daily_summary_min_messages} сообщений за сутки (порог — `daily_summary_min_messages`).",
+                f"Автоматические итоги работают только с Selara AI. Час — `daily_summary_hour` (по умолчанию {_SUMMARY_HOUR}, время бота), стиль — neutral, lively или snarky.",
+                f"Нужны включённый `save_message` и не меньше {_SUMMARY_MIN_MESSAGES} сообщений за сутки (порог — `daily_summary_min_messages`).",
                 "`daily_summary_include_voice` и `daily_summary_include_video_notes` добавляют в итоги расшифровку голосовых и кружков.",
                 "`/autocfg` работает в личке: выберите группу и опишите, что изменить. Черновик живёт 24 часа и применяется только после сводки и кнопки «Сохранить»; `/autocfgcancel` его отменяет. Лимиты подписки не тратятся.",
             ),
