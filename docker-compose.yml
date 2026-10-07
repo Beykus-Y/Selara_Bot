@@ -36,30 +36,43 @@ services:
     # limits. Unlike the renderer, app keeps credentials (env_file), the
     # database/redis networks and published ports.
     # Writable paths on the read-only root fs:
-    #   - /tmp (tmpfs): daily-backup dumps/splits (pg_dump + archive parts),
-    #     gacha reel ffmpeg output, Playwright Chromium profiles, matplotlib
-    #     and fontconfig caches (MPLCONFIGDIR/XDG_CACHE_HOME in the Dockerfile
-    #     point there).
+    #   - /tmp (tmpfs, 1g): the daily backup writes a pg_dump and then all of
+    #     its ~45 MB split parts, and never deletes the source dump, so the
+    #     dump and the parts must fit simultaneously; also gacha reel ffmpeg
+    #     output, Playwright Chromium profiles, matplotlib/fontconfig caches
+    #     (MPLCONFIGDIR/XDG_CACHE_HOME) and XDG_CONFIG_HOME.
     #   - /data/gacha_reel_cache (named volume): generated gacha reel MP4s,
     #     regenerated automatically on demand. The image pre-creates the mount
-    #     point owned by 10001, so fresh volumes inherit it; volumes created
-    #     by older root-based deploys need a one-time chown (see
+    #     point owned by 10001, so fresh volumes inherit it (see
     #     INSTALLATION.md 4.4).
+    # Limits are sized for the real peaks of this container, not the renderer:
+    #   - mem_limit 4g: one gacha reel render peaks at ~1.2-1.4 GB
+    #     (gacha_reel.py holds the accumulated PNG stdin payload, a second full
+    #     copy from stdin_payload.getvalue() passed to ffmpeg, and the PIL
+    #     frames), Chromium also runs in-process, and tmpfs pages are charged
+    #     to this same cgroup. Exceeding the cap OOM-kills bot and web together,
+    #     and restart: unless-stopped would turn that into a restart loop.
+    #   - pids_limit 512: the limit counts threads, shared by Chromium, ffmpeg
+    #     and the asyncio thread pool.
+    #   - init: true: PID 1 below is `sh -c "alembic upgrade head && python -m
+    #     selara.main"`, which does not reap orphaned Chromium/crashpad
+    #     children; a real init process does.
     image: ${SELARA_IMAGE:-selara:local}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: selara-app
     restart: unless-stopped
+    init: true
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 2g
+    mem_limit: 4g
     cpus: 2.0
-    pids_limit: 256
+    pids_limit: 512
     tmpfs:
-      - /tmp:rw,nosuid,size=512m,mode=1777
+      - /tmp:rw,nosuid,size=1g,mode=1777
     env_file:
       - .env
     environment:
@@ -67,6 +80,7 @@ services:
       REDIS_URL: ${SELARA_REDIS_URL:-redis://redis:6379/0}
       GACHA_REEL_CACHE_DIR: /data/gacha_reel_cache
       ARTIFACT_RENDERER_URL: http://artifact-renderer:8090
+      XDG_CONFIG_HOME: /tmp/config
     volumes:
       - selara_gacha_reel_cache:/data/gacha_reel_cache
     depends_on:
@@ -153,7 +167,14 @@ services:
 volumes:
   selara_pg_data:
   selara_redis_data:
+  # Only the regenerable gacha reel cache pins an explicit name, following
+  # gacha/docker-compose.yml. It is safe to replace and the stable name keeps
+  # INSTALLATION.md 4.4 accurate. Do NOT pin selara_pg_data or
+  # selara_redis_data: a pinned name would be a different volume from the
+  # project-prefixed one a running deployment already uses, orphaning the
+  # production Postgres/Redis data.
   selara_gacha_reel_cache:
+    name: selara_gacha_reel_cache
 
 networks:
   artifact_rendering:
