@@ -24,7 +24,8 @@ async def _granted_turn_lease(**_kwargs) -> AsyncIterator[_GrantedTurnLease]:
 
 @pytest.fixture(autouse=True)
 def _grant_ai_turn_lease(monkeypatch: pytest.MonkeyPatch) -> None:
-    from selara.presentation.handlers import llm_admin, personal_ai
+    from selara.presentation.handlers import group_character, llm_admin, personal_ai
 
     monkeypatch.setattr(personal_ai, "ai_turn_lease", _granted_turn_lease)
     monkeypatch.setattr(llm_admin, "ai_turn_lease", _granted_turn_lease)
+    monkeypatch.setattr(group_character, "ai_turn_lease", _granted_turn_lease)

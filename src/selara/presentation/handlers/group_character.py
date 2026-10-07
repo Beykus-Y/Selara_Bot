@@ -5,7 +5,8 @@ member may then address Selara by a call name at the very start of a message
 («Селя, кто сегодня самый активный?») or reply to her member-mode answer. Member
 mode has read-only tools only and its own dialogue history, apart from the admin
 assistant (``?``/``??``). It is free for every chat with a daily limit per chat and
-per member; Selara AI raises both and allows up to five names.
+per member; Selara AI raises both and allows up to five names. A chat runs one member
+turn at a time: a call that arrives during a turn gets a short note and no answer.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from selara.application.feature_access import (
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.ai_pets import AiPetService
+from selara.infrastructure.db.ai_turn_leases import AiTurnLease, AiTurnLeaseLostError, ai_turn_lease
 from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository, GroupCharacterError
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.llm_repository import LlmRepository
@@ -75,11 +77,16 @@ router = Router(name="group_character")
 _GROUP_TYPES = {"group", "supergroup"}
 _STATE_TTL_SECONDS = 30.0
 _HINT_INTERVAL_SECONDS = 3600.0
+_BUSY_REPLY_INTERVAL_SECONDS = 30.0
+_BUSY_TEXT = "⏳ Selara ещё отвечает на предыдущий вопрос в этом чате. Спроси, когда она ответит. Квота не потрачена."
+_LEASE_LOST_TEXT = "⚠️ Ответ прерван: обработку перехватил другой экземпляр бота. Если ответа не будет, спроси ещё раз."
 
 # chat_id -> (expires_at, member_mode_enabled, active names): checked on every group message.
 _state_cache: dict[int, tuple[float, bool, list[CallName]]] = {}
 # (chat_id, actor or 0) -> monotonic time of the last no-LLM hint: one per hour, never a reply per message.
 _hint_sent_at: dict[tuple[int, int], float] = {}
+# chat_id -> monotonic time of the last busy note: while a turn runs, one note per window and the rest stay silent.
+_busy_reply_sent_at: dict[int, float] = {}
 
 
 def invalidate_call_names(chat_id: int | None) -> None:
@@ -93,6 +100,15 @@ def _hint_allowed(chat_id: int, actor_id: int = 0) -> bool:
     if last is not None and now - last < _HINT_INTERVAL_SECONDS:
         return False
     _hint_sent_at[(chat_id, actor_id)] = now
+    return True
+
+
+def _busy_reply_allowed(chat_id: int) -> bool:
+    now = time.monotonic()
+    last = _busy_reply_sent_at.get(chat_id)
+    if last is not None and now - last < _BUSY_REPLY_INTERVAL_SECONDS:
+        return False
+    _busy_reply_sent_at[chat_id] = now
     return True
 
 
@@ -204,10 +220,7 @@ async def handle_group_call(
     session_factory,
     llm_client: LlmClient | None,
 ) -> None:
-    user = message.from_user
     chat_id = message.chat.id
-    repo = ChatAiCharacterRepository(db_session)
-
     if llm_client is None or session_factory is None:
         if _hint_allowed(chat_id):
             await message.reply("Selara сейчас не может отвечать: AI временно недоступен.")
@@ -215,6 +228,54 @@ async def handle_group_call(
     if len(text) > MAX_MEMBER_TEXT_LENGTH:
         await message.reply(f"Слишком длинный вопрос: до {MAX_MEMBER_TEXT_LENGTH} символов.")
         return
+
+    # The lease takes its own connection: end this request's transaction first, as the personal and admin paths do.
+    await db_session.commit()
+    # A turn reads the history that earlier turns wrote, so turns of one chat never run side by side. A second call gets
+    # a short note and is not admitted, quota-checked or sent to the model.
+    async with ai_turn_lease(session_factory=session_factory, lease_key=f"group_member_turn:{chat_id}") as lease:
+        if lease is None:
+            if _busy_reply_allowed(chat_id):
+                await message.reply(_BUSY_TEXT)
+            return
+        try:
+            await _run_group_turn(
+                message,
+                lease=lease,
+                text=text,
+                bot=bot,
+                activity_repo=activity_repo,
+                db_session=db_session,
+                settings=settings,
+                session_factory=session_factory,
+                llm_client=llm_client,
+            )
+        except AiTurnLeaseLostError:
+            # Another instance took the key while this turn was stalled. The turn stopped at its last check, and what it
+            # had not committed is rolled back.
+            log.warning("group member: turn stopped after its AI turn lease was lost chat_id=%s", chat_id)
+            await db_session.rollback()
+            await message.reply(_LEASE_LOST_TEXT)
+            return
+        # Commit before the lease is released: the next turn of this chat must see this turn's history and cooldown row.
+        await db_session.commit()
+
+
+async def _run_group_turn(
+    message: Message,
+    *,
+    lease: AiTurnLease,
+    text: str,
+    bot,
+    activity_repo,
+    db_session,
+    settings: Settings,
+    session_factory,
+    llm_client: LlmClient,
+) -> None:
+    user = message.from_user
+    chat_id = message.chat.id
+    repo = ChatAiCharacterRepository(db_session)
 
     now = datetime.now(timezone.utc)
     admission = await repo.admit_turn(
@@ -312,6 +373,7 @@ async def handle_group_call(
         has_ai = await chat_has_selara_ai(session_factory, chat_id=chat_id, settings=settings)
         answer = await _run_member_dialogue(
             message,
+            lease=lease,
             actions_enabled=character.member_actions_enabled,
             actor_label=primary,
             total_rounds=group_tool_rounds(settings, has_subscription=has_ai),
@@ -332,6 +394,8 @@ async def handle_group_call(
             call_context=call_context,
             outcome=outcome,
         )
+        # The last check before anything is saved or sent: a turn that lost its key must not write over the new owner's.
+        await lease.confirm()
         if not answer:
             if outcome["error_category"] == "handler_error":
                 outcome["error_category"] = "empty_answer"
@@ -351,6 +415,9 @@ async def handle_group_call(
         if sent is not None:
             await repo.set_reply_message_id(row_id=reply_row_id, telegram_message_id=sent.message_id)
             await repo.commit()
+    except AiTurnLeaseLostError:
+        outcome["error_category"] = "lease_lost"
+        raise
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
@@ -371,6 +438,7 @@ async def handle_group_call(
 async def _run_member_dialogue(
     message: Message,
     *,
+    lease: AiTurnLease,
     bot,
     messages: list[dict],
     history_access: bool,
@@ -400,6 +468,8 @@ async def _run_member_dialogue(
         tools = [*tools, action_tool_definition()]
     action_done = False
     for round_index in range(total_rounds):
+        # Fence each model round: a turn that lost its key must not start another provider call or tool.
+        await lease.confirm()
         try:
             await bot.send_chat_action(message.chat.id, "typing")
         except Exception:
@@ -432,6 +502,8 @@ async def _run_member_dialogue(
             return text
         messages.append(msg.model_dump(exclude_none=True))
         for tool_call in msg.tool_calls:
+            # Fence each tool call too: an action reaches the chat and cannot be taken back once it is sent.
+            await lease.confirm()
             try:
                 arguments = json.loads(tool_call.function.arguments or "{}")
                 if not isinstance(arguments, dict):
