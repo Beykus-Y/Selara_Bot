@@ -487,11 +487,13 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert feature_routes.down_revision == settlement.revision
     member_actions = _load_migration("0095_group_member_actions.py")
     assert member_actions.down_revision == feature_routes.revision
-    pets_default = _load_migration("0096_pets_on_by_default.py")
-    assert pets_default.down_revision == member_actions.revision
-    grants = _load_migration("0097_entitlement_grants.py")
+    tool_confirmations = _load_migration("0096_llm_tool_confirmations.py")
+    assert tool_confirmations.down_revision == member_actions.revision
+    pets_default = _load_migration("0097_pets_on_by_default.py")
+    assert pets_default.down_revision == tool_confirmations.revision
+    grants = _load_migration("0098_entitlement_grants.py")
     assert grants.down_revision == pets_default.revision
-    personal_tools = _load_migration("0098_personal_ai_tools.py")
+    personal_tools = _load_migration("0099_personal_ai_tools.py")
     assert personal_tools.down_revision == grants.revision
     assert revisions - parents == {personal_tools.revision}
     assert len(feature_routes.revision) <= 32

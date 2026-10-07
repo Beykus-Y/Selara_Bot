@@ -1,7 +1,7 @@
 """Owner-made subscription grants: an immutable journal
 
-Revision ID: 0097_entitlement_grants
-Revises: 0096_pets_on_by_default
+Revision ID: 0098_entitlement_grants
+Revises: 0097_pets_on_by_default
 Create Date: 2026-10-08 00:00:00
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0097_entitlement_grants"
-down_revision: str | None = "0096_pets_on_by_default"
+revision: str = "0098_entitlement_grants"
+down_revision: str | None = "0097_pets_on_by_default"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

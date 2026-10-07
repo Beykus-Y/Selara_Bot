@@ -2474,6 +2474,52 @@ class LlmAdminActionModel(Base):
     )
 
 
+class LlmToolConfirmationModel(Base):
+    """Pending admin confirmation for a high-impact LLM tool call (#51).
+
+    A preview phase stores the EXACT payload the model proposed (arguments +
+    payload_hash) and the initiating admin; the side effect runs only after
+    that same admin approves via the chat button. `payload_hash` is checked at
+    confirm time so a tampered arguments_json can never be executed, and the
+    status claim (pending -> resolved) is a single UPDATE for idempotency.
+    """
+
+    __tablename__ = "llm_tool_confirmations"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    arguments_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'confirmed', 'rejected', 'expired')", name="ck_llm_tool_confirmations_status"),
+        Index("idx_llm_tool_confirmations_chat_status", "chat_id", "status"),
+    )
+
+
 class GachaAnimationVariantModel(Base):
     """Cached reel-animation clips for the animated gacha pull mode (see
     docs/GACHA_MODERNIZATION_TODO.md, Этап 3). Purely a presentation-layer

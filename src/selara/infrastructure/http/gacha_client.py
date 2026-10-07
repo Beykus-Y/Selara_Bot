@@ -81,6 +81,26 @@ class GachaBannerCardsResponse(BaseModel):
     cards: list[GachaCardPayload]
 
 
+class GachaCollectionCardPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    code: str
+    name: str
+    rarity: str
+    rarity_label: str
+    copies_owned: int
+    image_url: str
+
+
+class GachaCollectionResponse(BaseModel):
+    status: str
+    banner: str
+    user_id: int
+    cards: list[GachaCollectionCardPayload]
+    total_unique: int
+    total_copies: int
+
+
 class GachaHistoryResponse(BaseModel):
     status: str
     banner: str
@@ -156,11 +176,12 @@ class HttpGachaClient:
         )
         return GachaPullResponse.model_validate(payload)
 
-    async def get_profile(self, *, user_id: int, banner: str) -> GachaProfileResponse:
+    async def get_profile(self, *, user_id: int, banner: str, limit: int = 5) -> GachaProfileResponse:
         payload = await self._request(
             "GET",
             f"/v1/gacha/users/{user_id}/profile",
-            params={"banner": banner},
+            params={"banner": banner, "limit": limit},
+            headers=self._service_headers(),
         )
         return GachaProfileResponse.model_validate(payload)
 
@@ -204,8 +225,18 @@ class HttpGachaClient:
             "GET",
             f"/v1/gacha/users/{user_id}/history",
             params={"banner": banner, "limit": limit},
+            headers=self._service_headers(),
         )
         return GachaHistoryResponse.model_validate(payload)
+
+    async def get_collection(self, *, user_id: int, banner: str) -> GachaCollectionResponse:
+        payload = await self._request(
+            "GET",
+            f"/v1/gacha/users/{user_id}/collection",
+            params={"banner": banner},
+            headers=self._service_headers(),
+        )
+        return GachaCollectionResponse.model_validate(payload)
 
     async def purchase_pull(self, *, user_id: int, username: str | None, banner: str) -> GachaPullResponse:
         payload = await self._request(

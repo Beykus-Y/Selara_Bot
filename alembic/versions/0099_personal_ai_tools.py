@@ -1,7 +1,7 @@
 """Personal AI tools: per-user switches and the web-tainted mark on stored answers
 
-Revision ID: 0098_personal_ai_tools
-Revises: 0097_entitlement_grants
+Revision ID: 0099_personal_ai_tools
+Revises: 0098_entitlement_grants
 Create Date: 2026-10-08 00:00:00
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0098_personal_ai_tools"
-down_revision: str | None = "0097_entitlement_grants"
+revision: str = "0099_personal_ai_tools"
+down_revision: str | None = "0098_entitlement_grants"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
