@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -1189,10 +1190,113 @@ class GroupGame:
 
 
 class GameStore:
+    """Registry of in-process group games.
+
+    Locking model:
+
+    * ``_registry_lock`` guards the game registries (``_by_id`` /
+      ``_active_by_chat``) and the per-game lock table itself. It is only held
+      for short, await-free critical sections, so it never serializes the state
+      mutations of independent games.
+    * Every ``game_id`` gets its own ``asyncio.Lock``, created on demand: two
+      actions of the same game still serialize, actions of different games do
+      not block each other.
+    * Per-game locks are reference counted. As soon as the last holder or
+      waiter releases one it is dropped from the table, so the registry cannot
+      grow without bound.
+    * Lock ordering: a per-game lock may be held while taking
+      ``_registry_lock`` (for example when retiring the active game of a chat),
+      but ``_registry_lock`` is never held while waiting for a per-game lock.
+    """
+
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
+        self._registry_lock = asyncio.Lock()
+        self._game_locks: dict[str, asyncio.Lock] = {}
+        self._game_lock_refs: dict[str, int] = {}
         self._by_id: dict[str, GroupGame] = {}
         self._active_by_chat: dict[int, str] = {}
+
+    @asynccontextmanager
+    async def _lock_game(self, game_id: str) -> AsyncIterator[None]:
+        """Serialize operations that touch a single game.
+
+        The lock object is created on first use and reference counted, so the
+        table only keeps locks that are currently held or awaited.
+        """
+        async with self._registry_lock:
+            lock = self._game_locks.get(game_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._game_locks[game_id] = lock
+            self._game_lock_refs[game_id] = self._game_lock_refs.get(game_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            async with self._registry_lock:
+                remaining = self._game_lock_refs.get(game_id, 1) - 1
+                if remaining > 0:
+                    self._game_lock_refs[game_id] = remaining
+                else:
+                    self._game_lock_refs.pop(game_id, None)
+                    self._game_locks.pop(game_id, None)
+
+    def _forget_active_locked(self, game: GroupGame) -> None:
+        """Retire the chat -> game mapping of ``game`` (caller holds ``_registry_lock``).
+
+        Only a mapping that still points at this game is removed, so a rematch
+        lobby created in the meantime keeps owning the chat.
+        """
+        if self._active_by_chat.get(game.chat_id) == game.game_id:
+            self._active_by_chat.pop(game.chat_id, None)
+
+    async def _cache_hydrated_game(self, game: GroupGame) -> bool:
+        """Publish a game loaded from Redis into the local registry.
+
+        Returns ``False`` when the game is already in memory: the in-memory
+        copy is authoritative, so the loaded payload must not replace it.
+        """
+        async with self._registry_lock:
+            if game.game_id in self._by_id:
+                return False
+            self._by_id[game.game_id] = game
+            if game.status != "finished":
+                self._active_by_chat[game.chat_id] = game.game_id
+            return True
+
+    @asynccontextmanager
+    async def _lock_active_game(self, chat_id: int) -> AsyncIterator[GroupGame | None]:
+        """Lock the game that is currently active in a chat.
+
+        The chat -> game mapping is read under ``_registry_lock`` and verified
+        again while the per-game lock is held, so a lobby that replaced the
+        previous game in between is picked up instead of being ignored.
+        """
+        for _ in range(4):
+            async with self._registry_lock:
+                active_id = self._active_by_chat.get(chat_id)
+            if active_id is None:
+                break
+            async with self._lock_game(active_id):
+                async with self._registry_lock:
+                    if self._active_by_chat.get(chat_id) != active_id:
+                        continue
+                    game = self._by_id.get(active_id)
+                if game is None or game.status == "finished":
+                    break
+                yield game
+                return
+        yield None
+
+    async def _active_game_ids(self) -> set[str]:
+        """Game ids that are currently mapped to a chat."""
+        async with self._registry_lock:
+            return set(self._active_by_chat.values())
+
+    async def _games_snapshot(self) -> tuple[set[str], dict[str, GroupGame]]:
+        """Snapshot the registry so callers can iterate it without racing writers."""
+        async with self._registry_lock:
+            return set(self._active_by_chat.values()), dict(self._by_id)
 
     async def create_lobby(
         self,
@@ -1208,7 +1312,7 @@ class GameStore:
         zlob_category: str | None = None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._registry_lock:
             active_id = self._active_by_chat.get(chat_id)
             if active_id:
                 active_game = self._by_id.get(active_id)
@@ -1264,7 +1368,7 @@ class GameStore:
             return game, None
 
     async def set_message_id(self, *, game_id: str, message_id: int) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1272,7 +1376,7 @@ class GameStore:
             return game
 
     async def set_execution_confirm_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1280,7 +1384,7 @@ class GameStore:
             return game
 
     async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1288,13 +1392,8 @@ class GameStore:
             return game
 
     async def set_player_label(self, *, chat_id: int, user_id: int, user_label: str) -> GroupGame | None:
-        async with self._lock:
-            active_id = self._active_by_chat.get(chat_id)
-            if active_id is None:
-                return None
-
-            game = self._by_id.get(active_id)
-            if game is None or game.status == "finished":
+        async with self._lock_active_game(chat_id) as game:
+            if game is None:
                 return None
             if user_id not in game.players:
                 return game
@@ -1303,7 +1402,7 @@ class GameStore:
             return game
 
     async def set_mafia_reveal_eliminated_role(self, *, game_id: str, reveal_eliminated_role: bool) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1316,7 +1415,7 @@ class GameStore:
             return game, None
 
     async def set_bred_rounds(self, *, game_id: str, rounds: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1333,7 +1432,7 @@ class GameStore:
             return game, None
 
     async def set_zlob_rounds(self, *, game_id: str, rounds: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1350,7 +1449,7 @@ class GameStore:
             return game, None
 
     async def set_zlob_target_score(self, *, game_id: str, target_score: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1367,7 +1466,7 @@ class GameStore:
             return game, None
 
     async def set_bunker_seats(self, *, game_id: str, seats: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1394,7 +1493,7 @@ class GameStore:
         this when the source game's seats were genuinely tuned by a human;
         an auto-computed count should be left alone so the new lobby keeps
         auto-scaling as players join."""
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1410,7 +1509,7 @@ class GameStore:
         game_id: str,
         category: str | None,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1433,7 +1532,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1459,7 +1558,7 @@ class GameStore:
         category: str | None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1485,7 +1584,7 @@ class GameStore:
         game_id: str,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1515,7 +1614,7 @@ class GameStore:
         category: str | None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1541,7 +1640,7 @@ class GameStore:
         game_id: str,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1565,23 +1664,17 @@ class GameStore:
             return game, None
 
     async def get_game(self, game_id: str) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             return self._by_id.get(game_id)
 
     async def get_active_game_for_chat(self, *, chat_id: int) -> GroupGame | None:
-        async with self._lock:
-            active_id = self._active_by_chat.get(chat_id)
-            if active_id is None:
-                return None
-            game = self._by_id.get(active_id)
-            if game is None or game.status == "finished":
-                return None
+        async with self._lock_active_game(chat_id) as game:
             return game
 
     async def list_active_games(self, *, chat_ids: set[int] | None = None) -> list[GroupGame]:
-        async with self._lock:
-            games: list[GroupGame] = []
-            for game_id in self._active_by_chat.values():
+        games: list[GroupGame] = []
+        for game_id in await self._active_game_ids():
+            async with self._lock_game(game_id):
                 game = self._by_id.get(game_id)
                 if game is None or game.status == "finished":
                     continue
@@ -1589,11 +1682,11 @@ class GameStore:
                     continue
                 games.append(game)
 
-            games.sort(
-                key=lambda item: item.started_at or item.created_at,
-                reverse=True,
-            )
-            return games
+        games.sort(
+            key=lambda item: item.started_at or item.created_at,
+            reverse=True,
+        )
+        return games
 
     async def list_recent_games_for_user(
         self,
@@ -1602,27 +1695,27 @@ class GameStore:
         chat_ids: set[int] | None = None,
         limit: int = 6,
     ) -> list[GroupGame]:
-        async with self._lock:
-            games = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.status == "finished"
-                    and user_id in game.players
-                    and (chat_ids is None or game.chat_id in chat_ids)
-                )
-            ]
-            games.sort(
-                key=lambda item: item.started_at or item.created_at,
-                reverse=True,
+        _, games_by_id = await self._games_snapshot()
+        games = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.status == "finished"
+                and user_id in game.players
+                and (chat_ids is None or game.chat_id in chat_ids)
             )
-            return games[: max(1, limit)]
+        ]
+        games.sort(
+            key=lambda item: item.started_at or item.created_at,
+            reverse=True,
+        )
+        return games[: max(1, limit)]
 
     async def migrate_chat_id(self, *, old_chat_id: int, new_chat_id: int, new_chat_title: str | None = None) -> int:
         if old_chat_id == new_chat_id:
             return 0
 
-        async with self._lock:
+        async with self._registry_lock:
             migrated = 0
             old_active_id = self._active_by_chat.pop(old_chat_id, None)
             if old_active_id is not None and new_chat_id not in self._active_by_chat:
@@ -1641,7 +1734,7 @@ class GameStore:
             return migrated
 
     async def join(self, *, game_id: str, user_id: int, user_label: str) -> tuple[GroupGame | None, str]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "not_found"
@@ -1659,7 +1752,7 @@ class GameStore:
             return game, "joined"
 
     async def leave(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "not_found"
@@ -1674,7 +1767,7 @@ class GameStore:
             return game, "left"
 
     async def start(self, *, game_id: str, actions_18_enabled: bool = True) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1959,7 +2052,7 @@ class GameStore:
             return game, "Неизвестный тип игры"
 
     async def finish(self, *, game_id: str, winner_text: str | None = None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1969,85 +2062,86 @@ class GameStore:
             game.winner_text = winner_text
             game.execution_confirm_message_id = None
             game.quiz_feed_message_id = None
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
             return game
 
     async def get_role(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None
             return game, game.roles.get(user_id)
 
     async def get_latest_role_game_for_user(self, *, user_id: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind in {"spy", "mafia", "whoami"}
-                    and game.status == "started"
-                    and game.roles
-                    and user_id in game.roles
-                )
-            ]
-            if not candidates:
-                return None, None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind in {"spy", "mafia", "whoami"}
+                and game.status == "started"
+                and game.roles
+                and user_id in game.roles
+            )
+        ]
+        if not candidates:
+            return None, None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            game = candidates[0]
-            return game, game.roles.get(user_id)
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        game = candidates[0]
+        return game, game.roles.get(user_id)
 
     async def get_latest_bunker_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if game.kind == "bunker" and game.status == "started" and user_id in game.players
-            ]
-            if not candidates:
-                return None
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if game.kind == "bunker" and game.status == "started" and user_id in game.players
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def get_latest_bred_submission_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind == "bredovukha"
-                    and game.status == "started"
-                    and game.phase == "private_answers"
-                    and user_id in game.players
-                )
-            ]
-            if not candidates:
-                return None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind == "bredovukha"
+                and game.status == "started"
+                and game.phase == "private_answers"
+                and user_id in game.players
+            )
+        ]
+        if not candidates:
+            return None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def get_latest_zlob_submission_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind == "zlobcards"
-                    and game.status == "started"
-                    and game.phase == "private_answers"
-                    and user_id in game.players
-                )
-            ]
-            if not candidates:
-                return None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind == "zlobcards"
+                and game.status == "started"
+                and game.phase == "private_answers"
+                and user_id in game.players
+            )
+        ]
+        if not candidates:
+            return None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def bred_get_category_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int | None, tuple[str, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, ()
@@ -2060,7 +2154,7 @@ class GameStore:
         actor_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, str | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2091,7 +2185,7 @@ class GameStore:
             return game, category, None
 
     async def bred_force_pick_category(self, *, game_id: str) -> tuple[GroupGame | None, str | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2127,7 +2221,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, SpyVoteResolution | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, None, "Игра не найдена"
@@ -2182,7 +2276,8 @@ class GameStore:
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
 
             resolution = SpyVoteResolution(
                 candidate_user_id=candidate_user_id,
@@ -2203,7 +2298,7 @@ class GameStore:
         actor_user_id: int,
         guessed_location: str,
     ) -> tuple[GroupGame | None, SpyGuessResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2232,7 +2327,8 @@ class GameStore:
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
 
             resolution = SpyGuessResolution(
                 spy_user_id=actor_user_id,
@@ -2249,7 +2345,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None, 0
@@ -2276,7 +2372,7 @@ class GameStore:
         actor_user_id: int,
         question_text: str,
     ) -> tuple[GroupGame | None, WhoamiQuestionResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2322,7 +2418,7 @@ class GameStore:
         responder_user_id: int,
         answer_code: Literal["yes", "no", "unknown", "irrelevant"],
     ) -> tuple[GroupGame | None, WhoamiAnswerResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2392,7 +2488,7 @@ class GameStore:
         actor_user_id: int,
         guess_text: str,
     ) -> tuple[GroupGame | None, WhoamiGuessResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2453,7 +2549,8 @@ class GameStore:
                     game.phase = "finished"
                     game.winner_text = winner_text
                     game.whoami_current_actor_user_id = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                 else:
                     self._advance_whoami_turn(game)
                     game.phase = "whoami_ask"
@@ -2508,7 +2605,7 @@ class GameStore:
         game_id: str,
         user_id: int,
     ) -> tuple[GroupGame | None, DiceRollResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2534,7 +2631,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
 
             return (
                 game,
@@ -2556,7 +2654,7 @@ class GameStore:
         user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, QuizAnswerResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2590,7 +2688,7 @@ class GameStore:
             )
 
     async def quiz_get_answer_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -2603,7 +2701,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, QuizRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2646,7 +2744,8 @@ class GameStore:
                 game.phase = "finished"
                 game.winner_text = winner_text
                 game.quiz_current_question_index = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.quiz_current_question_index = next_question_index
                 game.round_no = next_question_index + 1
@@ -2678,7 +2777,7 @@ class GameStore:
         user_id: int,
         lie_text: str,
     ) -> tuple[GroupGame | None, BredSubmitResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2734,7 +2833,7 @@ class GameStore:
             )
 
     async def bred_get_submit_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -2748,7 +2847,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -2774,7 +2873,7 @@ class GameStore:
         voter_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, BredVoteResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2804,7 +2903,7 @@ class GameStore:
             )
 
     async def bred_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, tuple[int, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, ()
@@ -2828,7 +2927,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, BredRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2916,7 +3015,8 @@ class GameStore:
                 game.bred_question_prompt = None
                 game.bred_correct_answer = None
                 game.bred_fact_text = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 next_round_no = current_round_no + 1
                 next_selector_user_id = self._selector_for_round(game, round_no=next_round_no)
@@ -2931,7 +3031,8 @@ class GameStore:
                     game.bred_question_prompt = None
                     game.bred_correct_answer = None
                     game.bred_fact_text = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                     finished = True
                 else:
                     next_selector_label = game.players.get(next_selector_user_id, f"user:{next_selector_user_id}")
@@ -2959,7 +3060,8 @@ class GameStore:
                         game.bred_question_prompt = None
                         game.bred_correct_answer = None
                         game.bred_fact_text = None
-                        self._active_by_chat.pop(game.chat_id, None)
+                        async with self._registry_lock:
+                            self._forget_active_locked(game)
                         finished = True
                         next_round_no = None
                         next_selector_user_id = None
@@ -2994,7 +3096,7 @@ class GameStore:
         user_id: int,
         card_indexes: tuple[int, ...],
     ) -> tuple[GroupGame | None, ZlobSubmitResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3049,7 +3151,7 @@ class GameStore:
             )
 
     async def zlob_get_submit_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -3062,7 +3164,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3088,7 +3190,7 @@ class GameStore:
         voter_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, ZlobVoteResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3125,7 +3227,7 @@ class GameStore:
             )
 
     async def zlob_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, tuple[int, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, ()
@@ -3149,7 +3251,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, ZlobRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3245,7 +3347,8 @@ class GameStore:
                 game.winner_text = winner_text
                 game.zlob_black_text = None
                 game.zlob_black_slots = 1
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 next_round_no = current_round_no + 1
                 game.round_no = next_round_no
@@ -3262,7 +3365,8 @@ class GameStore:
                     game.winner_text = winner_text
                     game.zlob_black_text = None
                     game.zlob_black_slots = 1
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                     finished = True
                     next_round_no = None
 
@@ -3289,7 +3393,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None
@@ -3306,7 +3410,7 @@ class GameStore:
         actor_user_id: int,
         field_key: str,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3354,7 +3458,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3405,7 +3509,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3430,7 +3534,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None, 0
@@ -3461,7 +3565,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, BunkerVoteResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3521,7 +3625,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
                 next_phase = "finished"
             else:
                 game.round_no += 1
@@ -3561,7 +3666,7 @@ class GameStore:
         actor_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3722,7 +3827,7 @@ class GameStore:
             return game, "У вашей роли нет ночного действия"
 
     async def mafia_is_night_ready(self, *, game_id: str) -> tuple[GroupGame | None, bool, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, False, "Игра не найдена"
@@ -3789,7 +3894,7 @@ class GameStore:
             return game, bool(required_checks and all(required_checks)), None
 
     async def mafia_open_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3811,7 +3916,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3833,7 +3938,7 @@ class GameStore:
             return game, previous_target_user_id, None
 
     async def mafia_resolve_night(self, *, game_id: str) -> tuple[GroupGame | None, NightResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4367,7 +4472,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.phase = "day_discussion"
                 game.phase_started_at = datetime.now(timezone.utc)
@@ -4390,7 +4496,7 @@ class GameStore:
             return game, resolution, None
 
     async def mafia_resolve_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4442,7 +4548,8 @@ class GameStore:
                     game.phase = "finished"
                     game.winner_text = winner_text
                     game.execution_confirm_message_id = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                 else:
                     game.round_no += 1
                     game.phase = "night"
@@ -4474,7 +4581,7 @@ class GameStore:
         voter_user_id: int,
         approve: bool,
     ) -> tuple[GroupGame | None, bool | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4490,7 +4597,7 @@ class GameStore:
             return game, previous, None
 
     async def mafia_is_execution_confirm_ready(self, *, game_id: str) -> tuple[GroupGame | None, bool, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, False, "Игра не найдена"
@@ -4508,7 +4615,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, ExecutionConfirmResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4571,7 +4678,8 @@ class GameStore:
                 game.phase = "finished"
                 game.winner_text = winner_text
                 game.execution_confirm_message_id = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.round_no += 1
                 game.phase = "night"
@@ -4594,7 +4702,7 @@ class GameStore:
             return game, resolution, None
 
     async def mafia_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -4603,7 +4711,7 @@ class GameStore:
             return game, unique_votes, alive
 
     async def mafia_get_execution_confirm_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, 0, 0
@@ -5753,6 +5861,13 @@ class RuntimeGameStore:
       half-open Redis can never pin the single recovery task forever.
     * ``close()`` is terminal: it cancels the recovery loop, sets ``_closed``
       and no later Redis error can re-arm recovery or start a new task.
+
+    Lock order across layers: a game lock (``GameStore._lock_game``) may take
+    ``GameStore._registry_lock`` and nothing else, and no game lock is ever
+    held across a Redis call. The per-chat write lock wraps Redis I/O only and
+    is never held while a game or registry lock is taken; handler syncs take
+    it after their mutation has released its game lock. Nothing nests in the
+    reverse direction, so the two layers cannot deadlock.
     """
 
     _RECOVERY_RETRY_SECONDS = 15.0
@@ -6081,7 +6196,7 @@ class RuntimeGameStore:
         writes are awaited, so ``_attempt_recovery`` runs a second push after
         the live repo/broker are wired in.
         """
-        games = dict(self._backend._by_id)
+        _, games = await self._backend._games_snapshot()
         for game in games.values():
             await self._save_game_until_stable(repo, game)
         await self._reassert_active_pointers(repo, games=games)
@@ -6176,14 +6291,17 @@ class RuntimeGameStore:
             raise
 
     async def _hydrate_game(self, game_id: str) -> None:
-        if self._state_repo is None or game_id in self._backend._by_id:
+        if self._state_repo is None:
+            return
+        if game_id in self._backend._by_id:
             return
         game = await self._state_repo.load_game(game_id)
         if game is None:
             return
-        self._backend._by_id[game_id] = game
-        if game.status != "finished":
-            self._backend._active_by_chat[game.chat_id] = game.game_id
+        # The in-memory copy always wins: a game another task registered while
+        # this load was in flight is kept, and the loaded payload is dropped.
+        if not await self._backend._cache_hydrated_game(game):
+            return
         # Hydration changes the state pointer re-assertion reads; bump the
         # version so an in-flight pointer write for this chat is retried.
         self._game_state_version += 1
@@ -6249,7 +6367,8 @@ class RuntimeGameStore:
         # lease defers closing the repo until the last such sync is done.
         self._repo_sync_leases[repo] = self._repo_sync_leases.get(repo, 0) + 1
         try:
-            for game in list(self._backend._by_id.values()):
+            _, games = await self._backend._games_snapshot()
+            for game in games.values():
                 await self._save_game_until_stable(repo, game)
         finally:
             remaining = self._repo_sync_leases.pop(repo) - 1
@@ -6329,7 +6448,8 @@ class RuntimeGameStore:
         if not games:
             game_id = kwargs.get("game_id")
             if isinstance(game_id, str):
-                current = self._backend._by_id.get(game_id)
+                async with self._backend._registry_lock:
+                    current = self._backend._by_id.get(game_id)
                 if current is not None:
                     games = [current]
         if not games:
