@@ -157,3 +157,53 @@ async def test_interesting_fact_scheduler_does_not_persist_state_on_send_error(
         assert state is None
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_is_not_resent_when_state_persist_fails_after_send(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100901, chat_type="group", title="Facts")
+    human = UserSnapshot(telegram_user_id=1, username="human", first_name="Human", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_chat_settings(chat=chat, values=settings_to_dict(_fact_settings()))
+        await repo.upsert_activity(chat=chat, user=human, event_at=now - timedelta(hours=5))
+        await session.commit()
+
+    path = tmp_path / "facts.json"
+    path.write_text('["Тестовый факт"]', encoding="utf-8")
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=501)))
+    scheduler = InterestingFactsScheduler(
+        bot=bot,
+        session_factory=session_factory,
+        catalog=InterestingFactCatalog(path),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    original_upsert = SqlAlchemyActivityRepository.upsert_chat_interesting_fact_state
+
+    async def failing_upsert(self, **kwargs):
+        raise RuntimeError("db unavailable after send")
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "upsert_chat_interesting_fact_state", failing_upsert)
+    assert await scheduler.run_once(now=now) == 1
+
+    # The DB recovers; the next tick is still inside the 180 minute interval.
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "upsert_chat_interesting_fact_state", original_upsert)
+    assert await scheduler.run_once(now=now + timedelta(minutes=5)) == 0
+    bot.send_message.assert_awaited_once()
+
+    await engine.dispose()
