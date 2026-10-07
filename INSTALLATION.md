@@ -245,6 +245,11 @@ docker compose logs -f app
 
 ### 5.1 Публикация образа
 
+Для production используйте `Publish Docker Image` после CI на `main`: он
+сохраняет единый digest manifest app/web/gacha. Номер успешного запуска —
+release ID для deploy. Команды ниже публикуют только удобный mutable alias
+для ручных экспериментов, без production release manifest.
+
 ```bash
 docker build -t ghcr.io/<your-user>/selara:latest .
 docker push ghcr.io/<your-user>/selara:latest
@@ -253,7 +258,9 @@ docker push ghcr.io/<your-user>/selara:latest
 ### 5.2 Настройка окружения на VPS
 
 ```env
-SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
+# Digest из release manifest; workflow задаёт образы из manifest самостоятельно.
+SELARA_IMAGE=ghcr.io/<your-user>/selara@sha256:<digest>
+SELARA_WEB_IMAGE=ghcr.io/<your-user>/selara-web@sha256:<digest>
 SELARA_POSTGRES_DB=selara
 SELARA_POSTGRES_USER=selara
 SELARA_POSTGRES_PASSWORD=<сгенерированный_пароль_БД>
@@ -280,11 +287,15 @@ openssl rand -hex 32
 WEB_AUTH_SECRET=<сгенерированный_секрет>
 ```
 
-Только после этого выполняйте обновление:
+Только после этого запустите `Deploy To VPS` с `release_run_id` успешного
+publisher на `main`. Workflow загрузит фиксированный manifest, проверит
+запущенные image IDs/digests и сохранит previous release для rollback.
+Подробности и ограничения срока хранения: [IMMUTABLE_DEPLOY.md](docs/IMMUTABLE_DEPLOY.md).
+
+При ручном обновлении с тем же manifest:
 
 ```bash
-docker compose pull app
-docker compose up -d app
+python3 scripts/release_manifest.py deploy /path/to/manifest.json
 ```
 
 ---
