@@ -51,18 +51,27 @@ runs:
         fi
 
         mkdir -p "$DEBS"
+        export DEBS APT_OPTS
         finish() {
           sudo chown -R "$(id -u):$(id -g)" "$DEBS"
           rm -rf "$DEBS/partial" "$DEBS/lock"
         }
 
-        # The runner image already has a package index, so try without `update`
-        # first: it skips the mirror round trips that stall on bad days.
-        # shellcheck disable=SC2086
-        if timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
-          finish
-          exit 0
-        fi
+        # Download the .debs ourselves, 8 at a time. The hosted mirror stalls
+        # for tens of seconds per file on bad days, and parallel downloads
+        # overlap those stalls; apt then installs from the local files.
+        fetch() {
+          local base
+          base=$(head -1 /etc/apt/apt-mirrors.txt 2>/dev/null | sed 's#/*$##')
+          # shellcheck disable=SC2086
+          sudo apt-get $APT_OPTS --print-uris -qq install -y --no-install-recommends $PKGS 2>/dev/null \
+            | sed -n "s/^'\([^']*\)' \([^ ]*\) .*/\1 \2/p" \
+            | sed "s#^mirror+file:/etc/apt/apt-mirrors.txt#$base#" \
+            | grep -E '^https?://' \
+            | DEBS="$DEBS" xargs -P 8 -L1 sh -c \
+                'if [ ! -s "$DEBS/$1" ]; then curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 -o "$DEBS/$1.part" "$0" && mv "$DEBS/$1.part" "$DEBS/$1"; fi' \
+            || true
+        }
 
         for attempt in 1 2 3; do
           if [ "$attempt" = "3" ]; then
@@ -71,10 +80,16 @@ runs:
             sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' \
               /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
           fi
-          # Each call is bounded so a stalled mirror fails the attempt in ~3 minutes.
+          # The runner image already has a package index, so the first attempt
+          # skips `apt-get update` and its mirror round trips.
+          if [ "$attempt" != "1" ]; then
+            # shellcheck disable=SC2086
+            timeout 60 sudo apt-get $APT_OPTS update || true
+          fi
+          # Every step is bounded so a stalled mirror fails an attempt in ~5 minutes at most.
+          timeout 150 bash -c "$(declare -f fetch); fetch" || true
           # shellcheck disable=SC2086
-          if timeout 60 sudo apt-get $APT_OPTS update \
-            && timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
+          if timeout 120 sudo apt-get $APT_OPTS install -y --no-install-recommends $PKGS; then
             finish
             exit 0
           fi
