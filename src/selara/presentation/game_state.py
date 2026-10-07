@@ -5710,6 +5710,10 @@ class RuntimeGameStore:
     def live_broker(self) -> LiveEventBroker | None:
         return self._broker
 
+    @property
+    def durable_runtime_ready(self) -> bool:
+        return self._state_repo is not None and self._broker is not None and not self._redis_degraded
+
     def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
         ttl = timedelta(hours=max(1, ttl_hours))
         self._backend = InMemoryGameStore()

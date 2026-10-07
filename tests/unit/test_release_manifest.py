@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -74,6 +75,8 @@ class DockerFake:
                 "Config": {"Image": "latest" if self.mismatch == "container-ref" else self.data["images"][name]},
                 "State": {"Running": self.mismatch != "stopped"},
             }])
+        if args[:3] == ("exec", "web-container", "sha256sum"):
+            return hashlib.sha256(b'<html><div id="root"></div></html>\n').hexdigest() + "  index.html\n"
         if args[0] == "exec" and self.health_fail:
             raise subprocess.CalledProcessError(1, args)
         return ""
@@ -120,7 +123,7 @@ def test_failed_health_check_preserves_known_release(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         release.deploy_release(manifest(), tmp_path, runner=runner, sleeper=lambda _: None)
     assert json.loads((tmp_path / "current.json").read_text()) == old
-    assert len([call for call in runner.calls if call[0] == "exec"]) == 6
+    assert len([call for call in runner.calls if call[:2] == ("exec", "app-container")]) == 6
 
 
 def test_known_release_id_cannot_be_rebound_to_new_digest(tmp_path):
@@ -141,13 +144,53 @@ def test_renderer_exit_during_app_start_does_not_promote(tmp_path):
 
     def crash_after_app_health(*args, env):
         result = runner(*args, env=env)
-        if args[0] == "exec":
+        if args[:2] == ("exec", "app-container"):
             runner.mismatch = "stopped"
         return result
 
     with pytest.raises(ValueError, match="Final"):
         release.deploy_release(manifest(), tmp_path, runner=crash_after_app_health)
     assert json.loads((tmp_path / "current.json").read_text()) == old
+
+
+@pytest.mark.parametrize("failure", [None, "public-not-ready", "wrong-frontend"])
+def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, monkeypatch, failure):
+    import urllib.request
+
+    monkeypatch.setenv("WEB_BASE_URL", "https://bot.example.com/")
+    monkeypatch.setenv("WEB_PORT", "8080")
+    visited = []
+
+    def public_http(url, timeout):
+        visited.append(url)
+        if url.endswith("/miniapp/"):
+            body = b"old build" if failure == "wrong-frontend" else b'<html><div id="root"></div></html>\n'
+        else:
+            body = json.dumps({"status": "ok", "checks": {
+                "database": True, "redis": True,
+                "polling": not (failure == "public-not-ready" and "example.com" in url),
+            }}).encode()
+        return type("Response", (), {"read": lambda self: body})()
+
+    monkeypatch.setattr(urllib.request, "urlopen", public_http)
+    runner = DockerFake(manifest())
+
+    def probe_runner(*args, env):
+        result = runner(*args, env=env)
+        if args[:2] == ("exec", "app-container"):
+            try:
+                exec(args[-1], {})
+            except AssertionError as error:
+                raise subprocess.CalledProcessError(1, args) from error
+        return result
+
+    if failure:
+        with pytest.raises(subprocess.CalledProcessError):
+            release.deploy_release(manifest(), tmp_path, runner=probe_runner, sleeper=lambda _: None)
+        assert not (tmp_path / "current.json").exists()
+    else:
+        release.deploy_release(manifest(), tmp_path, runner=probe_runner)
+        assert {"http://127.0.0.1:8080/readyz", "https://bot.example.com/miniapp/readyz", "https://bot.example.com/miniapp/"} <= set(visited)
 
 
 def test_release_workflows_use_manifest_and_fail_before_ssh():

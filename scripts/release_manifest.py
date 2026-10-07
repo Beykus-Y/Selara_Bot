@@ -108,10 +108,21 @@ def deploy_release(manifest: dict, state_dir: Path, *, runner=docker, sleeper=ti
         containers[service] = {"container_id": container_id,
                                "image_id": expected_ids[image_name], "image": reference}
     app_id = containers["app"]["container_id"]
+    # Verify the public frontend is this exact deployed build, not a stale
+    # reverse-proxy upstream or an unrelated HTTP 200 page.
+    index_hash = runner("exec", containers["web"]["container_id"], "sha256sum",
+                        "/usr/share/nginx/html/index.html", env=env).split()[0]
+    if not re.fullmatch(r"[0-9a-f]{64}", index_hash):
+        raise ValueError("Invalid deployed frontend checksum")
     health_command = (
-        "import os, urllib.request; "
+        "import hashlib, json, os, urllib.request; "
         "port = int(os.environ.get('WEB_PORT', '8080')); "
-        "urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=5).read()"
+        "urllib.request.urlopen(f'http://127.0.0.1:{port}/readyz', timeout=5).read(); "
+        "base = os.environ['WEB_BASE_URL'].rstrip('/'); "
+        "ready = json.loads(urllib.request.urlopen(base + '/miniapp/readyz', timeout=5).read()); "
+        "assert ready['status'] == 'ok' and set(ready['checks']) == {'database', 'redis', 'polling'} and all(ready['checks'].values()); "
+        "page = urllib.request.urlopen(base + '/miniapp/', timeout=5).read(); "
+        f"assert hashlib.sha256(page).hexdigest() == '{index_hash}', 'Public frontend build mismatch'"
     )
     for attempt in range(6):
         try:
