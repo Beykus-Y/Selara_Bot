@@ -16,6 +16,7 @@ from selara.application.personal_memory import (
 from selara.application.model_router import ResolvedModel
 from selara.infrastructure.db.personal_ai_repository import AddMemoryStatus, PersonalAiRepository
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
+from selara.infrastructure.llm.personal_tools import PersonalToolRun, run_tool_dialogue
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,17 @@ MAX_USER_TEXT_LENGTH = 4000
 MAX_TOKENS_PERSONAL_REPLY = 1500
 MAX_TOKENS_PERSONAL_SUMMARY = 1500
 MAX_TOKENS_MEMORY_EXTRACT = 400
+
+# What later turns and summaries see instead of an answer that was written from web content: its text stays
+# with the user in Telegram, but a poisoned page must not be able to plant instructions in future context.
+WEB_ANSWER_PLACEHOLDER = "[ответ по результатам поиска в интернете, текст не сохранён в контексте]"
+
+
+def history_content(row) -> str:
+    if row.role == "assistant" and getattr(row, "web_tainted", False):
+        return WEB_ANSWER_PLACEHOLDER
+    return row.content
+
 
 _COMPRESSION_PROMPT = (
     "Сожми личный диалог пользователя с AI-собеседником в краткое резюме на русском языке. "
@@ -43,7 +55,7 @@ async def load_history(
     recent = await repo.recent_messages(user_id=user_id, thread=thread, limit=PERSONAL_CONTEXT_THRESHOLD)
     return (
         summary.content if summary is not None else None,
-        [HistoryMessage(role=row.role, content=row.content) for row in recent],
+        [HistoryMessage(role=row.role, content=history_content(row)) for row in recent],
     )
 
 
@@ -58,8 +70,14 @@ async def generate_reply(
     use_memory: bool = False,
     resolved_model: ResolvedModel | None = None,
     usage_sink: list | None = None,
+    tool_run: PersonalToolRun | None = None,
+    outcome_sink: dict | None = None,
 ) -> str:
-    """Ask the model for one reply. No tools are offered: a private chat can never act on groups.
+    """Ask the model for one reply.
+
+    Without ``tool_run`` (every tool off, the default) this is one plain completion. With one, the model may use the
+    small allow-listed tool set of :mod:`personal_tools`; ``outcome_sink`` then receives ``web_tainted`` and
+    ``artifact_sent``. A private chat can never act on groups either way.
 
     ``usage_sink`` receives the provider usages of this chat turn only (what AIL settlement prices).
     """
@@ -76,6 +94,21 @@ async def generate_reply(
     # Everything the model needs is in memory: end the read transaction so no pooled connection
     # stays "idle in transaction" for the whole (slow) provider call.
     await repo.commit()
+    if tool_run is not None and tool_run.active:
+        messages.insert(1, {"role": "system", "content": tool_run.prompt_block()})
+        turn = await run_tool_dialogue(
+            llm_client=llm_client,
+            messages=messages,
+            run=tool_run,
+            accounting_context=accounting_context,
+            resolved_model=resolved_model,
+            usage_sink=usage_sink,
+        )
+        if outcome_sink is not None:
+            outcome_sink["web_tainted"] = turn.web_tainted
+            outcome_sink["artifact_sent"] = turn.artifact_sent
+            outcome_sink["source_domains"] = list(tool_run.source_domains)
+        return turn.text
     kwargs: dict = {"max_tokens": MAX_TOKENS_PERSONAL_REPLY}
     if accounting_context is not None:
         kwargs["accounting_context"] = accounting_context
@@ -105,7 +138,7 @@ async def maybe_compress_personal(
         return False
     previous = await repo.latest_summary(user_id=user_id, thread=thread)
     # Plain values only: the transaction ends before the provider call, so ORM rows must not be touched after it.
-    rows = [(m.id, m.role, m.content, m.created_at) for m in batch]
+    rows = [(m.id, m.role, history_content(m), m.created_at) for m in batch]
     previous_text = previous.content if previous is not None else None
     await repo.commit()
 

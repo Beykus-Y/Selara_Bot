@@ -53,8 +53,12 @@ from selara.core.config import Settings
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
+from selara.infrastructure.db.artifact_repository import ArtifactRepository
+from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
+from selara.infrastructure.llm.personal_tools import PersonalToolRun
+from selara.infrastructure.llm.web_tools import WebToolContext
 from selara.infrastructure.llm.personal_ai import (
     MAX_USER_TEXT_LENGTH,
     generate_reply,
@@ -207,8 +211,34 @@ def failed_turn_cost_usd(usages) -> Decimal | None:
     return sum((Decimal(usage.estimated_cost_usd) for usage in answered), Decimal(0))
 
 
+_TOOLS_RESERVE_HINT = (
+    "\n\nЗапрос с инструментами резервирует больше AIL. Их можно выключить: /ai → Поведение и настройки → Инструменты."
+)
+
+
+async def _tool_flags(user_id: int, stored: StoredProfile, choice, deps: _ModelDeps | None) -> tuple[bool, bool] | None:
+    """(web, artifacts) for this turn, or ``None`` when it runs without tools.
+
+    Read from the database on every turn: switched off means gone from the next message. Tools need an active
+    Selara Personal, the assistant mode (never role play) and a model that supports them.
+    """
+    if stored.profile.mode != "assistant" or deps is None:
+        return None
+    web_on = bool(stored.tools_web_enabled and deps.web_available)
+    artifacts_on = bool(stored.tools_artifacts_enabled)
+    if not (web_on or artifacts_on):
+        return None
+    capabilities = getattr(getattr(choice, "effective", None), "capabilities", None)
+    if capabilities is not None and not capabilities.supports_tools:
+        return None
+    if not await _has_personal(user_id, deps):
+        return None
+    return web_on, artifacts_on
+
+
 async def _settle_chat_turn(
-    access_service, *, config, invocation_id, usages, user_id: int, failed: bool = False
+    access_service, *, config, invocation_id, usages, user_id: int, failed: bool = False,
+    max_units: Decimal | None = None,
 ) -> None:
     """Replace the multiplier reservation by the request's actual cost; never fails the answer."""
     if invocation_id is None:
@@ -220,6 +250,9 @@ async def _settle_chat_turn(
         return
     try:
         units = ail_units_from_cost_usd(cost, config.ail_usd_value)
+        if max_units is not None:
+            # A tool turn is never charged above what its reservation (checked against the balance) covered.
+            units = min(units, max_units)
         await access_service.adjust(invocation_id=invocation_id, actual_units=units)
     except Exception:
         log.exception("personal_ai: AIL settlement failed user_id=%s invocation_id=%s", user_id, invocation_id)
@@ -558,6 +591,7 @@ async def ai_settings_command(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     if message.chat.type != "private" or message.from_user is None:
         await message.answer("Личные настройки Selara AI доступны в личных сообщениях с ботом: откройте диалог и отправьте /ai.")
@@ -567,7 +601,7 @@ async def ai_settings_command(
     stored = await repo.get_or_create_profile(message.from_user.id)
     await repo.commit()
     lines, label = await _model_lines(
-        message.from_user.id, stored, _model_deps(settings, session_factory, personal_config, llm_client)
+        message.from_user.id, stored, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
     )
     await message.answer(_profile_text(stored, lines), parse_mode="HTML", reply_markup=_main_keyboard(stored, label))
 
@@ -592,6 +626,7 @@ async def ai_settings_callback(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     if not _is_private_callback(query):
         await query.answer()
@@ -600,7 +635,7 @@ async def ai_settings_callback(
     action, args = (parts[1] if len(parts) > 1 else ""), parts[2:]
     repo = PersonalAiRepository(db_session)
     user_id = query.from_user.id
-    deps = _model_deps(settings, session_factory, personal_config, llm_client)
+    deps = _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
 
     if action == "close":
         _pending_inputs.pop(user_id, None)
@@ -731,6 +766,7 @@ async def ai_settings_input(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     personal_config: PersonalConfigProvider | None = None,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     user_id = message.from_user.id
     state = _get_pending_input(user_id)
@@ -755,7 +791,7 @@ async def ai_settings_input(
         await message.answer("Настройки изменились одновременно. Откройте /ai и повторите.")
         return
     await repo.commit()
-    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client))
+    lines, label = await _model_lines(user_id, updated, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client))
     await message.answer(
         "Сохранено.\n\n" + _profile_text(updated, lines), parse_mode="HTML", reply_markup=_main_keyboard(updated, label)
     )
@@ -823,6 +859,7 @@ async def personal_chat_handler(
     settings: Settings,
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None = None,
+    web_search_client=None,
 ) -> None:
     user_id = message.from_user.id
     fact = parse_remember_request(message.text)
@@ -836,7 +873,9 @@ async def personal_chat_handler(
         return
     _inflight_users.add(user_id)
     try:
-        await _handle_personal_chat(message, db_session, session_factory, settings, personal_config, llm_client)
+        await _handle_personal_chat(
+            message, db_session, session_factory, settings, personal_config, llm_client, web_search_client
+        )
     finally:
         _inflight_users.discard(user_id)
 
@@ -848,6 +887,7 @@ async def _handle_personal_chat(
     settings: Settings,
     personal_config: PersonalConfigProvider,
     llm_client: LlmClient | None,
+    web_search_client=None,
 ) -> None:
     user = message.from_user
     text = (message.text or "").strip()
@@ -878,6 +918,15 @@ async def _handle_personal_chat(
         selected_key=stored.model_profile_key,
         legacy_model=getattr(llm_client, "default_model", None) or settings.llm_model,
     )
+    tool_flags = await _tool_flags(
+        user.id, stored, choice, _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
+    )
+    tools_active = tool_flags is not None
+    reserve_units = choice.ail_cost
+    if tools_active and config.ail_settles_actual_cost:
+        # Tool turns cost several model calls: reserve a multiple up front (the balance must cover it) and settle
+        # to the real cost, never above that reservation.
+        reserve_units = choice.ail_cost * settings.personal_tools_reserve_factor
     # The quota service works in its own transactions and also upserts the user row: commit ours first,
     # otherwise a brand-new user's first request would wait on a lock held by this very handler.
     await db_session.commit()
@@ -900,7 +949,7 @@ async def _handle_personal_chat(
             mode=stored.profile.mode,
             owner_exempt=resolve_owner_private_exemption(user_id=user.id, admin_user_id=settings.admin_user_id),
             # Used only if the pool counts AI Limits; in requests mode a message is one request.
-            units=choice.ail_cost,
+            units=reserve_units,
             model_profile=choice.profile_key,
         )
     except Exception:
@@ -919,10 +968,11 @@ async def _handle_personal_chat(
                 ail_insufficient_message(
                     decision,
                     profile_name=choice.display_name,
-                    cost=choice.ail_cost,
+                    cost=reserve_units,
                     timezone_name=settings.bot_timezone,
                     can_buy=_offer_markup(settings, config, decision) is not None,
-                ),
+                )
+                + (_TOOLS_RESERVE_HINT if tools_active and reserve_units != choice.ail_cost else ""),
                 reply_markup=_offer_markup(settings, config, decision),
             )
         elif decision.reason == AccessReason.QUOTA_EXHAUSTED:
@@ -952,6 +1002,32 @@ async def _handle_personal_chat(
             telegram_message_id=message.message_id,
         )
 
+    tool_run = None
+    if tool_flags is not None:
+        web_on, artifacts_on = tool_flags
+        usd_per_ail = config.ail_usd_value
+        budget_units = reserve_units if config.ail_settles_actual_cost else choice.ail_cost * settings.personal_tools_reserve_factor
+        tool_run = PersonalToolRun(
+            web_enabled=web_on,
+            artifacts_enabled=artifacts_on,
+            web_context=WebToolContext(
+                client=web_search_client,
+                max_calls=settings.personal_web_max_calls,
+                max_results=settings.web_search_max_results,
+                max_page_chars=settings.personal_web_page_chars,
+            ),
+            artifact_context=ArtifactRequestContext(
+                repository=ArtifactRepository(db_session),
+                renderer_url=settings.artifact_renderer_url,
+                chat_id=user.id,
+                creator_id=user.id,
+                message_id=message.message_id,
+            ),
+            bot=message.bot,
+            total_rounds=settings.personal_tool_rounds,
+            cost_budget_usd=Decimal(budget_units) * Decimal(usd_per_ail) if usd_per_ail else None,
+        )
+    reply_outcome: dict = {}
     outcome = {"status": "failed", "error_category": "handler_error"}
     turn_usages: list = []
     try:
@@ -974,14 +1050,18 @@ async def _handle_personal_chat(
                 use_memory=stored.memory_enabled,
                 resolved_model=resolved_model,
                 usage_sink=turn_usages,
+                tool_run=tool_run,
+                outcome_sink=reply_outcome,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
             # A provider error is not charged the full reservation; with no attempt at all the release below runs.
-            if exc.usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+            failed_usages = [*turn_usages, *exc.usages]
+            if failed_usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
                 await _settle_chat_turn(
                     access_service, config=config, invocation_id=invocation_id,
-                    usages=exc.usages, user_id=user.id, failed=True,
+                    usages=failed_usages, user_id=user.id, failed=True,
+                    max_units=reserve_units if tools_active else None,
                 )
             await thinking.edit_text("⚠️ Не удалось получить ответ от AI. Попробуйте позже.")
             return
@@ -997,6 +1077,7 @@ async def _handle_personal_chat(
                 await _settle_chat_turn(
                     access_service, config=config, invocation_id=invocation_id,
                     usages=turn_usages, user_id=user.id, failed=True,
+                    max_units=reserve_units if tools_active else None,
                 )
             await thinking.edit_text("⚠️ AI не дал ответа. Попробуйте переформулировать.")
             return
@@ -1004,17 +1085,28 @@ async def _handle_personal_chat(
         # Settle now, before compression and memory extraction: only the chat turn's own cost is charged.
         if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
             await _settle_chat_turn(
-                access_service, config=config, invocation_id=invocation_id, usages=turn_usages, user_id=user.id
+                access_service, config=config, invocation_id=invocation_id, usages=turn_usages, user_id=user.id,
+                max_units=reserve_units if tools_active else None,
             )
+        web_tainted = bool(reply_outcome.get("web_tainted"))
         await repo.add_message(
             user_id=user.id, thread=thread, role="user", content=text, telegram_message_id=message.message_id
         )
-        await repo.add_message(user_id=user.id, thread=thread, role="assistant", content=answer)
+        await repo.add_message(
+            user_id=user.id, thread=thread, role="assistant", content=answer, web_tainted=web_tainted
+        )
         # Persist the turn now and give the connection back before delivery and compression.
         await db_session.commit()
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
-        await _send_answer(message, thinking, answer)
+        if reply_outcome.get("artifact_sent"):
+            # The artifact's caption is the answer and is already in the chat.
+            try:
+                await thinking.delete()
+            except Exception:
+                log.warning("personal_ai: could not remove the progress message", exc_info=True)
+        else:
+            await _send_answer(message, thinking, answer)
         try:
             await maybe_compress_personal(
                 repo=repo,
@@ -1034,6 +1126,8 @@ async def _handle_personal_chat(
             and stored.auto_memory_enabled
             and decision.access_tier in (AccessTier.PAID, AccessTier.OWNER_INTERNAL)
             and thread == "assistant"
+            # A turn that read the web never feeds automatic memory.
+            and not web_tainted
         ):
             try:
                 await maybe_extract_memories(

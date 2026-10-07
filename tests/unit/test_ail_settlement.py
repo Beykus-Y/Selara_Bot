@@ -230,3 +230,16 @@ def test_provider_preferences_only_route_the_personal_chat_turn():
     assert "provider" in client._with_provider_options(plain)["extra_body"]
     other = client._with_provider_options(plain, route=False)["extra_body"]
     assert other == {"usage": {"include": True}}
+
+
+async def test_a_tool_turn_is_never_charged_above_its_reservation():
+    access = SimpleNamespace(adjust=AsyncMock())
+    config = PersonalConfig(None, 30, PersonalQuotaLimits(5, 50), quota_mode="ail",
+                            ail_limits=PersonalQuotaLimits(10, 100, unit="ail"))
+
+    await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.05")], user_id=5,
+                            max_units=Decimal("3"))
+    await _settle_chat_turn(access, config=config, invocation_id=1, usages=[_usage(cost="0.0005")], user_id=5,
+                            max_units=Decimal("3"))
+
+    assert [call.kwargs["actual_units"] for call in access.adjust.await_args_list] == [Decimal("3"), Decimal("1.00")]
