@@ -105,6 +105,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Audit production frontend dependencies (high/critical)
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Set up Python for Mini App browser regression
         uses: actions/setup-python@v5
         with:
