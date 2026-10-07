@@ -16,6 +16,7 @@ from selara.infrastructure.http.gacha_client import (
     GachaBannerCardsResponse,
     GachaCardPayload,
     GachaClientError,
+    GachaCollectionResponse,
     GachaCooldownResetResponse,
     GachaCurrencyGrantResponse,
     GachaPlayerPayload,
@@ -190,10 +191,20 @@ async def get_banner_cards(
         ) from exc
 
 
-async def get_profile(settings: Settings, *, user_id: int, banner: str) -> GachaProfileResponse:
+async def get_profile(settings: Settings, *, user_id: int, banner: str, limit: int = 5) -> GachaProfileResponse:
     client = _build_client(settings, banner=banner)
     try:
-        return await client.get_profile(user_id=user_id, banner=banner)
+        return await client.get_profile(user_id=user_id, banner=banner, limit=limit)
+    except GachaClientError as exc:
+        raise GachaUseCaseError(
+            exc.message, is_timeout=exc.is_timeout, is_operational=exc.is_operational
+        ) from exc
+
+
+async def get_collection(settings: Settings, *, user_id: int, banner: str) -> GachaCollectionResponse:
+    client = _build_client(settings, banner=banner)
+    try:
+        return await client.get_collection(user_id=user_id, banner=banner)
     except GachaClientError as exc:
         raise GachaUseCaseError(
             exc.message, is_timeout=exc.is_timeout, is_operational=exc.is_operational

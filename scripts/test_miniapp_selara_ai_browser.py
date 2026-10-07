@@ -137,6 +137,15 @@ async def _new_page(browser, width: int):
     return context, page, errors
 
 
+SELARA_SETTINGS = {
+    "ok": True, "chat_id": -1001, "can_manage": True, "paid": False,
+    "names": [{"display": "Селя", "norm": "селя", "is_primary": True, "active": True}], "name_limit": 1,
+    "character": {"preset": "default", "custom": None, "custom_key": "custom",
+                  "presets": [{"key": "default", "title": "Обычная Selara"}, {"key": "friendly", "title": "Дружелюбная"}]},
+    "member_mode": True, "history": False, "actions": True, "limits": {"daily": 30, "per_actor": 5},
+}
+
+
 def _chat_handler(payload):
     async def handle(route):
         path = route.request.url.split("?", 1)[0]
@@ -146,6 +155,8 @@ def _chat_handler(payload):
             body = {"ok": True, "page": {"hero_ctas": []}}
         elif path.endswith("/ai-access"):
             body = payload
+        elif path.endswith("/selara"):
+            body = SELARA_SETTINGS
         elif path.endswith("/leaderboard"):
             body = LEADERBOARD
         elif path.endswith("/miniapp/chat/-1001"):
@@ -217,6 +228,8 @@ async def _run_chat_retry(browser) -> None:
                 ({"ok": False, "message": "Не удалось загрузить статус Selara AI."}, 503)
                 if calls["ai"] <= 2 else (_ai_access("free"), 200)
             )
+        elif path.endswith("/selara"):
+            body, status = SELARA_SETTINGS, 200
         elif path.endswith("/leaderboard"):
             body, status = LEADERBOARD, 200
         elif path.endswith("/miniapp/chat/-1001"):
