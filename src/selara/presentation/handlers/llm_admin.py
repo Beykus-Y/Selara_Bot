@@ -21,6 +21,7 @@ from selara.application.feature_access import AccessReason, FeatureAccessService
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
+from selara.infrastructure.db.ai_turn_leases import ai_turn_lease
 from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
@@ -62,6 +63,7 @@ from selara.presentation.feature_access_messages import quota_exhausted_message
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
 log = logging.getLogger(__name__)
+_ADMIN_TURN_BUSY_TEXT = "⏳ Предыдущий запрос к AI-ассистенту ещё выполняется. Квота не потрачена."
 
 router = Router(name="llm_admin")
 
@@ -120,7 +122,7 @@ async def llm_admin_context_handler(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
 ) -> None:
-    await _handle(
+    await _handle_serialised(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=True, settings=settings, session_factory=session_factory,
         web_search_client=web_search_client,
@@ -142,11 +144,45 @@ async def llm_admin_nocontext_handler(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
 ) -> None:
-    await _handle(
+    await _handle_serialised(
         message, bot, activity_repo, chat_settings, llm_client, db_session,
         with_context=False, settings=settings, session_factory=session_factory,
         web_search_client=web_search_client,
     )
+
+
+async def _handle_serialised(
+    message: Message,
+    bot: Bot,
+    activity_repo: Any,
+    chat_settings: ChatSettings,
+    llm_client: LlmClient,
+    db_session: AsyncSession,
+    *,
+    with_context: bool,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    web_search_client: WebSearchClient | None,
+) -> None:
+    """Run one admin turn under a durable (chat, admin) lease, so overlapping ?/?? cannot run two tool loops."""
+    args = (message, bot, activity_repo, chat_settings, llm_client, db_session)
+    kwargs = {
+        "with_context": with_context,
+        "settings": settings,
+        "session_factory": session_factory,
+        "web_search_client": web_search_client,
+    }
+    if session_factory is None:
+        # _handle answers "quota service unavailable" before any provider call, so no lease is needed.
+        await _handle(*args, **kwargs)
+        return
+    async with ai_turn_lease(
+        session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
+    ) as acquired:
+        if not acquired:
+            await message.reply(_ADMIN_TURN_BUSY_TEXT)
+            return
+        await _handle(*args, **kwargs)
 
 
 async def _handle(

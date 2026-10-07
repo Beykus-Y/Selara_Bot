@@ -50,6 +50,7 @@ from selara.application.personal_models import (
     profile_options,
 )
 from selara.core.config import Settings
+from selara.infrastructure.db.ai_turn_leases import ai_turn_lease
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository, StoredProfile
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
@@ -857,6 +858,7 @@ async def _notify_fallback_once(message: Message, user_id: int, choice: Personal
 # One turn per user at a time: a second message sent while the first is still being answered would
 # pass the cooldown, spend quota and generate from the same stale history.
 _inflight_users: set[int] = set()
+_BUSY_TEXT = "⏳ Я ещё отвечаю на предыдущее сообщение. Подожди немного. Квота не потрачена."
 
 
 @chat_router.message(PersonalChatFilter())
@@ -877,13 +879,18 @@ async def personal_chat_handler(
         # "запомни, что ..." is a local action: no model call, no quota, the fact is stored only after confirmation.
         return
     if user_id in _inflight_users:
-        await message.answer("⏳ Я ещё отвечаю на предыдущее сообщение. Подожди немного. Квота не потрачена.")
+        await message.answer(_BUSY_TEXT)
         return
     _inflight_users.add(user_id)
     try:
-        await _handle_personal_chat(
-            message, db_session, session_factory, settings, personal_config, llm_client, web_search_client
-        )
+        # The set above only sees this process; the durable lease also stops a turn on another bot instance.
+        async with ai_turn_lease(session_factory=session_factory, lease_key=f"personal_ai:{user_id}") as acquired:
+            if not acquired:
+                await message.answer(_BUSY_TEXT)
+                return
+            await _handle_personal_chat(
+                message, db_session, session_factory, settings, personal_config, llm_client, web_search_client
+            )
     finally:
         _inflight_users.discard(user_id)
 
