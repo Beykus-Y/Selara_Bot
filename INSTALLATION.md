@@ -148,6 +148,58 @@ curl -i http://127.0.0.1:8080/healthz
 docker network create edge
 ```
 
+### 4.4 Non-root app-контейнер и том `selara_gacha_reel_cache`
+
+Контейнер `app` работает под непривилегированным пользователем `10001:10001`
+с read-only корневой ФС. Запись возможна только в `/tmp` (tmpfs: бэкапы,
+ffmpeg, профили Chromium, кэши matplotlib/fontconfig) и в том
+`selara_gacha_reel_cache` (кэш MP4-анимаций гачи, регенерируется автоматически).
+
+Том объявлен с явным `name: selara_gacha_reel_cache`, поэтому compose не
+добавляет к имени префикс проекта. Образ создаёт точку монтирования
+`/data/gacha_reel_cache` с владельцем `10001:10001`, и новый (в том числе
+пересозданный) том наследует этого владельца — отдельный `chown` не нужен.
+
+Обновление уже работающего деплоя: раньше том назывался с префиксом проекта
+(`<project>_selara_gacha_reel_cache`, обычно `<каталог>_selara_gacha_reel_cache`).
+Теперь он не монтируется, приложение получает новый пустой том с правами на
+запись и заново генерирует кэш по запросу; старый том можно удалить, чтобы
+освободить место:
+
+```bash
+docker volume ls | grep gacha_reel_cache
+docker volume rm <project>_selara_gacha_reel_cache
+```
+
+Если том всё же остался root-owned и его нужно один раз исправить, делайте это
+отдельным контейнером: `cap_drop: [ALL]` у `app` убирает `CAP_CHOWN` даже у
+root, поэтому `docker compose run app ... chown` не сработает.
+
+```bash
+docker compose stop app
+docker run --rm -v selara_gacha_reel_cache:/data alpine chown -R 10001:10001 /data
+docker compose up -d app
+```
+
+### 4.5 Ресурсные лимиты app-контейнера
+
+Для `app` заданы `mem_limit: 4g`, `cpus: 2.0`, `pids_limit: 512`, tmpfs `/tmp`
+размером 1g и `init: true`. 4g покрывают пик одного рендера гача-рила
+(~1.2–1.4 ГБ), Chromium в том же процессе и страницы tmpfs, которые
+учитываются в том же cgroup; `pids_limit` считает потоки (Chromium, ffmpeg,
+пул потоков asyncio); `init` пожинает осиротевшие дочерние процессы Chromium.
+Превышение `mem_limit` приводит к OOM-kill всего контейнера (bot + web) и
+циклу перезапуска из-за `restart: unless-stopped`.
+
+Лимиты действуют только на пересобранном образе, поэтому перед тем как
+полагаться на них, соберите образ и прогоните smoke-тест:
+
+```bash
+docker compose build app
+docker compose up -d postgres redis app
+docker compose logs -f app
+```
+
 ---
 
 ## 5. Модель с Docker-образом (GHCR/VPS)

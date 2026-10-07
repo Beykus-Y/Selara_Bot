@@ -23,7 +23,7 @@ Web UI Modernization (`docs/WEB_UI_MODERNIZATION_TODO.md`) закрыт и не 
 
 | # | Вопрос | Решение | Дата |
 |---|---|---|---|
-| 1 | Публично доступные read-эндпоинты (`/v1/gacha/users/{id}/profile\|history\|collection` без авторизации) | Оставить как есть — сознательный дизайн, подтверждён существующим тестом `test_public_profile_for_unknown_user_is_read_only` | 2026-08-19 |
+| 1 | Публично доступные read-эндпоинты (`/v1/gacha/users/{id}/profile\|history\|collection` без авторизации) | Пересмотрено 2026-10-07 (issue #77): per-user reads требуют `X-Gacha-Service-Token`, как mutating-эндпоинты — данные игрока не публичны. Ранее — «оставить как есть» (2026-08-19, тест `test_public_profile_for_unknown_user_is_read_only` переименован в `test_profile_for_unknown_user_is_read_only`) | 2026-10-07 |
 | 2 | Приоритет «ambiguous timeout» бага (потерянная карта / возможное двойное начисление) | Важно, но чинится после базовых улучшений, не первым делом | 2026-08-19 |
 | 3 | Система pity/гарантий | Отсутствует полностью в домене — обсуждается отдельно позже, вне рамок этого TODO | 2026-08-19 |
 | 4 | Порядок этапов | Сначала баги/атомарность → потом UX → потом анимация (рекомендованный порядок) | 2026-08-19 |
@@ -432,7 +432,11 @@ Web UI Modernization (`docs/WEB_UI_MODERNIZATION_TODO.md`) закрыт и не 
 ## 7. Отложенные задачи
 
 - Система pity/гарантий — решение #3, обсуждается отдельно, вне этого TODO.
-- Публичные read-эндпоинты без авторизации — решение #1, осознанно оставлено как есть.
+- Публичные read-эндпоинты `profile`/`history`/`collection` — решение #1, закрыто в issue #77:
+  per-user чтения требуют `X-Gacha-Service-Token`, а Mini App читает их через авторизованный
+  app-прокси `GET /api/miniapp/gacha/profile|collection` (app определяет user_id из Mini App-сессии).
+  Публичными намеренно остаются только статический каталог карт
+  `GET /v1/gacha/banners/{banner}/cards`, картинки `/images/...` и `GET /v1/gacha/health`.
 
 ## 8. Сводный прогресс
 

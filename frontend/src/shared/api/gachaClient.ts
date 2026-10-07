@@ -3,6 +3,9 @@
  * Communicates with independent gacha microservice
  */
 
+import { isAxiosError } from 'axios'
+
+import { http } from '@/shared/api/http'
 import { resolveAppPath } from '@/shared/config/app-base-path'
 
 export interface CollectionCard {
@@ -84,7 +87,19 @@ function getGachaApiUrl(): string {
   return `${window.location.origin}${resolveAppPath('/gacha')}`
 }
 
+/**
+ * Public gacha proxy base. Card images (`/images/...`) stay publicly proxied at `/miniapp/gacha/`;
+ * only the per-user reads go through the authenticated app API below.
+ */
 const GACHA_API_URL = getGachaApiUrl()
+
+/**
+ * Per-user gacha reads go through the main app (`/miniapp/api/miniapp/gacha/...`): the browser sends
+ * only its Mini App session, and the server adds `X-Gacha-Service-Token` when it calls the gacha
+ * service. The browser must never hold that service token, which is why these calls cannot hit the
+ * gacha service directly.
+ */
+const APP_GACHA_API_PATH = '/miniapp/gacha'
 
 function normalizeGachaImageUrl(imageUrl: string): string {
   const value = imageUrl.trim()
@@ -131,47 +146,28 @@ function normalizeProfileResponse(payload: ProfileResponse): ProfileResponse {
 }
 
 async function request<T>(
-  method: string,
   path: string,
-  options?: {
-    params?: Record<string, string | number>
-    headers?: Record<string, string>
-  },
+  params: Record<string, string | number>,
+  fallback: string,
+  signal?: AbortSignal,
 ): Promise<T> {
-  let url = `${GACHA_API_URL}${path}`
-
-  // Add query parameters
-  if (options?.params) {
-    const searchParams = new URLSearchParams()
-    for (const [key, value] of Object.entries(options.params)) {
-      searchParams.append(key, String(value))
-    }
-    url += `?${searchParams.toString()}`
-  }
-
   try {
-    const response = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
+    const response = await http.request<T & { ok?: boolean; message?: string }>({
+      method: 'get',
+      url: `${APP_GACHA_API_PATH}${path}`,
+      params,
+      signal,
+      validateStatus: () => true,
     })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new GachaClientError(
-        `Gacha API error: ${response.statusText}. ${errorText}`,
-        response.status,
-      )
+    const data = response.data
+    if (response.status >= 400 || data?.ok === false) {
+      throw new GachaClientError(data?.message || fallback, response.status)
     }
-
-    return response.json()
+    return data
   } catch (error) {
-    if (error instanceof GachaClientError) {
-      throw error
-    }
-    throw new GachaClientError(`Failed to communicate with Gacha service at ${GACHA_API_URL}`)
+    if (isAxiosError(error) && error.code === 'ERR_CANCELED') throw error
+    if (error instanceof GachaClientError) throw error
+    throw new GachaClientError(fallback)
   }
 }
 
@@ -179,26 +175,23 @@ async function request<T>(
  * Get user collection for a specific banner
  * Returns all cards owned by user sorted by code
  */
-export async function getUserCollection(
-  userId: number,
-  banner: string = 'genshin',
-): Promise<CollectionResponse> {
-  const payload = await request<CollectionResponse>('GET', `/v1/gacha/users/${userId}/collection`, {
-    params: { banner },
-  })
+export async function getUserCollection(banner: string = 'genshin'): Promise<CollectionResponse> {
+  const payload = await request<CollectionResponse>(
+    '/collection',
+    { banner },
+    'Не удалось загрузить коллекцию.',
+  )
   return normalizeCollectionResponse(payload)
 }
 
 /**
  * Get user profile and recent pulls
  */
-export async function getUserProfile(
-  userId: number,
-  banner: string = 'genshin',
-  limit: number = 5,
-): Promise<ProfileResponse> {
-  const payload = await request<ProfileResponse>('GET', `/v1/gacha/users/${userId}/profile`, {
-    params: { banner, limit },
-  })
+export async function getUserProfile(banner: string = 'genshin', limit: number = 5): Promise<ProfileResponse> {
+  const payload = await request<ProfileResponse>(
+    '/profile',
+    { banner, limit },
+    'Не удалось загрузить профиль.',
+  )
   return normalizeProfileResponse(payload)
 }
