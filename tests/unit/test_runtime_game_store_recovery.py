@@ -843,6 +843,10 @@ class _GatedFakeRedisClient:
         self.release_gate = asyncio.Event()
         self.hold_when: Callable[[], bool] | None = None
 
+    async def ping(self) -> None:
+        # RedisGameStateRepository.ping() probes through client.ping().
+        return None
+
     async def _hold_if_requested(self, value: str) -> None:
         if self.hold_when is None or not self.hold_when():
             return

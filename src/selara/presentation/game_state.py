@@ -6203,7 +6203,9 @@ class RuntimeGameStore:
             revision = self._game_revisions.get(game.game_id, 0)
             await repo.save_game(
                 game,
-                is_active=self._backend._active_by_chat.get(game.game_id) == game.game_id,
+                # _active_by_chat maps chat_id -> game_id: look the game up by
+                # its chat, not by its own id.
+                is_active=self._backend._active_by_chat.get(game.chat_id) == game.game_id,
             )
             if self._game_revisions.get(game.game_id, 0) == revision:
                 return
