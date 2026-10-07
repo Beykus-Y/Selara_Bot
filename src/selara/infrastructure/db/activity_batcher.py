@@ -87,6 +87,7 @@ class ActivityBatcher:
         raw_message_json: dict[str, object] | None = None,
         snapshot_hash: str | None = None,
         reply_to_telegram_message_id: int | None = None,
+        session: AsyncSession | None = None,
     ) -> None:
         if self._closed:
             raise RuntimeError("ActivityBatcher is closed.")
@@ -114,12 +115,16 @@ class ActivityBatcher:
             snapshot_hash=snapshot_hash,
             reply_to_telegram_message_id=reply_to_telegram_message_id,
         )
-        async with self._write_slots:
-            if self._closed:
-                raise RuntimeError("ActivityBatcher is closed.")
-            async with self._session_factory() as session:
-                stage_activity_inbox_events(session, [event])
-                await session.commit()
+        if session is not None:
+            # Joins the caller's transaction, so it commits with the request and takes no second pooled connection.
+            stage_activity_inbox_events(session, [event])
+        else:
+            async with self._write_slots:
+                if self._closed:
+                    raise RuntimeError("ActivityBatcher is closed.")
+                async with self._session_factory() as own_session:
+                    stage_activity_inbox_events(own_session, [event])
+                    await own_session.commit()
 
         self._unflushed_hint += 1
         if self._unflushed_hint >= self._max_events:
@@ -161,6 +166,11 @@ class ActivityBatcher:
             applied = await self._flush_next_batch()
             if applied is None:
                 return False
+            if applied == 0:
+                # Rows from rolled-back request transactions never reach the inbox, so the hint would otherwise
+                # keep growing and wake the flusher on every enqueue.
+                self._unflushed_hint = 0
+                return True
             self._unflushed_hint = max(0, self._unflushed_hint - applied)
             if applied < self._max_events:
                 return True
