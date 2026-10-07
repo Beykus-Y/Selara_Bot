@@ -4,6 +4,10 @@ import pytest
 
 from selara.domain.entities import ChatPersonaAssignment, UserSnapshot
 from selara.presentation.commands.resolver import resolve_persona_target_text_candidate
+from selara.presentation.handlers.text_commands import (
+    _apply_alias_mode_to_text,
+    _resolve_persona_target_intent,
+)
 from selara.presentation.targeting import resolve_chat_target_user
 
 
@@ -91,6 +95,35 @@ async def test_bare_name_resolves_to_chat_persona_owner() -> None:
 
     assert target is not None
     assert target.telegram_user_id == 901
+
+
+def test_tail_longer_than_persona_label_limit_is_not_a_candidate() -> None:
+    assert resolve_persona_target_text_candidate("пара " + "а" * 48) is not None
+    assert resolve_persona_target_text_candidate("пара " + "а" * 49) is None
+
+
+def test_persona_name_form_is_suppressed_when_command_has_alias() -> None:
+    aliases = [SimpleNamespace(alias_text_norm="сватай тут", command_key="pair", source_trigger_norm="пара")]
+
+    assert _apply_alias_mode_to_text(text="пара Коломбина", mode="aliases_if_exists", aliases=aliases) is None
+    assert _apply_alias_mode_to_text(text="пара Коломбина", mode="standard_only", aliases=aliases) == "пара Коломбина"
+    assert _apply_alias_mode_to_text(text="рынок сегодня", mode="aliases_if_exists", aliases=aliases) == "рынок сегодня"
+
+
+@pytest.mark.asyncio
+async def test_persona_form_in_reply_is_not_resolved_to_named_persona() -> None:
+    message = _message()
+    message.reply_to_message = SimpleNamespace(from_user=SimpleNamespace(id=222))
+
+    assert await _resolve_persona_target_intent(message, _FakeActivityRepo(), text="пара Коломбина") is None
+
+
+@pytest.mark.asyncio
+async def test_persona_form_resolves_to_intent_outside_reply() -> None:
+    intent = await _resolve_persona_target_intent(_message(), _FakeActivityRepo(), text="пара Коломбина")
+
+    assert intent is not None
+    assert intent.name == "pair"
 
 
 @pytest.mark.asyncio

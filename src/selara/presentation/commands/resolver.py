@@ -295,7 +295,11 @@ def resolve_text_command(
 
 # Target commands whose text form accepts only @username/ID in the validator.
 # Their tail may also be a chat persona label, which the caller must confirm.
-_PERSONA_TARGET_COMMAND_KEYS = frozenset({"lastseen", "pair", "marry", "adopt", "adoptdaughter", "family_pet", "family"})
+_PERSONA_TARGET_COMMAND_KEYS = frozenset(
+    {"lastseen", "pair", "marry", "adopt", "adoptdaughter", "family_pet", "family"}
+)
+# Matches the persona label limit enforced when labels are stored (repositories._normalize_persona_label).
+_PERSONA_LABEL_MAX_LENGTH = 48
 
 
 def resolve_persona_target_text_candidate(text: str) -> CommandIntent | None:
@@ -313,7 +317,12 @@ def resolve_persona_target_text_candidate(text: str) -> CommandIntent | None:
         if command_key not in _PERSONA_TARGET_COMMAND_KEYS or not normalized.startswith(f"{trigger} "):
             continue
         tail = normalized[len(trigger) :].strip()
-        if not tail or tail.startswith("@") or tail.lstrip("-").isdigit():
+        if (
+            not tail
+            or len(tail) > _PERSONA_LABEL_MAX_LENGTH
+            or tail.startswith("@")
+            or tail.lstrip("-").isdigit()
+        ):
             return None
         return CommandIntent(name=command_key, args={"raw_args": tail})
 
