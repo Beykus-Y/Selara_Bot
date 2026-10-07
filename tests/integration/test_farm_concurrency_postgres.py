@@ -131,7 +131,7 @@ async def test_farm_mutations_serialize_whole_operation(monkeypatch, scenario, m
                     assert sum(result.accepted for result in results) == 1
                 if scenario == "use_vs_harvest":
                     used = results[0].accepted
-                    assert quantities["item:fertilizer_rich"] == (0 if used else 1)
+                    assert quantities.get("item:fertilizer_rich", 0) == (0 if used else 1)
                     expected = max(1, int(round(crop.min_yield * (1.25 if used else 1))))
                     assert results[1].amount == expected
     finally:
