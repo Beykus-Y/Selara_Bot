@@ -417,7 +417,7 @@ async def test_concurrent_shop_purchases_charge_only_one_winner(scenario):
     current_day = datetime(2026, 2, 14, tzinfo=timezone.utc).date()
     offers = build_shop_offers(scope=repo.scope, user_id=10, current_day=current_day, account=repo.account)
     if scenario == "upgrade":
-        offer = next(offer for offer in offers if offer.offer_code == "upgrade_tap_glove_1")
+        offer = next(offer for offer in offers if offer.category == "upgrades")
         requested = [offer, offer]
     else:
         requested = [offer for offer in offers if offer.category != "upgrades"][:2]
@@ -439,7 +439,8 @@ async def test_concurrent_shop_purchases_charge_only_one_winner(scenario):
     assert repo.ledger[0]["amount"] == winner.offer.price
     assert repo.events == ["lock:economy:account:global:10"] * 2
     if scenario == "upgrade":
-        assert repo.account.tap_glove_level == 1
+        field_name = {"sprinkler": "sprinkler_level", "tap_glove": "tap_glove_level", "storage_rack": "storage_level"}[winner.offer.item_code.split(":")[1]]
+        assert getattr(repo.account, field_name) == 1
     else:
         assert len(repo.inventory) == inventory_stack_limit(0)
         assert repo.inventory[winner.offer.item_code] == winner.offer.quantity

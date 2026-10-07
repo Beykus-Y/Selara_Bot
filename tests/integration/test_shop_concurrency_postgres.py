@@ -38,7 +38,7 @@ async def test_shop_serializes_level_and_stack_capacity_before_charging(scenario
             await repo.add_balance(account_id=account_id, delta=100000)
             offers = build_shop_offers(scope=scope, user_id=10, current_day=current_day, account=account)
             if scenario == "upgrade":
-                offer = next(offer for offer in offers if offer.offer_code == "upgrade_tap_glove_1")
+                offer = next(offer for offer in offers if offer.category == "upgrades")
                 requested = [offer, offer]
             else:
                 requested = [offer for offer in offers if offer.category != "upgrades"][:2]
@@ -77,7 +77,8 @@ async def test_shop_serializes_level_and_stack_capacity_before_charging(scenario
             assert ledger[0].amount == winner.offer.price
             assert ledger[0].reason == ("shop_upgrade" if scenario == "upgrade" else "shop_buy")
             if scenario == "upgrade":
-                assert stored.tap_glove_level == 1
+                field_name = {"sprinkler": "sprinkler_level", "tap_glove": "tap_glove_level", "storage_rack": "storage_level"}[winner.offer.item_code.split(":")[1]]
+                assert getattr(stored, field_name) == 1
             else:
                 assert len(inventory) == inventory_stack_limit(0)
                 assert next(row for row in inventory if row.item_code == winner.offer.item_code).quantity == winner.offer.quantity
