@@ -536,6 +536,25 @@ def _bot_database_url(settings: Settings) -> URL:
     return database_url
 
 
+async def _stop_pg_dump_process(process: asyncio.subprocess.Process) -> None:
+    """Stop a pg_dump child whose backup job was cancelled, and reap it before the temp directory is removed.
+
+    The child is asked to exit with SIGTERM and given a bounded time to do so; one that ignores it is killed.
+    """
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+    try:
+        await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+    except TimeoutError:  # pragma: no cover - a killed child must exit
+        logger.warning("pg_dump process did not exit after being killed")
+
+
 async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> BackupFile:
     database_url = _bot_database_url(settings)
 
@@ -566,7 +585,12 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
             f"Backup command '{settings.backup_pg_dump_path}' is not available in the main bot runtime."
         ) from exc
 
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        # Shutdown and a lost backup lease both cancel this job; pg_dump must not keep running after it.
+        await _stop_pg_dump_process(process)
+        raise
     if process.returncode != 0:
         detail = _last_line(stderr)
         if detail:
