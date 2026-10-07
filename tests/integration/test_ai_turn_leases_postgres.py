@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from selara.infrastructure.db.ai_turn_leases import (
     ai_turn_lease,
     release_ai_turn_lease,
+    renew_ai_turn_lease,
     try_acquire_ai_turn_lease,
 )
 from selara.infrastructure.db.base import Base
@@ -110,5 +111,38 @@ async def test_context_manager_reports_busy_and_releases_on_exit() -> None:
                 assert second is False
         async with ai_turn_lease(session_factory=session_factory, lease_key="personal_ai:9", ttl_seconds=_TTL) as again:
             assert again is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_renew_extends_only_the_current_owner() -> None:
+    engine, session_factory = await _session_factory()
+    try:
+        token = await try_acquire_ai_turn_lease(session_factory=session_factory, lease_key="personal_ai:13", ttl_seconds=_TTL)
+        assert token is not None
+        assert await renew_ai_turn_lease(
+            session_factory=session_factory, lease_key="personal_ai:13", owner_token=token, ttl_seconds=_TTL
+        ) is True
+        assert await renew_ai_turn_lease(
+            session_factory=session_factory, lease_key="personal_ai:13", owner_token="not-the-owner", ttl_seconds=_TTL
+        ) is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_heartbeat_keeps_a_long_turn_past_its_ttl() -> None:
+    engine, session_factory = await _session_factory()
+    try:
+        # The TTL is shorter than the turn, as provider retries can make a real turn. The heartbeat must keep the key.
+        async with ai_turn_lease(session_factory=session_factory, lease_key="llm_admin:-5:6", ttl_seconds=0.6) as held:
+            assert held is True
+            await asyncio.sleep(1.5)
+            assert await try_acquire_ai_turn_lease(
+                session_factory=session_factory, lease_key="llm_admin:-5:6", ttl_seconds=_TTL
+            ) is None
     finally:
         await engine.dispose()

@@ -177,9 +177,7 @@ async def _handle_serialised(
         await _handle(*args, **kwargs)
         return
     async with ai_turn_lease(
-        session_factory=session_factory,
-        lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
-        ttl_seconds=settings.llm_timeout_seconds * (settings.group_tool_rounds_paid + 2),
+        session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
     ) as acquired:
         if not acquired:
             await message.reply(_ADMIN_TURN_BUSY_TEXT)
