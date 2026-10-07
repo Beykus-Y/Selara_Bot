@@ -80,6 +80,45 @@ async def _seed(repo: SqlAlchemyActivityRepository) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_archive_projection_preserves_minimal_utf16_mention_for_privacy():
+    from selara.application.daily_summary.pipeline import _build_segment_block
+    from selara.application.daily_summary.sanitize import build_author_display_tokens
+
+    engine, session_factory = await _database()
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            await _seed(repo)
+            await session.execute(update(UserChatActivityModel).where(
+                UserChatActivityModel.chat_id == _CHAT_ID, UserChatActivityModel.user_id == _USER_B,
+            ).values(is_active_member=False))
+            await session.execute(update(MessageArchiveModel).where(
+                MessageArchiveModel.chat_id == _CHAT_ID, MessageArchiveModel.telegram_message_id == 1,
+            ).values(text="😀 герой", raw_message_json={"entities": [{
+                "type": "text_mention", "offset": 3, "length": 5,
+                "user": {"id": _USER_B, "first_name": "B"},
+            }]}))
+            await session.commit()
+            rows = await repo.list_archived_messages_in_window(
+                chat_id=_CHAT_ID, window_from=_BASE, window_to=_BASE + timedelta(minutes=1),
+            )
+            assert len(rows) == 1
+            assert rows[0].text_mentions == ((3, 5, _USER_B),)
+            assert not hasattr(rows[0], "raw_message_json")
+            members = await repo.get_daily_summary_member_info(chat_id=_CHAT_ID, user_ids=[_USER_A, _USER_B])
+            tokens = build_author_display_tokens(members, persona_enabled=False)
+            block = _build_segment_block(
+                rows, author_tokens=tokens, alias_index={},
+                text_mention_tokens={member.user_id: tokens[member.user_id] for member in members if not member.is_active_member},
+            )
+            assert '"😀 Участник #1"' in block
+            assert "герой" not in block
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_get_message_context_returns_window_around_anchor() -> None:
     engine, session_factory = await _database()
     try:
