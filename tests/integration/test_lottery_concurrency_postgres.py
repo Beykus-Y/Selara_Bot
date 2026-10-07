@@ -89,7 +89,7 @@ async def test_lottery_admission_matches_exactly_the_consumed_tickets(monkeypatc
             if ticket == "free":
                 assert stored.free_lottery_claimed_on == now.date()
             if ticket == "item":
-                assert quantities["item:lottery_ticket"] == 0
+                assert quantities.get("item:lottery_ticket", 0) == 0
             if ticket == "paid":
                 assert stored.paid_lottery_used_today == count
                 assert stored.paid_lottery_used_on == now.date()
