@@ -128,3 +128,57 @@ def test_build_client_provider_selection():
     assert build_web_search_client(enabled=True, provider="brave", api_key="k").provider_name == "brave+duckduckgo"
     # keyed provider without a key degrades to duckduckgo instead of disabling search
     assert build_web_search_client(enabled=True, provider="tavily", api_key=" ").provider_name == "duckduckgo"
+
+
+from selara.infrastructure.http.web_search.providers import SearxngProvider
+
+
+@pytest.mark.asyncio
+async def test_searxng_parses_json_and_uses_json_format():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"results": [
+            {"title": "S", "url": "https://s.example", "content": "C"}]})
+
+    provider = SearxngProvider(base_url="http://searxng:8080", transport=httpx.MockTransport(handler))
+    items = await provider.search("q", max_results=5)
+    assert items[0].snippet == "C"
+    assert calls[0].url.params["format"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_searxng_unreachable_falls_back_to_ddg_and_is_skipped_during_cooldown():
+    searx_calls = []
+
+    def down(request):
+        searx_calls.append(request)
+        raise httpx.ConnectError("no such host")
+
+    searx = SearxngProvider(transport=httpx.MockTransport(down))
+    ddg = DuckDuckGoProvider(transport=_transport([200], DDG_HTML))
+    chain = FallbackProvider([searx, ddg])
+    assert (await chain.search("q", max_results=5))[0].url == "https://example.com/a"
+    assert (await chain.search("q", max_results=5))[0].url == "https://example.com/a"
+    assert len(searx_calls) == 1  # second query skipped the failed primary
+
+
+@pytest.mark.asyncio
+async def test_searxng_403_json_disabled_falls_back():
+    searx = SearxngProvider(transport=httpx.MockTransport(lambda r: httpx.Response(403, text="forbidden")))
+    ddg = DuckDuckGoProvider(transport=_transport([200], DDG_HTML))
+    assert (await FallbackProvider([searx, ddg]).search("q", max_results=5))[0].title == "Title A"
+
+
+def test_build_client_defaults_to_searxng_then_duckduckgo():
+    assert build_web_search_client(enabled=True, provider="auto").provider_name == "searxng+duckduckgo"
+    assert build_web_search_client(enabled=True, provider="").provider_name == "searxng+duckduckgo"
+    assert build_web_search_client(enabled=True, provider="searxng").provider_name == "searxng+duckduckgo"
+
+
+def test_config_default_provider_is_auto(monkeypatch):
+    from selara.core.config import Settings
+
+    monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
+    assert Settings.model_fields["web_search_provider"].default == "auto"

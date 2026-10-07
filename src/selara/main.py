@@ -153,6 +153,7 @@ async def _run_bot(settings, session_factory) -> None:
         provider=settings.web_search_provider,
         base_url=settings.web_search_base_url,
         api_key=settings.web_search_api_key,
+        searxng_url=settings.web_search_searxng_url,
         timeout_seconds=settings.web_search_timeout_seconds,
     )
     logger.info("Web search client: %s",

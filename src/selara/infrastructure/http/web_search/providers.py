@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Protocol
 
 import httpx
@@ -22,6 +23,7 @@ USER_AGENT = "Mozilla/5.0 (compatible; SelaraBot/1.0; +https://github.com/Beykus
 DEFAULT_DUCKDUCKGO_BASE_URL = "https://lite.duckduckgo.com"
 DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com"
 DEFAULT_BRAVE_BASE_URL = "https://api.search.brave.com"
+DEFAULT_SEARXNG_URL = "http://searxng:8080"  # compose service name, internal network only
 
 # One delayed retry for statuses that can clear up by themselves (5xx, 202).
 _RETRY_DELAY_SECONDS = 1.5
@@ -200,20 +202,57 @@ class BraveProvider(_KeyedJsonProvider):
         return _items(web.get("results") if isinstance(web, dict) else None, snippet_key="description")
 
 
-class FallbackProvider:
-    """Try providers in order; the first one that answers wins."""
+class SearxngProvider(_KeyedJsonProvider):
+    """Self-hosted SearXNG metasearch (JSON format must be enabled in its settings).
 
-    def __init__(self, providers: list[SearchProvider]) -> None:
+    Unreachable/absent instances raise WebSearchError so FallbackProvider moves on.
+    """
+
+    name = "searxng"
+
+    def __init__(self, *, base_url: str = DEFAULT_SEARXNG_URL, timeout_seconds: float = 8.0,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+        super().__init__(api_key="", base_url=base_url or DEFAULT_SEARXNG_URL,
+                         timeout_seconds=timeout_seconds, transport=transport)
+
+    async def _request(self, query: str, max_results: int) -> httpx.Response:
+        async with self._client() as client:
+            return await client.get("/search", params={"q": query, "format": "json"},
+                                    headers={"Accept": "application/json"})
+
+    def _parse(self, payload: dict) -> list[SearchResultItem]:
+        return _items(payload.get("results"), snippet_key="content")
+
+
+class FallbackProvider:
+    """Try providers in order; the first one that answers wins.
+
+    A provider that failed is skipped for ``cooldown_seconds`` so a missing or
+    down primary (e.g. no SearXNG container) does not add latency to every query.
+    If every provider is cooling down, all are tried anyway.
+    """
+
+    def __init__(self, providers: list[SearchProvider], *, cooldown_seconds: float = 60.0) -> None:
         self._providers = providers
+        self._cooldown_seconds = cooldown_seconds
+        self._down_until: dict[int, float] = {}
         self.name = "+".join(p.name for p in providers)
 
     async def search(self, query: str, *, max_results: int) -> list[SearchResultItem]:
+        now = time.monotonic()
+        candidates = [p for p in self._providers if self._down_until.get(id(p), 0.0) <= now]
+        if not candidates:
+            candidates = list(self._providers)
         last_error: WebSearchError | None = None
-        for provider in self._providers:
+        for provider in candidates:
             try:
-                return await provider.search(query, max_results=max_results)
+                result = await provider.search(query, max_results=max_results)
             except WebSearchError as exc:
                 log.warning("web search provider %s failed, trying next: %s", provider.name, exc.message)
+                self._down_until[id(provider)] = time.monotonic() + self._cooldown_seconds
                 last_error = exc
+                continue
+            self._down_until.pop(id(provider), None)
+            return result
         assert last_error is not None
         raise last_error

@@ -88,11 +88,12 @@ LLM_COOLDOWN_SECONDS=5
 
 Инструменты `web_search` (поиск) и `fetch_page` (чтение страницы) доступны
 ассистенту `?`/`??` во всех чатах, где он включён. По умолчанию включены
-(`WEB_SEARCH_ENABLED=true`) и работают через DuckDuckGo без API-ключа.
+(`WEB_SEARCH_ENABLED=true`). По умолчанию (`auto`) используется SearXNG из
+docker-compose, а если он не запущен или недоступен — DuckDuckGo без ключа.
 
 ```env
 WEB_SEARCH_ENABLED=true
-WEB_SEARCH_PROVIDER=duckduckgo   # или tavily / brave (нужен WEB_SEARCH_API_KEY)
+WEB_SEARCH_PROVIDER=auto   # auto|searxng|duckduckgo|tavily|brave
 WEB_SEARCH_TIMEOUT_SECONDS=15
 WEB_SEARCH_MAX_RESULTS=5
 ```
@@ -108,7 +109,13 @@ WEB_SEARCH_MAX_RESULTS=5
 выставьте `WEB_SEARCH_ENABLED=false`.
 
 DuckDuckGo с датацентровых IP часто отвечает анти-бот страницей (HTTP 202/403).
-Для стабильной работы задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
+**SearXNG (рекомендуется):** задайте `SELARA_SEARXNG_SECRET` (`openssl rand -hex 32`) в `.env`
+и выполните `docker compose up -d searxng`. Сервис не публикует портов и доступен
+только приложению по `http://searxng:8080` (`WEB_SEARCH_SEARXNG_URL`). Если в `.env`
+явно стоит `WEB_SEARCH_PROVIDER=duckduckgo`, смените на `auto`. Деплой-workflow
+searxng не запускает.
+
+Альтернатива — ключевой провайдер: задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
 `WEB_SEARCH_API_KEY`; при сбое такого провайдера бот пробует DuckDuckGo.
 
 ---

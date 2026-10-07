@@ -1,0 +1,19 @@
+# SearXNG settings for Selara's internal web search (see docker-compose.yml).
+# The instance is NOT published; only the app container reaches it over the
+# compose network, so the bot limiter (which needs Valkey/Redis) is off.
+# server.secret_key comes from the SEARXNG_SECRET env var (SELARA_SEARXNG_SECRET).
+use_default_settings: true
+
+general:
+  instance_name: "selara-searxng"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false

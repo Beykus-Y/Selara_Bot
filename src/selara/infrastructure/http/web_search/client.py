@@ -25,12 +25,14 @@ from selara.infrastructure.http.web_search.models import PageContent, SearchResu
 from selara.infrastructure.http.web_search.providers import (
     DEFAULT_BRAVE_BASE_URL,
     DEFAULT_DUCKDUCKGO_BASE_URL,
+    DEFAULT_SEARXNG_URL,
     DEFAULT_TAVILY_BASE_URL,
     USER_AGENT,
     BraveProvider,
     DuckDuckGoProvider,
     FallbackProvider,
     SearchProvider,
+    SearxngProvider,
     TavilyProvider,
 )
 
@@ -248,16 +250,21 @@ def build_web_search_client(
     provider: str,
     base_url: str = "",
     api_key: str = "",
+    searxng_url: str = "",
     timeout_seconds: float = 15.0,
 ) -> WebSearchClient | None:
     """Composition-root factory: None means web tools stay disabled.
 
-    tavily/brave need WEB_SEARCH_API_KEY and fall back to DuckDuckGo when the
-    keyed provider fails (DuckDuckGo alone is often challenged on datacenter IPs).
+    - auto (default): self-hosted SearXNG first, DuckDuckGo as fallback. Without a
+      reachable SearXNG the bot just uses DuckDuckGo (no crash, no extra latency
+      after the first failure).
+    - searxng: same chain, explicit.
+    - tavily/brave: need WEB_SEARCH_API_KEY; fall back to DuckDuckGo.
+    - duckduckgo: DuckDuckGo only.
     """
     if not enabled:
         return None
-    normalized = (provider or "").strip().lower()
+    normalized = (provider or "auto").strip().lower() or "auto"
     ddg = DuckDuckGoProvider(
         base_url=base_url if normalized == "duckduckgo" and base_url else DEFAULT_DUCKDUCKGO_BASE_URL,
         timeout_seconds=timeout_seconds,
@@ -265,6 +272,10 @@ def build_web_search_client(
     search_provider: SearchProvider
     if normalized == "duckduckgo":
         search_provider = ddg
+    elif normalized in ("auto", "searxng"):
+        searxng = SearxngProvider(base_url=searxng_url or DEFAULT_SEARXNG_URL,
+                                  timeout_seconds=min(timeout_seconds, 8.0))
+        search_provider = FallbackProvider([searxng, ddg])
     elif normalized in ("tavily", "brave"):
         if not api_key.strip():
             log.warning("WEB_SEARCH: для провайдера %s нужен WEB_SEARCH_API_KEY — используется duckduckgo.", normalized)

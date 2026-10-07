@@ -165,7 +165,8 @@ class Settings(BaseSettings):
     # default duckduckgo provider needs no API key; api_key/base_url are
     # reserved for key-based providers added later.
     web_search_enabled: bool = Field(default=True, validation_alias="WEB_SEARCH_ENABLED")
-    web_search_provider: str = Field(default="duckduckgo", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_provider: str = Field(default="auto", validation_alias="WEB_SEARCH_PROVIDER")
+    web_search_searxng_url: str = Field(default="http://searxng:8080", validation_alias="WEB_SEARCH_SEARXNG_URL")
     web_search_api_key: str = Field(default="", validation_alias="WEB_SEARCH_API_KEY")
     web_search_base_url: str = Field(default="", validation_alias="WEB_SEARCH_BASE_URL")
     web_search_timeout_seconds: float = Field(
