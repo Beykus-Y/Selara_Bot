@@ -319,6 +319,7 @@ def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None]
         )
 
     _reject_restore_target_connection_overrides(database_url)
+    _require_explicit_restore_target_address(database_url)
     _reject_production_restore_target(settings, database_url)
 
     # Keep libpq options such as sslmode so the drill connects the same way
@@ -356,6 +357,42 @@ def _reject_restore_target_connection_overrides(restore_url: URL) -> None:
         )
 
 
+def _require_explicit_restore_target_address(restore_url: URL) -> None:
+    """Demand an explicit host and database for the destructive drill.
+
+    pg_restore resolves every component the URI leaves out from libpq
+    defaults: it dials localhost (or PGHOST) and opens the database named by
+    PGDATABASE, falling back to the user name when that is unset too. A drill
+    URL relying on such implicit addressing can therefore land on the
+    production database even though the guard compared a mismatched pair of
+    strings, and its ``--clean`` would drop production objects. The disposable
+    target must be named in full and unambiguously before any process starts.
+    """
+    host = (restore_url.host or "").strip()
+    database = (restore_url.database or "").strip()
+    missing = [
+        component
+        for component, value in (("host", host), ("database", database))
+        if not value
+    ]
+    if missing:
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL must explicitly name the restore target: "
+            f"the URL is missing {', '.join(missing)}, which pg_restore would then take "
+            "from libpq defaults (PGHOST or localhost, PGDATABASE or the user name), "
+            "and the destructive --clean restore could silently hit the production "
+            "database."
+        )
+    if "," in host:
+        # libpq tries comma-separated hosts in turn, so the production guard
+        # cannot tell which endpoint such a URI would actually reach.
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL must name a single unambiguous host: "
+            "libpq dials several comma-separated hosts in turn, which the "
+            "production database guard cannot compare."
+        )
+
+
 def _reject_production_restore_target(settings: Settings, restore_url: URL) -> None:
     raw_production_url = getattr(settings, "database_url", None) or ""
     if not raw_production_url:
@@ -380,11 +417,32 @@ def _postgres_endpoint(url: URL) -> tuple[str, int, str]:
     # Compare on the connection parameters libpq will actually use: a URI
     # query such as ``?host=...`` or ``?port=...`` overrides the addressing
     # components, so a plain host/port/database comparison would miss an
-    # aliased production target (see the drill URL rejection above).
+    # aliased production target (see the drill URL rejection above). Every
+    # component the URL omits falls back to the same implicit source libpq
+    # uses -- PGHOST, PGPORT, PGDATABASE and finally the user name as the
+    # database -- because a production URL without them still dials whatever
+    # those defaults resolve to.
     query = {key.lower(): value for key, value in url.query.items()}
-    host = query.get("host") or query.get("hostaddr") or url.host or ""
-    port = _parse_query_port(query.get("port")) or url.port or 5432
-    database = query.get("dbname") or url.database or ""
+    host = (
+        query.get("host")
+        or query.get("hostaddr")
+        or url.host
+        or os.environ.get("PGHOST")
+        or ""
+    )
+    port = (
+        _parse_query_port(query.get("port"))
+        or url.port
+        or _parse_query_port(os.environ.get("PGPORT"))
+        or 5432
+    )
+    database = (
+        query.get("dbname")
+        or url.database
+        or os.environ.get("PGDATABASE")
+        or url.username
+        or ""
+    )
     return (host.lower(), port, database)
 
 

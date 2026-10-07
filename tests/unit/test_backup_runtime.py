@@ -432,6 +432,158 @@ def test_production_guard_compares_effective_libpq_endpoints() -> None:
         backup._resolve_backup_restore_target(settings)
 
 
+def test_resolve_backup_restore_target_rejects_implicit_database_name() -> None:
+    # Review #97 scenario: the restore URL omits the database, so libpq would
+    # open the database named by PGDATABASE or, unset, the user name -- here
+    # exactly the production database -- and `--clean` would drop its objects
+    # before restoring anything.
+    settings = _make_settings(
+        database_url="postgresql+asyncpg://selara:secret@db.internal:5432/selara",
+        backup_restore_database_url="postgresql://selara:secret@db.internal:5432",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must explicitly name the restore target",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_resolve_backup_restore_target_ignores_pgdatabase_for_missing_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A PGDATABASE value must not rescue a restore URL without a database:
+    # the drill target may only come from an explicitly named database.
+    monkeypatch.setenv("PGDATABASE", "selara_restore")
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@restore-db.internal:5433",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must explicitly name the restore target",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_resolve_backup_restore_target_rejects_missing_host() -> None:
+    # Without a host pg_restore dials localhost or PGHOST, so such a drill
+    # target is not the one the configuration seems to name.
+    settings = _make_settings(
+        backup_restore_database_url="postgresql://restore_user:restore_pass@/selara_restore",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must explicitly name the restore target",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_resolve_backup_restore_target_rejects_multi_host() -> None:
+    # libpq tries comma-separated hosts in turn, so the production guard
+    # cannot tell which endpoint the drill would actually reach.
+    settings = _make_settings(
+        backup_restore_database_url=(
+            "postgresql://restore_user:restore_pass"
+            "@db-a.internal,db-b.internal:5433/selara_restore"
+        ),
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must name a single unambiguous host",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_production_guard_resolves_implicit_production_database_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Production names its database only through the environment: the guard
+    # must resolve PGDATABASE before comparing, or an explicit drill URL for
+    # the resolved production database slips past it.
+    monkeypatch.setenv("PGDATABASE", "selara")
+    settings = _make_settings(
+        database_url="postgresql://selara:secret@db.internal:5432",
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/selara",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must not point at the production DATABASE_URL",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_production_guard_resolves_implicit_production_database_from_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With neither an explicit database nor PGDATABASE, libpq opens the
+    # database named after the user; the guard compares that resolved name.
+    monkeypatch.delenv("PGDATABASE", raising=False)
+    settings = _make_settings(
+        database_url="postgresql://selara:secret@db.internal:5432",
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/selara",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must not point at the production DATABASE_URL",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+def test_production_guard_resolves_implicit_production_host_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A production URL without a host dials PGHOST; the guard must compare
+    # the resolved host or the drill URL could name it explicitly.
+    monkeypatch.setenv("PGHOST", "db.internal")
+    monkeypatch.delenv("PGDATABASE", raising=False)
+    settings = _make_settings(
+        database_url="postgresql://selara:secret@/selara",
+        backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/selara",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must not point at the production DATABASE_URL",
+    ):
+        backup._resolve_backup_restore_target(settings)
+
+
+@pytest.mark.asyncio
+async def test_verify_dump_restorable_rejects_implicit_target_before_starting_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dump_path = tmp_path / "bot_pg_dump.dump"
+    dump_path.write_bytes(b"PGDMP-fake")
+    captured: dict[str, object] = {}
+    _install_fake_pg_restore(monkeypatch, captured)
+    monkeypatch.delenv("PGDATABASE", raising=False)
+    settings = _make_settings(
+        database_url="postgresql+asyncpg://selara:secret@db.internal:5432/selara",
+        backup_restore_database_url="postgresql://selara:secret@db.internal:5432",
+    )
+
+    with pytest.raises(
+        backup.BackupJobError,
+        match="must explicitly name the restore target",
+    ):
+        await backup._verify_dump_restorable(
+            dump_path=dump_path,
+            label="main bot database dump",
+            settings=settings,
+            temp_dir=tmp_path,
+        )
+
+    # The guard must reject the URL before the destructive drill process
+    # exists: nothing may be spawned against the implicit production target.
+    assert captured == {}
+
+
 def test_resolve_backup_restore_target_ignores_production_guard_for_other_hosts() -> None:
     settings = _make_settings(
         backup_restore_database_url="postgresql://restore_user:restore_pass@db.internal:5432/other_database",
