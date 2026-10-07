@@ -76,10 +76,17 @@ class ChatAiCharacterRepository:
             character_custom=row.character_custom,
             member_mode_enabled=bool(row.member_mode_enabled),
             member_history_access=bool(row.member_history_access),
+            member_actions_enabled=bool(row.member_actions_enabled),
         )
 
     async def update_character(self, *, chat_id: int, actor_user_id: int | None, **values) -> GroupCharacter:
-        allowed = {"character_preset", "character_custom", "member_mode_enabled", "member_history_access"}
+        allowed = {
+            "character_preset",
+            "character_custom",
+            "member_mode_enabled",
+            "member_history_access",
+            "member_actions_enabled",
+        }
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"Unknown character fields: {sorted(unknown)}")

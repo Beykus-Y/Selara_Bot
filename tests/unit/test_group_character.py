@@ -460,7 +460,7 @@ async def test_member_is_answered_with_read_only_tools_and_can_continue_by_reply
     reserved = _Access.reservations[0]
     assert reserved["feature"] == AiFeature.GROUP_MEMBER and reserved["actor_user_id"] == _MEMBER
     offered = {t["function"]["name"] for t in llm.requests[0]["tools"]}
-    assert offered == MEMBER_TOOL_NAMES
+    assert offered == MEMBER_TOOL_NAMES | {"perform_action"}
     tool_results = [m for m in llm.requests[1]["messages"] if m.get("role") == "tool"]
     assert "недоступен" in tool_results[0]["content"] and "utc_datetime" in tool_results[1]["content"]
     first.reply.assert_awaited_once()
@@ -491,6 +491,38 @@ async def test_member_tool_rounds_depend_on_subscription_and_last_round_is_tool_
     last = llm.requests[-1]
     assert last["tools"] == [] and last["messages"][-1]["content"] == LAST_ROUND_NOTICE
     assert all(r["max_tokens"] == 500 for r in llm.requests)
+
+
+@pytest.mark.asyncio
+async def test_member_can_perform_one_action_per_answer_and_switch_off_actions(member_db, monkeypatch):
+    performed = []
+
+    async def fake_action(*, message, bot, activity_repo, arguments, actor_label):
+        performed.append((arguments, actor_label))
+        return "Действие выполнено: обнять.", True
+
+    monkeypatch.setattr(group_character, "perform_member_action", fake_action)
+    llm = _Llm()
+    llm.script = [
+        _ToolMessage(tool_calls=[
+            _call("perform_action", {"action": "обнять", "target": "asker"}, "a1"),
+            _call("perform_action", {"action": "погладить", "target": "asker"}, "a2"),
+        ]),
+        _ToolMessage(content="Обняла!"),
+    ]
+    await _ask(member_db, _member_message("Селя, обними меня"), llm)
+    assert performed == [({"action": "обнять", "target": "asker"}, "Селя")]
+    results = [m["content"] for m in llm.requests[1]["messages"] if m.get("role") == "tool"]
+    assert results[0].startswith("Действие выполнено") and "Одно действие за ответ" in results[1]
+
+    repo = ChatAiCharacterRepository(member_db)
+    await repo.update_character(chat_id=_CHAT, actor_user_id=1, member_actions_enabled=False)
+    await member_db.commit()
+    llm2 = _Llm()
+    llm2.script = [_ToolMessage(content="Привет")]
+    await _ask(member_db, _member_message("Селя, привет", message_id=720), llm2)
+    assert "perform_action" not in {t["function"]["name"] for t in llm2.requests[0]["tools"]}
+    assert "perform_action" not in llm2.requests[0]["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
