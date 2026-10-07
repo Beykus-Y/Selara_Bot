@@ -45,12 +45,12 @@ from selara.application.daily_summary.transcription import (
     TranscriptionJob,
     build_job_from_raw_message,
     is_transcription_enabled,
-    is_within_transcription_budget,
 )
 from selara.core.config import Settings
-from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
+from selara.infrastructure.db.repositories import STT_CLAIM_STALE_AFTER_SECONDS, SqlAlchemyActivityRepository
+from selara.infrastructure.db.stt_budget_repository import SttBudgetRepository
 from selara.infrastructure.llm.pricing import estimate_stt_cost_usd
-from selara.infrastructure.stt.client import SttClient, SttClientError
+from selara.infrastructure.stt.client import SttClient
 
 logger = logging.getLogger(__name__)
 
@@ -227,75 +227,67 @@ class DailySummaryTranscriptionQueue:
         if chat_settings is None or not is_transcription_enabled(chat_settings, message_type=job.message_type):
             return  # toggle turned off (or chat gone) before we got to it -- spend nothing
 
-        archive_row_id = await self._claim_with_retry(job)
+        claim_at = datetime.now(timezone.utc)
+        archive_row_id = await self._claim_with_retry(job, claim_at=claim_at)
         if archive_row_id is None:
             return
 
-        now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
-            repo = SqlAlchemyActivityRepository(session)
-            seconds_used_today = await repo.sum_transcription_seconds_in_window(
-                chat_id=job.chat_id, window_from=now - timedelta(hours=24), window_to=now
+            token = await SttBudgetRepository(session).reserve(
+                chat_id=job.chat_id, archive_row_id=archive_row_id, claim_at=claim_at,
+                duration_seconds=job.duration_seconds,
+                max_seconds=self._settings.daily_summary_max_transcription_seconds_per_chat_per_day,
             )
-        if not is_within_transcription_budget(
-            seconds_used_today=seconds_used_today,
-            job_duration_seconds=job.duration_seconds,
-            max_seconds_per_day=self._settings.daily_summary_max_transcription_seconds_per_chat_per_day,
-        ):
+            await session.commit()
+        if token is None:
             logger.info(
                 "daily summary STT: chat_id=%s over the daily transcription budget, skipping message_id=%s",
                 job.chat_id,
                 job.telegram_message_id,
             )
-            await self._release(job, archive_row_id)
+            await self._release(job, archive_row_id, claim_at=claim_at)
             return
 
         try:
-            file = await self._bot.get_file(job.file_id)
-            downloaded = await self._bot.download_file(file.file_path)  # type: ignore[arg-type]
-            raw = downloaded.read() if hasattr(downloaded, "read") else bytes(downloaded)
+            # Finish network work before the durable claim/lease can be reclaimed.
+            deadline = claim_at + timedelta(seconds=STT_CLAIM_STALE_AFTER_SECONDS - 5)
+            remaining = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+            async with asyncio.timeout(remaining):
+                file = await self._bot.get_file(job.file_id)
+                downloaded = await self._bot.download_file(file.file_path)  # type: ignore[arg-type]
+                raw = downloaded.read() if hasattr(downloaded, "read") else bytes(downloaded)
+                text = await self._stt_client.transcribe_with_retry(raw, filename=job.filename)
         except asyncio.CancelledError:
+            try:
+                await self._release(job, archive_row_id, reservation_token=token)
+            except Exception:
+                # Cancellation must still stop the worker during a DB outage;
+                # the durable lease/recovery policy covers uncertain cleanup.
+                logger.exception("daily summary STT: cancellation cleanup failed token=%s", token)
             raise
         except Exception:
             logger.warning(
-                "daily summary STT: failed to download file chat_id=%s message_id=%s",
+                "daily summary STT: download/transcription failed chat_id=%s message_id=%s",
                 job.chat_id,
                 job.telegram_message_id,
                 exc_info=True,
             )
-            await self._release(job, archive_row_id)
+            await self._release(job, archive_row_id, reservation_token=token)
             return
 
-        try:
-            text = await self._stt_client.transcribe_with_retry(raw, filename=job.filename)
-        except SttClientError:
-            logger.warning(
-                "daily summary STT: transcription failed chat_id=%s message_id=%s",
-                job.chat_id,
-                job.telegram_message_id,
-                exc_info=True,
-            )
-            await self._release(job, archive_row_id)
-            return
-
-        completed_at = datetime.now(timezone.utc)
         async with self._session_factory() as session:
-            repo = SqlAlchemyActivityRepository(session)
-            await repo.finalize_message_transcript(
-                archive_row_id=archive_row_id, transcript=text, transcribed_at=completed_at
-            )
-            await repo.record_llm_usage(
-                message_archive_id=archive_row_id,
-                chat_id=job.chat_id,
-                feature="daily_summary",
-                stage="stt",
+            settled = await SttBudgetRepository(session).settle(
+                token=token, transcript=text,
                 model=self._stt_client.model,
                 estimated_cost_usd=estimate_stt_cost_usd(audio_seconds=job.duration_seconds),
                 audio_seconds=job.duration_seconds,
             )
             await session.commit()
+        if not settled:
+            logger.warning("daily summary STT: discarded expired/reclaimed result chat_id=%s message_id=%s",
+                           job.chat_id, job.telegram_message_id)
 
-    async def _claim_with_retry(self, job: TranscriptionJob) -> int | None:
+    async def _claim_with_retry(self, job: TranscriptionJob, *, claim_at: datetime | None = None) -> int | None:
         """Bounded retry/backoff waiting for the archive row to show up.
 
         A `None` result from `claim_message_for_transcription` means either "the
@@ -308,7 +300,7 @@ class DailySummaryTranscriptionQueue:
             async with self._session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
                 claimed = await repo.claim_message_for_transcription(
-                    chat_id=job.chat_id, telegram_message_id=job.telegram_message_id
+                    chat_id=job.chat_id, telegram_message_id=job.telegram_message_id, now=claim_at,
                 )
                 await session.commit()
             if claimed is not None:
@@ -324,13 +316,17 @@ class DailySummaryTranscriptionQueue:
         )
         return None
 
-    async def _release(self, job: TranscriptionJob, archive_row_id: int) -> None:
+    async def _release(self, job: TranscriptionJob, archive_row_id: int, *,
+                       reservation_token: str | None = None, claim_at: datetime | None = None) -> None:
         """Release the DB claim after a failed/skipped attempt and start the
         retry cooldown so the next recovery scan does not immediately repeat the
         same (possibly permanently failing) work."""
         async with self._session_factory() as session:
-            repo = SqlAlchemyActivityRepository(session)
-            await repo.release_transcription_claim(archive_row_id=archive_row_id)
+            if reservation_token is not None:
+                await SttBudgetRepository(session).release(token=reservation_token)
+            else:
+                repo = SqlAlchemyActivityRepository(session)
+                await repo.release_transcription_claim(archive_row_id=archive_row_id, claim_at=claim_at)
             await session.commit()
         self._start_retry_cooldown(job)
 

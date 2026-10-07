@@ -2758,6 +2758,29 @@ class LlmUsageLogModel(Base):
     )
 
 
+class SttBudgetReservationModel(Base):
+    """Durable, millisecond-precise admission and completed STT budget charges."""
+
+    __tablename__ = "stt_budget_reservations"
+    token: Mapped[str] = mapped_column(String(36), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False)
+    archive_row_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    claim_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reserved_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="reserved", server_default="reserved")
+    usage_log_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("llm_usage_log.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("reserved_ms > 0", name="ck_stt_budget_reserved_ms"),
+        CheckConstraint("status IN ('reserved', 'consumed')", name="ck_stt_budget_status"),
+        Index("idx_stt_budget_chat_created", "chat_id", "created_at"),
+        Index("idx_stt_budget_archive_lease", "archive_row_id", "lease_expires_at"),
+        Index("idx_stt_budget_usage_log", "usage_log_id", unique=True),
+    )
+
+
 class LlmArtifactModel(Base):
     __tablename__ = "llm_artifacts"
 

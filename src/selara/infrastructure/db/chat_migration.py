@@ -46,6 +46,7 @@ from selara.infrastructure.db.models import (
     SelaraAiPurchaseIntentModel,
     DailySummaryRunModel,
     MessageArchiveModel,
+    SttBudgetReservationModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -970,6 +971,9 @@ async def _move_chat_alias_settings(session: AsyncSession, *, old_chat_id: int, 
 
 
 async def _move_simple_chat_refs(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    await session.execute(update(SttBudgetReservationModel).where(
+        SttBudgetReservationModel.chat_id == old_chat_id,
+    ).values(chat_id=new_chat_id))
     await session.execute(update(UserKarmaVoteModel).where(UserKarmaVoteModel.chat_id == old_chat_id).values(chat_id=new_chat_id))
     await session.execute(
         update(RelationshipProposalModel)
