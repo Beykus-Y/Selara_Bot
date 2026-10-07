@@ -159,9 +159,13 @@ class LlmClient:
         model: str | None = None,
         model_profile: str | None = None,
     ):
-        model_profile = await self._routed_profile(model, model_profile, accounting_context)
+        routed = await self._routed_profile(model, model_profile, accounting_context)
+        # A routed tool feature needs tool support in every round of its loop, also in the final
+        # round without tools: otherwise one request would switch models halfway through.
+        needs_tools = bool(tools) or (routed is not None and routed != model_profile)
+        model_profile = routed
         selected, snapshot, _ = await self._prepare_model(
-            model, model_profile, self._config.model, ModelCapabilities(supports_tools=bool(tools)),
+            model, model_profile, self._config.model, ModelCapabilities(supports_tools=needs_tools),
         )
         response, usages = await self._request_with_retries(
             "chat_with_tools", selected, accounting_context,

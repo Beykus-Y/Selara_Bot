@@ -56,6 +56,29 @@ async def test_routed_feature_uses_profile_model_and_others_keep_legacy():
 
 
 @pytest.mark.asyncio
+async def test_model_without_tools_stays_on_legacy_in_every_round_of_a_tool_loop():
+    plain = CatalogModel("plain", "provider/plain", "Plain", capabilities=ModelCapabilities(False, True, False))
+    snap = CatalogSnapshot((plain,), (ModelProfile("fast", "Быстрая", "plain"),))
+
+    async def catalog():
+        return snap
+
+    async def load():
+        return {ROUTE_GROUP_ASK: "fast", ROUTE_PETS: "fast"}
+
+    llm = LlmClient(LlmConfig(api_key="t", model="legacy", summary_model="summary"),
+                    model_catalog=CachedModelCatalogProvider(catalog), feature_routes=CachedFeatureRoutes(load))
+    llm._client.chat.completions.create = AsyncMock(return_value=_response())
+    tool = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    await llm.chat_with_tools([{"role": "user", "content": "q"}], tool, accounting_context=_ctx("llm_admin"))
+    first = _sent_model(llm)
+    await llm.chat_with_tools([{"role": "user", "content": "q"}], [], accounting_context=_ctx("llm_admin"))
+    assert first == _sent_model(llm) == "legacy"  # final round without tools: same model as before
+    await llm.chat_simple([{"role": "user", "content": "q"}], accounting_context=_ctx("pet_talk"))
+    assert _sent_model(llm) == "provider/plain"  # pets never use tools
+
+
+@pytest.mark.asyncio
 async def test_route_failure_falls_back_to_legacy_model():
     routes = SimpleNamespace(profile_for_feature=AsyncMock(side_effect=RuntimeError("boom")))
     llm = _client(routes)
