@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 
 from selara.core.config import Settings
@@ -89,6 +90,21 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
     try:
         bot_dump = await _create_bot_database_dump(settings=settings, temp_dir=temp_dir)
         gacha_dump = await _download_gacha_backup(settings=settings, temp_dir=temp_dir)
+
+        # Verify that every produced dump is actually restorable before it is
+        # sent out; a backup that cannot be restored is worse than no backup.
+        await _verify_dump_restorable(
+            dump_path=bot_dump.path,
+            label="main bot database dump",
+            settings=settings,
+            temp_dir=temp_dir,
+        )
+        await _verify_dump_restorable(
+            dump_path=gacha_dump.path,
+            label="gacha dump",
+            settings=settings,
+            temp_dir=temp_dir,
+        )
 
         created_at = _backup_timestamp()
         manifest_files: list[dict[str, object]] = []
@@ -189,6 +205,146 @@ async def _download_gacha_backup(*, settings: Settings, temp_dir: Path) -> Backu
     output_path = temp_dir / f"gacha_pg_dump{suffix}"
     await asyncio.to_thread(output_path.write_bytes, gacha_backup.content)
     return BackupFile(path=output_path, archive_name=output_path.name)
+
+
+async def _verify_dump_restorable(
+    *,
+    dump_path: Path,
+    label: str,
+    settings: Settings,
+    temp_dir: Path,
+) -> None:
+    """Fail the backup job when the produced dump cannot be restored.
+
+    PostgreSQL custom-format dumps are validated with pg_restore: either a
+    cheap archive/TOC listing (no database server required) or, when
+    BACKUP_RESTORE_DATABASE_URL points at a disposable database, a full
+    restore drill into it. SQLite dumps are validated with an equivalent
+    integrity check.
+    """
+    if dump_path.suffix.lower() == ".sqlite3":
+        await asyncio.to_thread(_verify_sqlite_dump_restorable, dump_path, label)
+        return
+    await _verify_pg_dump_restorable(
+        dump_path=dump_path,
+        label=label,
+        settings=settings,
+        temp_dir=temp_dir,
+    )
+
+
+async def _verify_pg_dump_restorable(
+    *,
+    dump_path: Path,
+    label: str,
+    settings: Settings,
+    temp_dir: Path,
+) -> None:
+    restore_target = _resolve_backup_restore_target(settings)
+    if restore_target is not None:
+        database_url, password = restore_target
+        args = [
+            "--no-owner",
+            "--no-privileges",
+            "--exit-on-error",
+            "--clean",
+            "--if-exists",
+            f"--dbname={database_url}",
+            str(dump_path),
+        ]
+    else:
+        password = None
+        toc_path = temp_dir / f"{dump_path.name}.restore-check"
+        args = [
+            "--list",
+            f"--file={toc_path}",
+            str(dump_path),
+        ]
+    await _run_pg_restore_verification(
+        label=label,
+        settings=settings,
+        args=args,
+        password=password,
+    )
+
+
+def _resolve_backup_restore_target(settings: Settings) -> tuple[str, str | None] | None:
+    raw_url = (settings.backup_restore_database_url or "").strip()
+    if not raw_url:
+        return None
+
+    try:
+        database_url = make_url(raw_url)
+    except ArgumentError as exc:
+        raise BackupJobError(
+            "BACKUP_RESTORE_DATABASE_URL is invalid, backup restore drill cannot run."
+        ) from exc
+    if database_url.get_backend_name() != "postgresql":
+        raise BackupJobError(
+            "Backup restore drill supports only PostgreSQL for BACKUP_RESTORE_DATABASE_URL."
+        )
+
+    rendered_url = URL.create(
+        drivername="postgresql",
+        username=database_url.username,
+        password=None,
+        host=database_url.host,
+        port=database_url.port,
+        database=database_url.database,
+    ).render_as_string(hide_password=False)
+    return rendered_url, database_url.password
+
+
+def _verify_sqlite_dump_restorable(dump_path: Path, label: str) -> None:
+    try:
+        connection = sqlite3.connect(dump_path)
+    except sqlite3.Error as exc:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {exc}") from exc
+    try:
+        status = connection.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.Error as exc:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {exc}") from exc
+    finally:
+        connection.close()
+    if status != "ok":
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: integrity_check reported {status!r}."
+        )
+
+
+async def _run_pg_restore_verification(
+    *,
+    label: str,
+    settings: Settings,
+    args: list[str],
+    password: str | None,
+) -> None:
+    command = [settings.backup_pg_restore_path, *args]
+    env = os.environ.copy()
+    if password is not None:
+        env["PGPASSWORD"] = password
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise BackupJobError(
+            f"Backup restore verification command '{settings.backup_pg_restore_path}' "
+            "is not available in the main bot runtime."
+        ) from exc
+
+    _stdout, stderr = await process.communicate()
+    if process.returncode == 0:
+        return
+
+    detail = _last_line(stderr)
+    if detail:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {detail}")
+    raise BackupJobError(f"Backup restore verification failed for {label}.")
 
 
 def _split_backup_file(

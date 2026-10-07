@@ -108,6 +108,12 @@ class Settings(BaseSettings):
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
+    backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
+    # Optional disposable PostgreSQL database for full backup restore drills;
+    # when unset, only the cheap pg_restore --list archive check runs.
+    backup_restore_database_url: str | None = Field(
+        default=None, validation_alias="BACKUP_RESTORE_DATABASE_URL"
+    )
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
