@@ -3,7 +3,7 @@ import warnings
 import pytest
 from pydantic import ValidationError
 
-from selara.core.config import Settings
+from selara.core.config import Settings, get_settings
 
 OPT_IN_ENV = "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"
 
@@ -95,6 +95,35 @@ def test_web_disabled_property_fails_closed_without_opt_in() -> None:
 
     with pytest.raises(RuntimeError, match="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"):
         _ = settings.resolved_web_auth_secret
+
+
+@pytest.fixture
+def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Make the real startup path hermetic for one test.
+
+    ``Settings`` reads a ``.env`` file relative to the CWD, so a developer's
+    gitignored ``.env`` (possibly holding ``WEB_AUTH_SECRET``) must not leak in;
+    the ``get_settings`` cache must not hand a previously built instance to this
+    test either, and must be left empty afterwards so the test cannot leak state
+    into the rest of the suite.
+    """
+    monkeypatch.delenv("WEB_AUTH_SECRET", raising=False)
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+
+
+def test_get_settings_fails_closed_without_secret_or_opt_in(no_fallback_opt_in, isolated_env) -> None:
+    # tests/conftest.py makes every test construct Settings with the fallback
+    # opt-in, so nothing else exercises the production entry point: the bot and
+    # the web panel call get_settings() at startup and must fail closed there.
+    with pytest.raises(ValidationError, match="WEB_AUTH_SECRET"):
+        get_settings()
+
+    assert get_settings.cache_info().currsize == 0
 
 
 def test_bot_token_rotation_keeps_web_hmac_domain() -> None:
