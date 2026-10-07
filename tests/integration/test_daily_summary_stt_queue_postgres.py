@@ -23,13 +23,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.daily_summary.transcription import TranscriptionJob
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import LlmUsageLogModel, MessageArchiveModel
+from selara.infrastructure.db.models import LlmUsageLogModel, MessageArchiveModel, SttBudgetReservationModel
+from selara.infrastructure.db.stt_budget_repository import SttBudgetRepository
+from selara.infrastructure.db.chat_migration import migrate_chat_id
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.stt.client import SttClientError
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
@@ -39,6 +41,153 @@ _USER_ID = 2001
 # The recovery scan uses a rolling lookback from the real current time.
 # Keep sample archive rows inside that window instead of aging out of it.
 _NOW = datetime.now(timezone.utc)
+
+
+async def _count_budget_rows(sessions):
+    async with sessions() as session:
+        return await session.scalar(select(func.count()).select_from(SttBudgetReservationModel))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stt_budget_follows_group_to_supergroup_migration():
+    engine, sessions = await _database()
+    now = datetime.now(timezone.utc)
+    try:
+        await _seed_chat(sessions)
+        await _insert_archive_row(sessions, telegram_message_id=1)
+        async with sessions() as session:
+            archive_id = await SqlAlchemyActivityRepository(session).claim_message_for_transcription(
+                chat_id=_CHAT_ID, telegram_message_id=1, now=now)
+            token = await SttBudgetRepository(session).reserve(chat_id=_CHAT_ID, archive_row_id=archive_id,
+                                                              claim_at=now, duration_seconds=10, max_seconds=20, now=now)
+            await session.commit()
+        new_chat_id = _CHAT_ID - 1000
+        async with sessions() as session:
+            await migrate_chat_id(session, old_chat_id=_CHAT_ID, new_chat_id=new_chat_id)
+            await session.commit()
+        async with sessions() as session:
+            reservation = await session.get(SttBudgetReservationModel, token)
+            assert reservation.chat_id == new_chat_id
+            assert await SttBudgetRepository(session).settle(token=token, transcript="migrated", model="fake",
+                                                            audio_seconds=10, estimated_cost_usd=0)
+            await session.commit()
+            usage = await session.get(LlmUsageLogModel, reservation.usage_log_id)
+            assert usage.chat_id == new_chat_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_workers_reserve_near_cap_and_settle_without_double_charge():
+    engine, sessions = await _database()
+    try:
+        await _seed_chat(sessions)
+        for message_id, duration in [(1, 25), (2, 25), (3, 5), (4, 1)]:
+            await _insert_archive_row(sessions, telegram_message_id=message_id, duration=duration)
+        async with sessions() as session:
+            session.add(LlmUsageLogModel(chat_id=_CHAT_ID, feature="daily_summary", stage="stt",
+                                        model="legacy", audio_seconds=20, created_at=_NOW))
+            await session.commit()
+        client = _fake_stt_client()
+
+        async def transcribe(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return "Recognized audio text"
+
+        client.transcribe_with_retry.side_effect = transcribe
+        queues = [DailySummaryTranscriptionQueue(bot=_fake_bot(), stt_client=client, session_factory=sessions,
+                                                settings=_settings(max_seconds_per_day=50), max_lookup_attempts=1)
+                  for _ in range(2)]
+        jobs = [TranscriptionJob(_CHAT_ID, message_id, f"file-{message_id}", "voice.ogg", "voice", 25)
+                for message_id in (1, 2)]
+        await asyncio.wait_for(asyncio.gather(*(queue._process_job(job) for queue, job in zip(queues, jobs))), timeout=10)
+        assert client.transcribe_with_retry.await_count == 1
+        rows = [await _get_archive_row(sessions, telegram_message_id=message_id) for message_id in (1, 2)]
+        assert sum(row.transcript is not None for row in rows) == 1
+        # The successful usage row and its exact budget charge count only once.
+        await queues[0]._process_job(TranscriptionJob(_CHAT_ID, 3, "file-3", "voice.ogg", "voice", 5))
+        await queues[0]._process_job(TranscriptionJob(_CHAT_ID, 4, "file-4", "voice.ogg", "voice", 1))
+        assert client.transcribe_with_retry.await_count == 2
+        assert (await _get_archive_row(sessions, telegram_message_id=3)).transcript is not None
+        assert (await _get_archive_row(sessions, telegram_message_id=4)).transcribed_at is None
+        async with sessions() as session:
+            reservations = (await session.execute(select(SttBudgetReservationModel))).scalars().all()
+            assert sum(row.reserved_ms for row in reservations) == 30000
+            assert all(row.status == "consumed" for row in reservations)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["release", "crash", "window_expired"])
+async def test_budget_release_and_crash_reclaim_policy(scenario):
+    engine, sessions = await _database()
+    now = datetime.now(timezone.utc)
+    try:
+        await _seed_chat(sessions)
+        for message_id in (1, 2):
+            await _insert_archive_row(sessions, telegram_message_id=message_id, duration=25)
+
+        async def claim_and_reserve(message_id, timestamp):
+            async with sessions() as session:
+                archive_id = await SqlAlchemyActivityRepository(session).claim_message_for_transcription(
+                    chat_id=_CHAT_ID, telegram_message_id=message_id, now=timestamp)
+                assert archive_id is not None
+                token = await SttBudgetRepository(session).reserve(chat_id=_CHAT_ID, archive_row_id=archive_id,
+                                                                  claim_at=timestamp, duration_seconds=25,
+                                                                  max_seconds=30, now=timestamp)
+                await session.commit()
+                return archive_id, token
+
+        first_id, token = await claim_and_reserve(1, now)
+        assert token is not None
+        timestamp = now if scenario == "release" else now + timedelta(seconds=601)
+        async with sessions() as session:
+            if scenario == "release":
+                assert await SttBudgetRepository(session).release(token=token)
+            elif scenario == "crash":
+                # Lease expiry allows reclaiming the job, not forgetting possibly
+                # billed audio. It continues charging the budget for 24 hours.
+                assert not await SttBudgetRepository(session).settle(token=token, transcript="late", model="fake",
+                                                                     audio_seconds=25, estimated_cost_usd=0, now=timestamp)
+            await session.commit()
+        second_id, second_token = await claim_and_reserve(2, timestamp)
+        if scenario == "release":
+            assert second_token is not None
+        else:
+            assert second_token is None
+        if scenario == "crash":
+            # Reclaim the first job, then prove an old failure cannot clear its
+            # new claim. Only that old attempt's own reservation is released.
+            async with sessions() as session:
+                assert await SqlAlchemyActivityRepository(session).claim_message_for_transcription(
+                    chat_id=_CHAT_ID, telegram_message_id=1, now=timestamp) == first_id
+                assert await SttBudgetRepository(session).release(token=token)
+                await session.commit()
+            row = await _get_archive_row(sessions, telegram_message_id=1)
+            assert row.transcribed_at == timestamp
+            async with sessions() as session:
+                new_token = await SttBudgetRepository(session).reserve(chat_id=_CHAT_ID, archive_row_id=first_id,
+                                                                      claim_at=timestamp, duration_seconds=25,
+                                                                      max_seconds=30, now=timestamp)
+                assert new_token is not None
+                assert await SttBudgetRepository(session).settle(token=new_token, transcript="current", model="fake",
+                                                                audio_seconds=25, estimated_cost_usd=0, now=timestamp)
+                assert not await SttBudgetRepository(session).settle(token=token, transcript="late", model="fake",
+                                                                    audio_seconds=25, estimated_cost_usd=0, now=timestamp)
+                await session.commit()
+            assert (await _get_archive_row(sessions, telegram_message_id=1)).transcript == "current"
+        elif scenario == "window_expired":
+            timestamp = now + timedelta(hours=24, seconds=1)
+            _, new_token = await claim_and_reserve(2, timestamp)
+            assert new_token is not None
+            async with sessions() as session:
+                assert await session.get(SttBudgetReservationModel, token) is None
+    finally:
+        await engine.dispose()
 
 
 async def _database():
@@ -299,6 +448,7 @@ async def test_process_job_releases_claim_on_download_failure() -> None:
         row = await _get_archive_row(session_factory, telegram_message_id=1)
         assert row.transcript is None
         assert row.transcribed_at is None
+        assert await _count_budget_rows(session_factory) == 0
     finally:
         await engine.dispose()
 
@@ -319,6 +469,7 @@ async def test_process_job_releases_claim_on_stt_failure_without_crashing() -> N
         assert row.transcript is None
         assert row.transcribed_at is None
         assert await _count_stt_usage_rows(session_factory) == 0
+        assert await _count_budget_rows(session_factory) == 0
     finally:
         await engine.dispose()
 
