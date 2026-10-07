@@ -496,3 +496,29 @@ async def test_opposite_trades_between_two_users_do_not_deadlock() -> None:
     assert await _stock(session_factory, account_id=account_41, item_code="crop:radish") == 1
     assert await _stock(session_factory, account_id=account_40, item_code="crop:wheat") == 1
     await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sweep_never_returns_units_of_a_cancelled_listing_again() -> None:
+    from selara.infrastructure.db.market_expiry_sweeper import sweep_due_market_listings
+
+    engine, session_factory = await _database()
+    # Cancelling keeps qty_left on the row, so the sweep must key on status, not on qty_left alone.
+    created_at = datetime.now(timezone.utc) - timedelta(days=2)
+    listing_id, seller_account_id = await _seed_listing(session_factory, seller_user_id=40, event_at=created_at)
+    cancelled = await _cancel(
+        session_factory,
+        seller_user_id=40,
+        listing_id=listing_id,
+        event_at=created_at + timedelta(hours=1),
+    )
+
+    returned = await sweep_due_market_listings(session_factory)
+
+    assert cancelled.accepted
+    assert returned == 0
+    status, _ = await _listing_state(session_factory, listing_id=listing_id)
+    assert status == "cancelled"
+    assert await _stock(session_factory, account_id=seller_account_id, item_code="crop:radish") == 10
+    await engine.dispose()

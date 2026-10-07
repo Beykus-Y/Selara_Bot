@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import inventory_stack_limit
 from selara.application.use_cases.economy.common import (
+    account_lock_key,
     get_account_or_error,
     lock_economy_resources,
     market_listing_lock_key,
     resolve_scope_or_error,
     to_meta_json,
 )
+from selara.application.use_cases.economy.market_expiry import settle_expired_escrow
 from selara.application.use_cases.economy.market_limits import (
     MAX_MARKET_LISTING_ID,
     MAX_MARKET_QUANTITY,
@@ -29,8 +31,6 @@ async def execute(
     seller_tax_percent: int,
     event_at: datetime | None = None,
 ) -> MarketBuyResult:
-    now = event_at or datetime.now(timezone.utc)
-
     if quantity <= 0:
         return MarketBuyResult(
             accepted=False,
@@ -70,7 +70,28 @@ async def execute(
             buyer_balance=None,
         )
 
-    await lock_economy_resources(repo, market_listing_lock_key(listing_id))
+    owner = await repo.get_market_listing_owner(listing_id=listing_id)
+    if owner is None:
+        return MarketBuyResult(
+            accepted=False,
+            reason="Лот не найден.",
+            listing_id=None,
+            quantity=0,
+            total_cost=0,
+            buyer_balance=None,
+        )
+    listing_scope, seller_user_id = owner
+    # Account locks go before the listing lock. The seller's account is locked here too,
+    # because the account helpers below take it, and taking it after the listing lock
+    # could deadlock with a seller who buys on another listing.
+    await lock_economy_resources(
+        repo,
+        account_lock_key(scope=scope, user_id=buyer_user_id),
+        account_lock_key(scope=listing_scope, user_id=seller_user_id),
+        market_listing_lock_key(listing_id),
+    )
+    # Read the clock after the locks, so a purchase that waited out the expiry is refused.
+    now = event_at or datetime.now(timezone.utc)
     listing = await repo.get_market_listing(listing_id=listing_id)
     if listing is None:
         return MarketBuyResult(
@@ -103,7 +124,7 @@ async def execute(
         )
 
     if listing.expires_at <= now:
-        await repo.update_market_listing_qty_and_status(listing_id=listing.id, qty_left=listing.qty_left, status="expired")
+        await settle_expired_escrow(repo, scope=scope, listing=listing, now=now)
         return MarketBuyResult(
             accepted=False,
             reason="Срок лота истёк.",
