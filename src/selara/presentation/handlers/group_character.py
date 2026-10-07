@@ -417,6 +417,14 @@ async def _run_group_turn(
             await repo.commit()
     except AiTurnLeaseLostError:
         outcome["error_category"] = "lease_lost"
+        # Drop what this turn had not committed, then mark its admitted row failed: it will get no answer. Best effort,
+        # since pending rows are never read as history.
+        await db_session.rollback()
+        try:
+            await repo.set_status(message_id=row_id, status="failed")
+            await repo.commit()
+        except Exception:
+            log.exception("group member: could not mark the stopped turn failed message_id=%s", row_id)
         raise
     finally:
         if accounting is not None and invocation_id is not None:

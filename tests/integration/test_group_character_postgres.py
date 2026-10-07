@@ -336,7 +336,8 @@ async def test_a_turn_whose_lease_was_taken_over_saves_and_sends_nothing(factory
         rows = (
             await db.scalars(select(ChatMemberAiMessageModel).where(ChatMemberAiMessageModel.chat_id == CHAT))
         ).all()
-    assert [row.role for row in rows if row.status == "ok"] == []
+    # The admitted question is marked failed and no answer was saved.
+    assert [(row.role, row.status) for row in rows] == [("user", "failed")]
 
 
 async def test_a_lease_left_by_a_dead_instance_does_not_block_the_chat(factory) -> None:
