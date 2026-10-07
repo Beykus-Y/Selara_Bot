@@ -546,9 +546,9 @@ class MessageArchiveModel(Base):
     raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    # Daily summary feature fields (see docs/DAILY_SUMMARY_TODO.md). transcribed_at is
-    # tracked separately from snapshot_at because a transcript can be produced later
-    # than the message itself -- TTL cleanup keys off transcribed_at, not snapshot_at.
+    # Daily summary feature fields (see docs/DAILY_SUMMARY_TODO.md). transcribed_at is the STT claim marker:
+    # set when a worker claims the row and again when its transcript is stored; NULL before the first claim.
+    # Retention keys off snapshot_at and deletes whole rows, so it does not read transcribed_at.
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reply_to_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

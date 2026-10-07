@@ -4,6 +4,7 @@ The archive keeps raw Telegram JSON, text, captions and voice transcripts. Once 
 MESSAGE_ARCHIVE_RETENTION_DAYS, the row is deleted, which removes that content with it. Parked activity dead
 letters carry the same payloads, so they follow the same window. Deletes run in batches, each in its own
 transaction, so no statement holds locks on a table for long. Aggregates live in other tables and are untouched.
+The cleanup is off unless MESSAGE_ARCHIVE_RETENTION_DAYS is set, because the bot cannot restore deleted rows.
 """
 
 from __future__ import annotations

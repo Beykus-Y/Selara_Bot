@@ -46,9 +46,10 @@ class Settings(BaseSettings):
     activity_batch_close_grace_seconds: float = Field(
         default=5.0, gt=0, le=60, validation_alias="ACTIVITY_BATCH_CLOSE_GRACE_SECONDS"
     )
-    # Archived group messages (text, raw JSON, transcripts) and parked dead letters are deleted after this many days.
-    # 0 turns the cleanup off. See docs/MESSAGE_ARCHIVE_RETENTION.md.
-    message_archive_retention_days: int = Field(default=14, ge=0, validation_alias="MESSAGE_ARCHIVE_RETENTION_DAYS")
+    # Archived group messages (text, raw JSON, transcripts) and parked dead letters older than this many days are
+    # deleted for good. 0 (the default) keeps everything. Enabling it cannot be undone, so back up first.
+    # See docs/MESSAGE_ARCHIVE_RETENTION.md.
+    message_archive_retention_days: int = Field(default=0, ge=0, validation_alias="MESSAGE_ARCHIVE_RETENTION_DAYS")
     achievements_catalog_path: str = Field(
         default="src/selara/core/achievements.json",
         validation_alias="ACHIEVEMENTS_CATALOG_PATH",

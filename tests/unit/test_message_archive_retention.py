@@ -177,3 +177,8 @@ def test_retention_window_must_be_off_or_at_least_a_week(days: int) -> None:
 @pytest.mark.parametrize("days", [0, 7, 14])
 def test_retention_window_accepts_off_and_a_week_or_more(days: int) -> None:
     assert _settings(MESSAGE_ARCHIVE_RETENTION_DAYS=days).message_archive_retention_days == days
+
+
+def test_retention_is_off_by_default() -> None:
+    # Reads the declared default, so a local .env that sets the variable cannot change the result.
+    assert Settings.model_fields["message_archive_retention_days"].default == 0
