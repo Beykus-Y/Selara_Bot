@@ -27,7 +27,9 @@ Status: **в разработке**, слайсами с тестами перв
 - Атомарный claim + lease/reclaim через `daily_summary_runs` — не read-then-write.
 - Себестоимость: `pipeline_cost_usd` (без двойного счёта) отдельно от
   `context_stt_cost_usd` (может законно повторяться между пересекающимися прогонами).
-- STT — асинхронная очередь (не синхронно в хендлере), с recovery-сканом при рестарте.
+- STT — асинхронная очередь (не синхронно в хендлере), с периодическим recovery-сканом
+  (первый проход на старте, далее раз в минуту; архивная таблица — durable-состояние,
+  job, отброшенный при переполнении очереди, подбирается сканом без рестарта, #81).
 - Полный план: `~/.claude/plans/fancy-baking-pascal.md` (согласован в диалоге с Ильёй,
   прошёл несколько раундов правок — семантика окна, атомарность, себестоимость STT,
   privacy-pass, episode_count, structured output с fallback).
@@ -276,7 +278,11 @@ Status: **в разработке**, слайсами с тестами перв
     архивной строки синхронно, per-chat лимит секунд транскрибации в сутки
     (`settings.daily_summary_max_transcription_seconds_per_chat_per_day`, проверяется
     ДО скачивания файла — по duration из Telegram, не после оплаты STT), recovery-скан
-    на старте (`list_pending_voice_transcription_candidates`, окно 26ч).
+    периодический (`_recovery_loop`: первый проход на старте, далее раз в минуту —
+    `list_pending_voice_transcription_candidates`, окно 26ч; #81: очередь — только
+    fast path, архивная таблица — durable-состояние, отброшенный при QueueFull job
+    подбирается следующим сканом, дубликаты в очереди гасятся in-memory по
+    `(chat_id, telegram_message_id)`).
   - **Дедупликация live-job/recovery без новой колонки**: `claim_message_for_transcription`
     переиспользует `transcribed_at` как маркер claim'а (атомарный
     `UPDATE ... WHERE transcript IS NULL AND transcribed_at IS NULL RETURNING id`) —
@@ -284,7 +290,7 @@ Status: **в разработке**, слайсами с тестами перв
     дальше. `release_transcription_claim` откатывает `transcribed_at` в `NULL` при
     любой неудаче (бюджет/скачивание/STT-ошибка/выключенный тумблер), не трогая
     `transcript`, — сообщение остаётся доступным для будущего retry (следующий
-    recovery-скан после рестарта), но не бьёт по очереди/сводке прямо сейчас.
+    периодический recovery-скан, без рестарта), но не бьёт по очереди/сводке прямо сейчас.
     Ошибка одного job (`_process_job`) ловится в `_worker_loop` — воркер не падает,
     берёт следующий job из очереди.
   - Новые репозиторные методы: `claim_message_for_transcription`,
