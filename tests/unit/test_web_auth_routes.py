@@ -8,14 +8,14 @@ from selara.domain.entities import UserSnapshot
 from selara.web import app as web_app_module
 
 
-def _settings() -> Settings:
+def _settings(web_base_url="http://127.0.0.1:8080") -> Settings:
     return Settings.model_validate(
         {
             "BOT_TOKEN": "123456:TEST",
             "DATABASE_URL": "postgresql+asyncpg://user:pass@localhost:5432/selara_test",
             "BOT_USERNAME": "selara_test_bot",
             "WEB_AUTH_SECRET": "secret",
-            "WEB_BASE_URL": "http://127.0.0.1:8080",
+            "WEB_BASE_URL": web_base_url,
         }
     )
 
@@ -75,9 +75,10 @@ class DummySessionFactory:
 
 
 @pytest.mark.asyncio
-async def test_login_submit_returns_json_for_fetch_requests(monkeypatch) -> None:
+@pytest.mark.parametrize("base_url,secure", [("http://127.0.0.1:8080", False), ("https://panel.example.com", True)])
+async def test_login_submit_returns_json_for_fetch_requests(monkeypatch, base_url, secure) -> None:
     state = AuthRouteState(
-        settings=_settings(),
+        settings=_settings(base_url),
         user_from_code=UserSnapshot(
             telegram_user_id=77,
             username="viewer",
@@ -90,7 +91,7 @@ async def test_login_submit_returns_json_for_fetch_requests(monkeypatch) -> None
 
     app = web_app_module.create_web_app(settings=state.settings, session_factory=DummySessionFactory())
     transport = httpx.ASGITransport(app=app)
-    client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    client = httpx.AsyncClient(transport=transport, base_url=base_url)
     try:
         response = await client.post(
             "/login",
@@ -112,6 +113,10 @@ async def test_login_submit_returns_json_for_fetch_requests(monkeypatch) -> None
     assert payload["redirect"].startswith("/app?flash=")
     assert state.created_session_for == 77
     assert state.settings.web_session_cookie_name in response.headers.get("set-cookie", "")
+    cookie = response.headers["set-cookie"]
+    assert ("; Secure" in cookie) is secure
+    assert "HttpOnly" in cookie
+    assert "SameSite=lax" in cookie
 
 
 @pytest.mark.asyncio
