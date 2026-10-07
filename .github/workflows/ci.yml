@@ -148,18 +148,8 @@ jobs:
       - name: Backend setup
         uses: ./.github/actions/backend-setup
 
-      - name: Install snapshot fonts
-        timeout-minutes: 12
-        run: |
-          for attempt in 1 2 3; do
-            if timeout 60 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
-              exit 0
-            fi
-            echo "apt attempt $attempt failed" >&2
-            sleep 5
-          done
-          exit 1
+      - name: Install snapshot fonts and ffmpeg
+        uses: ./.github/actions/snapshot-fonts
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -168,7 +158,16 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
       - name: Install headless Chromium
-        run: python -m playwright install --with-deps chromium
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 240 python -m playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "playwright install attempt $attempt failed" >&2
+            sleep 5
+          done
+          exit 1
 
       - name: Create gacha test database
         run: >-
@@ -229,28 +228,6 @@ jobs:
 
       - name: Backend setup
         uses: ./.github/actions/backend-setup
-
-      - name: Install snapshot fonts
-        timeout-minutes: 12
-        run: |
-          for attempt in 1 2 3; do
-            if timeout 60 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ffmpeg; then
-              exit 0
-            fi
-            echo "apt attempt $attempt failed" >&2
-            sleep 5
-          done
-          exit 1
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-
-      - name: Install headless Chromium
-        run: python -m playwright install --with-deps chromium
 
       - name: Create gacha test database
         run: >-
