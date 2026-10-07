@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -190,6 +191,98 @@ async def test_daily_grants_ticket_on_cap() -> None:
     assert result.streak == 7
     assert result.granted_lottery_ticket
     assert repo.inventory.get("item:lottery_ticket", 0) == 1
+
+
+class LockingFakeEconomyRepo(FakeEconomyRepo):
+    """Fake that models transaction-scoped account locks like the SQLAlchemy repo.
+
+    ``lock_resources`` acquires a per-key ``asyncio.Lock``; the test releases it
+    after the use case returns, mimicking the middleware commit. The fake yields
+    control inside ``get_or_create_account``/``add_balance`` so two concurrent
+    claims interleave deterministically.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._account_locks: dict[str, asyncio.Lock] = {}
+        self.events: list[str] = []
+        self.ledger: list[dict] = []
+
+    def _lock_for(self, resource_key: str) -> asyncio.Lock:
+        return self._account_locks.setdefault(resource_key, asyncio.Lock())
+
+    async def lock_resources(self, *resource_keys: str) -> None:
+        for resource_key in resource_keys:
+            await self._lock_for(resource_key).acquire()
+            self.events.append(f"lock:{resource_key}")
+
+    def release_transaction_locks(self) -> None:
+        for lock in self._account_locks.values():
+            if lock.locked():
+                lock.release()
+
+    async def get_or_create_account(self, *, scope: EconomyScope, user_id: int):
+        await asyncio.sleep(0)
+        return self.account, self.farm
+
+    async def add_balance(self, *, account_id: int, delta: int) -> int:
+        await asyncio.sleep(0)
+        return await super().add_balance(account_id=account_id, delta=delta)
+
+    async def add_ledger(self, **kwargs) -> None:
+        self.ledger.append(kwargs)
+
+
+async def _run_daily_claim(repo: LockingFakeEconomyRepo, *, event_at: datetime):
+    try:
+        return await claim_daily(
+            repo,
+            economy_mode="global",
+            chat_id=1,
+            user_id=10,
+            daily_base_reward=120,
+            daily_streak_cap=7,
+            event_at=event_at,
+        )
+    finally:
+        repo.release_transaction_locks()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_daily_claims_pay_reward_once() -> None:
+    repo = LockingFakeEconomyRepo()
+    now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
+
+    results = await asyncio.gather(_run_daily_claim(repo, event_at=now), _run_daily_claim(repo, event_at=now))
+
+    assert sum(result.accepted for result in results) == 1
+    rejected = next(result for result in results if not result.accepted)
+    assert rejected.reason == "Дейлик уже получен. Попробуйте позже."
+    assert repo.account.balance == 120
+    assert repo.account.daily_streak == 1
+    assert repo.inventory.get("item:lottery_ticket", 0) == 0
+    assert len(repo.ledger) == 1
+    # The account-scope lock is acquired before the cooldown check and every
+    # side effect, exactly once per claim.
+    assert repo.events == ["lock:economy:account:global:10", "lock:economy:account:global:10"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_daily_claims_grant_single_ticket_on_streak_cap() -> None:
+    repo = LockingFakeEconomyRepo()
+    old_claim = datetime(2026, 2, 13, 0, 0, tzinfo=timezone.utc)
+    repo.account = replace(repo.account, daily_streak=6, last_daily_claimed_at=old_claim)
+    now = old_claim + timedelta(hours=25)
+
+    results = await asyncio.gather(_run_daily_claim(repo, event_at=now), _run_daily_claim(repo, event_at=now))
+
+    assert sum(result.accepted for result in results) == 1
+    accepted = next(result for result in results if result.accepted)
+    assert accepted.granted_lottery_ticket
+    assert repo.account.balance == 120 + 6 * 20
+    assert repo.account.daily_streak == 7
+    assert repo.inventory.get("item:lottery_ticket", 0) == 1
+    assert len(repo.ledger) == 1
 
 
 @pytest.mark.asyncio
