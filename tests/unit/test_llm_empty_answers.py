@@ -212,14 +212,14 @@ async def test_malformed_tool_json_finalizes_invocation_after_provider_usage():
          )), \
          patch.object(handler, 'LlmRepository', return_value=repo), \
          patch.object(handler, 'save_interaction', AsyncMock()):
-        with pytest.raises(json.JSONDecodeError):
-            await handler._handle(
-                message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
-                llm_client, AsyncMock(), with_context=False, settings=settings, session_factory=object(),
-            )
+        await handler._handle(
+            message, AsyncMock(), MagicMock(), replace(default_chat_settings(settings), llm_enabled=True),
+            llm_client, AsyncMock(), with_context=False, settings=settings, session_factory=object(),
+        )
 
-    accounting.report_provider_attempt.assert_awaited_once()
+    # Broken arguments go back to the model as a tool error; every provider attempt is accounted and the
+    # invocation is finalized instead of crashing the handler.
+    assert accounting.report_provider_attempt.await_count == 4
     accounting.create_invocation.assert_not_awaited()
-    accounting.finish_invocation_outcome.assert_awaited_once_with(
-        invocation_id=41, status='failed', error_category='handler_error',
-    )
+    accounting.finish_invocation_outcome.assert_awaited_once()
+    assert accounting.finish_invocation_outcome.await_args.kwargs['invocation_id'] == 41
