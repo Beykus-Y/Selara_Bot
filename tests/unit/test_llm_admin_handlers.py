@@ -124,6 +124,8 @@ async def test_llm_admin_handlers_dispatch(chat_settings):
     llm_client = MagicMock()
     db_session = MagicMock()
     message = MagicMock(spec=Message)
+    message.chat = SimpleNamespace(id=-100123, type="supergroup", title="Test group")
+    message.from_user = SimpleNamespace(id=111, username="admin", first_name="Admin", last_name=None, is_bot=False)
     settings = MagicMock()
     session_factory = object()
 
