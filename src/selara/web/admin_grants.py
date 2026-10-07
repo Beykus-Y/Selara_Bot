@@ -58,7 +58,7 @@ def grant_error_http(exc: GrantError) -> HTTPException:
 
 
 def build_admin_grants_router(
-    *, settings, session_factory, require_admin, send_notice: NoticeSender | None = None
+    *, settings, session_factory, require_admin, send_notice: NoticeSender | None = None, source: str = "miniapp"
 ) -> APIRouter:
     router = APIRouter(prefix="/monetization", dependencies=[Depends(require_admin)])
     service = EntitlementGrantService(session_factory, admin_user_id=settings.admin_user_id)
@@ -113,7 +113,7 @@ def build_admin_grants_router(
                 reason=payload.reason,
                 idempotency_key=payload.idempotency_key,
                 actor_user_id=actor,
-                source="miniapp",
+                source=source,
             )
         )
         return {"ok": True, **outcome_json(outcome, notified=notified)}
@@ -132,7 +132,7 @@ def build_admin_grants_router(
                 reason=payload.reason,
                 idempotency_key=payload.idempotency_key,
                 actor_user_id=actor,
-                source="miniapp",
+                source=source,
             )
         )
         return {"ok": True, **outcome_json(outcome, notified=notified)}

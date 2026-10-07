@@ -36,6 +36,17 @@ def _provider(settings, *, ail: bool):
     )
 
 
+def _query(data: str):
+    query = MagicMock()
+    query.data = data
+    query.from_user = SimpleNamespace(id=USER_ID, is_bot=False)
+    query.answer = AsyncMock()
+    query.message = MagicMock()
+    query.message.chat = SimpleNamespace(id=USER_ID, type="private")
+    query.message.edit_text = AsyncMock()
+    return query
+
+
 def _usage(cost: str) -> LlmCallUsage:
     return LlmCallUsage("c", "m", 1, 1, 2, Decimal(cost), "known", 1, "succeeded")
 
@@ -203,6 +214,51 @@ async def test_a_sent_artifact_replaces_the_progress_message(monkeypatch, sessio
     )
     message.thinking.delete.assert_awaited()
     message.thinking.edit_text.assert_not_awaited()
+
+
+async def test_an_artifact_without_a_caption_is_still_a_stored_answer(monkeypatch, session):
+    settings, llm, web_client, ail = await _arrange(monkeypatch, session, web=False, artifacts=True)
+
+    async def generate(**kwargs):
+        kwargs["outcome_sink"].update({"artifact_sent": True})
+        kwargs["usage_sink"].append(_usage("0.0001"))
+        return ""
+
+    monkeypatch.setattr(handler, "generate_reply", generate)
+    message = _message("сделай таблицу")
+    await handler.personal_chat_handler(
+        message, db_session=session, session_factory=MagicMock(), settings=settings,
+        personal_config=_provider(settings, ail=True), llm_client=llm, web_search_client=None,
+    )
+    message.thinking.delete.assert_awaited()
+    rows = await PersonalAiRepository(session).recent_messages(user_id=USER_ID, thread="assistant", limit=10)
+    assert [row.content for row in rows if row.role == "assistant"] == [handler.ARTIFACT_ANSWER_PLACEHOLDER]
+
+
+async def test_answers_never_get_a_link_preview(monkeypatch, session):
+    settings, llm, web_client, ail = await _arrange(monkeypatch, session)
+
+    async def generate(**kwargs):
+        kwargs["usage_sink"].append(_usage("0.0001"))
+        return "Вот ответ"
+
+    monkeypatch.setattr(handler, "generate_reply", generate)
+    message = _message("привет")
+    await handler.personal_chat_handler(
+        message, db_session=session, session_factory=MagicMock(), settings=settings,
+        personal_config=_provider(settings, ail=True), llm_client=llm, web_search_client="client",
+    )
+    options = message.thinking.edit_text.await_args.kwargs["link_preview_options"]
+    assert options.is_disabled is True
+
+
+async def test_the_legacy_set_callback_cannot_switch_tools_on(session):
+    repo = PersonalAiRepository(session)
+    stored = await repo.get_or_create_profile(USER_ID)
+    await session.commit()
+    query = _query(f"pai:set:tweb:1:{stored.revision}")
+    await handler.ai_settings_callback(query, db_session=session)
+    assert (await repo.get_profile(USER_ID)).tools_web_enabled is False
 
 
 async def test_tainted_history_is_replaced_by_a_placeholder_for_later_turns(session):

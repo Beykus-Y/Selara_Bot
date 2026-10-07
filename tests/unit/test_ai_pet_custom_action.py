@@ -159,6 +159,54 @@ async def test_gate_enforces_cooldown_daily_cap_and_availability(db) -> None:
     assert await gate(NOW, chat=-9) == "unavailable"
 
 
+async def _claim(service, pet_id, key, *, actor=GUEST, at=NOW, guests=None):
+    return (
+        await service.custom_action_gate(
+            pet_id=pet_id, chat_id=CHAT, actor_user_id=actor, now=at, day_start=NOW.replace(hour=0), daily_limit=5,
+            claim_key=key, owner_user_id=OWNER, guests_daily_limit=guests,
+        )
+    )[0]
+
+
+async def test_a_claim_makes_the_check_and_the_record_one_step(db) -> None:
+    session, _, pet_id = db
+    service = AiPetService(session)
+    assert await _claim(service, pet_id, "c1") == "ok"
+    # A second message from the same person before the first finished sees the claim as a cooldown.
+    assert await _claim(service, pet_id, "c2") == "cooldown"
+    assert await _claim(service, pet_id, "c1", at=NOW + ca.CUSTOM_COOLDOWN) == "duplicate"
+    await service.release_custom_claim(claim_key="c1")  # the model call produced nothing: no cooldown is kept
+    assert await _claim(service, pet_id, "c3") == "ok"
+
+
+async def test_a_paid_call_without_effect_still_counts_against_the_cooldown(db) -> None:
+    session, _, pet_id = db
+    service = AiPetService(session)
+    row = await session.get(AiPetModel, pet_id)
+    row.energy, row.last_tick_at = 5, NOW
+    await session.flush()
+    assert await _claim(service, pet_id, "b-claim") == "ok"
+    blocked = await service.perform_custom_action(
+        pet_id=pet_id, chat_id=CHAT, actor_user_id=GUEST, class_key="play", narration="ok", action_text="играю",
+        idempotency_key="b-final", today=TODAY, now=NOW, claim_key="b-claim",
+    )
+    assert blocked.status == "blocked"
+    kinds = [event.event_type for event in await session.scalars(select(AiPetEventModel))]
+    assert kinds.count("custom_blocked") == 1 and "custom_claim" not in kinds
+    assert await _claim(service, pet_id, "b-again", at=NOW + timedelta(minutes=1)) == "cooldown"
+
+
+async def test_all_guests_together_have_a_daily_cap_per_pet(db) -> None:
+    session, _, pet_id = db
+    service = AiPetService(session)
+    session.add_all(UserModel(telegram_user_id=user_id, first_name=f"G{user_id}") for user_id in (301, 302, 303))
+    await session.flush()
+    assert await _claim(service, pet_id, "g1", actor=301, guests=2) == "ok"
+    assert await _claim(service, pet_id, "g2", actor=302, guests=2) == "ok"
+    assert await _claim(service, pet_id, "g3", actor=303, guests=2) == "limit"
+    assert await _claim(service, pet_id, "o1", actor=OWNER, guests=2) == "ok"  # the owner is not a guest
+
+
 async def test_tired_and_full_pets_block_the_matching_classes_without_an_effect(db) -> None:
     session, _, pet_id = db
     service = AiPetService(session)
@@ -249,12 +297,17 @@ async def test_hostile_description_is_refused_by_the_model_class_and_has_no_effe
     await _run(db, message, "бью Мурку", llm)
     assert "отворачивается" in message.reply.await_args.args[0]
     after = await AiPetService(session).get_pet(pet_id)
-    assert (before.mood, before.xp) == (after.mood, after.xp)
+    # The handler reads the wall clock, so the time tick may move the mood: the refusal itself gives no xp
+    # and its only journal entry is the refusal.
+    assert before.xp == after.xp
+    kinds = {event.event_type for event in await session.scalars(select(AiPetEventModel))}
+    assert "custom_refuse" in kinds and not kinds & {"custom_care", "custom_play", "custom_prank"}
 
 
 async def test_no_subscription_no_model_call_and_quota_exhaustion_is_friendly(db, fake_quota, monkeypatch) -> None:
     session, factory, pet_id = db
     row = (await session.scalars(select(UserEntitlementModel))).one()
+    row.valid_from = NOW - timedelta(days=10)
     row.valid_until = NOW - timedelta(days=1)
     await session.commit()
     llm = _llm("{}")

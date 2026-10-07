@@ -92,6 +92,14 @@ async def test_every_change_needs_the_admin_header_but_reads_do_not(api):
     assert (await client.post(f"{PREFIX}/monetization/grants", json=grant)).status_code == 403
 
 
+async def test_grants_from_the_web_admin_are_journaled_as_admin_panel(api):
+    client, _ = api
+    grant = {"scope": "user", "target_id": 5, "days": 3, "reason": "тест", "idempotency_key": "web-1", "notify": False}
+    assert (await client.post(f"{PREFIX}/monetization/grants", json=grant, headers=HEADERS)).status_code == 200
+    rows = (await client.get(f"{PREFIX}/monetization/grants")).json()["items"]
+    assert [row["source"] for row in rows] == ["admin_panel"]
+
+
 async def test_models_and_profiles_are_changed_through_the_same_endpoints(api):
     client, _ = api
     model = {

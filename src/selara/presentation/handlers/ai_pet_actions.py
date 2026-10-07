@@ -55,6 +55,14 @@ def pick_pet(pets: list[PetView], raw: str) -> tuple[PetView | None, str]:
     return None, text
 
 
+async def _release_claim(service: AiPetService, db_session, claim_key: str) -> None:
+    try:
+        await service.release_custom_claim(claim_key=claim_key)
+        await db_session.commit()
+    except Exception:
+        log.exception("Could not release pet action claim %s", claim_key)
+
+
 async def handle_pet_custom_action(
     message: Message,
     *,
@@ -104,11 +112,17 @@ async def handle_pet_custom_action(
         if user.id == owner_id
         else settings.pet_custom_actions_guest_daily_limit
     )
+    claim_key = f"ai_pet_claim:{chat_id}:{message.message_id}"
     status, gate_message = await service.custom_action_gate(
         pet_id=pet.id, chat_id=chat_id, actor_user_id=user.id, now=now,
         day_start=_day_start(settings, now), daily_limit=daily_limit,
+        claim_key=claim_key, owner_user_id=owner_id, guests_daily_limit=settings.pet_custom_actions_guests_daily_limit,
     )
+    if status == "duplicate":
+        await db_session.commit()
+        return
     if status != "ok":
+        await db_session.commit()
         await message.reply(escape(f"{pet.emoji} {gate_message}"), parse_mode="HTML")
         return
 
@@ -155,10 +169,13 @@ async def handle_pet_custom_action(
         )
     except Exception:
         log.exception("Pet action quota reservation failed message_id=%s", message.message_id)
+        await _release_claim(service, db_session, claim_key)
         return
     if decision.reused:
+        await _release_claim(service, db_session, claim_key)
         return
     if not decision.allowed:
+        await _release_claim(service, db_session, claim_key)
         if decision.reason == AccessReason.QUOTA_EXHAUSTED:
             await message.reply(escape(f"{pet.emoji} {pet.name} наигрался(ась) на сегодня. Завтра придумаем новое!"), parse_mode="HTML")
         else:
@@ -193,6 +210,7 @@ async def handle_pet_custom_action(
         if not raw:
             if outcome["error_category"] == "handler_error":
                 outcome["error_category"] = "empty_answer"
+            await _release_claim(service, db_session, claim_key)
             await message.reply(escape(f"{pet.emoji} {pet.name} задумчиво молчит."), parse_mode="HTML")
             return
         outcome["status"] = "succeeded"
@@ -209,6 +227,7 @@ async def handle_pet_custom_action(
             idempotency_key=f"ai_pet_action:{chat_id}:{message.message_id}",
             today=local_day,
             now=now,
+            claim_key=claim_key,
         )
         await db_session.commit()
         if result.status == "duplicate":
@@ -236,6 +255,7 @@ async def handle_pet_custom_action(
                     decision=decision,
                     usages=line_usages,
                     failed=outcome["status"] != "succeeded",
+                    max_units=pet_reserve_units(settings),
                 )
             except Exception:
                 log.exception("Could not settle pet action AIL invocation_id=%s", invocation_id)

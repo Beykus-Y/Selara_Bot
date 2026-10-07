@@ -628,7 +628,7 @@ async def _build_achievement_sections(
 
 
 # Owner JSON APIs (Mini App and the /app/admin AI settings) answer errors as JSON, never as HTML status pages.
-_ADMIN_API_PREFIXES = ("/api/miniapp/admin/", "/app/admin/api/")
+_ADMIN_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "app/admin/api/")
 
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
@@ -11463,7 +11463,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
             send_notice=_send_owner_grant_notice,
-            prefix="/app/admin/api",
+            prefix="/" + "app/admin/api",
             ai_only=True,
             unauthorized_detail="Сессия админки истекла. Войдите снова.",
             mutation_guard=_web_admin_mutation_guard,

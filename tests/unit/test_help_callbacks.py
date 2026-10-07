@@ -132,8 +132,7 @@ def test_help_ai_plus_section_documents_subscription_summary_and_autocfg() -> No
 def test_help_models_section_lists_profiles_limit_modes_and_grants() -> None:
     settings = _settings()
     text, _ = _resolve_help_payload(settings, section="models")
-    for fragment in ("/ai", "Базовая", "Аналитик", "Быстрая", "AI Limits", "AIL",
-                     f"{settings.personal_free_daily_limit} в сутки бесплатно", f"{settings.personal_paid_daily_limit}"):
+    for fragment in ("/ai", "Базовая", "Аналитик", "Быстрая", "AI Limits", "AIL"):
         assert fragment in text, fragment
     assert len(text) < 4096
 

@@ -12,7 +12,7 @@ from typing import Any
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, Filter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -704,6 +704,8 @@ async def ai_settings_callback(
         changes = {"character_preset": args[0]}
     elif action == "set" and len(args) == 3:
         changes = _parse_switch(args[0], args[1])
+        if changes is not None and any(column in changes for column in _TOOL_SWITCHES.values()):
+            changes = None  # tool switches live in the category screen, where the Personal check is done
     elif action == "sc" and len(args) == 4 and args[0] in _CATEGORIES:
         category = args[0]
         changes = _parse_switch(args[1], args[2])
@@ -808,18 +810,24 @@ def _offer_markup(settings: Settings, config, decision) -> InlineKeyboardMarkup 
     return builder.as_markup()
 
 
+# A model that read a web page can be talked into writing a link that carries the person's data out; a preview
+# would load that address on Telegram's side without a click, so Personal answers never get one.
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+ARTIFACT_ANSWER_PLACEHOLDER = "[отправлен артефакт]"
+
+
 async def _send_answer(message: Message, thinking: Message, text: str) -> None:
     for index, chunk in enumerate(render_llm_html(text)):
         if index == 0:
             try:
-                await thinking.edit_text(chunk, parse_mode="HTML")
+                await thinking.edit_text(chunk, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
                 continue
             except Exception as exc:
                 log.warning("personal_ai: editing answer failed, sending reply: %s", exc)
         try:
-            await message.answer(chunk, parse_mode="HTML")
+            await message.answer(chunk, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
         except TelegramBadRequest:
-            await message.answer(html_to_plain_text(chunk), parse_mode=None)
+            await message.answer(html_to_plain_text(chunk), parse_mode=None, link_preview_options=_NO_PREVIEW)
         except TelegramForbiddenError:
             # The user blocked the bot while the model was answering: the turn is already stored and charged.
             log.info("personal_ai: user blocked the bot before the answer was delivered")
@@ -1071,6 +1079,10 @@ async def _handle_personal_chat(
             await thinking.edit_text("⚠️ Не удалось выполнить запрос. Попробуйте позже.")
             return
 
+        artifact_sent = bool(reply_outcome.get("artifact_sent"))
+        if not answer and artifact_sent:
+            # An artifact without a caption is still an answer: keep the turn and its charge.
+            answer = ARTIFACT_ANSWER_PLACEHOLDER
         if not answer:
             outcome["error_category"] = "empty_answer"
             if ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
@@ -1099,7 +1111,7 @@ async def _handle_personal_chat(
         await db_session.commit()
         outcome["status"] = "succeeded"
         outcome["error_category"] = None
-        if reply_outcome.get("artifact_sent"):
+        if artifact_sent:
             # The artifact's caption is the answer and is already in the chat.
             try:
                 await thinking.delete()

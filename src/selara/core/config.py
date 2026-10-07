@@ -223,6 +223,9 @@ class Settings(BaseSettings):
     pet_custom_actions_guest_daily_limit: int = Field(
         default=5, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_GUEST_DAILY_LIMIT"
     )
+    pet_custom_actions_guests_daily_limit: int = Field(
+        default=20, ge=0, le=10_000, validation_alias="PET_CUSTOM_ACTIONS_GUESTS_DAILY_LIMIT"
+    )
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,

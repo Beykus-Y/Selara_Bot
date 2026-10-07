@@ -110,6 +110,10 @@ def _outcome(row: EntitlementGrantModel, *, duplicate: bool, paid_recently: bool
     )
 
 
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class EntitlementGrantService:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, admin_user_id: int | None = None) -> None:
         self._session_factory = session_factory
@@ -141,7 +145,9 @@ class EntitlementGrantService:
                 async with session.begin():
                     if _is_postgres(session):
                         await _advisory_xact_lock(session, _lock_key(scope, target_id))
-                    replay = await self._replay(session, key, scope=scope, target_id=target_id)
+                    replay = await self._replay(
+                        session, key, scope=scope, target_id=target_id, actions=("grant", "extend")
+                    )
                     if replay is not None:
                         return replay
                     await self._require_known_target(session, scope, target_id)
@@ -214,7 +220,9 @@ class EntitlementGrantService:
                 async with session.begin():
                     if _is_postgres(session):
                         await _advisory_xact_lock(session, _lock_key(scope, target_id))
-                    replay = await self._replay(session, key, scope=scope, target_id=target_id)
+                    replay = await self._replay(
+                        session, key, scope=scope, target_id=target_id, actions=("revoke", "shorten")
+                    )
                     if replay is not None:
                         return replay
                     entitlement = await self._entitlement_row(session, scope, target_id)
@@ -230,7 +238,17 @@ class EntitlementGrantService:
                         new_until = until_before
                         action = "revoke"
                     else:
-                        proposed = until_before - timedelta(days=int(days))
+                        # Only days the owner granted by hand and has not already taken back can be removed:
+                        # paid time is never shortened here (use cancel_all to close a subscription).
+                        removable = min(
+                            await self._granted_days_left(session, scope, target_id), until_before - current
+                        )
+                        if removable <= timedelta(0):
+                            raise GrantError(
+                                "exceeds_granted",
+                                "Выданных вручную дней, которые можно убрать, нет: оплаченный срок так не сокращается.",
+                            )
+                        proposed = until_before - min(timedelta(days=int(days)), removable)
                         removed = until_before - max(proposed, current)
                         if proposed <= current:
                             # Nothing left of the paid or granted time: closing it keeps the validity window valid.
@@ -425,7 +443,7 @@ class EntitlementGrantService:
             else:
                 name = text.lstrip("@")
                 user_filter.append(func.lower(UserModel.username) == name.lower())
-                chat_filter.append(func.lower(ChatModel.title).like(f"%{name.lower()}%"))
+                chat_filter.append(ChatModel.title.ilike(f"%{_like_escape(name)}%", escape="\\"))
             for user in await session.scalars(select(UserModel).where(or_(*user_filter)).limit(limit)):
                 users.append(
                     {
@@ -484,7 +502,9 @@ class EntitlementGrantService:
         return await session.scalar(stmt.with_for_update() if for_update else stmt)
 
     @staticmethod
-    async def _replay(session: AsyncSession, key: str, *, scope: str, target_id: int) -> GrantOutcome | None:
+    async def _replay(
+        session: AsyncSession, key: str, *, scope: str, target_id: int, actions: tuple[str, ...]
+    ) -> GrantOutcome | None:
         row = await session.scalar(
             select(EntitlementGrantModel).where(EntitlementGrantModel.idempotency_key == key)
         )
@@ -493,7 +513,7 @@ class EntitlementGrantService:
         same_target = row.scope == scope and (
             (row.target_chat_id if scope == "chat" else row.target_user_id) == target_id
         )
-        if not same_target:
+        if not same_target or row.action not in actions:
             raise GrantError("idempotency_conflict", "Этот ключ уже использован для другой операции.")
         return _outcome(row, duplicate=True)
 
@@ -532,6 +552,27 @@ class EntitlementGrantService:
             .limit(1)
         )
         return found is not None
+
+    @staticmethod
+    async def _granted_days_left(session: AsyncSession, scope: str, target_id: int) -> timedelta:
+        """Hand-granted time not yet taken back since the last full revoke (the journal is the source of truth)."""
+        column = _target_column(scope)
+        rows = (
+            await session.execute(
+                select(EntitlementGrantModel.action, EntitlementGrantModel.delta_seconds)
+                .where(column == target_id)
+                .order_by(EntitlementGrantModel.id.asc())
+            )
+        ).all()
+        seconds = 0
+        for action, delta in rows:
+            if action in ("grant", "extend"):
+                seconds += int(delta)
+            elif action == "shorten":
+                seconds = max(0, seconds - int(delta))
+            elif action == "revoke":
+                seconds = 0
+        return timedelta(seconds=seconds)
 
     @staticmethod
     async def _granted_after_last_payment(session: AsyncSession, scope: str, target_id: int) -> bool:

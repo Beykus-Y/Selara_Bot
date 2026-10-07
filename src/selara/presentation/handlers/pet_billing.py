@@ -16,7 +16,7 @@ def pet_reserve_units(settings) -> Decimal:
     return Decimal(getattr(settings, "pet_request_ail_cap", Decimal("3")))
 
 
-async def settle_pet_line(access_service, *, config, decision, usages, failed: bool = False) -> None:
+async def settle_pet_line(access_service, *, config, decision, usages, failed: bool = False, max_units: Decimal | None = None) -> None:
     """Replace the cap reservation by the line's actual cost in AI Limits mode; never fails the line.
 
     Without a priced response (or in requests mode) the reservation simply stays as the charge.
@@ -30,9 +30,10 @@ async def settle_pet_line(access_service, *, config, decision, usages, failed: b
     if cost is None:
         log.warning("pet billing: cost unknown, keeping the cap reservation invocation_id=%s", invocation_id)
         return
+    units = ail_units_from_cost_usd(cost, config.ail_usd_value)
+    if max_units is not None:
+        units = min(units, max_units)  # the per-request cap holds even if the route points at an expensive model
     try:
-        await access_service.adjust(
-            invocation_id=invocation_id, actual_units=ail_units_from_cost_usd(cost, config.ail_usd_value)
-        )
+        await access_service.adjust(invocation_id=invocation_id, actual_units=units)
     except Exception:
         log.exception("pet billing: AIL settlement failed invocation_id=%s", invocation_id)

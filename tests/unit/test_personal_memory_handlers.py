@@ -948,10 +948,11 @@ async def test_export_is_rate_limited_per_user(monkeypatch, session):
 
 async def test_auto_memory_toggle_says_it_needs_personal(monkeypatch, session):
     stored = await PersonalAiRepository(session).get_or_create_profile(USER_ID)
-    message = _message("/ai")
+    screen = _query(f"pai:cat:memory:{stored.revision}")
 
-    await handler.ai_settings_command(message, db_session=session)
+    await handler.ai_settings_callback(screen, db_session=session)
 
-    buttons = [b.text for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard for b in row]
+    markup = screen.message.edit_text.await_args.kwargs["reply_markup"]
+    buttons = [b.text for row in markup.inline_keyboard for b in row]
     assert any("Авто-память" in text and "Personal" in text for text in buttons)
     assert stored.auto_memory_enabled is False

@@ -263,6 +263,7 @@ async def _phrase(
                     decision=decision,
                     usages=line_usages,
                     failed=outcome["status"] != "succeeded",
+                    max_units=pet_reserve_units(settings),
                 )
             except Exception:
                 log.exception("Could not settle pet event AIL invocation_id=%s", invocation_id)

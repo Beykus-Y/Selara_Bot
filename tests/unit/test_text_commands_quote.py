@@ -14,6 +14,7 @@ from selara.presentation.handlers import text_commands
 
 
 _BASE_CHAT_SETTINGS = ChatSettings(
+    pets_enabled=False,
     top_limit_default=10,
     top_limit_max=50,
     vote_daily_limit=20,

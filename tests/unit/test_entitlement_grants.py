@@ -98,7 +98,7 @@ def test_notices_do_not_talk_about_payment() -> None:
         eg.revoke_notice(scope="chat", mode="shorten", valid_until=until, timezone_name="UTC"),
     ):
         assert "оплат" not in text.casefold()
-    assert "07.11.2026" in eg.grant_notice(scope="user", valid_until=until, timezone_name="UTC")
+    assert "05.11.2026" in eg.grant_notice(scope="user", valid_until=until, timezone_name="UTC")
 
 
 # ----- service ------------------------------------------------------------------------------------------
@@ -271,6 +271,47 @@ async def test_shorten_removes_only_the_asked_days_and_never_goes_below_now(env)
     assert caught.value.code == "no_entitlement"
 
 
+async def test_shorten_never_removes_paid_days(env) -> None:
+    factory, service = env
+    async with factory() as session:  # 30 paid days, as a payment would leave them
+        session.add(
+            UserEntitlementModel(
+                user_id=PERSON, product_key=SELARA_PERSONAL_PRODUCT_KEY, status="active",
+                valid_from=NOW, valid_until=NOW + timedelta(days=30), paid_daily_limit=150,
+            )
+        )
+        await session.commit()
+    with pytest.raises(eg.GrantError) as caught:  # nothing was granted by hand yet
+        await service.revoke(
+            scope="user", target_id=PERSON, mode="shorten", days=5, reason="x",
+            idempotency_key="p0", actor_user_id=OWNER, source="command", now=NOW,
+        )
+    assert caught.value.code == "exceeds_granted"
+    await service.grant(**_args(days=7))
+    taken = await service.revoke(
+        scope="user", target_id=PERSON, mode="shorten", days=30, reason="ошибка",
+        idempotency_key="p1", actor_user_id=OWNER, source="command", now=NOW,
+    )
+    assert taken.status == "active" and taken.delta_seconds == 7 * 86_400
+    assert _as_utc(taken.valid_until) == NOW + timedelta(days=30)
+    with pytest.raises(eg.GrantError):  # the granted days are used up, the paid ones stay
+        await service.revoke(
+            scope="user", target_id=PERSON, mode="shorten", days=1, reason="x",
+            idempotency_key="p2", actor_user_id=OWNER, source="command", now=NOW,
+        )
+
+
+async def test_an_idempotency_key_cannot_be_replayed_as_another_kind_of_operation(env) -> None:
+    _, service = env
+    await service.grant(**_args(days=5, idempotency_key="same"))
+    with pytest.raises(eg.GrantError) as caught:
+        await service.revoke(
+            scope="user", target_id=PERSON, mode="cancel_all", days=None, reason="x",
+            idempotency_key="same", actor_user_id=OWNER, source="command", now=NOW,
+        )
+    assert caught.value.code == "idempotency_conflict"
+
+
 async def test_granted_mark_follows_the_last_way_the_time_was_added(env) -> None:
     factory, service = env
     assert not await service.granted_by_admin(scope="user", target_id=PERSON)
@@ -298,7 +339,7 @@ async def test_lookup_recent_and_personal_list(env) -> None:
     _, service = env
     found = await service.lookup("@vasya")
     assert [user["id"] for user in found["users"]] == [PERSON]
-    assert [chat["id"] for chat in (await service.lookup("клуб"))["chats"]] == [CHAT]
+    assert [chat["id"] for chat in (await service.lookup("Клуб"))["chats"]] == [CHAT]
     assert [chat["id"] for chat in (await service.lookup(str(CHAT)))["chats"]] == [CHAT]
     assert await service.lookup("") == {"users": [], "chats": []}
     await service.grant(**_args(now=datetime.now(timezone.utc)))

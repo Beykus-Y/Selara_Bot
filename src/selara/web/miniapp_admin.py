@@ -1136,14 +1136,16 @@ def build_miniapp_admin_router(
             "checks": checks,
         }
 
+    if ai_only:
+        # AI and monetization settings only: feedback, logs, broadcasts and the audience stay Mini App routes.
+        # Filter before including the sub-routers: newer FastAPI keeps them as path-less include objects.
+        keep = (f"{prefix}/ai", f"{prefix}/monetization")
+        router.routes[:] = [route for route in router.routes if getattr(route, "path", "").startswith(keep)]
     router.include_router(build_admin_models_router(
         settings=settings, session_factory=session_factory, require_admin=require_admin,
     ))
     router.include_router(build_admin_grants_router(
         settings=settings, session_factory=session_factory, require_admin=require_admin, send_notice=send_notice,
+        source="admin_panel" if ai_only else "miniapp",
     ))
-    if ai_only:
-        # AI and monetization settings only: feedback, logs, broadcasts and the audience stay Mini App routes.
-        keep = (f"{prefix}/ai", f"{prefix}/monetization")
-        router.routes[:] = [route for route in router.routes if getattr(route, "path", "").startswith(keep)]
     return router

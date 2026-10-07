@@ -197,7 +197,7 @@ def render_result(result: ActionResult, *, event_type: str, actor_link: str, cha
     if result.leveled_up_to is not None:
         lines.append(f"🎉 {escape(pet.name)} достигает {result.leveled_up_to} уровня!")
         if result.leveled_up_to == m.TRAVEL_UNLOCK_LEVEL:
-            lines.append("Открыты путешествия: напишите /pet_travel в другом чате, где включены питомцы.")
+            lines.append("Открыты путешествия (нужен Selara Personal): напишите /pet_travel в другом чате, где включены питомцы.")
     return "\n".join(lines)
 
 

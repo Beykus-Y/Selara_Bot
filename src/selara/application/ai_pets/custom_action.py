@@ -54,7 +54,11 @@ CLASSES: dict[str, ActionClass] = {
     "social": ActionClass("social", "общение", "обнять, поговорить по душам, посидеть рядом", m.Effect(mood=5, affinity=2, xp=1)),
     "prank": ActionClass("prank", "шалость", "безобидно подшутить, подразнить, напугать понарошку", m.Effect(mood=-4, affinity=-2)),
 }
-CLASS_KEYS = (*CLASSES, REFUSE_CLASS)
+# Journal-only kinds: a claim is written under the pet lock before the paid model call (cooldown and caps count it),
+# a blocked action keeps its claim as the record of a paid call that had no effect.
+CLAIM_CLASS = "claim"
+BLOCKED_CLASS = "blocked"
+CLASS_KEYS = (*CLASSES, REFUSE_CLASS, CLAIM_CLASS, BLOCKED_CLASS)
 
 
 def event_type(class_key: str) -> str:
