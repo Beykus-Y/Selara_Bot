@@ -69,6 +69,18 @@ class _BuyerInventoryRaceRepository(SqlAlchemyEconomyRepository):
         return result
 
 
+class _AccountRaceRepository(SqlAlchemyEconomyRepository):
+    def __init__(self, session, rendezvous: _Rendezvous) -> None:
+        super().__init__(session)
+        self._rendezvous = rendezvous
+
+    async def get_or_create_account(self, *, scope, user_id: int):
+        # Hold each account lock first, then wait, so both trades own their first account before either asks for its second.
+        result = await super().get_or_create_account(scope=scope, user_id=user_id)
+        await self._rendezvous.wait()
+        return result
+
+
 async def _database():
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
@@ -448,4 +460,39 @@ async def test_sweep_repays_legacy_expired_rows_that_still_hold_escrow_exactly_o
     assert second == 0
     assert await _listing_state(session_factory, listing_id=listing_id) == ("expired", 0)
     assert await _stock(session_factory, account_id=seller_account_id, item_code="crop:radish") == 7
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_opposite_trades_between_two_users_do_not_deadlock() -> None:
+    engine, session_factory = await _database()
+    radish_listing, _ = await _seed_listing(session_factory, seller_user_id=40, item_code="crop:radish")
+    wheat_listing, _ = await _seed_listing(session_factory, seller_user_id=41, item_code="crop:wheat")
+    account_40 = await _fund(session_factory, user_id=40, amount=1000)
+    account_41 = await _fund(session_factory, user_id=41, amount=1000)
+    rendezvous = _Rendezvous()
+
+    async def run_buy(buyer_user_id: int, listing_id: int):
+        async with session_factory() as session:
+            result = await buy_listing(
+                _AccountRaceRepository(session, rendezvous),
+                economy_mode="global",
+                chat_id=None,
+                buyer_user_id=buyer_user_id,
+                listing_id=listing_id,
+                quantity=1,
+                seller_tax_percent=0,
+                event_at=EVENT_AT + timedelta(hours=1),
+            )
+            await session.commit()
+            return result
+
+    # 41 buys radish from 40 while 40 buys wheat from 41. Each buy locks its buyer's account
+    # before the seller's, so the two trades can end up waiting on each other.
+    results = await asyncio.gather(run_buy(41, radish_listing), run_buy(40, wheat_listing))
+
+    assert all(result.accepted for result in results)
+    assert await _stock(session_factory, account_id=account_41, item_code="crop:radish") == 1
+    assert await _stock(session_factory, account_id=account_40, item_code="crop:wheat") == 1
     await engine.dispose()
