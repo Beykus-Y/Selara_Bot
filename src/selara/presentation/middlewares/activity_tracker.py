@@ -230,5 +230,7 @@ class ActivityTrackerMiddleware(BaseMiddleware):
             reply_to_telegram_message_id=(
                 archive_payload["reply_to_telegram_message_id"] if archive_payload is not None else None
             ),
+            # Staged in the request's transaction when there is one, so the row commits with the handler's writes.
+            session=data.get("db_session"),
         )
         return result
