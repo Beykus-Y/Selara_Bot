@@ -10,7 +10,7 @@ import logging
 import re
 import secrets
 import xml.etree.ElementTree as ElementTree
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from html import escape, unescape
 from importlib import import_module
@@ -49,6 +49,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from selara.web.login_limiter import LoginLimiterUnavailable, RedisLoginAttemptLimiter
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.application.feature_access import FeatureAccessService
@@ -88,6 +89,7 @@ from selara.application.use_cases.get_my_stats import execute as get_my_stats
 from selara.application.use_cases.get_rep_stats import execute as get_rep_stats
 from selara.core.chat_settings import ChatSettings, default_chat_settings
 from selara.core.bot_runtime import get_bot_polling_runtime_state
+from selara.web.readiness import database_ready, polling_ready, redis_ready
 from selara.core.config import Settings
 from selara.core.roles import PERM_MANAGE_SETTINGS
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
@@ -117,6 +119,7 @@ from selara.infrastructure.db.models import (
     AdminBroadcastModel,
     AdminRuntimeSettingsModel,
     ChatModel,
+    ChatSettingsModel,
     EconomyAccountModel,
     MessageArchiveModel,
     UserChatActivityModel,
@@ -627,6 +630,10 @@ async def _build_achievement_sections(
     return sections
 
 
+# Owner JSON APIs (Mini App and the /app/admin AI settings) answer errors as JSON, never as HTML status pages.
+_ADMIN_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "app/admin/api/")
+
+
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     template_environment = create_template_environment(
@@ -647,7 +654,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
-    failed_attempts: dict[str, deque[datetime]] = defaultdict(deque)
+    login_limiter = RedisLoginAttemptLimiter(
+        redis_url=settings.redis_url, limit=settings.web_login_attempt_limit,
+        window_seconds=max(1, settings.web_login_attempt_window_minutes) * 60,
+    )
     chat_settings_defaults = default_chat_settings(settings)
     bot_username = (settings.bot_username or settings.bot_name or "selara_ru_bot").lstrip("@")
     game_bot: Bot | None = None
@@ -678,6 +688,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return {"status": "healthy", "latency_ms": round((asyncio.get_running_loop().time() - started) * 1000)}
         except Exception:
             return {"status": "down", "latency_ms": None, "detail": "Telegram Bot API не ответил на проверку."}
+
+    async def _send_owner_grant_notice(chat_id: int, text: str) -> bool:
+        """Best-effort notice for a granted or revoked subscription: a DM to the user or a message in the chat."""
+        try:
+            await (await _get_game_bot()).send_message(chat_id, text)
+        except Exception:
+            logger.warning("Subscription notice was not delivered chat_id=%s", chat_id)
+            return False
+        return True
 
     async def _close_game_bot() -> None:
         nonlocal game_bot
@@ -1164,8 +1183,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
-            message = exc.detail if isinstance(exc.detail, str) and exc.detail else "Сервер отклонил запрос."
+        if exc.status_code == 503 and request.url.path in {"/login", "/app/admin/login", "/api/admin/login"} and (
+            request.url.path == "/api/admin/login" or _prefers_json(request)
+        ):
+            return _json_result(ok=False, message=str(exc.detail), status_code=503)
+        if request.url.path.startswith(_ADMIN_API_PREFIXES):
+            detail = exc.detail.get("message") if isinstance(exc.detail, dict) else exc.detail
+            message = detail if isinstance(detail, str) and detail else "Сервер отклонил запрос."
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"ok": False, "status_code": exc.status_code, "message": message},
@@ -1207,7 +1231,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
-        if request.url.path.startswith("/" + "api/miniapp/admin/"):
+        if request.url.path.startswith(_ADMIN_API_PREFIXES):
             return JSONResponse(
                 status_code=422,
                 content={"ok": False, "status_code": 422, "message": "Проверьте параметры запроса."},
@@ -1266,15 +1290,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             payload["field"] = field
         return JSONResponse(content=payload, status_code=status_code)
 
-    def _check_rate_limit(host: str, now: datetime) -> bool:
-        attempts = failed_attempts[host]
-        window = timedelta(minutes=max(1, settings.web_login_attempt_window_minutes))
-        while attempts and attempts[0] <= now - window:
-            attempts.popleft()
-        return len(attempts) >= max(1, settings.web_login_attempt_limit)
-
-    def _register_failed_attempt(host: str, now: datetime) -> None:
-        failed_attempts[host].append(now)
+    async def _reserve_login_attempt(key: str) -> str | None:
+        try:
+            return await login_limiter.reserve(key)
+        except LoginLimiterUnavailable as error:
+            raise StarletteHTTPException(status_code=503, detail=str(error)) from None
 
     def _admin_password_matches(candidate: str) -> bool:
         configured = settings.admin_password
@@ -4509,18 +4529,25 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
         return False, "Неизвестное действие."
 
+    @app.get("/livez")
+    async def liveness() -> Response:
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
     @app.get("/healthz")
-    async def healthcheck() -> Response:
-        try:
-            async with session_factory() as session:
-                await session.execute(select(1))
-        except Exception:
-            logger.warning("Web readiness check failed", exc_info=True)
-            return JSONResponse(content={"status": "unavailable"}, status_code=503)
-        # game_store_redis surfaces the game store's Redis mode
-        # (disabled/connected/degraded/recovering) for operators: a degraded
-        # store still serves games from memory, so it must not fail the check.
-        return JSONResponse(content={"status": "ok", "game_store_redis": GAME_STORE.redis_recovery_state}, status_code=200)
+    @app.get("/readyz")
+    async def readiness() -> Response:
+        database_ok, redis_ok = await asyncio.gather(database_ready(session_factory), redis_ready(settings.redis_url))
+        checks = {
+            "database": database_ok,
+            "redis": redis_ok,
+            "polling": polling_ready(get_bot_polling_runtime_state()),
+        }
+        ready = all(checks.values())
+        # Informational only: a degraded or recovering game store still serves games from memory,
+        # so its Redis mode (disabled/connected/degraded/recovering) must not fail readiness.
+        checks["game_store_redis"] = GAME_STORE.redis_recovery_state
+        return JSONResponse(content={"status": "ok" if ready else "unavailable", "checks": checks},
+                            status_code=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -4608,7 +4635,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"web:{host}"
         prefers_json = _prefers_json(request)
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             redirect_path = _with_message(
                 "/login",
                 key="error",
@@ -4626,7 +4654,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         form = await _parse_form(request)
         code = normalize_login_code(form.get("code"))
         if len(code) != 6:
-            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/login", key="error", text="Введите корректный шестизначный код.")
             if prefers_json:
                 return _json_result(
@@ -4646,7 +4673,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             )
             if user is None:
                 await session.commit()
-                _register_failed_attempt(rate_limit_key, now)
                 redirect_path = _with_message(
                     "/login",
                     key="error",
@@ -4663,7 +4689,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
 
             token = await _create_user_session(auth_repo, user=user, now=now)
             await session.commit()
-            failed_attempts.pop(rate_limit_key, None)
+            await login_limiter.release(rate_limit_key, attempt_token)
 
         redirect_path = _with_message("/app", key="flash", text="Вход выполнен.")
         response = (
@@ -8169,6 +8195,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             ("broadcasts", "/app/admin#broadcasts", "Рассылки"),
             ("history", "/app/admin/table/messages_compact", "История"),
             ("database", "/app/admin#database", "База данных"),
+            ("ai", "/app/admin/ai", "AI-настройки"),
         )
         return {
             "top_links": [
@@ -8189,10 +8216,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         }
 
     def _compact_message_text(row: MessageArchiveModel) -> str:
-        value = (row.text or row.caption or "").strip()
+        return _compact_preview_text(
+            text=row.text,
+            caption=row.caption,
+            message_type=row.message_type,
+        )
+
+    def _compact_preview_text(
+        *,
+        text: str | None,
+        caption: str | None,
+        message_type: str | None,
+    ) -> str:
+        value = (text or caption or "").strip()
         if value:
             return value
-        return f"[{row.message_type}]"
+        return f"[{message_type}]"
 
     def _admin_archive_highlight_segments(
         value: str,
@@ -8914,7 +8953,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"admin:{host}"
         prefers_json = _prefers_json(request)
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             redirect_path = _with_message(
                 "/app/admin/login",
                 key="error",
@@ -8933,7 +8973,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         password = form.get("password", "")
 
         if not _admin_password_matches(password):
-            _register_failed_attempt(rate_limit_key, now)
             redirect_path = _with_message("/app/admin/login", key="error", text="Неверный пароль.")
             if prefers_json:
                 return _json_result(ok=False, message="Неверный пароль.", status_code=401, redirect=redirect_path)
@@ -8961,7 +9000,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 now=now,
             )
             await session.commit()
-        failed_attempts.pop(rate_limit_key, None)
+        await login_limiter.release(rate_limit_key, attempt_token)
 
         redirect_path = _with_message("/app/admin", key="flash", text="Вход выполнен.")
         response = (
@@ -9650,14 +9689,75 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     filter_errors.append("ID автора должен быть целым числом.")
 
             async with session_factory() as session:
-                navigation_stmt = (
-                    select(MessageArchiveModel)
-                    .order_by(MessageArchiveModel.snapshot_at.desc(), MessageArchiveModel.id.desc())
-                    .limit(250)
+                # Навигация архива — это чаты с включённым save_message (issue #98),
+                # а не глобальный top-250 последних снимков: иначе тихий чат «моргает»,
+                # исчезая из списка, когда активные чаты выталкивают его снимки
+                # за пределы top-250. Агрегаты архива (реальный COUNT и MAX) и
+                # latest preview достраиваются поверх этого списка.
+                archive_aggregates = (
+                    select(
+                        MessageArchiveModel.chat_id.label("chat_id"),
+                        func.count(MessageArchiveModel.id).label("snapshot_count"),
+                        func.max(MessageArchiveModel.snapshot_at).label("last_snapshot_at"),
+                    )
+                    .group_by(MessageArchiveModel.chat_id)
+                    .subquery()
                 )
-                navigation_rows = (await session.execute(navigation_stmt)).scalars().all()
-                if selected_chat_id is None and navigation_rows:
-                    selected_chat_id = int(navigation_rows[0].chat_id)
+                latest_ranked = (
+                    select(
+                        MessageArchiveModel.chat_id.label("chat_id"),
+                        MessageArchiveModel.text.label("last_text"),
+                        MessageArchiveModel.caption.label("last_caption"),
+                        MessageArchiveModel.message_type.label("last_message_type"),
+                        func.row_number()
+                        .over(
+                            partition_by=MessageArchiveModel.chat_id,
+                            order_by=(
+                                MessageArchiveModel.snapshot_at.desc(),
+                                MessageArchiveModel.id.desc(),
+                            ),
+                        )
+                        .label("snapshot_rank"),
+                    )
+                    .subquery()
+                )
+                navigation_stmt = (
+                    select(
+                        ChatSettingsModel.chat_id.label("chat_id"),
+                        archive_aggregates.c.snapshot_count.label("snapshot_count"),
+                        archive_aggregates.c.last_snapshot_at.label("last_snapshot_at"),
+                        latest_ranked.c.last_text.label("last_text"),
+                        latest_ranked.c.last_caption.label("last_caption"),
+                        latest_ranked.c.last_message_type.label("last_message_type"),
+                    )
+                    # Явный FROM: иначе левая часть join выводится из первой колонки
+                    # select, и перестановка списка колонок молча меняет цель join.
+                    .select_from(ChatSettingsModel)
+                    .join(ChatModel, ChatModel.telegram_chat_id == ChatSettingsModel.chat_id)
+                    .join(
+                        archive_aggregates,
+                        archive_aggregates.c.chat_id == ChatSettingsModel.chat_id,
+                        isouter=True,
+                    )
+                    .join(
+                        latest_ranked,
+                        (latest_ranked.c.chat_id == ChatSettingsModel.chat_id)
+                        & (latest_ranked.c.snapshot_rank == 1),
+                        isouter=True,
+                    )
+                    .where(ChatSettingsModel.save_message.is_(True))
+                    .order_by(
+                        archive_aggregates.c.last_snapshot_at.desc().nulls_last(),
+                        ChatModel.title.asc().nulls_last(),
+                        ChatSettingsModel.chat_id.asc(),
+                    )
+                )
+                navigation_rows = (await session.execute(navigation_stmt)).all()
+                if selected_chat_id is None:
+                    for navigation_row in navigation_rows:
+                        if navigation_row.last_snapshot_at is not None:
+                            selected_chat_id = int(navigation_row.chat_id)
+                            break
 
                 stmt = select(MessageArchiveModel)
                 count_stmt = select(func.count()).select_from(MessageArchiveModel)
@@ -9749,10 +9849,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 total = int((await session.execute(count_stmt)).scalar() or 0)
 
                 user_ids = sorted({int(row.user_id) for row in rows})
+                navigation_chat_ids = {int(row.chat_id) for row in navigation_rows}
                 chat_ids = sorted(
-                    {int(row.chat_id) for row in navigation_rows}
+                    navigation_chat_ids
                     | ({selected_chat_id} if selected_chat_id is not None else set())
                 )
+                selected_chat_snapshot_count: int | None = None
+                if selected_chat_id is not None and selected_chat_id not in navigation_chat_ids:
+                    # Чат с выключенным save_message можно открыть прямой ссылкой:
+                    # показываем его в навигации с настоящим числом снимков.
+                    selected_chat_count_result = await session.execute(
+                        select(func.count())
+                        .select_from(MessageArchiveModel)
+                        .where(MessageArchiveModel.chat_id == selected_chat_id)
+                    )
+                    selected_chat_snapshot_count = int(selected_chat_count_result.scalar() or 0)
                 user_rows = (
                     await session.execute(select(UserModel).where(UserModel.telegram_user_id.in_(user_ids)))
                 ).scalars().all() if user_ids else []
@@ -9795,23 +9906,32 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             navigation_by_chat: dict[int, dict[str, object]] = {}
             for row in navigation_rows:
                 chat_id = int(row.chat_id)
-                summary = navigation_by_chat.get(chat_id)
-                if summary is None:
-                    navigation_by_chat[chat_id] = {
-                        "chat_id": chat_id,
-                        "last_preview": _compact_message_text(row),
-                        "last_time": row.snapshot_at.strftime("%H:%M"),
-                        "snapshot_count": 1,
-                    }
-                else:
-                    summary["snapshot_count"] = int(summary["snapshot_count"]) + 1
+                last_snapshot_at = row.last_snapshot_at
+                navigation_by_chat[chat_id] = {
+                    "chat_id": chat_id,
+                    "last_preview": (
+                        _compact_preview_text(
+                            text=row.last_text,
+                            caption=row.last_caption,
+                            message_type=row.last_message_type,
+                        )
+                        if last_snapshot_at is not None
+                        else "Сообщений в архиве пока нет"
+                    ),
+                    "last_time": last_snapshot_at.strftime("%H:%M") if last_snapshot_at else "—",
+                    "snapshot_count": int(row.snapshot_count or 0),
+                }
 
             if selected_chat_id is not None and selected_chat_id not in navigation_by_chat:
                 navigation_by_chat[selected_chat_id] = {
                     "chat_id": selected_chat_id,
                     "last_preview": _compact_message_text(rows[0]) if rows else "Нет сообщений в текущей выборке",
                     "last_time": rows[0].snapshot_at.strftime("%H:%M") if rows else "—",
-                    "snapshot_count": len(rows),
+                    "snapshot_count": (
+                        selected_chat_snapshot_count
+                        if selected_chat_snapshot_count is not None
+                        else len(rows)
+                    ),
                 }
 
             chat_summaries = [
@@ -10428,7 +10548,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         now = _now_utc()
         host = request.client.host if request.client is not None and request.client.host else "unknown"
         rate_limit_key = f"admin:{host}"
-        if _check_rate_limit(rate_limit_key, now):
+        attempt_token = await _reserve_login_attempt(rate_limit_key)
+        if attempt_token is None:
             return _json_result(
                 ok=False,
                 message="Слишком много попыток. Попробуйте позже.",
@@ -10439,7 +10560,6 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         password = form.get("password", "")
 
         if not _admin_password_matches(password):
-            _register_failed_attempt(rate_limit_key, now)
             return _json_result(ok=False, message="Неверный пароль.", status_code=401)
 
         if settings.admin_user_id is None:
@@ -10460,7 +10580,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 now=now,
             )
             await session.commit()
-        failed_attempts.pop(rate_limit_key, None)
+        await login_limiter.release(rate_limit_key, attempt_token)
 
         response = _json_result(ok=True, message="Вход выполнен.", status_code=200, redirect="/app/admin")
         response.set_cookie(
@@ -11336,6 +11456,127 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             "created_at": broadcast.created_at.isoformat(),
         }
 
+    # --- AI settings of the owner in the server-rendered /app/admin --------------------------------------------
+    # The same endpoints and services as the Mini App admin (build_miniapp_admin_router), mounted a second time
+    # under /app/admin/api with the admin web session instead of the Telegram one.
+
+    async def _load_web_admin_user(session: AsyncSession, request: Request) -> UserSnapshot | None:
+        admin_user_id = await _load_admin_from_request(session, request, touch=True)
+        if not _admin_auth_required(admin_user_id):
+            return None
+        return UserSnapshot(
+            telegram_user_id=int(admin_user_id), username=None, first_name=None, last_name=None, is_bot=False
+        )
+
+    def _web_admin_mutation_guard(request: Request) -> None:
+        # The admin cookie is SameSite=Lax and the API reads JSON only; a custom header on every change makes a
+        # cross-site request impossible without a CORS preflight (this app allows none).
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("x-selara-admin") != "1":
+            raise StarletteHTTPException(status_code=403, detail="Недопустимый запрос: нужен заголовок X-Selara-Admin.")
+
+    @app.get("/app/admin/ai", response_class=HTMLResponse)
+    async def admin_ai_page(request: Request):
+        async with session_factory() as session:
+            admin_user_id = await _load_admin_from_request(session, request, touch=True)
+            await session.commit()
+        if not _admin_auth_required(admin_user_id):
+            return _redirect("/app/admin/login")
+        return _render_template(
+            "admin_ai.html",
+            page_title="Selara • AI-настройки",
+            page_name="admin_ai",
+            **_admin_layout_context(
+                flash=request.query_params.get("flash"), error=request.query_params.get("error"), active="ai"
+            ),
+            extra_styles=["admin-ai.css"],
+            extra_scripts=["admin-ai.js"],
+        )
+
+    async def _web_admin_chat_context(session: AsyncSession, request: Request, chat_id: int):
+        """(admin_user_id, chat) for the owner's per-chat Selara settings, or an error response."""
+        _web_admin_mutation_guard(request)
+        admin_user_id = await _load_admin_from_request(session, request, touch=True)
+        if not _admin_auth_required(admin_user_id):
+            return None, None, _json_result(ok=False, message="Сессия админки истекла. Войдите снова.", status_code=401)
+        chat = await session.scalar(select(ChatModel).where(ChatModel.telegram_chat_id == chat_id))
+        if chat is None or chat.type not in {"group", "supergroup"}:
+            return admin_user_id, None, _json_result(ok=False, message="Группа не найдена.", status_code=404)
+        return admin_user_id, chat, None
+
+    @app.get("/app/admin/api/chats/{chat_id}/selara")
+    async def admin_chat_selara_settings_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            _, chat, failure = await _web_admin_chat_context(session, request, chat_id)
+            if failure is not None:
+                await session.commit()
+                return failure
+            payload = await build_selara_settings_payload(
+                db_session=session, chat_id=chat_id, session_factory=session_factory, settings=settings,
+                can_manage=True,
+            )
+            await session.commit()
+        return JSONResponse(
+            content={"ok": True, "chat_title": chat.title, **payload}, headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/app/admin/api/chats/{chat_id}/selara")
+    async def admin_chat_selara_settings_update_api(chat_id: int, request: Request):
+        async with session_factory() as session:
+            admin_user_id, chat, failure = await _web_admin_chat_context(session, request, chat_id)
+            if failure is not None:
+                await session.commit()
+                return failure
+            activity_repo = SqlAlchemyActivityRepository(session)
+            form = await _parse_form(request)
+            action = (form.get("action") or "").strip()
+            ok, message = await apply_selara_action(
+                db_session=session,
+                activity_repo=activity_repo,
+                chat_id=chat_id,
+                actor_id=admin_user_id,
+                action=action,
+                value=form.get("value") or "",
+                session_factory=session_factory,
+                settings=settings,
+            )
+            if ok:
+                await log_chat_action(
+                    activity_repo,
+                    chat_id=chat_id,
+                    chat_type=chat.type,
+                    chat_title=chat.title,
+                    action_code="web_setting_updated",
+                    description=f"Владелец изменил настройки Selara в чате через /app/admin ({action})",
+                    actor_user_id=admin_user_id,
+                )
+            await session.commit()
+            payload = await build_selara_settings_payload(
+                db_session=session, chat_id=chat_id, session_factory=session_factory, settings=settings,
+                can_manage=True,
+            )
+            await session.commit()
+        return JSONResponse(
+            content={"ok": ok, "message": message, "chat_title": chat.title, **payload},
+            status_code=200 if ok else 400,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    app.include_router(
+        build_miniapp_admin_router(
+            settings=settings,
+            session_factory=session_factory,
+            load_user=_load_web_admin_user,
+            broadcast_preview_handler=_miniapp_broadcast_preview,
+            broadcast_start_handler=_miniapp_broadcast_start,
+            broadcast_status_handler=_miniapp_broadcast_status,
+            telegram_bot_probe=_probe_miniapp_telegram_bot,
+            send_notice=_send_owner_grant_notice,
+            prefix="/" + "app/admin/api",
+            ai_only=True,
+            unauthorized_detail="Сессия админки истекла. Войдите снова.",
+            mutation_guard=_web_admin_mutation_guard,
+        )
+    )
     app.include_router(
         build_miniapp_admin_router(
             settings=settings,
@@ -11345,6 +11586,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             broadcast_start_handler=_miniapp_broadcast_start,
             broadcast_status_handler=_miniapp_broadcast_status,
             telegram_bot_probe=_probe_miniapp_telegram_bot,
+            send_notice=_send_owner_grant_notice,
         )
     )
     app.include_router(

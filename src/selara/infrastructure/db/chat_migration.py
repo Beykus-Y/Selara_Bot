@@ -26,6 +26,7 @@ from selara.infrastructure.db.models import (
     ChatAiCharacterModel,
     ChatMemberAiMessageModel,
     ChatEntitlementModel,
+    EntitlementGrantModel,
     ChatActivityEventSyncStateModel,
     ChatMemberCountSnapshotModel,
     ChatModel,
@@ -45,6 +46,7 @@ from selara.infrastructure.db.models import (
     SelaraAiPurchaseIntentModel,
     DailySummaryRunModel,
     MessageArchiveModel,
+    SttBudgetReservationModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -121,6 +123,13 @@ async def _migrate_selara_ai_purchases(
         update(SelaraAiPurchaseIntentModel)
         .where(SelaraAiPurchaseIntentModel.chat_id == old_chat_id)
         .values(chat_id=new_chat_id)
+    )
+
+    # The grant journal follows the chat; it has no foreign keys, so nothing else keeps it attached.
+    await session.execute(
+        update(EntitlementGrantModel)
+        .where(EntitlementGrantModel.target_chat_id == old_chat_id)
+        .values(target_chat_id=new_chat_id)
     )
 
     products = list(
@@ -962,6 +971,9 @@ async def _move_chat_alias_settings(session: AsyncSession, *, old_chat_id: int, 
 
 
 async def _move_simple_chat_refs(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    await session.execute(update(SttBudgetReservationModel).where(
+        SttBudgetReservationModel.chat_id == old_chat_id,
+    ).values(chat_id=new_chat_id))
     await session.execute(update(UserKarmaVoteModel).where(UserKarmaVoteModel.chat_id == old_chat_id).values(chat_id=new_chat_id))
     await session.execute(
         update(RelationshipProposalModel)

@@ -5,7 +5,12 @@ from datetime import datetime, timedelta, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
 from selara.application.use_cases.economy.catalog import localize_item_code
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+)
 from selara.application.use_cases.economy.growth import effective_growth_stress_pct, stored_growth_stress_pct
 from selara.application.use_cases.economy.results import UseItemResult
 
@@ -76,6 +81,7 @@ async def execute(
     if scope is None:
         return UseItemResult(accepted=False, reason=error or "Не удалось определить режим экономики", item_code=None, details=None)
 
+    await lock_economy_resources(repo, account_lock_key(scope=scope, user_id=user_id))
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
     item = await repo.get_inventory_item(account_id=account.id, item_code=normalized)
     if item is None or item.quantity <= 0:

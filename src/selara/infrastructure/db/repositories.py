@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import and_, case, delete, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -2591,8 +2592,8 @@ class SqlAlchemyActivityRepository:
         """Membership/persona info for exactly the given user_ids in this chat --
         used to build the author-token map and alias index for one daily summary
         run (see application/daily_summary/sanitize.py). Callers pass the set of
-        user_ids that actually authored messages in the analysed window, not
-        "every member ever" -- a member who never posted needs no token."""
+        user_ids that authored messages or were mentioned via text_mention in the
+        analysed window, not "every member ever"."""
         from selara.application.daily_summary.participants import ChatMemberInfo
 
         if not user_ids:
@@ -2655,6 +2656,20 @@ class SqlAlchemyActivityRepository:
 
     @staticmethod
     def _to_archived_message_view(row: MessageArchiveModel) -> ArchivedMessageView:
+        text_mentions: list[tuple[int, int, int]] = []
+        raw = row.raw_message_json
+        entities = raw.get("entities") if isinstance(raw, dict) else None
+        if row.text and isinstance(entities, list):
+            for entity in entities:
+                if not isinstance(entity, dict) or entity.get("type") != "text_mention":
+                    continue
+                user = entity.get("user")
+                if not isinstance(user, dict):
+                    continue
+                offset, length, user_id = entity.get("offset"), entity.get("length"), user.get("id")
+                if all(type(value) is int for value in (offset, length, user_id)):
+                    if offset >= 0 and length > 0 and user_id > 0:
+                        text_mentions.append((offset, length, user_id))
         return ArchivedMessageView(
             telegram_message_id=int(row.telegram_message_id),
             user_id=int(row.user_id),
@@ -2664,6 +2679,7 @@ class SqlAlchemyActivityRepository:
             reply_to_telegram_message_id=(
                 int(row.reply_to_telegram_message_id) if row.reply_to_telegram_message_id is not None else None
             ),
+            text_mentions=tuple(text_mentions),
         )
 
     async def get_message_context(
@@ -3309,15 +3325,16 @@ class SqlAlchemyActivityRepository:
         await self._session.flush()
         return int(row_id) if row_id is not None else None
 
-    async def release_transcription_claim(self, *, archive_row_id: int) -> None:
+    async def release_transcription_claim(self, *, archive_row_id: int, claim_at: datetime | None = None) -> None:
         """Undo a claim after a failed/skipped transcription attempt, so a later
         recovery scan can retry this message. A no-op if the row somehow already
         has a real transcript (never clobber a finished result)."""
-        await self._session.execute(
-            update(MessageArchiveModel)
-            .where(MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None))
-            .values(transcribed_at=None)
+        statement = update(MessageArchiveModel).where(
+            MessageArchiveModel.id == archive_row_id, MessageArchiveModel.transcript.is_(None),
         )
+        if claim_at is not None:
+            statement = statement.where(MessageArchiveModel.transcribed_at == _coerce_utc_datetime(claim_at))
+        await self._session.execute(statement.values(transcribed_at=None))
         await self._session.flush()
 
     async def finalize_message_transcript(
@@ -8839,6 +8856,7 @@ class SqlAlchemyActivityRepository:
             daily_summary_style=str(getattr(row, "daily_summary_style", "neutral") or "neutral"),
             daily_summary_include_voice=bool(getattr(row, "daily_summary_include_voice", False)),
             daily_summary_include_video_notes=bool(getattr(row, "daily_summary_include_video_notes", False)),
+            instant_stt_enabled=bool(getattr(row, "instant_stt_enabled", True)),
         )
 
     @staticmethod
@@ -9192,25 +9210,89 @@ class SqlAlchemyEconomyRepository:
         return self._to_inventory_item(row)
 
     async def add_inventory_item(self, *, account_id: int, item_code: str, delta: int) -> InventoryItem:
-        row = await self._session.get(EconomyInventoryModel, {"account_id": account_id, "item_code": item_code})
-        if row is None:
-            if delta < 0:
-                raise ValueError("Cannot subtract missing inventory item")
-            row = EconomyInventoryModel(account_id=account_id, item_code=item_code, quantity=0)
-            self._session.add(row)
-
-        row.quantity = int(row.quantity) + int(delta)
-        if row.quantity < 0:
+        normalized_delta = int(delta)
+        changed_at = datetime.now(timezone.utc)
+        # Atomic conditional increment/decrement: the UPDATE itself takes the row
+        # lock, so concurrent writers serialize instead of racing a
+        # read-modify-write that loses updates or double-spends the last unit.
+        stmt = (
+            update(EconomyInventoryModel)
+            .where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+                EconomyInventoryModel.quantity + normalized_delta >= 0,
+            )
+            .values(
+                quantity=EconomyInventoryModel.quantity + normalized_delta,
+                updated_at=changed_at,
+            )
+            .returning(EconomyInventoryModel.quantity)
+        )
+        new_quantity = (await self._session.execute(stmt)).scalar_one_or_none()
+        if new_quantity is not None:
+            return await self._finish_inventory_change(
+                account_id=account_id, item_code=item_code, quantity=int(new_quantity)
+            )
+        # No row matched: the item is missing or the stored quantity is too low.
+        stored_quantity = await self._session.scalar(
+            select(EconomyInventoryModel.quantity).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+            )
+        )
+        if stored_quantity is not None:
             raise ValueError("Inventory quantity cannot be negative")
+        if normalized_delta < 0:
+            raise ValueError("Cannot subtract missing inventory item")
+        # Missing row: atomic upsert so concurrent first inserts cannot collide
+        # on the primary key or lose an increment. The negative-delta guard above
+        # rejects a subtract on a missing row, so `quantity + delta >= 0` holds by
+        # construction here; unlike the conditional UPDATE, the upsert needs no
+        # inline non-negative check because it only ever adds a non-negative delta
+        # to an existing row (or inserts that same non-negative delta).
+        upsert_quantity = await self._upsert_inventory_quantity(
+            account_id=account_id,
+            item_code=item_code,
+            quantity=normalized_delta,
+            changed_at=changed_at,
+        )
+        return await self._finish_inventory_change(
+            account_id=account_id, item_code=item_code, quantity=upsert_quantity
+        )
 
-        if row.quantity == 0:
-            await self._session.delete(row)
-            await self._session.flush()
+    async def _upsert_inventory_quantity(
+        self, *, account_id: int, item_code: str, quantity: int, changed_at: datetime
+    ) -> int:
+        dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        insert = sqlite_insert if dialect == "sqlite" else pg_insert
+        stmt = insert(EconomyInventoryModel).values(
+            account_id=account_id,
+            item_code=item_code,
+            quantity=quantity,
+            updated_at=changed_at,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[EconomyInventoryModel.account_id, EconomyInventoryModel.item_code],
+            set_={
+                "quantity": EconomyInventoryModel.quantity + stmt.excluded.quantity,
+                "updated_at": changed_at,
+            },
+        )
+        return int(
+            (await self._session.execute(stmt.returning(EconomyInventoryModel.quantity))).scalar_one()
+        )
+
+    async def _finish_inventory_change(self, *, account_id: int, item_code: str, quantity: int) -> InventoryItem:
+        if quantity == 0:
+            # The change above holds the row lock until commit, so removing the
+            # zero row cannot open a window for a concurrent lost update.
+            stmt = delete(EconomyInventoryModel).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == item_code,
+            )
+            await self._session.execute(stmt)
             return InventoryItem(account_id=account_id, item_code=item_code, quantity=0)
-
-        row.updated_at = datetime.now(timezone.utc)
-        await self._session.flush()
-        return self._to_inventory_item(row)
+        return InventoryItem(account_id=account_id, item_code=item_code, quantity=quantity)
 
     async def add_balance(self, *, account_id: int, delta: int) -> int:
         normalized_delta = int(delta)

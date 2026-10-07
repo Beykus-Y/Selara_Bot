@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram.types import Message
 
 from selara.application.ai_pets import dialogue as d
+from selara.application.ai_pets import personality
 from selara.application.ai_pets import mechanics as m
 from selara.application.feature_access import (
     AccessReason,
@@ -30,6 +31,7 @@ from selara.infrastructure.db.ai_pet_dialogue import AiPetDialogueRepository
 from selara.infrastructure.db.ai_pets import AiPetService, PetView
 from selara.infrastructure.db.feature_quota import SqlAlchemyFeatureQuotaRepository
 from selara.infrastructure.db.telegram_stars import SqlAlchemyUserEntitlementResolver
+from selara.presentation.handlers.pet_billing import pet_reserve_units, settle_pet_line
 from selara.infrastructure.llm.ai_pets import extract_notes, generate_pet_reply
 from selara.infrastructure.llm.client import LlmAccountingContext, LlmClient, LlmClientError
 from selara.infrastructure.llm.features import AiFeature
@@ -100,11 +102,15 @@ async def talk_allowed(message: Message, activity_repo) -> bool:
     return allowed
 
 
-def _day_start(settings: Settings, now: datetime) -> datetime:
+def _zone(settings: Settings) -> ZoneInfo:
     try:
-        zone = ZoneInfo(settings.bot_timezone)
+        return ZoneInfo(settings.bot_timezone)
     except ZoneInfoNotFoundError:
-        zone = ZoneInfo("UTC")
+        return ZoneInfo("UTC")
+
+
+def _day_start(settings: Settings, now: datetime) -> datetime:
+    zone = _zone(settings)
     local = now.astimezone(zone)
     return datetime.combine(local.date(), dt_time.min, tzinfo=zone).astimezone(timezone.utc)
 
@@ -124,6 +130,7 @@ async def _display_name(activity_repo, *, chat_id: int, user_id: int, fallback: 
 async def _build_context(
     *, repo: AiPetDialogueRepository, activity_repo, pet: PetView, chat_id: int, speaker_id: int,
     speaker_name: str, affinity: int, now: datetime, outfit: tuple[str, ...] = (),
+    group_attitude: str = "", mood_of_day: str = "",
 ) -> d.PetContext:
     names: dict[int, str] = {speaker_id: speaker_name}
 
@@ -164,6 +171,8 @@ async def _build_context(
         aggregates=d.aggregate_lines(aggregates),
         notes=await repo.notes(pet_id=pet.id, chat_id=chat_id),
         recent=recent,
+        group_attitude=group_attitude,
+        mood_of_day=mood_of_day,
     )
 
 
@@ -233,6 +242,10 @@ async def handle_pet_talk(
     context = await _build_context(
         repo=repo, activity_repo=activity_repo, pet=pet, chat_id=chat_id, speaker_id=user.id,
         speaker_name=speaker_name, affinity=affinity, now=now, outfit=tuple(await service.outfit(pet_id=pet.id)),
+        group_attitude=personality.group_attitude(await service.chat_relations(pet_id=pet.id, chat_id=chat_id)),
+        mood_of_day=personality.mood_of_the_day(
+            pet_id=pet.id, day=_day_start(settings, now).astimezone(_zone(settings)).date(), mood=pet.mood, traits=pet.traits
+        ),
     )
     # Admission and context are settled: release the pet row lock before quota and the provider call.
     await repo.commit()
@@ -260,6 +273,7 @@ async def handle_pet_talk(
                 feature=AiFeature.PET_TALK, chat_id=chat_id, source_message_id=message.message_id
             ),
             source_message_id=message.message_id,
+            units=pet_reserve_units(settings),
         )
     except Exception:
         log.exception("Pet talk quota reservation failed message_id=%s", message.message_id)
@@ -295,15 +309,18 @@ async def handle_pet_talk(
         )
 
     outcome = {"status": "failed", "error_category": "handler_error"}
+    line_usages: list = []
     try:
         try:
             answer = await generate_pet_reply(
                 llm_client=llm_client,
                 messages=d.build_pet_messages(context, user_text=talk_text),
                 accounting_context=_context(AiFeature.PET_TALK, "pet_talk"),
+                usages_out=line_usages,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
+            line_usages.extend(exc.usages)
             answer = ""
         except Exception:
             log.exception("pet talk: LLM request failed before reaching the provider")
@@ -323,6 +340,8 @@ async def handle_pet_talk(
             pet_id=pet.id, chat_id=chat_id, author_user_id=user.id,
             idempotency_key=f"ai_pet_talk_done:{chat_id}:{message.message_id}", now=now,
         )
+        if talks_total % 5 == 0:
+            await service.refresh_traits(pet_id=pet.id)
         reply_row_id = await repo.add_reply(pet_id=pet.id, chat_id=chat_id, content=answer, now=datetime.now(timezone.utc))
         await repo.prune_history(pet_id=pet.id, chat_id=chat_id, now=now)
         await repo.commit()
@@ -352,6 +371,18 @@ async def handle_pet_talk(
         except Exception:
             log.exception("pet talk: note extraction crashed pet_id=%s", pet.id)
     finally:
+        if line_usages and personal_config is not None:
+            try:
+                await settle_pet_line(
+                    access_service,
+                    config=await personal_config.get(),
+                    decision=decision,
+                    usages=line_usages,
+                    failed=outcome["status"] != "succeeded",
+                    max_units=pet_reserve_units(settings),
+                )
+            except Exception:
+                log.exception("Could not settle pet talk AIL invocation_id=%s", invocation_id)
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
                 try:

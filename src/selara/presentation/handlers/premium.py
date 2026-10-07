@@ -17,6 +17,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy.exc import DataError, IntegrityError
 from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.selara_ai_product import (
     PRODUCT_SCOPE_CHAT,
@@ -36,13 +37,18 @@ from selara.infrastructure.db.telegram_stars import (
     PurchaseIntentRateLimited,
     SqlAlchemyTelegramStarsRepository,
 )
+from selara.infrastructure.db.entitlement_grants import EntitlementGrantService
 from selara.infrastructure.llm.runtime import llm_runtime_config
+from selara.presentation.handlers.admin_grants import (
+    grant_subscription_command,
+    list_grants_command,
+    revoke_subscription_command,
+)
 from selara.presentation.auth import (
     is_telegram_chat_admin,
     resolve_owner_admin_exemption,
     resolve_owner_private_exemption,
 )
-
 logger = logging.getLogger(__name__)
 router = Router(name="premium")
 
@@ -53,6 +59,38 @@ _PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
 _PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
 _PAYMENT_RETRY_ALERT_ATTEMPT = 3
 _PAYMENT_RETRY_MAX_SECONDS = 60
+# After this many failed attempts the confirmed payment is dead-lettered into
+# the rejected-payment audit so one poison payload cannot stall polling forever.
+_PAYMENT_RETRY_DEADLETTER_ATTEMPT = 5
+# Failures bound to the payload or the stored data: replaying the same statement
+# can never succeed, so the terminal dead-letter path is the only exit. Everything
+# else (connection loss, timeouts, lock waits, serialization and deadlock
+# conflicts, and schema/deploy-window errors) stays transient and must keep
+# retrying — a dead-letter row would misfile a valid, already-charged payment as
+# rejected while the database is merely unhealthy or a contended row is still
+# held. SQLAlchemy ``ProgrammingError`` ("column ... does not exist", cached plan
+# vs DDL mismatch) is deterministic for the connection but not for the payment:
+# during a partial migration it lasts only until the deploy finishes, so the
+# update must stay unacknowledged and succeed then instead of dead-lettering a
+# captured charge that can only be recovered with a manual /stars_refund.
+_PERMANENT_PAYMENT_ERROR_TYPES: tuple[type[Exception], ...] = (
+    ValueError,
+    TypeError,
+    DataError,
+    IntegrityError,
+)
+
+
+def _is_permanent_payment_failure(exc: BaseException) -> bool:
+    """Classify whether retrying the failed payment statement can ever succeed."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _PERMANENT_PAYMENT_ERROR_TYPES):
+            return True
+        current = getattr(current, "orig", None) or current.__cause__
+    return False
 _PAYMENT_OWNER_ALERT_TIMEOUT_SECONDS = 3.0
 _PAYMENT_CONFIRMATION_TIMEOUT_SECONDS = 3.0
 _STAR_REFUND_TIMEOUT_SECONDS = 10.0
@@ -208,6 +246,18 @@ def _format_date(value: datetime, timezone_name: str) -> str:
     except ZoneInfoNotFoundError:
         zone = ZoneInfo("UTC")
     return value.astimezone(zone).strftime("%d.%m.%Y %H:%M")
+
+
+async def _admin_grant_line(session_factory, *, scope: str, target_id: int, active: datetime | None) -> str:
+    """One line when the running subscription was last extended by the owner rather than paid for."""
+    if active is None:
+        return ""
+    try:
+        granted = await EntitlementGrantService(session_factory).granted_by_admin(scope=scope, target_id=target_id)
+    except Exception:
+        logger.warning("Could not read the grant mark scope=%s", scope)
+        return ""
+    return "🎁 Подписка выдана администратором.\n" if granted else ""
 
 
 def _selection_keyboard(chats) -> InlineKeyboardMarkup:
@@ -416,12 +466,14 @@ async def show_personal_offer(
         if entitlement is not None and entitlement.status == "active" and entitlement.valid_until > now
         else None
     )
+    gift = await _admin_grant_line(session_factory, scope="user", target_id=query.from_user.id, active=active_until)
     if config.ail_enabled and config.ail_limits is not None:
         # AI Limits mode: the budget is the config's, not a request count fixed at purchase.
         ail = config.ail_limits
         status = (
             f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
+            + gift
+            + f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>.\n"
             if active_until is not None
             else f"Цена: <b>{product.price_stars} ⭐</b>. Продление не автоматическое.\n"
         )
@@ -440,7 +492,8 @@ async def show_personal_offer(
         text = (
             f"<b>{escape(product.title)}</b>\n"
             f"Selara Personal уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Сейчас ваш лимит — {current_limit} запросов в сутки.\n"
+            + gift
+            + f"Сейчас ваш лимит — {current_limit} запросов в сутки.\n"
             f"Новая покупка продлит срок ещё на {product.duration_label} — <b>{product.price_stars} ⭐</b>; "
             f"лимит будет {renewed_limit} (больший из текущего и предлагаемого {config.limits.paid_daily}), "
             "оплаченные дни не урезаются.\n"
@@ -632,11 +685,13 @@ async def select_premium_chat(
         else None
     )
     label = escape(_chat_label(await repository.get_chat_title(chat_id=chat_id), chat_id))
+    gift = await _admin_grant_line(session_factory, scope="chat", target_id=chat_id, active=active_until)
     if active_until is not None:
         text = (
             f"<b>{label}</b>\n"
             f"Selara AI уже активна до <b>{_format_date(active_until, settings.bot_timezone)}</b>.\n"
-            f"Новая покупка продлит срок ещё на {product.duration_label} — "
+            + gift
+            + f"Новая покупка продлит срок ещё на {product.duration_label} — "
             f"<b>{product.price_stars} ⭐</b>.\n"
             "Перед оплатой нужно подтвердить принятие условий покупки."
         )
@@ -888,6 +943,33 @@ async def selara_ai_pre_checkout(
         )
 
 
+async def _record_unprocessable_payment(repository, *, message: Message, payment) -> int | None:
+    """Dead-letter the confirmed payment; ``None`` means even the audit write failed."""
+    if message.from_user is None:
+        return None
+    try:
+        return await repository.record_unprocessable_payment(
+            buyer_user_id=message.from_user.id,
+            invoice_payload=payment.invoice_payload,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            provider_payment_charge_id=payment.provider_payment_charge_id,
+            amount_stars=payment.total_amount,
+            currency=payment.currency,
+            payment_at=message.date,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Telegram Stars payment dead-letter write failed "
+            "telegram_payment_charge_id=%s exception_type=%s exception=%s",
+            payment.telegram_payment_charge_id,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 async def selara_ai_successful_payment(
     message: Message,
     session_factory,
@@ -920,12 +1002,14 @@ async def selara_ai_successful_payment(
             # is durable. Alert once, then keep a capped exponential backoff.
             attempt += 1
             delay = _payment_retry_delay(attempt)
+            permanent = _is_permanent_payment_failure(exc)
             logger.error(
                 "Telegram Stars payment processing failed; retaining update for retry "
-                "attempt=%s retry_in_seconds=%s exception_type=%s",
+                "attempt=%s retry_in_seconds=%s exception_type=%s permanent_failure=%s",
                 attempt,
                 delay,
                 type(exc).__name__,
+                permanent,
             )
             if attempt >= _PAYMENT_RETRY_ALERT_ATTEMPT and not owner_alert_sent:
                 owner_alert_sent = True
@@ -940,6 +1024,34 @@ async def selara_ai_successful_payment(
                     ),
                     log_event="persistence_retry",
                 )
+            if attempt >= _PAYMENT_RETRY_DEADLETTER_ATTEMPT and permanent:
+                # A deterministic (poison) failure would retry forever and keep the
+                # whole polling loop from reading any other Telegram update. Once the
+                # payment is durably dead-lettered as a rejected payment, give up on
+                # this update: the owner alert and /stars_refund take over, and
+                # polling resumes. Transient failures never enter this terminal
+                # path: while the database is unhealthy or a contended row is held,
+                # the update stays unacknowledged and keeps retrying under the
+                # owner alert, so a valid charge can still be applied.
+                dead_letter_payment_id = await _record_unprocessable_payment(
+                    repository,
+                    message=message,
+                    payment=payment,
+                )
+                if dead_letter_payment_id is not None:
+                    logger.error(
+                        "Telegram Stars payment dead-lettered after retries; "
+                        "resuming polling payment_id=%s attempts=%s exception_type=%s",
+                        dead_letter_payment_id,
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    dead_letter_result = PaymentResult(
+                        "rejected", "processing_failed", payment_id=dead_letter_payment_id
+                    )
+                    await _notify_owner_of_rejected_payment(bot=bot, settings=settings, result=dead_letter_result)
+                    await _send_payment_reconciliation_message(message, dead_letter_result)
+                    return
             await asyncio.sleep(delay)
 
     if result.state == "rejected":
@@ -1233,5 +1345,8 @@ def build_payment_router() -> Router:
     payment_router = Router(name="selara_ai_payments")
     payment_router.pre_checkout_query.register(selara_ai_pre_checkout)
     payment_router.message.register(refund_rejected_stars_payment, Command("stars_refund"))
+    payment_router.message.register(grant_subscription_command, Command("grant_sub"))
+    payment_router.message.register(revoke_subscription_command, Command("revoke_sub"))
+    payment_router.message.register(list_grants_command, Command("grants"))
     payment_router.message.register(selara_ai_successful_payment, F.successful_payment)
     return payment_router

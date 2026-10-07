@@ -26,6 +26,7 @@ import {
 } from '../lib/format'
 import { AdminModelsSection } from './AdminModelsSection'
 import { AdminFeatureRoutesSection } from './AdminFeatureRoutesSection'
+import { AdminGrantsSection } from './AdminGrantsSection'
 import { AdminQuotaModeSection } from './AdminQuotaModeSection'
 import { MiniBars, Metric, SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
 
@@ -550,6 +551,7 @@ export function AdminAiPage() {
       <BreakdownSection periodDays={periodDays} />
       <StarsSection periodDays={periodDays} />
       <EntitlementsSection />
+      <AdminGrantsSection />
       <PaymentsSection />
     </section>
   )

@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from selara.application.feature_access import (
     AIL_UNIT,
+    PET_FEATURES,
     AccessTier,
     FeatureEntitlement,
     GroupMemberQuotaLimits,
@@ -191,7 +192,7 @@ class SqlAlchemyUserEntitlementResolver:
         self._pet_daily_limit = pet_daily_limit
 
     async def resolve(self, *, user_id: int, feature: AiFeature, trigger: str) -> FeatureEntitlement:
-        if feature not in (AiFeature.PERSONAL_CHAT, AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT):
+        if feature != AiFeature.PERSONAL_CHAT and feature not in PET_FEATURES:
             return FeatureEntitlement(access_tier=AccessTier.FREE)
         limits = (await self._config.get()).active_limits
         try:
@@ -218,8 +219,8 @@ class SqlAlchemyUserEntitlementResolver:
             source="telegram_stars",
             product_key=row.product_key,
             quota_policy=(
-                paid_pet_policy(self._pet_daily_limit, feature)
-                if feature in (AiFeature.PET_TALK, AiFeature.PET_EVENT_TEXT)
+                paid_pet_policy(self._pet_daily_limit, feature, limits if limits.unit == AIL_UNIT else None)
+                if feature in PET_FEATURES
                 # The sold request limit is a requests-mode promise; AIL budgets come from the config.
                 else paid_personal_policy(
                     limits if limits.unit == AIL_UNIT else _snapshot_limits(limits, row.paid_daily_limit)
@@ -759,6 +760,120 @@ class SqlAlchemyTelegramStarsRepository:
             target_scope=PRODUCT_SCOPE_USER,
             user_id=user_id,
         )
+
+    async def record_unprocessable_payment(
+        self,
+        *,
+        buyer_user_id: int,
+        invoice_payload: str,
+        telegram_payment_charge_id: str,
+        provider_payment_charge_id: str | None,
+        amount_stars: int,
+        currency: str,
+        payment_at: datetime,
+    ) -> int | None:
+        """Durably dead-letter a confirmed payment whose processing keeps failing.
+
+        The row reuses the rejected-payment audit (state ``rejected`` with reason
+        ``processing_failed``) so the existing owner alerts and ``/stars_refund``
+        stay usable even though the economic effect was never applied. Idempotent
+        on the charge id; returns the stored payment id, or ``None`` when the row
+        could not be written (the caller must keep the update unacknowledged).
+
+        The charge id is the key Telegram accepts for refunds, so an id longer
+        than the audit column is refused instead of truncated: a truncated value
+        could both collide with another charge on the unique index and fail every
+        later ``/stars_refund``. A missing or empty charge id is refused as well:
+        an empty value cannot key a unique audit row, so distinct poison payments
+        would collapse onto a single dead-letter record and every payment after
+        the first would be silently lost. Scope, target, and product are copied
+        from the resolvable intent so a failed personal purchase stays visible in
+        the user-scoped payment views instead of being filed as a chat purchase.
+        """
+        charge_id = telegram_payment_charge_id
+        if not charge_id or not charge_id.strip():
+            # The audit index keys on the charge id, so an empty value would make
+            # ON CONFLICT DO NOTHING file every such payment onto one dead-letter
+            # row and silently lose all but the first. Refuse the write instead:
+            # the caller keeps the update unacknowledged and retrying.
+            logger.error(
+                "Telegram Stars dead-letter refused: charge id is missing, so it "
+                "cannot key a unique dead-letter row; keeping the update "
+                "unacknowledged",
+            )
+            return None
+        if len(charge_id) > 255:
+            logger.error(
+                "Telegram Stars dead-letter refused: charge id exceeds the audit "
+                "column limit and cannot be stored verbatim length=%s",
+                len(charge_id),
+            )
+            return None
+        paid_at = _as_utc(payment_at)
+        async with self._session_factory() as session:
+            async with session.begin():
+                _require_postgresql(session)
+                await _advisory_xact_lock(session, _payment_lock_key(charge_id))
+                intent = None
+                intent_id = parse_invoice_payload(invoice_payload)
+                if intent_id is not None:
+                    intent = await session.scalar(
+                        select(SelaraAiPurchaseIntentModel).where(
+                            SelaraAiPurchaseIntentModel.id == intent_id
+                        )
+                    )
+                    if intent is not None and intent.invoice_payload != invoice_payload:
+                        intent = None
+                # Copy the intent reference only when it satisfies the audit
+                # constraints; a broken intent row falls back to the scope-less
+                # defaults instead of blocking the dead-letter write.
+                target_scope = PRODUCT_SCOPE_CHAT
+                target_user_id = None
+                target_chat_id = None
+                source_chat_id = None
+                product_key = None
+                if intent is not None and _product_matches_scope(intent.product_key, intent.target_scope):
+                    if intent.target_scope == PRODUCT_SCOPE_USER and intent.target_user_id is not None:
+                        target_scope = PRODUCT_SCOPE_USER
+                        target_user_id = intent.target_user_id
+                        product_key = intent.product_key
+                    else:
+                        target_chat_id = intent.chat_id
+                        source_chat_id = intent.source_chat_id
+                        product_key = intent.product_key
+                stored_id = await session.scalar(
+                    pg_insert(SelaraAiPaymentModel)
+                    .values(
+                        telegram_payment_charge_id=charge_id,
+                        provider_payment_charge_id=(
+                            provider_payment_charge_id[:255] if provider_payment_charge_id is not None else None
+                        ),
+                        invoice_payload=invoice_payload,
+                        purchase_intent_id=intent.id if intent is not None else None,
+                        buyer_user_id=buyer_user_id,
+                        source_chat_id=source_chat_id,
+                        target_chat_id=target_chat_id,
+                        target_scope=target_scope,
+                        target_user_id=target_user_id,
+                        product_key=product_key,
+                        # Defensive bounds only: this row must survive a poison
+                        # payload, and rejected rows never feed revenue totals.
+                        amount_stars=max(int(amount_stars), 0),
+                        currency=currency[:3],
+                        payment_at=paid_at,
+                        processing_state="rejected",
+                        processing_reason="processing_failed",
+                    )
+                    .on_conflict_do_nothing(index_elements=[SelaraAiPaymentModel.telegram_payment_charge_id])
+                    .returning(SelaraAiPaymentModel.id)
+                )
+                if stored_id is not None:
+                    return int(stored_id)
+                return await session.scalar(
+                    select(SelaraAiPaymentModel.id).where(
+                        SelaraAiPaymentModel.telegram_payment_charge_id == charge_id
+                    )
+                )
 
     async def _duplicate_result(
         self,

@@ -6,10 +6,12 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
@@ -25,6 +27,25 @@ logger = logging.getLogger(__name__)
 # The hosted Telegram Bot API accepts documents smaller than 50 MB. Keep a
 # margin for differences between decimal MB and MiB and for future API changes.
 BACKUP_CHUNK_SIZE_BYTES = 45 * 1024 * 1024
+
+# Serialize dump verification: overlapping backup jobs (the nightly scheduler
+# and an admin-triggered request) must not run parallel pg_restore children.
+_BACKUP_VERIFICATION_LOCK = asyncio.Lock()
+
+# SQLite database files always start with this 16-byte header string.
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+
+# A verification child that ignores SIGKILL would defeat the timeout, so after
+# killing it wait only this long for the event loop to reap it.
+_PROCESS_REAP_TIMEOUT_SECONDS = 10.0
+
+# The SQLite progress handler is consulted after this many VM instructions; a
+# non-zero return aborts the running integrity_check, which bounds it in time.
+_SQLITE_PROGRESS_HANDLER_OPS = 1000
+
+# Telegram messages are bounded; keep the failure reason useful but short so a
+# verbose pg_restore error cannot turn the notification into a wall of text.
+_BACKUP_FAILURE_REASON_MAX_CHARS = 500
 
 
 class BackupJobError(RuntimeError):
@@ -72,10 +93,10 @@ async def run_daily_backup_scheduler(*, bot: Bot, settings: Settings) -> None:
             await send_daily_backup(bot=bot, settings=settings)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Daily Selara backup job failed")
             try:
-                await _notify_backup_failure(bot=bot, settings=settings)
+                await _notify_backup_failure(bot=bot, settings=settings, reason=str(exc))
             except Exception:
                 logger.exception("Could not notify admin about backup failure")
 
@@ -89,6 +110,19 @@ async def send_daily_backup(*, bot: Bot, settings: Settings) -> None:
     try:
         bot_dump = await _create_bot_database_dump(settings=settings, temp_dir=temp_dir)
         gacha_dump = await _download_gacha_backup(settings=settings, temp_dir=temp_dir)
+
+        # Verify that every produced dump is actually restorable before it is
+        # sent out; a backup that cannot be restored is worse than no backup.
+        await _verify_dump_restorable(
+            dump_path=bot_dump.path,
+            label="main bot database dump",
+            settings=settings,
+        )
+        await _verify_dump_restorable(
+            dump_path=gacha_dump.path,
+            label="gacha dump",
+            settings=settings,
+        )
 
         created_at = _backup_timestamp()
         manifest_files: list[dict[str, object]] = []
@@ -191,6 +225,178 @@ async def _download_gacha_backup(*, settings: Settings, temp_dir: Path) -> Backu
     return BackupFile(path=output_path, archive_name=output_path.name)
 
 
+async def _verify_dump_restorable(
+    *,
+    dump_path: Path,
+    label: str,
+    settings: Settings,
+) -> None:
+    """Fail the backup job when the produced dump cannot be restored.
+
+    PostgreSQL custom-format dumps are validated offline with pg_restore:
+    emitting the whole SQL script parses and decompresses every archive data
+    block without touching any database server. SQLite dumps are validated
+    with an equivalent integrity check. Both checks are bounded by
+    BACKUP_TIMEOUT_SECONDS.
+    """
+    if dump_path.suffix.lower() == ".sqlite3":
+        # The gacha service names its SQLite snapshot `*.sqlite3`; this suffix
+        # is what routes the dump to the integrity check instead of pg_restore.
+        await asyncio.to_thread(
+            _verify_sqlite_dump_restorable,
+            dump_path,
+            label,
+            settings.backup_timeout_seconds,
+        )
+        return
+    await _verify_pg_dump_restorable(
+        dump_path=dump_path,
+        label=label,
+        settings=settings,
+    )
+
+
+async def _verify_pg_dump_restorable(
+    *,
+    dump_path: Path,
+    label: str,
+    settings: Settings,
+) -> None:
+    # Overlapping backup jobs verify their dumps one after another instead of
+    # spawning parallel pg_restore children.
+    async with _BACKUP_VERIFICATION_LOCK:
+        # Offline check without a database server: emitting the SQL script
+        # forces pg_restore to parse and decompress every archive data block,
+        # unlike `--list`, which only reads the table of contents. The archive
+        # is read from its filename argument, so pg_restore never opens a
+        # database connection and needs no credentials. The script itself is
+        # discarded into the null device instead of a staging file: /tmp is a
+        # small tmpfs shared with gacha rendering, and a dump-sized SQL file
+        # next to the archive can exhaust it.
+        await _run_pg_restore_verification(
+            label=label,
+            settings=settings,
+            args=[f"--file={os.devnull}", str(dump_path)],
+        )
+
+
+def _verify_sqlite_dump_restorable(
+    dump_path: Path,
+    label: str,
+    timeout_seconds: float,
+) -> None:
+    if dump_path.stat().st_size == 0:
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: dump file is empty."
+        )
+    with dump_path.open("rb") as handle:
+        header = handle.read(len(_SQLITE_HEADER_MAGIC))
+    if header != _SQLITE_HEADER_MAGIC:
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: file is not a SQLite database."
+        )
+    try:
+        connection = sqlite3.connect(dump_path)
+    except sqlite3.Error as exc:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {exc}") from exc
+
+    # integrity_check on a large snapshot can run for a long time; a progress
+    # handler makes it interruptible, so the check honours the same timeout as
+    # the pg_restore child instead of outliving the backup job.
+    deadline = monotonic() + max(timeout_seconds, 0.0)
+
+    def _enforce_deadline() -> int:
+        return int(monotonic() > deadline)
+
+    connection.set_progress_handler(_enforce_deadline, _SQLITE_PROGRESS_HANDLER_OPS)
+    try:
+        status = connection.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        if _enforce_deadline():
+            raise BackupJobError(
+                f"Backup restore verification timed out after {timeout_seconds:g}s for {label}: "
+                "SQLite integrity_check did not finish and was interrupted."
+            ) from exc
+        raise BackupJobError(f"Backup restore verification failed for {label}: {exc}") from exc
+    except sqlite3.Error as exc:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {exc}") from exc
+    finally:
+        connection.close()
+    if status != "ok":
+        raise BackupJobError(
+            f"Backup restore verification failed for {label}: integrity_check reported {status!r}."
+        )
+
+
+async def _run_pg_restore_verification(
+    *,
+    label: str,
+    settings: Settings,
+    args: list[str],
+) -> None:
+    command = [settings.backup_pg_restore_path, *args]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise BackupJobError(
+            f"Backup restore verification command '{settings.backup_pg_restore_path}' "
+            "is not available in the main bot runtime."
+        ) from exc
+
+    # A stalled pg_restore (a pathological archive, an I/O hang on a huge dump)
+    # must not pin the nightly scheduler task or the admin HTTP request
+    # forever, so bound the child and kill it on expiry.
+    timeout_seconds = settings.backup_timeout_seconds
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            _stdout, stderr = await process.communicate()
+    except TimeoutError as exc:
+        await _kill_verification_process(process)
+        raise BackupJobError(
+            f"Backup restore verification timed out after {timeout_seconds:g}s for {label}: "
+            f"'{settings.backup_pg_restore_path}' did not finish and was terminated."
+        ) from exc
+    except asyncio.CancelledError:
+        # Shutdown cancels the scheduler task (backup_task.cancel() in
+        # main.py) without any timeout having expired: the child must not
+        # survive as an orphan while the verification lock is already
+        # released. Kill and reap it, then propagate the cancellation.
+        await _kill_verification_process(process)
+        raise
+
+    if process.returncode == 0:
+        return
+
+    detail = _last_line(stderr)
+    if detail:
+        raise BackupJobError(f"Backup restore verification failed for {label}: {detail}")
+    raise BackupJobError(f"Backup restore verification failed for {label}.")
+
+
+async def _kill_verification_process(process: asyncio.subprocess.Process) -> None:
+    """Terminate and reap a verification child that outlived its coroutine.
+
+    Whether its ``communicate()`` was cut short by the verification timeout or
+    by the surrounding task being cancelled (bot shutdown), the child is killed
+    and then reaped explicitly; otherwise a stalled pg_restore would survive as
+    an orphan holding the archive open.
+    """
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:  # pragma: no cover - child already exited
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), _PROCESS_REAP_TIMEOUT_SECONDS)
+    except TimeoutError:  # pragma: no cover - a killed child must exit
+        logger.warning("Backup restore verification process did not exit after being killed")
+
+
 def _split_backup_file(
     backup_file: BackupFile,
     temp_dir: Path,
@@ -280,11 +486,23 @@ def _last_line(raw: bytes) -> str:
     return decoded.splitlines()[-1]
 
 
-async def _notify_backup_failure(*, bot: Bot, settings: Settings) -> None:
+def _bounded_failure_reason(reason: str) -> str:
+    collapsed = " ".join(reason.split())
+    if len(collapsed) <= _BACKUP_FAILURE_REASON_MAX_CHARS:
+        return collapsed
+    return collapsed[: _BACKUP_FAILURE_REASON_MAX_CHARS - 1] + "…"
+
+
+async def _notify_backup_failure(*, bot: Bot, settings: Settings, reason: str = "") -> None:
     admin_user_id = settings.admin_user_id
     if admin_user_id is None:
         return
-    await bot.send_message(
-        chat_id=admin_user_id,
-        text="Суточный backup Selara завершился ошибкой. Подробности есть в логах.",
-    )
+    # Surface the concrete failure so a missing pg_restore, a corrupt archive
+    # and real corruption are distinguishable without log access. The dump is
+    # still withheld on failure.
+    detail = _bounded_failure_reason(reason)
+    if detail:
+        text = f"Суточный backup Selara завершился ошибкой.\nПричина: {detail}"
+    else:
+        text = "Суточный backup Selara завершился ошибкой. Подробности есть в логах."
+    await bot.send_message(chat_id=admin_user_id, text=text)

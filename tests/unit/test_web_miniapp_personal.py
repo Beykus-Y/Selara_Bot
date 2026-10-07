@@ -103,6 +103,8 @@ def _settings(admin_user_id: int | None = 999) -> Settings:
             "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
             "WEB_AUTH_SECRET": "test-secret",
             "WEB_BASE_URL": "http://testserver",
+            "WEB_SESSION_COOKIE_SECURE": False,
+            "ADMIN_SESSION_COOKIE_SECURE": False,
             "ADMIN_USER_ID": admin_user_id,
             "BOT_USERNAME": "selara_test_bot",
         }
@@ -557,3 +559,27 @@ async def test_requests_mode_reports_the_base_model_but_keeps_the_stored_choice(
         await session.commit()
     model = (await env.client.get("/api/miniapp/personal", headers=env.as_user(1))).json()["model"]
     assert (model["selected"], model["effective"], model["cost_ail"]) == ("analytics", "basic", "1")
+
+
+async def test_tool_switches_are_off_by_default_and_need_personal_to_enable(env):
+    headers = {**JSON, **env.as_user(1)}
+
+    free = await env.client.put("/api/miniapp/personal/settings", headers=headers, json={"tools_web_enabled": True})
+    assert free.status_code == 403
+    async with env.factory() as session:
+        stored = await PersonalAiRepository(session).get_profile(1)
+        assert stored is None or stored.tools_web_enabled is False
+
+    env.access.tier = AccessTier.PAID
+    paid = await env.client.put(
+        "/api/miniapp/personal/settings", headers=headers, json={"tools_web_enabled": True, "tools_artifacts_enabled": True}
+    )
+    assert paid.status_code == 200
+    profile = paid.json()["profile"]
+    assert profile["tools_web_enabled"] is True and profile["tools_artifacts_enabled"] is True
+    assert profile["tools_available"] is True
+
+    env.access.tier = AccessTier.FREE  # the plan ended: switching off must still work
+    off = await env.client.put("/api/miniapp/personal/settings", headers=headers, json={"tools_web_enabled": False})
+    assert off.status_code == 200
+    assert off.json()["profile"]["tools_web_enabled"] is False and off.json()["profile"]["tools_available"] is False

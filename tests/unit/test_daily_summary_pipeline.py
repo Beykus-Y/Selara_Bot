@@ -133,6 +133,30 @@ async def test_pipeline_empty_window_returns_quiet_day_fallback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_redacts_mentioned_departed_member_who_never_posted():
+    from unittest.mock import AsyncMock
+
+    row = ArchivedMessageView(1, 1, _WINDOW_FROM, "😀 герой и друг", None, None, ((3, 5, 2), (11, 4, 3)))
+    repo = _FakeRepo(messages=[row], members=[
+        ChatMemberInfo(user_id=1, is_active_member=True, display_name="Автор"),
+        ChatMemberInfo(user_id=2, is_active_member=False, display_name="Совсем другое имя"),
+        ChatMemberInfo(user_id=3, is_active_member=True, display_name="Текущее имя"),
+    ])
+    repo.get_daily_summary_member_info = AsyncMock(wraps=repo.get_daily_summary_member_info)
+    client = _FakeLlmClient(structured_responses=[SegmentTopicCardList(topics=[])])
+    client.chat_structured = AsyncMock(wraps=client.chat_structured)
+    await run_daily_summary_pipeline(
+        llm_client=client, repo=repo, chat_id=-100, chat_title="Test", summary_run_id=1,
+        window_from=_WINDOW_FROM, window_to=_WINDOW_TO, style="neutral", persona_enabled=True,
+    )
+    assert repo.get_daily_summary_member_info.await_args.kwargs["user_ids"] == [1, 2, 3]
+    block = client.chat_structured.await_args.kwargs["messages"][1]["content"]
+    assert '"😀 Участник #1 и друг"' in block
+    assert "герой" not in block
+    assert "Совсем другое имя" not in block
+
+
+@pytest.mark.asyncio
 async def test_pipeline_happy_path_produces_writer_text_and_cost() -> None:
     messages = [
         _msg(1, 1, 0, "Кто смотрел новый сезон?"),

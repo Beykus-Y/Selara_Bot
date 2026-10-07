@@ -24,6 +24,19 @@ services:
       dockerfile: gacha/Dockerfile
     container_name: selara-gacha
     restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      # Backups are created and streamed from /tmp; allow space for the dump.
+      - /tmp:rw,noexec,nosuid,size=536870912,mode=1777
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 256
+    volumes:
+      # Only SQLite deployments use this; PostgreSQL keeps its existing volume.
+      - gacha_runtime_data:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +55,8 @@ services:
       - edge
 
 volumes:
+  gacha_runtime_data:
+    name: ${GACHA_RUNTIME_VOLUME_NAME:-selara_gacha_runtime_data}
   gacha_postgres_data:
     name: ${GACHA_POSTGRES_VOLUME_NAME:-selara_gacha_postgres_data}
 

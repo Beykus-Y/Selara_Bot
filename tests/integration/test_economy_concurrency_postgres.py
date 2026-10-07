@@ -9,6 +9,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.use_cases.economy.claim_daily import execute as claim_daily
+from selara.application.use_cases.economy.tap import execute as tap
+from selara.application.use_cases.economy.growth import perform_action as growth
 from selara.application.use_cases.economy.market_buy_listing import (
     execute as buy_listing,
 )
@@ -81,6 +83,16 @@ class _MarketRaceRepository(SqlAlchemyEconomyRepository):
         return result
 
 
+class _InventoryRaceRepository(SqlAlchemyEconomyRepository):
+    def __init__(self, session, rendezvous: _Rendezvous) -> None:
+        super().__init__(session)
+        self._rendezvous = rendezvous
+
+    async def add_inventory_item(self, *, account_id: int, item_code: str, delta: int):
+        await self._rendezvous.wait()
+        return await super().add_inventory_item(account_id=account_id, item_code=item_code, delta=delta)
+
+
 async def _database():
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
@@ -90,6 +102,92 @@ async def _database():
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+@pytest.mark.parametrize("mode,chat_id", [("global", None), ("local", -100)])
+async def test_cooldown_actions_have_one_winner_and_one_ledger_entry(action, mode, chat_id):
+    engine, session_factory = await _database()
+    event_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyEconomyRepository(session)
+            scope, _ = await repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=10)
+            account, _ = await repo.get_or_create_account(scope=scope, user_id=10)
+            account_id = account.id
+            await session.commit()
+
+        rendezvous = _Rendezvous()
+
+        async def invoke():
+            async with session_factory() as session:
+                repo = _DailyRaceRepository(session, rendezvous)
+                kwargs = dict(economy_mode=mode, chat_id=chat_id, user_id=10, event_at=event_at)
+                result = await tap(repo, tap_cooldown_seconds=45, **kwargs) if action == "tap" else await growth(repo, **kwargs)
+                await session.commit()
+                return result
+
+        results = await asyncio.wait_for(asyncio.gather(invoke(), invoke()), timeout=10)
+        assert sum(result.accepted for result in results) == 1
+        winner = next(result for result in results if result.accepted)
+        async with session_factory() as session:
+            stored = await session.get(EconomyAccountModel, account_id)
+            rows = (await session.execute(select(EconomyLedgerModel).where(
+                EconomyLedgerModel.account_id == account_id,
+            ))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].amount == winner.reward
+            assert rows[0].reason == ("tap" if action == "tap" else "growth_action")
+            assert stored.balance == winner.reward
+            if action == "tap":
+                assert stored.tap_streak == 1
+                assert stored.last_tap_at == event_at
+            else:
+                assert stored.growth_actions == 1
+                assert stored.growth_size_mm == winner.new_size_mm
+                assert stored.growth_stress_pct == winner.new_stress_pct
+                assert stored.last_growth_at == event_at
+                assert stored.growth_boost_pct == stored.growth_cooldown_discount_seconds == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+async def test_cooldown_actions_for_different_accounts_progress_concurrently(action):
+    engine, session_factory = await _database()
+    event_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    barrier = asyncio.Barrier(2)
+
+    class ParallelRepository(SqlAlchemyEconomyRepository):
+        async def add_balance(self, *, account_id, delta):
+            # A global lock would prevent the second account reaching this point.
+            await asyncio.wait_for(barrier.wait(), timeout=5)
+            return await super().add_balance(account_id=account_id, delta=delta)
+
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyEconomyRepository(session)
+            scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=10)
+            for user_id in (10, 11):
+                await repo.get_or_create_account(scope=scope, user_id=user_id)
+            await session.commit()
+
+        async def invoke(user_id):
+            async with session_factory() as session:
+                repo = ParallelRepository(session)
+                kwargs = dict(economy_mode="global", chat_id=None, user_id=user_id, event_at=event_at)
+                result = await tap(repo, tap_cooldown_seconds=45, **kwargs) if action == "tap" else await growth(repo, **kwargs)
+                await session.commit()
+                return result
+
+        results = await asyncio.wait_for(asyncio.gather(invoke(10), invoke(11)), timeout=10)
+        assert all(result.accepted for result in results)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.integration
@@ -303,4 +401,118 @@ async def test_last_market_item_has_only_one_buyer_under_concurrency() -> None:
     assert sum(result.accepted for result in results) == 1
     assert listing is not None and listing.qty_left == 0 and listing.status == "closed"
     assert int(trade_count or 0) == 1
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_first_inventory_insert_does_not_collide_or_lose_increments() -> None:
+    engine, session_factory = await _database()
+
+    async with session_factory() as session:
+        repo = SqlAlchemyEconomyRepository(session)
+        scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=40)
+        account, _ = await repo.get_or_create_account(scope=scope, user_id=40)
+        account_id = account.id
+        await session.commit()
+
+    rendezvous = _Rendezvous()
+
+    async def run_add(delta: int):
+        async with session_factory() as session:
+            repo = _InventoryRaceRepository(session, rendezvous)
+            item = await repo.add_inventory_item(account_id=account_id, item_code="crop:radish", delta=delta)
+            await session.commit()
+            return item
+
+    results = await asyncio.gather(run_add(1), run_add(1))
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(EconomyInventoryModel.quantity).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == "crop:radish",
+            )
+        )
+
+    assert all(item.quantity >= 1 for item in results)
+    assert stored == 2
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_inventory_increments_on_existing_row_are_not_lost() -> None:
+    engine, session_factory = await _database()
+
+    async with session_factory() as session:
+        repo = SqlAlchemyEconomyRepository(session)
+        scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=41)
+        account, _ = await repo.get_or_create_account(scope=scope, user_id=41)
+        await repo.add_inventory_item(account_id=account.id, item_code="crop:radish", delta=3)
+        account_id = account.id
+        await session.commit()
+
+    rendezvous = _Rendezvous()
+
+    async def run_add(delta: int):
+        async with session_factory() as session:
+            repo = _InventoryRaceRepository(session, rendezvous)
+            item = await repo.add_inventory_item(account_id=account_id, item_code="crop:radish", delta=delta)
+            await session.commit()
+            return item
+
+    results = await asyncio.gather(run_add(2), run_add(2))
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(EconomyInventoryModel.quantity).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == "crop:radish",
+            )
+        )
+
+    assert sorted(item.quantity for item in results) == [5, 7]
+    assert stored == 7
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_decrements_cannot_spend_the_last_inventory_unit_twice() -> None:
+    engine, session_factory = await _database()
+
+    async with session_factory() as session:
+        repo = SqlAlchemyEconomyRepository(session)
+        scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=42)
+        account, _ = await repo.get_or_create_account(scope=scope, user_id=42)
+        await repo.add_inventory_item(account_id=account.id, item_code="item:lottery_ticket", delta=1)
+        account_id = account.id
+        await session.commit()
+
+    rendezvous = _Rendezvous()
+
+    async def run_spend():
+        async with session_factory() as session:
+            repo = _InventoryRaceRepository(session, rendezvous)
+            try:
+                item = await repo.add_inventory_item(account_id=account_id, item_code="item:lottery_ticket", delta=-1)
+                await session.commit()
+                return item.quantity
+            except ValueError:
+                return None
+
+    outcomes = await asyncio.gather(run_spend(), run_spend())
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(EconomyInventoryModel.quantity).where(
+                EconomyInventoryModel.account_id == account_id,
+                EconomyInventoryModel.item_code == "item:lottery_ticket",
+            )
+        )
+
+    assert sum(outcome is not None for outcome in outcomes) == 1
+    assert all(outcome is None or outcome == 0 for outcome in outcomes)
+    assert stored is None or stored == 0
     await engine.dispose()

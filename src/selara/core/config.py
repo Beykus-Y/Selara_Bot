@@ -1,7 +1,10 @@
+import warnings
+from ipaddress import ip_address, ip_network
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +18,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # #71: get_settings() runs before logging is configured, so a failed
+        # validation dumps its raw traceback straight to stderr. By default
+        # pydantic embeds the whole input dict ("input_value") in that text --
+        # including BOT_TOKEN, WEB_AUTH_SECRET and database credentials --
+        # so the input must stay hidden and only the error text is printed.
+        hide_input_in_errors=True,
     )
 
     bot_token: str = Field(..., validation_alias="BOT_TOKEN")
@@ -96,6 +105,7 @@ class Settings(BaseSettings):
     web_enabled: bool = Field(default=True, validation_alias="WEB_ENABLED")
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(default=8080, validation_alias="WEB_PORT")
+    web_forwarded_allow_ips: str = Field(default="127.0.0.1,::1", validation_alias="WEB_FORWARDED_ALLOW_IPS")
     web_domain: str | None = Field(default=None, validation_alias="WEB_DOMAIN")
     web_base_url: str = Field(default="http://127.0.0.1:8080", validation_alias="WEB_BASE_URL")
     gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
@@ -108,11 +118,19 @@ class Settings(BaseSettings):
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
+    backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
+    # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
+    # to BOT_TOKEN. Defaults to false so a fresh production install (including
+    # one shipped from .env.example with the default APP_ENV=dev) fails closed
+    # instead of silently reusing the Telegram credential as the web auth key.
+    web_auth_allow_bot_token_fallback: bool = Field(
+        default=False, validation_alias="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"
+    )
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
     web_session_cookie_name: str = Field(default="selara_session", validation_alias="WEB_SESSION_COOKIE_NAME")
-    web_session_cookie_secure: bool = Field(default=False, validation_alias="WEB_SESSION_COOKIE_SECURE")
+    web_session_cookie_secure: bool = Field(default=True, validation_alias="WEB_SESSION_COOKIE_SECURE")
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
@@ -207,6 +225,25 @@ class Settings(BaseSettings):
     personal_memory_extract_every: int = Field(default=10, ge=2, le=40, validation_alias="PERSONAL_MEMORY_EXTRACT_EVERY")
     # AI pet talk, paid by the owner's Selara Personal: total per day, and the share other people may use.
     pet_talk_daily_limit: int = Field(default=60, gt=0, le=10_000, validation_alias="PET_TALK_DAILY_LIMIT")
+    # In AI Limits mode a pet's model line reserves this many AIL (the per-request cap), then settles at its real cost.
+    # Tools of the private assistant (Selara Personal only, switched on per user): model turns per request
+    # (the last one offers no tools), internet calls and page size, and how many times the profile's AIL cost is
+    # reserved for a request that may use tools (the charge never exceeds that reservation).
+    personal_tool_rounds: int = Field(default=6, ge=2, le=12, validation_alias="PERSONAL_TOOL_ROUNDS")
+    personal_web_max_calls: int = Field(default=3, ge=1, le=10, validation_alias="PERSONAL_WEB_MAX_CALLS")
+    personal_web_page_chars: int = Field(default=6000, ge=500, le=20_000, validation_alias="PERSONAL_WEB_PAGE_CHARS")
+    personal_tools_reserve_factor: Decimal = Field(
+        default=Decimal("3"), ge=Decimal("1"), le=Decimal("10"), validation_alias="PERSONAL_TOOLS_RESERVE_FACTOR"
+    )
+    pet_request_ail_cap: Decimal = Field(default=Decimal("3"), gt=0, le=Decimal("50"), validation_alias="PET_REQUEST_AIL_CAP")
+    # Custom pet actions («/pet_do ...»): per person per day, the owner and everyone else; the owner's AIL pays.
+    pet_custom_actions_daily_limit: int = Field(default=10, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_DAILY_LIMIT")
+    pet_custom_actions_guest_daily_limit: int = Field(
+        default=5, ge=1, le=1000, validation_alias="PET_CUSTOM_ACTIONS_GUEST_DAILY_LIMIT"
+    )
+    pet_custom_actions_guests_daily_limit: int = Field(
+        default=20, ge=0, le=10_000, validation_alias="PET_CUSTOM_ACTIONS_GUESTS_DAILY_LIMIT"
+    )
     pet_talk_guests_daily_limit: int = Field(default=20, ge=0, le=10_000, validation_alias="PET_TALK_GUESTS_DAILY_LIMIT")
     pet_talk_guest_daily_limit: int = Field(default=5, ge=0, le=10_000, validation_alias="PET_TALK_GUEST_DAILY_LIMIT")
     # Spontaneous pet events: per pet per day, minimum gap per chat, quiet hours in BOT_TIMEZONE,
@@ -237,7 +274,43 @@ class Settings(BaseSettings):
     llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
-    admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+    admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_trusted_web_proxies(self):
+        for host in self.web_forwarded_allow_ips.split(","):
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                network = ip_network(host)
+            except ValueError:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS accepts explicit proxy IPs/CIDRs; wildcard trust is forbidden") from None
+            if network.prefixlen == 0:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS must not trust every client")
+        return self
+
+    @model_validator(mode="after")
+    def _check_session_cookie_security(self):
+        url = urlsplit(self.resolved_web_base_url)
+        hostname = (url.hostname or "").lower()
+        local = hostname == "localhost" or hostname.endswith(".localhost")
+        try:
+            local = local or ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        https = url.scheme.lower() == "https"
+        default_secure = https or not local
+        for field_name, env_name in (
+            ("web_session_cookie_secure", "WEB_SESSION_COOKIE_SECURE"),
+            ("admin_session_cookie_secure", "ADMIN_SESSION_COOKIE_SECURE"),
+        ):
+            if field_name not in self.model_fields_set:
+                # Only HTTP loopback defaults to insecure cookies for local dev.
+                object.__setattr__(self, field_name, default_secure)
+            elif self.web_enabled and https and not getattr(self, field_name):
+                raise ValueError(f"{env_name} must be true for an HTTPS web panel")
+        return self
 
     @model_validator(mode="after")
     def _check_personal_limits(self):
@@ -260,6 +333,47 @@ class Settings(BaseSettings):
             raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
+    @model_validator(mode="after")
+    def _check_web_auth_secret(self):
+        # #71: BOT_TOKEN doubles as the Telegram Bot API credential and, via
+        # the fallback below, the HMAC key for web login/session digests.
+        # Coupling the two security domains means rotating or leaking the bot
+        # token silently compromises web auth. The fallback never triggers by
+        # default -- it requires the explicit WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK
+        # opt-in, which is meant for local development only.
+        if not self.web_enabled:
+            return self
+        secret = (self.web_auth_secret or "").strip()
+        if not secret:
+            if not self.web_auth_allow_bot_token_fallback:
+                raise ValueError(
+                    "WEB_AUTH_SECRET is required while the web panel is enabled; set a separate "
+                    "random secret, or opt into the dev-only BOT_TOKEN fallback with "
+                    "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true"
+                )
+            warnings.warn(
+                "WEB_AUTH_SECRET is not set; falling back to BOT_TOKEN for web auth "
+                "(WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true). This couples the web auth HMAC "
+                "domain to the Telegram bot credential -- set a separate WEB_AUTH_SECRET.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self
+        if secret == (self.bot_token or "").strip():
+            if self.web_auth_allow_bot_token_fallback:
+                warnings.warn(
+                    "WEB_AUTH_SECRET equals BOT_TOKEN; web auth and the Telegram bot credential "
+                    "share one secret. Set a separate WEB_AUTH_SECRET.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return self
+            raise ValueError(
+                "WEB_AUTH_SECRET must differ from BOT_TOKEN; use a separate random secret "
+                "so the web auth and Telegram credentials can be rotated independently"
+            )
+        return self
+
     @property
     def supported_chat_types(self) -> set[str]:
         return {"private", "group", "supergroup"}
@@ -269,6 +383,16 @@ class Settings(BaseSettings):
         value = (self.web_auth_secret or "").strip()
         if value:
             return value
+        # Defense in depth (#71): Settings validation already rejects this
+        # state unless WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK is explicitly set,
+        # but any caller of this property is about to derive web auth HMAC
+        # keys from it, so fail closed here too instead of silently reusing
+        # the bot token.
+        if not self.web_auth_allow_bot_token_fallback:
+            raise RuntimeError(
+                "WEB_AUTH_SECRET is required; the BOT_TOKEN fallback needs the explicit "
+                "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true opt-in (development only)"
+            )
         return self.bot_token
 
     @property

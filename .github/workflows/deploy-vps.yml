@@ -2,53 +2,92 @@ name: Deploy To VPS
 
 on:
   workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful Publish Docker Image run ID (fixed digest manifest)
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+      IMAGE_OWNER: ${{ secrets.GHCR_USERNAME }}
 
     steps:
-      - name: Deploy over SSH
+      - name: Checkout deployment driver
+        uses: actions/checkout@v4
+
+      - name: Verify release publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Expected a numeric publisher run ID" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > publisher.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('publisher.json'))
+          if (run['repository']['full_name'] != os.environ['GITHUB_REPOSITORY']
+              or run['path'] != '.github/workflows/docker-publish.yml'
+              or run['head_branch'] != 'main'
+              or run['status'] != 'completed' or run['conclusion'] != 'success'):
+              raise SystemExit('Release must come from a successful main publisher run')
+          PY
+
+      - name: Download immutable release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+          path: release
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate release before connecting to VPS
+        run: |
+          python3 scripts/release_manifest.py validate release/manifest.json --run-id "$RELEASE_RUN_ID"
+          cat release/manifest.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Copy manifest and deployment driver
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || '22' }}
+          source: scripts/release_manifest.py,release/manifest.json
+          target: /tmp/selara-release-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Deploy exact release over SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          APP_DIR: ${{ secrets.VPS_APP_DIR }}
+          GHCR_USER: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PASSWORD: ${{ secrets.GHCR_TOKEN }}
+          RELEASE_DIR: /tmp/selara-release-${{ github.run_id }}-${{ github.run_attempt }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || '22' }}
           command_timeout: 30m
-          script_stop: true
+          envs: APP_DIR,GHCR_USER,GHCR_PASSWORD,RELEASE_DIR
           script: |
-            set -e
-            cd ${{ secrets.VPS_APP_DIR }}
+            set -eu
+            cd "$APP_DIR"
             if [ -f .env ]; then
               set -a
               . ./.env
               set +a
             fi
-            export SELARA_IMAGE="${SELARA_IMAGE:-ghcr.io/${{ secrets.GHCR_USERNAME }}/selara:latest}"
-            export SELARA_WEB_IMAGE="${SELARA_WEB_IMAGE:-ghcr.io/${{ secrets.GHCR_USERNAME }}/selara-web:latest}"
-            web_port="${WEB_PORT:-8080}"
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
-            docker compose pull app web artifact-renderer
-            docker compose up -d app web artifact-renderer
-            sleep 10
-            if [ "$(docker inspect -f '{{.State.Running}}' selara-app 2>/dev/null)" != "true" ]; then
-              echo "selara-app is not running after deploy"
-              docker logs selara-app --tail 200 || true
-              exit 1
-            fi
-            for attempt in 1 2 3 4 5 6; do
-              if docker exec selara-app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${web_port}/healthz', timeout=5).read()" >/dev/null 2>&1; then
-                break
-              fi
-              if [ "$attempt" -eq 6 ]; then
-                echo "healthcheck failed for selara-app"
-                docker logs selara-app --tail 200 || true
-                exit 1
-              fi
-              sleep 5
-            done
-            docker image prune -f
+            printf '%s' "$GHCR_PASSWORD" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            python3 "$RELEASE_DIR/scripts/release_manifest.py" deploy "$RELEASE_DIR/release/manifest.json"

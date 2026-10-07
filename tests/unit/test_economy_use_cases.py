@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from selara.application.use_cases.economy.claim_daily import execute as claim_daily
+from selara.application.use_cases.economy.buy_shop_item import execute as buy_shop_item, build_shop_offers
+from selara.application.use_cases.economy.catalog import inventory_stack_limit
 from selara.application.use_cases.economy.get_dashboard import execute as get_dashboard
 from selara.application.use_cases.economy.growth import get_profile as get_growth_profile
 from selara.application.use_cases.economy.growth import perform_action as perform_growth_action
@@ -286,6 +288,44 @@ async def test_concurrent_daily_claims_grant_single_ticket_on_streak_cap() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+@pytest.mark.parametrize("scope_id", ["global", "chat:-100"])
+async def test_concurrent_cooldown_actions_mutate_state_and_reward_once(monkeypatch, action, scope_id):
+    from importlib import import_module
+
+    repo = LockingFakeEconomyRepo()
+    repo.scope = EconomyScope(scope_id, "global" if scope_id == "global" else "chat", None if scope_id == "global" else -100)
+    now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
+    action_module = import_module(f"selara.application.use_cases.economy.{action}")
+    monkeypatch.setattr(action_module.random, "random", lambda: 1.0)
+    monkeypatch.setattr(action_module.random, "randint", lambda low, high: low)
+
+    async def invoke():
+        try:
+            kwargs = dict(economy_mode="global" if scope_id == "global" else "local", chat_id=-100, user_id=10, event_at=now)
+            if action == "tap":
+                return await tap(repo, tap_cooldown_seconds=45, **kwargs)
+            return await perform_growth_action(repo, **kwargs)
+        finally:
+            repo.release_transaction_locks()
+
+    results = await asyncio.gather(invoke(), invoke())
+    assert sum(result.accepted for result in results) == 1
+    assert len(repo.ledger) == 1
+    winner = next(result for result in results if result.accepted)
+    assert repo.account.balance == winner.reward
+    assert repo.events == [f"lock:economy:account:{scope_id}:10"] * 2
+    if action == "tap":
+        assert repo.account.tap_streak == 1
+        assert repo.account.last_tap_at == now
+    else:
+        assert repo.account.growth_actions == 1
+        assert repo.account.growth_size_mm == winner.new_size_mm
+        assert repo.account.growth_stress_pct == winner.new_stress_pct
+        assert repo.account.last_growth_at == now
+
+
+@pytest.mark.asyncio
 async def test_growth_action_and_cooldown() -> None:
     repo = FakeEconomyRepo()
     now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
@@ -400,3 +440,45 @@ async def test_get_dashboard_sorts_plots_and_inventory() -> None:
     assert dashboard is not None
     assert [plot.plot_no for plot in dashboard.plots] == [1, 2]
     assert [item.item_code for item in dashboard.inventory] == ["crop:alpha", "item:zeta"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["upgrade", "last_stack"])
+async def test_concurrent_shop_purchases_charge_only_one_winner(scenario):
+    class ShopRaceRepo(LockingFakeEconomyRepo):
+        async def set_upgrade_level(self, *, account_id, upgrade_code, new_level):
+            field_name = {"sprinkler": "sprinkler_level", "tap_glove": "tap_glove_level", "storage_rack": "storage_level"}[upgrade_code]
+            self.account = replace(self.account, **{field_name: new_level})
+
+    repo = ShopRaceRepo()
+    repo.account = replace(repo.account, balance=100000)
+    current_day = datetime(2026, 2, 14, tzinfo=timezone.utc).date()
+    offers = build_shop_offers(scope=repo.scope, user_id=10, current_day=current_day, account=repo.account)
+    if scenario == "upgrade":
+        offer = next(offer for offer in offers if offer.category == "upgrades")
+        requested = [offer, offer]
+    else:
+        requested = [offer for offer in offers if offer.category != "upgrades"][:2]
+        for index in range(inventory_stack_limit(0) - 1):
+            repo.inventory[f"item:existing_{index}"] = 1
+
+    async def invoke(offer):
+        try:
+            return await buy_shop_item(repo, economy_mode="global", chat_id=None, user_id=10,
+                                       offer_code=offer.offer_code, current_day=current_day)
+        finally:
+            repo.release_transaction_locks()
+
+    results = await asyncio.gather(*(invoke(offer) for offer in requested))
+    assert sum(result.accepted for result in results) == 1
+    winner = next(result for result in results if result.accepted)
+    assert repo.account.balance == 100000 - winner.offer.price
+    assert len(repo.ledger) == 1
+    assert repo.ledger[0]["amount"] == winner.offer.price
+    assert repo.events == ["lock:economy:account:global:10"] * 2
+    if scenario == "upgrade":
+        field_name = {"sprinkler": "sprinkler_level", "tap_glove": "tap_glove_level", "storage_rack": "storage_level"}[winner.offer.item_code.split(":")[1]]
+        assert getattr(repo.account, field_name) == 1
+    else:
+        assert len(repo.inventory) == inventory_stack_limit(0)
+        assert repo.inventory[winner.offer.item_code] == winner.offer.quantity

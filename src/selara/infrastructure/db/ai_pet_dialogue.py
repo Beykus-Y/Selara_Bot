@@ -29,7 +29,10 @@ TALK_COOLDOWN = timedelta(seconds=15)
 # History older than this is pruned beyond the newest KEEP_RECENT rows; a day's talks are always kept for counting.
 HISTORY_RETENTION = timedelta(days=2)
 KEEP_RECENT = 40
-_AGGREGATED_EVENTS = ("pat", "play", "feed", "toy", "tease", "hurt")
+_AGGREGATED_EVENTS = (
+    "pat", "play", "feed", "toy", "tease", "hurt",
+    "custom_care", "custom_feed", "custom_play", "custom_teach", "custom_social", "custom_prank",
+)
 
 
 @dataclass(frozen=True, slots=True)
