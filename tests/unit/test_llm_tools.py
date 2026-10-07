@@ -574,10 +574,17 @@ async def test_warn_user_success(chat_snapshot, actor_snapshot, target_user, act
 
 
 @pytest.mark.asyncio
-async def test_ban_user_success_calls_telegram_and_records_undo(
+async def test_ban_user_call_is_parked_for_confirmation_not_executed(
     chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo
 ):
+    """#51: a model tool call for ban_user never bans directly -- it is
+    parked as a pending admin confirmation; the side effect happens only via
+    the confirm grant (covered end-to-end in test_llm_tool_confirmations.py)."""
     activity_repo.apply_moderation_action = AsyncMock(return_value=SimpleNamespace())
+    llm_repo.find_active_tool_confirmation = AsyncMock(return_value=None)
+    llm_repo.create_tool_confirmation = AsyncMock(
+        return_value=SimpleNamespace(token="tok-1", action_description="Бан @target_user")
+    )
     bot = AsyncMock()
 
     result = await execute_tool(
@@ -587,8 +594,10 @@ async def test_ban_user_success_calls_telegram_and_records_undo(
     )
 
     assert result.success is True
-    bot.ban_chat_member.assert_awaited_once_with(chat_id=-100123, user_id=222)
-    assert result.undo_payload == {"tool": "unban", "target_user_id": 222, "chat_id": -100123}
+    assert result.pending_confirmation_token == "tok-1"
+    llm_repo.create_tool_confirmation.assert_awaited_once()
+    activity_repo.apply_moderation_action.assert_not_awaited()
+    bot.ban_chat_member.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -762,7 +771,12 @@ async def test_lookup_glossary_not_found(chat_snapshot, actor_snapshot, llm_repo
 
 
 @pytest.mark.asyncio
-async def test_set_rank_success(chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo):
+async def test_set_rank_call_is_parked_for_confirmation_not_executed(
+    chat_snapshot, actor_snapshot, target_user, activity_repo, llm_repo
+):
+    """#51: a model tool call for set_rank never changes a role directly --
+    the preview authorization still runs (owner actor here), but the side
+    effect is parked behind the pending admin confirmation."""
     activity_repo.get_effective_role_definition = AsyncMock(
         side_effect=[
             _role(chat_snapshot.telegram_chat_id, "owner", 40, "manage_roles"),
@@ -774,6 +788,10 @@ async def test_set_rank_success(chat_snapshot, actor_snapshot, target_user, acti
     )
     activity_repo.get_bot_role = AsyncMock(return_value=None)
     activity_repo.set_bot_role = AsyncMock()
+    llm_repo.find_active_tool_confirmation = AsyncMock(return_value=None)
+    llm_repo.create_tool_confirmation = AsyncMock(
+        return_value=SimpleNamespace(token="tok-2", action_description="Роль @target_user → junior_admin")
+    )
 
     result = await execute_tool(
         ToolCall(name="set_rank", arguments={"target": "@target_user", "rank": "junior_admin"}, call_id="sr-1"),
@@ -782,10 +800,9 @@ async def test_set_rank_success(chat_snapshot, actor_snapshot, target_user, acti
     )
 
     assert result.success is True
-    activity_repo.set_bot_role.assert_awaited_once()
-    data = json.loads(result.result_text)
-    assert data["new_rank"] == "junior_admin"
-    assert data["previous_rank"] == "participant"
+    assert result.pending_confirmation_token == "tok-2"
+    llm_repo.create_tool_confirmation.assert_awaited_once()
+    activity_repo.set_bot_role.assert_not_awaited()
 
 
 # --- #6/#16/#17: glossary management tools (remove_from_glossary, list_glossary), author tracking ---

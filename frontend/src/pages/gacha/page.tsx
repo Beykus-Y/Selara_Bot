@@ -5,25 +5,24 @@ import { useState } from 'react'
 import { CollectionGrid } from '@/pages/gacha/ui/CollectionGrid'
 import { getUserCollection, getUserProfile } from '@/shared/api/gachaClient'
 import { usePageTitle } from '@/shared/lib/use-page-title'
-import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function GachaCollectionPage() {
-  const { viewer } = useMiniApp()
   const [searchParams, setSearchParams] = useSearchParams()
   const rawBanner = searchParams.get('banner')
   const banner = rawBanner === 'hsr' ? 'hsr' : 'genshin'
 
   usePageTitle('Гача')
 
+  // The server resolves the viewer from the Mini App session: no telegram_user_id is sent.
   const collectionQuery = useQuery({
-    queryKey: ['miniapp-gacha-collection', viewer.telegram_user_id, banner],
-    queryFn: () => getUserCollection(viewer.telegram_user_id, banner),
+    queryKey: ['miniapp-gacha-collection', banner],
+    queryFn: () => getUserCollection(banner),
   })
 
   const profileQuery = useQuery({
-    queryKey: ['miniapp-gacha-profile', viewer.telegram_user_id, banner],
-    queryFn: () => getUserProfile(viewer.telegram_user_id, banner, 6),
+    queryKey: ['miniapp-gacha-profile', banner],
+    queryFn: () => getUserProfile(banner, 6),
   })
 
   const [showInviteText, setShowInviteText] = useState(false)
