@@ -226,6 +226,8 @@ async def _handle(
         # _run_admin_turn answers "quota service unavailable" before any provider call, so no lease is needed.
         await _run_admin_turn(*args, **kwargs)
         return
+    # End this request's transaction first: the lease takes its own connection, and a small pool would wait on ours.
+    await db_session.commit()
     async with ai_turn_lease(
         session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
     ) as acquired:

@@ -79,7 +79,7 @@ async def test_disabled_assistant_takes_no_lease(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_turn_is_committed_inside_the_lease_before_release(monkeypatch) -> None:
+async def test_transaction_ends_before_the_lease_and_the_turn_commits_before_release(monkeypatch) -> None:
     events: list[str] = []
     monkeypatch.setattr(llm_admin, "ai_turn_lease", _recording_lease(events))
     db_session = AsyncMock()
@@ -90,4 +90,4 @@ async def test_turn_is_committed_inside_the_lease_before_release(monkeypatch) ->
     ):
         await _call(_message(), db_session=db_session)
 
-    assert events == ["lease", "turn", "commit", "released"]
+    assert events == ["commit", "lease", "turn", "commit", "released"]

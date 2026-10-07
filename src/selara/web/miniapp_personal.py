@@ -377,6 +377,9 @@ def build_miniapp_personal_router(
             # The durable lease does the same across bot instances, where _inflight_users cannot see a running turn.
             personal_ai._inflight_users.add(user_id)
             try:
+                # End the authentication transaction first: the lease takes its own connection, and a small pool
+                # would otherwise wait on this request's connection.
+                await session.commit()
                 async with personal_ai.ai_turn_lease(
                     session_factory=session_factory, lease_key=f"personal_ai:{user_id}"
                 ) as acquired:
