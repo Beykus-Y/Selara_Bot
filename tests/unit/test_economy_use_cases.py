@@ -286,6 +286,44 @@ async def test_concurrent_daily_claims_grant_single_ticket_on_streak_cap() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+@pytest.mark.parametrize("scope_id", ["global", "chat:-100"])
+async def test_concurrent_cooldown_actions_mutate_state_and_reward_once(monkeypatch, action, scope_id):
+    from importlib import import_module
+
+    repo = LockingFakeEconomyRepo()
+    repo.scope = EconomyScope(scope_id, "global" if scope_id == "global" else "chat", None if scope_id == "global" else -100)
+    now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
+    action_module = import_module(f"selara.application.use_cases.economy.{action}")
+    monkeypatch.setattr(action_module.random, "random", lambda: 1.0)
+    monkeypatch.setattr(action_module.random, "randint", lambda low, high: low)
+
+    async def invoke():
+        try:
+            kwargs = dict(economy_mode="global" if scope_id == "global" else "local", chat_id=-100, user_id=10, event_at=now)
+            if action == "tap":
+                return await tap(repo, tap_cooldown_seconds=45, **kwargs)
+            return await perform_growth_action(repo, **kwargs)
+        finally:
+            repo.release_transaction_locks()
+
+    results = await asyncio.gather(invoke(), invoke())
+    assert sum(result.accepted for result in results) == 1
+    assert len(repo.ledger) == 1
+    winner = next(result for result in results if result.accepted)
+    assert repo.account.balance == winner.reward
+    assert repo.events == [f"lock:economy:account:{scope_id}:10"] * 2
+    if action == "tap":
+        assert repo.account.tap_streak == 1
+        assert repo.account.last_tap_at == now
+    else:
+        assert repo.account.growth_actions == 1
+        assert repo.account.growth_size_mm == winner.new_size_mm
+        assert repo.account.growth_stress_pct == winner.new_stress_pct
+        assert repo.account.last_growth_at == now
+
+
+@pytest.mark.asyncio
 async def test_growth_action_and_cooldown() -> None:
     repo = FakeEconomyRepo()
     now = datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
