@@ -425,8 +425,11 @@ async def _handle(
                 request_kwargs: dict[str, Any] = {
                     "messages": messages,
                     "tools": [] if is_last_round else available_tools,
-                    "max_tokens": settings.llm_admin_max_tokens,
                 }
+                # The short cap is for the tool-free final answer only: tool rounds may carry long
+                # create_artifact arguments, which a cut-off would turn into broken JSON.
+                if is_last_round:
+                    request_kwargs["max_tokens"] = settings.llm_admin_max_tokens
                 # `tools` is always passed, [] included: LlmClient normalizes
                 # it to tools=None / tool_choice=None (a required positional
                 # -- omitting the key would raise TypeError on the real
@@ -475,6 +478,8 @@ async def _handle(
                 # On the last round tools were not offered: a stray call is ignored, the text is the answer.
                 if (msg.content or "").strip():
                     final_answer = msg.content
+                    if choice.finish_reason == "length":
+                        final_answer = final_answer.rstrip() + _TRUNCATED_MARK
                     break
                 log.warning("llm_admin: empty completion finish_reason=%s after %d tools; created=%d sent=%d",
                     choice.finish_reason, len(tool_results), len(artifact_context.created_artifacts),
@@ -489,9 +494,31 @@ async def _handle(
 
             messages.append(msg.model_dump(exclude_none=True))
             for tc in msg.tool_calls:
+                try:
+                    parsed_arguments = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(parsed_arguments, dict):
+                        raise ValueError("arguments must be an object")
+                except ValueError:
+                    # Cut-off or malformed arguments: tell the model instead of failing the whole request.
+                    result = ToolResult(
+                        call_id=tc.id,
+                        name=tc.function.name,
+                        result_text=json.dumps(
+                            {"error": "Некорректные аргументы инструмента (JSON повреждён или обрезан). "
+                                      "Повтори вызов короче или ответь текстом."},
+                            ensure_ascii=False,
+                        ),
+                        action_description="",
+                        success=False,
+                    )
+                    tool_results.append(result)
+                    bad_msg = {"role": "tool", "tool_call_id": result.call_id, "content": result.result_text}
+                    messages.append(bad_msg)
+                    tool_messages.append(bad_msg)
+                    continue
                 call = ToolCall(
                     name=tc.function.name,
-                    arguments=json.loads(tc.function.arguments),
+                    arguments=parsed_arguments,
                     call_id=tc.id,
                 )
                 status = get_tool_status(call.name, call.arguments)
@@ -612,6 +639,16 @@ async def _handle(
 
     try:
         await _run_invocation()
+    except Exception:
+        # Never leave the «Думаю...» placeholder hanging when something unexpected breaks the loop.
+        log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)
+        outcome["status"] = "failed"
+        outcome["error_category"] = "handler_error"
+        error_text = "⚠️ Ошибка AI-ассистента: не удалось завершить запрос. Попробуйте позже."
+        try:
+            await thinking_msg.edit_text(error_text)
+        except Exception:
+            pass
     finally:
         if accounting is not None and invocation_id is not None:
             if outcome["status"] != "succeeded":
@@ -630,6 +667,9 @@ async def _handle(
                 )
             except Exception:
                 log.exception("Could not finalize llm_admin invocation id=%s", invocation_id)
+
+
+_TRUNCATED_MARK = "\n\n…(ответ обрезан по длине)"
 
 
 def _empty_answer_recovery() -> dict:

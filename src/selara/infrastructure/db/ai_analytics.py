@@ -247,7 +247,7 @@ class AdminAiAnalyticsRepository:
         return rows
 
     async def chat_breakdown(self, *, window_from: datetime, window_to: datetime, limit: int = 10) -> list[dict]:
-        """Chats ranked by known provider cost (group features only: rows without a chat are Personal/internal)."""
+        """Group chats ranked by known provider cost (private chats, i.e. Personal, are excluded)."""
         cost = func.coalesce(func.sum(LlmUsageLogModel.estimated_cost_usd), 0)
         calls = func.count(LlmUsageLogModel.id)
         result = await self._session.execute(
@@ -263,8 +263,11 @@ class AdminAiAnalyticsRepository:
             )
             .select_from(LlmUsageLogModel)
             .join(AiFeatureInvocationModel, LlmUsageLogModel.invocation_id == AiFeatureInvocationModel.id)
-            .outerjoin(ChatModel, ChatModel.telegram_chat_id == LlmUsageLogModel.chat_id)
-            .where(*self._in_window(window_from, window_to), LlmUsageLogModel.chat_id.is_not(None))
+            .join(ChatModel, ChatModel.telegram_chat_id == LlmUsageLogModel.chat_id)
+            .where(
+                *self._in_window(window_from, window_to),
+                ChatModel.type.in_(("group", "supergroup")),
+            )
             .group_by(LlmUsageLogModel.chat_id, ChatModel.title)
             .order_by(cost.desc(), calls.desc(), LlmUsageLogModel.chat_id)
             .limit(limit)

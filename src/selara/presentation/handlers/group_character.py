@@ -28,6 +28,7 @@ from selara.application.ai_character.group import (
     MAX_MEMBER_TEXT_LENGTH,
     MEMBER_RECENT_MESSAGES,
     LAST_ROUND_NOTICE,
+    MEMBER_REPLY_MAX_TOKENS,
     group_tool_rounds,
     CallName,
     MemberTurn,
@@ -396,7 +397,8 @@ async def _run_member_dialogue(
         if is_last and total_rounds > 1:
             messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
         request: dict = {"messages": messages, "tools": [] if is_last else tools}
-        request["max_tokens"] = max_tokens
+        # The short cap belongs to the tool-free final answer; tool rounds keep the previous ceiling.
+        request["max_tokens"] = max_tokens if is_last else MEMBER_REPLY_MAX_TOKENS
         if call_context is not None:
             request["accounting_context"] = call_context
         try:
@@ -413,7 +415,10 @@ async def _run_member_dialogue(
             return ""
         msg = response.choices[0].message
         if not msg.tool_calls or is_last:
-            return (msg.content or "").strip()
+            text = (msg.content or "").strip()
+            if text and getattr(response.choices[0], "finish_reason", None) == "length":
+                text += "…"
+            return text
         messages.append(msg.model_dump(exclude_none=True))
         for tool_call in msg.tool_calls:
             try:

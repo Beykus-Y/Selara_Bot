@@ -114,8 +114,24 @@ async def test_last_round_offers_no_tools_tells_the_model_and_caps_tokens():
     last = c.chat_with_tools.await_args_list[-1].kwargs
     assert last['tools'] == [] and last['messages'][-1]['content'] == LAST_ROUND_NOTICE
     assert all(call_.kwargs['tools'] for call_ in c.chat_with_tools.await_args_list[:-1])
-    assert all(call_.kwargs['max_tokens'] == 800 for call_ in c.chat_with_tools.await_args_list)
+    # The short cap is for the tool-free final answer; tool rounds (artifact arguments) stay uncapped by it.
+    assert all('max_tokens' not in call_.kwargs for call_ in c.chat_with_tools.await_args_list[:-1])
+    assert last['max_tokens'] == 800
     assert sent.call_args.args[2] == 'Итог без документов'
+
+
+async def test_truncated_tool_arguments_become_a_tool_error_not_a_crash():
+    broken = SimpleNamespace(id='create_artifact', function=SimpleNamespace(name='create_artifact', arguments='{"title": "x", "pages": ["<div'))
+    c, execute, sent, _, _ = await run([response(calls=[broken], finish='length'), response('Ответ без артефакта')])
+    execute.assert_not_awaited()
+    tool_msg = [m for m in c.chat_with_tools.await_args_list[-1].kwargs['messages'] if m['role'] == 'tool'][0]
+    assert 'Некорректные аргументы' in tool_msg['content']
+    assert sent.call_args.args[2] == 'Ответ без артефакта'
+
+
+async def test_final_answer_cut_by_the_token_cap_is_marked():
+    c, execute, sent, _, _ = await run([response('Длинный ответ', finish='length')])
+    assert sent.call_args.args[2].startswith('Длинный ответ') and 'обрезан' in sent.call_args.args[2]
 
 
 async def test_stray_tool_call_on_the_last_round_is_not_executed():

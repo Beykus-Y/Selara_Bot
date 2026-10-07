@@ -371,6 +371,7 @@ async def test_postgres_chat_breakdown_ranks_group_chats_by_known_cost():
                 [
                     ChatModel(telegram_chat_id=-100, type="supergroup", title="Дорогой"),
                     ChatModel(telegram_chat_id=-200, type="supergroup", title="Дешёвый"),
+                    ChatModel(telegram_chat_id=777, type="private", title=None),
                 ]
             )
             invocations = [
@@ -378,6 +379,7 @@ async def test_postgres_chat_breakdown_ranks_group_chats_by_known_cost():
                 _invocation("group_member", "succeeded", inside),
                 _invocation("group_member", "succeeded", inside),
                 _invocation("llm_admin", "succeeded", _FROM - timedelta(days=1)),
+                _invocation("personal_chat", "succeeded", inside),
             ]
             session.add_all(invocations)
             await session.flush()
@@ -386,8 +388,9 @@ async def test_postgres_chat_breakdown_ranks_group_chats_by_known_cost():
                 _usage(invocations[1].id, model="m", stage="member_round", cost="0.002", pricing="known"),
                 _usage(invocations[2].id, model="m", stage="member_round", cost="0.001", pricing="known"),
                 _usage(invocations[3].id, model="m", stage="tool_round", cost="5", pricing="known"),
+                _usage(invocations[4].id, model="m", stage="chat", cost="1", pricing="known"),
             ]
-            for usage, chat_id in zip(usages, (-100, -100, -200, -100)):
+            for usage, chat_id in zip(usages, (-100, -100, -200, -100, 777)):
                 usage.chat_id = chat_id
             session.add_all(usages)
             await session.commit()
