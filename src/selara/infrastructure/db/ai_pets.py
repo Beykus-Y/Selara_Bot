@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from selara.application.ai_character.group import normalize_call_name
 from selara.application.ai_pets import mechanics as m
+from selara.application.ai_pets import personality as personality
 from selara.application.selara_ai_product import SELARA_PERSONAL_PRODUCT_KEY
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.models import (
@@ -261,6 +262,38 @@ class AiPetService:
         )
         return int(value or 0)
 
+    async def chat_relations(self, *, pet_id: int, chat_id: int) -> list[tuple[int, int]]:
+        """``(affinity, interactions)`` of everyone the pet has met in this chat (its attitude to the group)."""
+        rows = await self._session.execute(
+            select(AiPetRelationshipModel.affinity, AiPetRelationshipModel.interactions).where(
+                AiPetRelationshipModel.pet_id == pet_id, AiPetRelationshipModel.chat_id == chat_id
+            )
+        )
+        return [(int(affinity), int(interactions or 0)) for affinity, interactions in rows]
+
+    async def refresh_traits(self, *, pet_id: int) -> tuple[str, ...]:
+        """Recompute the pet's traits from its journal; they form by themselves and nobody sets them."""
+        row = await self._session.get(AiPetModel, pet_id)
+        if row is None:
+            return ()
+        return await self._refresh_traits(row)
+
+    async def _refresh_traits(self, row: AiPetModel) -> tuple[str, ...]:
+        rows = await self._session.execute(
+            select(AiPetEventModel.event_type, func.count())
+            .where(AiPetEventModel.pet_id == row.id, AiPetEventModel.event_type.in_(personality.BEHAVIOR_EVENT_TYPES))
+            .group_by(AiPetEventModel.event_type)
+        )
+        counts = {str(event_type): int(count) for event_type, count in rows}
+        top = await self._session.scalar(
+            select(func.max(AiPetRelationshipModel.affinity)).where(AiPetRelationshipModel.pet_id == row.id)
+        )
+        traits = personality.derive_traits(counts, top_affinity=int(top or 0))
+        # Too little history to form traits yet: keep what the pet had instead of clearing it.
+        if traits and traits != list(row.traits or ()):
+            row.traits = traits
+        return tuple(row.traits or ())
+
     async def top_relations(self, *, pet_id: int, chat_id: int, limit: int = 3) -> list[tuple[int, int]]:
         rows = await self._session.execute(
             select(AiPetRelationshipModel.user_id, AiPetRelationshipModel.affinity)
@@ -366,15 +399,6 @@ class AiPetService:
                 idempotency_key=f"ai_pet:created:{row.id}",
             )
         )
-        await self._session.flush()
-        return _view(row)
-
-    async def set_traits(self, *, owner_user_id: int, traits: list[str]) -> PetView:
-        row = await self._owner_row(owner_user_id, for_update=True)
-        if row is None:
-            raise PetDomainError("У вас нет питомца. Заведите его: /pet_new <вид> <имя>.")
-        row.traits = list(traits)
-        row.version = int(row.version) + 1
         await self._session.flush()
         return _view(row)
 
@@ -981,6 +1005,7 @@ class AiPetService:
                 )
             )
         await self._session.flush()
+        await self._refresh_traits(row)
         return ActionResult(
             status="ok",
             pet=_view(row),

@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from selara.application.ai_pets import dialogue as dialogue_rules
 from selara.application.ai_pets import mechanics as m
+from selara.application.ai_pets import personality
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
@@ -145,6 +146,8 @@ def render_card(
     viewer_affinity: int | None,
     top: list[tuple[str, int]] | None = None,
     outfit: list[str] | None = None,
+    mood_of_day: str | None = None,
+    group_attitude: str | None = None,
 ) -> str:
     level, into, needed = m.level_progress(pet.xp)
     lines = [
@@ -154,7 +157,13 @@ def render_card(
         f"Сейчас {m.mood_label(pet.mood)}.",
     ]
     if pet.traits:
-        lines.append("Характер: " + ", ".join(escape(m.TRAITS.get(key, key)) for key in pet.traits))
+        lines.append("Черты (складываются сами): " + ", ".join(escape(m.TRAITS.get(key, key)) for key in pet.traits))
+    else:
+        lines.append("Черты ещё формируются: питомец растёт и привыкает к чату.")
+    if mood_of_day:
+        lines.append("Настроение дня: " + escape(mood_of_day))
+    if group_attitude:
+        lines.append("К чату: " + escape(group_attitude.removesuffix(" к чату")))
     if outfit:
         lines.append("Наряд: " + ", ".join(escape(title) for title in outfit))
     if viewer_affinity is not None:
@@ -211,8 +220,15 @@ async def _send_card(message: Message, pet: PetView, *, activity_repo, service: 
         if value >= 25
     ]
     outfit = await service.outfit(pet_id=pet.id)
+    now = _now()
+    today = _today(None, now)
+    mood_of_day = personality.mood_of_the_day(pet_id=pet.id, day=today, mood=pet.mood, traits=pet.traits)
+    group_attitude = personality.group_attitude(await service.chat_relations(pet_id=pet.id, chat_id=message.chat.id))
     await message.answer(
-        render_card(pet, owner_label=owner_label, viewer_affinity=affinity, top=top, outfit=outfit),
+        render_card(
+            pet, owner_label=owner_label, viewer_affinity=affinity, top=top, outfit=outfit,
+            mood_of_day=mood_of_day, group_attitude=group_attitude,
+        ),
         parse_mode="HTML",
         reply_markup=pet_keyboard(pet.id) if pet.status == "active" else None,
     )
@@ -309,28 +325,59 @@ async def pet_new_command(message: Message, command: CommandObject, activity_rep
     invalidate_pet_names(message.chat.id)
     await message.answer(
         f"{pet.emoji} У вас появился питомец: <b>{escape(pet.name)}</b>!\n"
-        f"Выберите до {m.MAX_TRAITS} черт характера: <code>/pet_traits игривый, ласковый</code>\n"
-        f"Доступны: {escape(', '.join(m.TRAITS.values()))}.",
+        "Черты характера не задаются: они складываются сами из того, как с питомцем общаются. "
+        "Кормите, играйте, гладьте и разговаривайте — и увидите, каким он станет.",
         parse_mode="HTML",
     )
     await _send_card(message, pet, activity_repo=activity_repo, service=service, viewer_id=message.from_user.id)
 
 
 @router.message(Command("pet_traits"))
-async def pet_traits_command(message: Message, command: CommandObject, db_session, economy_repo) -> None:
+async def pet_traits_command(message: Message, db_session, economy_repo) -> None:
+    """Traits are not set by anyone: they form from how people treat the pet."""
     if message.from_user is None:
         return
-    try:
-        traits = m.parse_traits(command.args or "")
-        pet = await _service(db_session, economy_repo).set_traits(owner_user_id=message.from_user.id, traits=traits)
-    except (m.PetValidationError, PetDomainError) as exc:
-        hint = f"\nДоступны: {', '.join(m.TRAITS.values())}." if not (command.args or "").strip() else ""
-        await message.answer(escape(str(exc) + hint), parse_mode="HTML")
+    pet = await _service(db_session, economy_repo).get_owner_pet(owner_user_id=message.from_user.id)
+    if pet is None:
+        await message.answer("У вас нет питомца. Заведите его: /pet_new <вид> <имя>.")
         return
+    shown = ", ".join(m.TRAITS.get(key, key) for key in pet.traits) if pet.traits else "пока не сложились"
     await message.answer(
-        f"{pet.emoji} Характер {escape(pet.name)}: " + escape(", ".join(m.TRAITS[key] for key in pet.traits)) + ".",
+        f"{pet.emoji} Черты {escape(pet.name)}: {escape(shown)}.\n"
+        "Задать их нельзя: они складываются сами из ухода, игр, разговоров и отношения людей. "
+        "Свои слова о характере можно добавить через <code>/pet_character</code>.",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("pet_memory"))
+async def pet_memory_command(message: Message, db_session, economy_repo, activity_repo) -> None:
+    """What the pet remembers in this chat; the owner can wipe it with /pet_forget."""
+    if message.from_user is None:
+        return
+    if message.chat.type not in _GROUP_TYPES:
+        await message.answer("Память питомца хранится отдельно для каждого чата: вызовите /pet_memory в той группе.")
+        return
+    pet = await _service(db_session, economy_repo).get_owner_pet(owner_user_id=message.from_user.id)
+    if pet is None:
+        await message.answer("У вас нет питомца.")
+        return
+    repo = AiPetDialogueRepository(db_session)
+    notes = await repo.notes(pet_id=pet.id, chat_id=message.chat.id)
+    rows = await repo.weekly_aggregates(pet_id=pet.id, chat_id=message.chat.id, now=_now())
+    names: dict[int, str] = {}
+    aggregates = []
+    for actor, event_type, count in rows:
+        if actor not in names:
+            names[actor] = await _owner_label(activity_repo, chat_id=message.chat.id, user_id=actor)
+        aggregates.append((names[actor], event_type, count))
+    lines = [f"{pet.emoji} <b>{escape(pet.name)}</b> помнит в этом чате:"]
+    lines.extend("• " + escape(line) for line in dialogue_rules.aggregate_lines(aggregates))
+    lines.extend("• " + escape(note) for note in notes)
+    if len(lines) == 1:
+        lines.append("Пока ничего особенного.")
+    lines.append("Стереть память о разговорах: /pet_forget.")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("pet_character"))

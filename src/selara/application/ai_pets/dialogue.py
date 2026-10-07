@@ -102,6 +102,9 @@ class PetContext:
     aggregates: Sequence[str] = field(default_factory=tuple)
     notes: Sequence[str] = field(default_factory=tuple)
     recent: Sequence[DialogueTurn] = field(default_factory=tuple)
+    # Computed by code (personality.py): the pet's feeling about the chat as a whole and its mood of the day.
+    group_attitude: str = ""
+    mood_of_day: str = ""
 
 
 _SAFETY_RULES = (
@@ -141,6 +144,8 @@ def build_pet_messages(context: PetContext, *, user_text: str) -> list[dict]:
         f"Сытость: {persona.satiety}/100" + (" — голоден" if persona.satiety < m.HUNGRY_BELOW else ""),
         f"Энергия: {persona.energy}/100" + (" — устал" if persona.energy < 20 else ""),
         *(["Наряд: " + ", ".join(_clean(title, 64) for title in persona.outfit)] if persona.outfit else []),
+        *([f"Настроение дня: {_clean(context.mood_of_day, 160)}"] if context.mood_of_day else []),
+        *([f"К чату в целом ты {_clean(context.group_attitude, 80)}"] if context.group_attitude else []),
         f"Собеседник: {_clean(context.speaker_name, 64)}"
         + (" (твой хозяин)" if context.speaker_is_owner else "")
         + f"; ты к нему: {context.speaker_attitude}",
@@ -172,6 +177,12 @@ def aggregate_lines(rows: Iterable[tuple[str, str, int]]) -> list[str]:
         "toy": "дарил(а) мне игрушки",
         "tease": "дразнил(а) меня",
         "hurt": "обижал(а) меня",
+        "custom_care": "ухаживал(а) за мной",
+        "custom_feed": "угощал(а) меня",
+        "custom_play": "затевал(а) со мной игры",
+        "custom_teach": "учил(а) меня новому",
+        "custom_social": "по-дружески общался(лась) со мной",
+        "custom_prank": "шалил(а) со мной",
     }
     lines: list[str] = []
     for person, event_type, count in rows:

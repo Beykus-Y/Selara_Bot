@@ -254,3 +254,34 @@ async def test_pets_are_enabled_by_default_and_an_explicit_off_is_kept(session) 
 
     assert ChatSettings.__dataclass_fields__["pets_enabled"].default is True
     assert ChatSettings.__dataclass_fields__["pets_spontaneous_enabled"].default is False
+
+
+async def test_traits_form_from_how_the_pet_is_treated_and_nobody_sets_them(session) -> None:
+    pet = await _create(session)
+    service = AiPetService(session)
+    assert not hasattr(service, "set_traits")
+    assert pet.traits == ()
+
+    async def pat(index: int):
+        return await service.perform_action(
+            pet_id=pet.id, chat_id=CHAT, actor_user_id=GUEST, action_key="pat", idempotency_key=f"t{index}",
+            today=TODAY, now=NOW + timedelta(minutes=15 * index),
+        )
+
+    for index in range(9):
+        assert (await pat(index)).status == "ok"
+    assert (await service.get_pet(pet.id)).traits == ()  # too little history yet
+    for index in range(9, 12):
+        result = await pat(index)
+    assert result.pet.traits == ("affectionate",)
+    assert (await service.get_pet(pet.id)).traits == ("affectionate",)
+
+
+async def test_attitude_to_the_chat_comes_from_everyone_the_pet_met(session) -> None:
+    pet = await _create(session)
+    service = AiPetService(session)
+    assert await service.chat_relations(pet_id=pet.id, chat_id=CHAT) == []
+    await service.perform_action(
+        pet_id=pet.id, chat_id=CHAT, actor_user_id=GUEST, action_key="pat", idempotency_key="r1", today=TODAY, now=NOW
+    )
+    assert await service.chat_relations(pet_id=pet.id, chat_id=CHAT) == [(m.ACTIONS["pat"].affinity, 1)]
