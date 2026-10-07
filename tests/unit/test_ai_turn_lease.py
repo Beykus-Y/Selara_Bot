@@ -10,50 +10,128 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from selara.infrastructure.db import ai_turn_leases
-from selara.infrastructure.db.ai_turn_leases import ai_turn_lease
+from selara.infrastructure.db.ai_turn_leases import AiTurnLease, AiTurnLeaseLostError, ai_turn_lease
 from selara.presentation.handlers import personal_ai
 
 _KEY = "personal_ai:1"
 
 
+def _lease(*, ttl_seconds: float = 60.0) -> AiTurnLease:
+    return AiTurnLease(
+        session_factory=object(),
+        lease_key=_KEY,
+        owner_token="t",
+        ttl_seconds=ttl_seconds,
+        acquired_at=asyncio.get_running_loop().time(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_busy_key_yields_false_and_neither_renews_nor_releases(monkeypatch) -> None:
+async def test_busy_key_yields_none_and_neither_renews_nor_releases(monkeypatch) -> None:
     release = AsyncMock()
     monkeypatch.setattr(ai_turn_leases, "try_acquire_ai_turn_lease", AsyncMock(return_value=None))
     monkeypatch.setattr(ai_turn_leases, "release_ai_turn_lease", release)
 
     async with ai_turn_lease(session_factory=object(), lease_key=_KEY, ttl_seconds=60) as acquired:
-        assert acquired is False
+        assert acquired is None
 
     release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_stops_once_the_lease_is_lost(monkeypatch, caplog) -> None:
+async def test_heartbeat_marks_the_lease_lost_once_the_renewal_is_refused(monkeypatch, caplog) -> None:
     renew = AsyncMock(return_value=False)
     monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
     caplog.set_level(logging.WARNING, logger=ai_turn_leases.__name__)
+    lease = _lease(ttl_seconds=0.03)
 
-    await asyncio.wait_for(
-        ai_turn_leases._keep_renewed(session_factory=object(), lease_key=_KEY, owner_token="t", ttl_seconds=0.03),
-        timeout=2,
-    )
+    await asyncio.wait_for(lease._heartbeat(), timeout=2)
 
     renew.assert_awaited_once()
-    assert "lease was lost" in caplog.text
+    assert lease.lost
+    assert "AI turn lease lost" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_keeps_going_after_a_failed_renewal(monkeypatch) -> None:
+async def test_heartbeat_keeps_going_after_a_failed_renewal_within_the_ttl(monkeypatch) -> None:
     renew = AsyncMock(side_effect=[RuntimeError("db down"), True, False])
     monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
+    lease = _lease(ttl_seconds=1.0)
 
-    await asyncio.wait_for(
-        ai_turn_leases._keep_renewed(session_factory=object(), lease_key=_KEY, owner_token="t", ttl_seconds=0.03),
-        timeout=2,
-    )
+    await asyncio.wait_for(lease._heartbeat(), timeout=5)
 
     assert renew.await_count == 3
+    assert lease.lost
+
+
+@pytest.mark.asyncio
+async def test_renewals_failing_for_a_whole_ttl_mark_the_lease_lost(monkeypatch) -> None:
+    renew = AsyncMock(side_effect=RuntimeError("db down"))
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
+    lease = _lease(ttl_seconds=0.2)
+
+    await asyncio.wait_for(lease._heartbeat(), timeout=5)
+
+    assert lease.lost
+    assert renew.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_hanging_past_the_ttl_marks_the_lease_lost(monkeypatch) -> None:
+    async def hang(**_kwargs) -> bool:
+        await asyncio.sleep(60)
+        return True
+
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", hang)
+    lease = _lease(ttl_seconds=0.2)
+
+    await asyncio.wait_for(lease._heartbeat(), timeout=5)
+
+    assert lease.lost
+
+
+@pytest.mark.asyncio
+async def test_a_lost_lease_stops_the_turn_at_its_next_checkpoint(monkeypatch) -> None:
+    # The first checkpoint passes; by the second, another owner has taken the key.
+    renew = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
+    lease = _lease()
+    steps: list[int] = []
+
+    with pytest.raises(AiTurnLeaseLostError):
+        for step in range(3):
+            await lease.confirm()
+            steps.append(step)
+
+    assert steps == [0]
+    assert lease.lost
+    # Once lost, the checkpoint refuses without asking the database again.
+    with pytest.raises(AiTurnLeaseLostError):
+        await lease.confirm()
+    assert renew.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_confirm_raises_and_marks_the_lease_lost_when_the_renewal_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", AsyncMock(return_value=False))
+    lease = _lease()
+
+    with pytest.raises(AiTurnLeaseLostError):
+        await lease.confirm()
+
+    assert lease.lost
+
+
+@pytest.mark.asyncio
+async def test_confirm_passes_while_the_lease_is_still_held(monkeypatch) -> None:
+    renew = AsyncMock(return_value=True)
+    monkeypatch.setattr(ai_turn_leases, "renew_ai_turn_lease", renew)
+    lease = _lease()
+
+    await lease.confirm()
+
+    renew.assert_awaited_once()
+    assert not lease.lost
 
 
 @pytest.mark.asyncio
@@ -76,7 +154,7 @@ async def test_failed_release_is_logged_and_does_not_fail_the_turn(monkeypatch, 
     monkeypatch.setattr(ai_turn_leases, "release_ai_turn_lease", AsyncMock(side_effect=RuntimeError("db down")))
 
     async with ai_turn_lease(session_factory=object(), lease_key=_KEY, ttl_seconds=60) as acquired:
-        assert acquired is True
+        assert isinstance(acquired, AiTurnLease)
 
     assert "Failed to release AI turn lease" in caplog.text
 
@@ -85,7 +163,7 @@ async def test_failed_release_is_logged_and_does_not_fail_the_turn(monkeypatch, 
 async def test_personal_turn_answers_busy_when_the_durable_lease_is_held(monkeypatch) -> None:
     @asynccontextmanager
     async def busy_lease(**_kwargs):
-        yield False
+        yield None
 
     turn = AsyncMock()
     monkeypatch.setattr(personal_ai, "ai_turn_lease", busy_lease)
@@ -99,4 +177,26 @@ async def test_personal_turn_answers_busy_when_the_durable_lease_is_held(monkeyp
 
     message.answer.assert_awaited_once_with(personal_ai._BUSY_TEXT)
     turn.assert_not_awaited()
+    assert 42 not in personal_ai._inflight_users
+
+
+@pytest.mark.asyncio
+async def test_personal_turn_that_loses_its_lease_says_so_and_rolls_back(monkeypatch) -> None:
+    @asynccontextmanager
+    async def held_lease(**_kwargs):
+        yield object()
+
+    turn = AsyncMock(side_effect=AiTurnLeaseLostError(_KEY))
+    monkeypatch.setattr(personal_ai, "ai_turn_lease", held_lease)
+    monkeypatch.setattr(personal_ai, "_handle_personal_chat", turn)
+    message = MagicMock()
+    message.from_user = MagicMock(id=42)
+    message.text = "привет"
+    message.answer = AsyncMock()
+    db_session = AsyncMock()
+
+    await personal_ai.personal_chat_handler(message, db_session, object(), object(), AsyncMock())
+
+    message.answer.assert_awaited_once_with(personal_ai._LEASE_LOST_TEXT)
+    db_session.rollback.assert_awaited_once()
     assert 42 not in personal_ai._inflight_users

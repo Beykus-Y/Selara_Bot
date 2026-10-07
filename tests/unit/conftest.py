@@ -8,9 +8,18 @@ from contextlib import asynccontextmanager
 import pytest
 
 
+class _GrantedTurnLease:
+    """Stands in for a lease the test holds: every checkpoint passes and no loss is ever reported."""
+
+    lost = False
+
+    async def confirm(self) -> None:
+        return None
+
+
 @asynccontextmanager
-async def _granted_turn_lease(**_kwargs) -> AsyncIterator[bool]:
-    yield True
+async def _granted_turn_lease(**_kwargs) -> AsyncIterator[_GrantedTurnLease]:
+    yield _GrantedTurnLease()
 
 
 @pytest.fixture(autouse=True)

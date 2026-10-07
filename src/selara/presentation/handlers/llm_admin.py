@@ -21,7 +21,7 @@ from selara.application.feature_access import AccessReason, FeatureAccessService
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.domain.entities import ChatSnapshot, UserSnapshot
-from selara.infrastructure.db.ai_turn_leases import ai_turn_lease
+from selara.infrastructure.db.ai_turn_leases import AiTurnLease, AiTurnLeaseLostError, ai_turn_lease
 from selara.infrastructure.db.chat_ai_character_repository import ChatAiCharacterRepository
 from selara.infrastructure.db.llm_repository import LlmRepository
 from selara.infrastructure.db.artifact_repository import ArtifactRepository
@@ -64,6 +64,7 @@ from selara.presentation.llm_formatting import html_to_plain_text, render_llm_ht
 
 log = logging.getLogger(__name__)
 _ADMIN_TURN_BUSY_TEXT = "⏳ Предыдущий запрос к AI-ассистенту ещё выполняется. Квота не потрачена."
+_ADMIN_TURN_LOST_TEXT = "⚠️ Ответ прерван: обработку перехватил другой экземпляр бота. Если ответа не будет, повтори запрос."
 
 router = Router(name="llm_admin")
 
@@ -230,11 +231,20 @@ async def _handle(
     await db_session.commit()
     async with ai_turn_lease(
         session_factory=session_factory, lease_key=f"llm_admin:{message.chat.id}:{message.from_user.id}",
-    ) as acquired:
-        if not acquired:
+    ) as lease:
+        if not lease:
             await message.reply(_ADMIN_TURN_BUSY_TEXT)
             return
-        await _run_admin_turn(*args, **kwargs)
+        try:
+            await _run_admin_turn(*args, turn_lease=lease, **kwargs)
+            # Re-check ownership before the commit: a turn that lost its lease must not save history over the new owner's.
+            await lease.confirm()
+        except AiTurnLeaseLostError:
+            # Another instance took the key while this turn was stalled. The turn was stopped, so its rows are rolled back.
+            log.warning("llm_admin: turn stopped after its AI turn lease was lost chat_id=%s", message.chat.id)
+            await db_session.rollback()
+            await message.reply(_ADMIN_TURN_LOST_TEXT)
+            return
         # Commit before the lease is released: the next ?/?? must see this turn's saved history and cooldown row.
         await db_session.commit()
 
@@ -251,6 +261,7 @@ async def _run_admin_turn(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     web_search_client: WebSearchClient | None = None,
+    turn_lease: AiTurnLease | None = None,
 ) -> None:
     raw_text = message.text or ""
     prefix = "??" if with_context else "?"
@@ -467,6 +478,9 @@ async def _run_admin_turn(
             # round on. Calls are decided before any of their results are
             # seen, so same-batch execution is never web-poisoned.
             round_allowed = {definition["function"]["name"] for definition in available_tools}
+            if turn_lease is not None:
+                # No further model round once the lease is gone: its answer could not be saved or published anyway.
+                await turn_lease.confirm()
             try:
                 await bot.send_chat_action(message.chat.id, "typing")
             except Exception:
@@ -598,6 +612,9 @@ async def _run_admin_turn(
                         success=False,
                     )
                 else:
+                    if turn_lease is not None:
+                        # Each tool call is a side effect, such as a moderation action: a turn that lost its lease starts none.
+                        await turn_lease.confirm()
                     result = await execute_tool(call, **tool_ctx)
                 tool_results.append(result)
                 if result.pending_confirmation_token is not None:
@@ -645,6 +662,9 @@ async def _run_admin_turn(
         else:
             final_answer = _verified_fallback(tool_results)
 
+        if turn_lease is not None:
+            # The answer is published next: a turn that lost its lease must not publish it.
+            await turn_lease.confirm()
         if artifact_context.sent_artifacts:
             try:
                 await thinking_msg.delete()
@@ -692,6 +712,9 @@ async def _run_admin_turn(
                 ) if invocation_id is not None else None),
             )
 
+        if turn_lease is not None:
+            # The summary is sent to the admin, so it goes out only while the turn still holds its lease.
+            await turn_lease.confirm()
         await _send_dm_summary(
             bot=bot,
             admin_user_id=message.from_user.id,
@@ -706,6 +729,8 @@ async def _run_admin_turn(
 
     try:
         await _run_invocation()
+    except AiTurnLeaseLostError:
+        raise
     except Exception:
         # Never leave the «Думаю...» placeholder hanging when something unexpected breaks the loop.
         log.exception("llm_admin: invocation failed chat_id=%s", message.chat.id)
