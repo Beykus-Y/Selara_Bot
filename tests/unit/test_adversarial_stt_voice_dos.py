@@ -55,7 +55,8 @@ def test_voice_message_handler_signature_has_settings_dependency_for_cooldown():
     unrelated to the cooldown this test guards."""
     sig = inspect.signature(voice_message_handler)
     params = set(sig.parameters.keys())
-    assert params == {"message", "bot", "stt_client", "settings", "chat_settings", "daily_summary_stt_queue"}
+    assert params == {"message", "bot", "stt_client", "settings", "chat_settings", "daily_summary_stt_queue", "settings_source"}
+    assert sig.parameters["settings_source"].default is None
 
 
 def test_settings_defines_stt_and_llm_cooldown_fields():
