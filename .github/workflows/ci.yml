@@ -82,6 +82,17 @@ jobs:
         working-directory: gacha
         run: python -m alembic upgrade head
 
+      - name: Verify hardened gacha container runtime
+        run: |
+          docker build -f gacha/Dockerfile -t selara-gacha:ci .
+          docker run --rm --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --cpus 1 --pids-limit 256 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=536870912,mode=1777 \
+            -e GACHA_DATABASE_URL -e GACHA_APP_DIR=/app \
+            -v /data \
+            -v "$PWD/scripts:/checks:ro" --entrypoint sh selara-gacha:ci \
+            -ec 'alembic upgrade head && python /checks/check_gacha_container_runtime.py'
+
       - name: Compile Python sources
         run: python -m compileall -q src gacha/src
 
