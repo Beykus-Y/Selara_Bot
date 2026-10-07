@@ -107,3 +107,18 @@ def test_redact_text_mentions_ignores_entities_for_unknown_users() -> None:
     redacted = redact_text_mentions(text, entities=entities, tokens=tokens)
 
     assert redacted == text
+
+
+def test_redact_text_mentions_uses_utf16_offsets_for_multiple_mentions() -> None:
+    text = "😀 Спроси у героя 🚀 и друга"
+    entities = [(12, 5, 2), (23, 5, 3)]
+    assert redact_text_mentions(text, entities=entities, tokens={2: "Участник #1", 3: "Участник #2"}) == (
+        "😀 Спроси у Участник #1 🚀 и Участник #2"
+    )
+
+
+def test_redact_text_mentions_ignores_invalid_utf16_boundaries() -> None:
+    text = "😀 герой"
+    assert redact_text_mentions(
+        text, entities=[(1, 1, 2), (-1, 2, 2), (3, 100, 2), (3, 0, 2)], tokens={2: "Участник #1"},
+    ) == text
