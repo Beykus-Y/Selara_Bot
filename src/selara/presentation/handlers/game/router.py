@@ -5055,11 +5055,31 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        # Old non-versioned keyboards could submit an answer to a *different*
+        # question after the board changed. Do not guess the round.
+        await query.answer("Кнопка устарела. Откройте текущую доску через /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, question_raw, payload = parts
+    question_index = int(question_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if (
+        current_game.kind != "quiz" or current_game.status != "started"
+        or current_game.quiz_current_question_index != question_index
+    ):
+        await query.answer("Вопрос уже закрыт. Найдите актуальную доску через /gameboard.", show_alert=True)
+        return
+
     if payload == "noop":
         snapshot_game, answered_count, total_players = await GAME_STORE.quiz_get_answer_snapshot(game_id=game_id)
         if snapshot_game is None:
@@ -5083,6 +5103,8 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         game_id=game_id,
         user_id=query.from_user.id,
         option_index=option_index,
+        expected_chat_id=query.message.chat.id,
+        expected_question_index=question_index,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5141,7 +5163,18 @@ async def dice_roll_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         await query.answer("Неизвестное действие", show_alert=False)
         return
 
-    game, result, error = await GAME_STORE.dice_register_roll(game_id=game_id, user_id=query.from_user.id)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+
+    game, result, error = await GAME_STORE.dice_register_roll(
+        game_id=game_id, user_id=query.from_user.id,
+        expected_chat_id=query.message.chat.id,
+    )
     if error:
         await query.answer(error, show_alert=True)
         return
@@ -5864,6 +5897,29 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         return
 
     _, game_id, payload = parts
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if payload == "mine":
+        if current_game.status != "started" or current_game.kind != "spy":
+            await query.answer("Партия уже завершена. Откройте актуальную доску.", show_alert=True)
+            return
+        if query.from_user.id not in current_game.players:
+            await query.answer("Вы не участвуете в этой игре.", show_alert=True)
+            return
+        target = current_game.spy_votes.get(query.from_user.id)
+        if target is None:
+            await query.answer("Вы ещё не голосовали. Выберите подозреваемого.", show_alert=True)
+        else:
+            await query.answer(
+                f"Ваш голос: {current_game.players.get(target, f'user:{target}')}. Пока игра идёт, выбор можно изменить.",
+                show_alert=True,
+            )
+        return
     if payload == "noop":
         game, voted_count, total_players, leader_user_id, leader_votes = await GAME_STORE.spy_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5893,6 +5949,7 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
