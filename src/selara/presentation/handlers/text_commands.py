@@ -2203,14 +2203,22 @@ async def _require_channel_subscription(bot: Bot, message: Message, user_id: int
     return False
 
 
-def _claim_gacha_subscription_prompt(*, chat_id: int, user_id: int) -> bool:
-    key = (chat_id, user_id)
+def _gacha_subscription_prompt_is_due(*, chat_id: int, user_id: int) -> bool:
+    last_sent_at = _gacha_subscription_prompt_sent_at.get((chat_id, user_id))
+    return last_sent_at is None or time.monotonic() - last_sent_at >= _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN
+
+
+def _mark_gacha_subscription_prompt_sent(*, chat_id: int, user_id: int) -> None:
     now = time.monotonic()
-    last_sent_at = _gacha_subscription_prompt_sent_at.get(key)
-    if last_sent_at is not None and now - last_sent_at < _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN:
-        return False
-    _gacha_subscription_prompt_sent_at[key] = now
-    return True
+    # Drop expired entries so the process-wide dict stays bounded by the cooldown window.
+    expired = [
+        key
+        for key, sent_at in _gacha_subscription_prompt_sent_at.items()
+        if now - sent_at >= _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN
+    ]
+    for key in expired:
+        del _gacha_subscription_prompt_sent_at[key]
+    _gacha_subscription_prompt_sent_at[(chat_id, user_id)] = now
 
 
 async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery, user_id: int, activity_repo=None) -> bool:
@@ -2224,15 +2232,16 @@ async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery,
     )
     # Alerts cannot hold a tappable link, so the subscribe path is posted in the chat as well,
     # but not on every repeated tap.
-    if query.message is not None and _claim_gacha_subscription_prompt(
-        chat_id=query.message.chat.id,
-        user_id=user_id,
-    ):
-        await query.message.answer(
-            _GACHA_SUBSCRIPTION_PROMPT_HTML,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+    if query.message is not None:
+        chat_id = query.message.chat.id
+        if _gacha_subscription_prompt_is_due(chat_id=chat_id, user_id=user_id):
+            await query.message.answer(
+                _GACHA_SUBSCRIPTION_PROMPT_HTML,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            # Recorded only after a successful send, so a failed send does not suppress the next tap.
+            _mark_gacha_subscription_prompt_sent(chat_id=chat_id, user_id=user_id)
     return False
 
 

@@ -593,6 +593,29 @@ def test_gacha_sell_button_shows_sale_price_before_tap() -> None:
     assert no_offer is None
 
 
+def test_gacha_subscription_prompt_cooldown_starts_only_after_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_commands, "_gacha_subscription_prompt_sent_at", {})
+
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+    # A failed send never marks the prompt, so the next tap still gets the link.
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+
+    text_commands._mark_gacha_subscription_prompt_sent(chat_id=-100, user_id=1)
+    assert not text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=2)
+
+
+def test_gacha_subscription_prompt_marking_prunes_expired_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    expired_at = text_commands.time.monotonic() - text_commands._GACHA_SUBSCRIPTION_PROMPT_COOLDOWN - 1
+    sent_at = {(-200, 2): expired_at}
+    monkeypatch.setattr(text_commands, "_gacha_subscription_prompt_sent_at", sent_at)
+
+    text_commands._mark_gacha_subscription_prompt_sent(chat_id=-100, user_id=1)
+
+    assert (-200, 2) not in sent_at
+    assert (-100, 1) in sent_at
+
+
 def test_gacha_currency_button_shows_cost_in_coins() -> None:
     assert text_commands._gacha_currency_button_label("genshin") == "+160 примогемов за 1600 монет"
     assert text_commands._gacha_currency_button_label("hsr") == "+160 нефрита за 1600 монет"
