@@ -212,7 +212,7 @@ async def test_double_confirmation_finalizes_exactly_once(monkeypatch):
     assert feed.await_count == 1
     assert sorted([a.answers[-1][0], b.answers[-1][0]]) == [
         "Игра завершена",
-        "Игра уже изменилась или подтверждение истекло. Откройте актуальную доску.",
+        "Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.",
     ]
 
 
@@ -263,3 +263,34 @@ async def test_legacy_advance_shows_fresh_controls_not_mutate(monkeypatch):
     await callback(q, bot_obj=b)
     b.send_message.assert_awaited_once()
     assert (await store.get_game(game.game_id)).status == "started"
+
+
+@pytest.mark.asyncio
+async def test_gameboard_recovery_is_available_without_manager_permissions(monkeypatch):
+    store = GameStore()
+    edit, _ = prepare(monkeypatch, store)
+    game = await create_started(store)
+    await store.set_message_id(game_id=game.game_id, message_id=888)
+
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=-100, type="group"),
+        answer=AsyncMock(),
+    )
+    await game_router.game_board_command(msg, bot=bot(), chat_settings=settings())
+    msg.answer.assert_awaited_once()
+    assert msg.answer.await_args.kwargs["reply_to_message_id"] == 888
+    assert "Нажмите на сообщение" in msg.answer.await_args.args[0]
+    edit.assert_not_awaited()
+    assert (await store.get_game(game.game_id)).status == "started"
+
+
+@pytest.mark.asyncio
+async def test_gameboard_recovery_reports_absent_game(monkeypatch):
+    store = GameStore()
+    prepare(monkeypatch, store)
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=-100, type="group"),
+        answer=AsyncMock(),
+    )
+    await game_router.game_board_command(msg, bot=bot(), chat_settings=settings())
+    assert "нет активной игры" in msg.answer.await_args.args[0]
