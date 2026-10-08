@@ -55,9 +55,11 @@ _TRANSIENT_ERROR_TYPES: tuple[type[BaseException], ...] = (
 )
 # PostgreSQL SQLSTATEs for contention, a cancelled statement, or a server that is going away: serialization
 # failure, deadlock, lock not available, query cancelled, and the shutdown codes. Classes 08 (connection
-# exception) and 53 (insufficient resources) are transient as a whole.
-_TRANSIENT_SQLSTATES = frozenset({"40001", "40P01", "55P03", "57014", "57P01", "57P02", "57P03"})
-_TRANSIENT_SQLSTATE_CLASSES = ("08", "53")
+# exception) and 53 (insufficient resources) are transient as a whole. So are class 42 (undefined table or
+# column, missing privilege, a statement the server rejects) and 0A000 (a cached plan whose result type changed):
+# they follow the statement and the schema, which a migration or rollback can change, not the row.
+_TRANSIENT_SQLSTATES = frozenset({"0A000", "40001", "40P01", "55P03", "57014", "57P01", "57P02", "57P03"})
+_TRANSIENT_SQLSTATE_CLASSES = ("08", "42", "53")
 
 
 class _BatchFailed(Exception):
