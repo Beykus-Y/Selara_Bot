@@ -1,8 +1,8 @@
 """Browser regression for the Mini App home and chats screens (v2 layout).
 
-Covers the three home states (new user, member, admin), the add-bot link taken from the API, and the default
-chats tab. The backend is stubbed at the network layer; the real frontend build is served by ``vite preview``.
-Run after ``npm run build`` from ``frontend/``.
+Covers the three home states (new user, member, admin), the add-bot link taken from the API, the default chats
+tab, the home "Лидерборд" deep link, and mythic rarity in the gacha collection. The backend is stubbed at the
+network layer; the real frontend build is served by ``vite preview``. Run after ``npm run build`` from ``frontend/``.
 """
 
 from __future__ import annotations
@@ -83,10 +83,33 @@ async def _overflow_free(page, label: str) -> None:
     assert fits, f"horizontal overflow: {label}"
 
 
+def _card(code: str, name: str, rarity: str, rarity_label: str) -> dict:
+    return {"code": code, "name": name, "rarity": rarity, "rarity_label": rarity_label, "copies_owned": 1, "image_url": ""}
+
+
+def _collection(cards: list[dict]) -> dict:
+    return {
+        "ok": True, "status": "ok", "banner": "genshin", "user_id": 77, "cards": cards,
+        "total_unique": len(cards), "total_copies": len(cards),
+    }
+
+
+def _profile() -> dict:
+    return {
+        "ok": True, "status": "ok", "banner": "genshin",
+        "player": {
+            "user_id": 77, "adventure_rank": 1, "adventure_xp": 0, "xp_into_rank": 0, "xp_for_next_rank": 100,
+            "total_points": 0, "total_primogems": 0,
+        },
+        "unique_cards": 0, "total_copies": 0, "recent_pulls": [],
+    }
+
+
 class FakeBackend:
-    def __init__(self, home: dict, groups: dict) -> None:
+    def __init__(self, home: dict | None = None, groups: dict | None = None, collection: dict | None = None) -> None:
         self.home = home
         self.groups = groups
+        self.collection = collection
 
     async def handle(self, route) -> None:
         path = route.request.url.split("?", 1)[0]
@@ -98,6 +121,10 @@ class FakeBackend:
             return await self._json(route, self.home)
         if path.endswith("/miniapp/groups"):
             return await self._json(route, self.groups)
+        if path.endswith("/miniapp/gacha/collection"):
+            return await self._json(route, self.collection)
+        if path.endswith("/miniapp/gacha/profile"):
+            return await self._json(route, _profile())
         return await self._json(route, {"ok": False, "message": "Unexpected API call."}, 404)
 
     @staticmethod
@@ -164,6 +191,9 @@ async def _run_admin(browser) -> None:
     assert "Настройки группы" not in text, "settings CTA must stay removed until a settings screen exists"
     await _overflow_free(page, "home admin")
     assert not errors, errors
+
+    await page.get_by_role("link", name="Лидерборд").click()
+    await expect(page).to_have_url(f"{PREVIEW_URL}/chat/-1001#leaderboard", timeout=10000)
     await context.close()
 
 
@@ -187,6 +217,20 @@ async def _run_chats_default_tab(browser) -> None:
     await context.close()
 
 
+async def _run_gacha_mythic_card(browser) -> None:
+    collection = _collection([
+        _card("mythic-1", "Миф Тест", "mythic", "Мифическая"),
+        _card("legendary-1", "Легенда Тест", "legendary", "Легендарная"),
+    ])
+    backend = FakeBackend(collection=collection)
+    context, page, errors = await _open(browser, 393, backend, "/gacha")
+    await expect(page.locator(".coll.m")).to_have_count(1, timeout=10000)
+    await expect(page.locator(".coll.l")).to_have_count(1)
+    await _overflow_free(page, "gacha collection mythic")
+    assert not errors, errors
+    await context.close()
+
+
 async def _run() -> None:
     preview = _start_preview()
     try:
@@ -196,6 +240,7 @@ async def _run() -> None:
             await _run_member(browser)
             await _run_admin(browser)
             await _run_chats_default_tab(browser)
+            await _run_gacha_mythic_card(browser)
             await browser.close()
     finally:
         preview.terminate()

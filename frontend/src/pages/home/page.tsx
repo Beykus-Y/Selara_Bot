@@ -92,7 +92,7 @@ export function HomePage() {
             <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Аудит действий</b></span>
             <span className="v2-aside">{manageChat.title} ›</span>
           </Link>
-          <Link className="v2-row" to={routes.chatTab(manageChat.chat_id, 'overview')}>
+          <Link className="v2-row" to={`${routes.chat(manageChat.chat_id)}#leaderboard`}>
             <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Лидерборд</b></span>
             <span className="v2-aside">{manageChat.title} ›</span>
           </Link>

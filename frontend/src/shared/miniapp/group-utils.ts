@@ -6,7 +6,9 @@ export function groupRoleText(group: MiniAppGroup) {
 }
 
 export function groupLetter(group: MiniAppGroup) {
-  return group.title.trim().slice(0, 1).toUpperCase() || '?'
+  // Iterate code points, not UTF-16 units, so a leading emoji is not split into a broken surrogate.
+  const [first] = Array.from(group.title.trim())
+  return first ? first.toUpperCase() : '?'
 }
 
 export function isGroupLive(lastSeen: string) {
