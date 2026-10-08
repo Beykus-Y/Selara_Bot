@@ -16,6 +16,8 @@ def test_ci_workflow_checks_backend_gacha_and_frontend() -> None:
     workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
     assert {"pull_request", "push"} <= set(workflow["on"])
+    # Merges into dev are pushes to dev: the merged tree must get its own CI run.
+    assert {"main", "dev"} <= set(workflow["on"]["push"]["branches"])
     jobs = workflow["jobs"]
 
     # Branch protection requires checks named exactly `backend` and `frontend`;
