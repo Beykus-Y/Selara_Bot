@@ -2082,10 +2082,30 @@ class GameStore:
 
             return game, "Неизвестный тип игры"
 
-    async def finish(self, *, game_id: str, winner_text: str | None = None) -> GroupGame | None:
+    async def finish(
+        self,
+        *,
+        game_id: str,
+        winner_text: str | None = None,
+        expected_status: str | None = None,
+        expected_phase: str | None = None,
+        expected_round_no: int | None = None,
+    ) -> GroupGame | None:
+        """Finish atomically, optionally rejecting stale lifecycle confirmations.
+
+        Existing internal game completions retain their previous behavior.
+        Confirmation callbacks must supply status, phase and round so a
+        delayed click cannot end a newer stage or finish twice.
+        """
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
+                return None
+            if expected_status is not None and game.status != expected_status:
+                return None
+            if expected_phase is not None and game.phase != expected_phase:
+                return None
+            if expected_round_no is not None and game.round_no != expected_round_no:
                 return None
 
             game.status = "finished"
