@@ -1,0 +1,34 @@
+name: Backend setup
+description: Locked Python environment shared by the backend CI jobs.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Set up locked Python resolver
+      uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.33"
+        enable-cache: true
+
+    - name: Check Python lock matches manifests
+      shell: bash
+      run: uv lock --check
+
+    - name: Install locked Python dependencies
+      shell: bash
+      run: |
+        uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
+        uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
+        echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+    - name: Verify installed CI graph matches lock
+      shell: bash
+      run: |
+        export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+        python scripts/check_locked_python_runtime.py uv.lock selara

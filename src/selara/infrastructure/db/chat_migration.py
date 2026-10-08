@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from selara.domain.glossary import normalize_glossary_text
+from selara.infrastructure.db.activity_inbox import retarget_activity_inbox_chat
 from selara.infrastructure.db.telegram_stars import entitlement_lock_key
 
 from selara.infrastructure.db.models import (
@@ -46,6 +47,7 @@ from selara.infrastructure.db.models import (
     SelaraAiPurchaseIntentModel,
     DailySummaryRunModel,
     MessageArchiveModel,
+    SttBudgetReservationModel,
     MarriageModel,
     PairModel,
     RelationshipProposalModel,
@@ -82,12 +84,32 @@ async def migrate_chat_id(
     if old_chat_id == new_chat_id:
         return ChatMigrationResult(old_chat_id=old_chat_id, new_chat_id=new_chat_id, migrated=False)
 
-    await _ensure_target_chat(
+    old_chat = await session.get(ChatModel, old_chat_id)
+    new_chat = await session.get(ChatModel, new_chat_id)
+    chat_type, chat_title = _target_chat_metadata(
+        old_chat,
+        new_chat,
+        new_chat_type=new_chat_type,
+        new_chat_title=new_chat_title,
+    )
+
+    # Pending activity inbox rows move before any chat row is written. The flusher locks inbox rows and then
+    # upserts chats, so this order cannot deadlock against it.
+    await retarget_activity_inbox_chat(
         session,
         old_chat_id=old_chat_id,
         new_chat_id=new_chat_id,
-        new_chat_type=new_chat_type,
-        new_chat_title=new_chat_title,
+        chat_type=chat_type,
+        chat_title=chat_title,
+    )
+
+    await _ensure_target_chat(
+        session,
+        old_chat=old_chat,
+        new_chat=new_chat,
+        new_chat_id=new_chat_id,
+        chat_type=chat_type,
+        chat_title=chat_title,
     )
 
     await _migrate_selara_ai_purchases(
@@ -201,18 +223,19 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-async def _ensure_target_chat(
-    session: AsyncSession,
+def _target_chat_metadata(
+    old_chat: ChatModel | None,
+    new_chat: ChatModel | None,
     *,
-    old_chat_id: int,
-    new_chat_id: int,
     new_chat_type: str | None,
     new_chat_title: str | None,
-) -> None:
-    old_chat = await session.get(ChatModel, old_chat_id)
-    new_chat = await session.get(ChatModel, new_chat_id)
-
-    chat_type = new_chat_type or (new_chat.type if new_chat is not None else None) or (old_chat.type if old_chat is not None else None) or "supergroup"
+) -> tuple[str, str | None]:
+    chat_type = (
+        new_chat_type
+        or (new_chat.type if new_chat is not None else None)
+        or (old_chat.type if old_chat is not None else None)
+        or "supergroup"
+    )
     if new_chat_title is not None:
         chat_title = new_chat_title
     elif new_chat is not None and new_chat.title is not None:
@@ -221,7 +244,18 @@ async def _ensure_target_chat(
         chat_title = old_chat.title
     else:
         chat_title = None
+    return chat_type, chat_title
 
+
+async def _ensure_target_chat(
+    session: AsyncSession,
+    *,
+    old_chat: ChatModel | None,
+    new_chat: ChatModel | None,
+    new_chat_id: int,
+    chat_type: str,
+    chat_title: str | None,
+) -> None:
     if new_chat is None:
         session.add(
             ChatModel(
@@ -970,6 +1004,9 @@ async def _move_chat_alias_settings(session: AsyncSession, *, old_chat_id: int, 
 
 
 async def _move_simple_chat_refs(session: AsyncSession, *, old_chat_id: int, new_chat_id: int) -> None:
+    await session.execute(update(SttBudgetReservationModel).where(
+        SttBudgetReservationModel.chat_id == old_chat_id,
+    ).values(chat_id=new_chat_id))
     await session.execute(update(UserKarmaVoteModel).where(UserKarmaVoteModel.chat_id == old_chat_id).values(chat_id=new_chat_id))
     await session.execute(
         update(RelationshipProposalModel)

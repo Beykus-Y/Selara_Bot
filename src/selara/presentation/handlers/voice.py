@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 
 from aiogram import Bot, F, Router
 from aiogram.types import Message
@@ -11,20 +10,13 @@ from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.infrastructure.stt import SttClient, SttClientError
 from selara.infrastructure.stt.client import _MAX_FILE_SIZE
+from selara.infrastructure.stt.cooldown import claim_stt_cooldown
 from selara.infrastructure.stt.daily_summary_queue import DailySummaryTranscriptionQueue
 
 router = Router(name="voice")
 log = logging.getLogger(__name__)
 
 _PENDING_TEXT = "🎙 Распознаю..."
-
-# #3: voice.py has no permission/group gate at all, so this in-process
-# per-(chat, user) cooldown is the only thing standing between a careless
-# or malicious user and unlimited paid Whisper calls. Known limitation:
-# resets on restart and isn't shared across multiple bot processes -- a
-# durable, per-chat-configurable version (mirroring economy_tap_cooldown_seconds)
-# is a reasonable fast-follow if that ever matters at this bot's scale.
-_last_request_at: dict[tuple[int, int], float] = {}
 
 
 def _split_transcription(text: str, *, max_len: int = 4000) -> list[str]:
@@ -51,20 +43,18 @@ async def _transcribe_and_reply(
     message: Message, bot: Bot, stt_client: SttClient, settings: Settings,
     *, file_id: str, filename: str, file_size: int | None,
 ) -> None:
-    if message.from_user is not None:
-        key = (message.chat.id, message.from_user.id)
-        now = time.monotonic()
-        last = _last_request_at.get(key)
-        if last is not None and (now - last) < settings.stt_cooldown_seconds:
-            return
-        _last_request_at[key] = now
-
     # #12: Telegram reports file_size on the message itself -- check it
     # before downloading anything, instead of downloading a file that's
     # going to be rejected by _validate_audio's size check afterward anyway.
     if file_size is not None and file_size > _MAX_FILE_SIZE:
         mb = file_size / (1024 * 1024)
         await message.reply(f"❌ Файл слишком большой ({mb:.1f} МБ). Максимум — 25 МБ.")
+        return
+
+    if message.from_user is None or not await claim_stt_cooldown(
+        redis_url=settings.redis_url, chat_id=message.chat.id, user_id=message.from_user.id,
+        cooldown_seconds=settings.stt_cooldown_seconds,
+    ):
         return
 
     status = await message.reply(_PENDING_TEXT)
@@ -132,6 +122,7 @@ async def voice_message_handler(
     settings: Settings,
     chat_settings: ChatSettings | None = None,
     daily_summary_stt_queue: DailySummaryTranscriptionQueue | None = None,
+    settings_source: str | None = None,
 ) -> None:
     voice = message.voice
     if voice is None:
@@ -145,6 +136,8 @@ async def voice_message_handler(
         filename="voice.ogg",
         duration=getattr(voice, "duration", None),
     )
+    if (chat_settings is not None and not chat_settings.instant_stt_enabled) or settings_source == "default_after_db_error":
+        return
     await _transcribe_and_reply(
         message, bot, stt_client, settings, file_id=voice.file_id, filename="voice.ogg", file_size=voice.file_size,
     )
@@ -158,6 +151,7 @@ async def video_note_message_handler(
     settings: Settings,
     chat_settings: ChatSettings | None = None,
     daily_summary_stt_queue: DailySummaryTranscriptionQueue | None = None,
+    settings_source: str | None = None,
 ) -> None:
     """#4: video circle messages ("кружки") carry an audio track in the same
     mp4 container Telegram voice notes don't use but Whisper already
@@ -175,6 +169,8 @@ async def video_note_message_handler(
         filename="video_note.mp4",
         duration=getattr(video_note, "duration", None),
     )
+    if (chat_settings is not None and not chat_settings.instant_stt_enabled) or settings_source == "default_after_db_error":
+        return
     await _transcribe_and_reply(
         message, bot, stt_client, settings,
         file_id=video_note.file_id, filename="video_note.mp4", file_size=video_note.file_size,

@@ -12,6 +12,7 @@ import pytest
 
 from selara.application.feature_access import AccessReason, AccessTier
 from selara.application.personal_config import PersonalConfig, StaticPersonalConfigProvider, ail_limits_from, config_from_settings
+from selara.infrastructure.db.ai_turn_leases import AiTurnLeaseLostError
 from selara.infrastructure.db.personal_ai_repository import PersonalAiRepository
 from selara.infrastructure.llm.client import LlmCallUsage
 from selara.presentation.handlers import personal_ai as handler
@@ -214,6 +215,34 @@ async def test_a_sent_artifact_replaces_the_progress_message(monkeypatch, sessio
     )
     message.thinking.delete.assert_awaited()
     message.thinking.edit_text.assert_not_awaited()
+
+
+async def test_a_lease_lost_mid_turn_is_not_a_provider_failure(monkeypatch, session):
+    settings, llm, web_client, ail = await _arrange(monkeypatch, session, web=False, artifacts=True)
+    captured = {}
+    original = handler._settle_chat_turn
+
+    async def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return await original(*args, **kwargs)
+
+    async def generate(**kwargs):
+        kwargs["usage_sink"].append(_usage("0.0002"))
+        raise AiTurnLeaseLostError("personal_ai:1")
+
+    monkeypatch.setattr(handler, "_settle_chat_turn", spy)
+    monkeypatch.setattr(handler, "generate_reply", generate)
+    message = _message("сделай таблицу")
+    await handler.personal_chat_handler(
+        message, db_session=session, session_factory=MagicMock(), settings=settings,
+        personal_config=_provider(settings, ail=True), llm_client=llm, web_search_client=None,
+    )
+    # The turn stops with the lease notice. The rounds that already ran are charged as a failed turn, and the
+    # progress message is not reported as a provider error.
+    message.answer.assert_awaited_with(handler._LEASE_LOST_TEXT)
+    message.thinking.edit_text.assert_not_awaited()
+    assert captured["failed"] is True
+    assert len(captured["usages"]) == 1
 
 
 async def test_an_artifact_without_a_caption_is_still_a_stored_answer(monkeypatch, session):

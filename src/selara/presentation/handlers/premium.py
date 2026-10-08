@@ -17,6 +17,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy.exc import DataError, IntegrityError
 from selara.application.personal_config import PersonalConfig, PersonalConfigProvider
 from selara.application.selara_ai_product import (
     PRODUCT_SCOPE_CHAT,
@@ -48,7 +49,6 @@ from selara.presentation.auth import (
     resolve_owner_admin_exemption,
     resolve_owner_private_exemption,
 )
-
 logger = logging.getLogger(__name__)
 router = Router(name="premium")
 
@@ -59,6 +59,38 @@ _PRECHECKOUT_VALIDATION_DEADLINE_SECONDS = 6.0
 _PRECHECKOUT_ANSWER_DEADLINE_SECONDS = 2.0
 _PAYMENT_RETRY_ALERT_ATTEMPT = 3
 _PAYMENT_RETRY_MAX_SECONDS = 60
+# After this many failed attempts the confirmed payment is dead-lettered into
+# the rejected-payment audit so one poison payload cannot stall polling forever.
+_PAYMENT_RETRY_DEADLETTER_ATTEMPT = 5
+# Failures bound to the payload or the stored data: replaying the same statement
+# can never succeed, so the terminal dead-letter path is the only exit. Everything
+# else (connection loss, timeouts, lock waits, serialization and deadlock
+# conflicts, and schema/deploy-window errors) stays transient and must keep
+# retrying — a dead-letter row would misfile a valid, already-charged payment as
+# rejected while the database is merely unhealthy or a contended row is still
+# held. SQLAlchemy ``ProgrammingError`` ("column ... does not exist", cached plan
+# vs DDL mismatch) is deterministic for the connection but not for the payment:
+# during a partial migration it lasts only until the deploy finishes, so the
+# update must stay unacknowledged and succeed then instead of dead-lettering a
+# captured charge that can only be recovered with a manual /stars_refund.
+_PERMANENT_PAYMENT_ERROR_TYPES: tuple[type[Exception], ...] = (
+    ValueError,
+    TypeError,
+    DataError,
+    IntegrityError,
+)
+
+
+def _is_permanent_payment_failure(exc: BaseException) -> bool:
+    """Classify whether retrying the failed payment statement can ever succeed."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _PERMANENT_PAYMENT_ERROR_TYPES):
+            return True
+        current = getattr(current, "orig", None) or current.__cause__
+    return False
 _PAYMENT_OWNER_ALERT_TIMEOUT_SECONDS = 3.0
 _PAYMENT_CONFIRMATION_TIMEOUT_SECONDS = 3.0
 _STAR_REFUND_TIMEOUT_SECONDS = 10.0
@@ -911,6 +943,33 @@ async def selara_ai_pre_checkout(
         )
 
 
+async def _record_unprocessable_payment(repository, *, message: Message, payment) -> int | None:
+    """Dead-letter the confirmed payment; ``None`` means even the audit write failed."""
+    if message.from_user is None:
+        return None
+    try:
+        return await repository.record_unprocessable_payment(
+            buyer_user_id=message.from_user.id,
+            invoice_payload=payment.invoice_payload,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            provider_payment_charge_id=payment.provider_payment_charge_id,
+            amount_stars=payment.total_amount,
+            currency=payment.currency,
+            payment_at=message.date,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Telegram Stars payment dead-letter write failed "
+            "telegram_payment_charge_id=%s exception_type=%s exception=%s",
+            payment.telegram_payment_charge_id,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 async def selara_ai_successful_payment(
     message: Message,
     session_factory,
@@ -943,12 +1002,14 @@ async def selara_ai_successful_payment(
             # is durable. Alert once, then keep a capped exponential backoff.
             attempt += 1
             delay = _payment_retry_delay(attempt)
+            permanent = _is_permanent_payment_failure(exc)
             logger.error(
                 "Telegram Stars payment processing failed; retaining update for retry "
-                "attempt=%s retry_in_seconds=%s exception_type=%s",
+                "attempt=%s retry_in_seconds=%s exception_type=%s permanent_failure=%s",
                 attempt,
                 delay,
                 type(exc).__name__,
+                permanent,
             )
             if attempt >= _PAYMENT_RETRY_ALERT_ATTEMPT and not owner_alert_sent:
                 owner_alert_sent = True
@@ -963,6 +1024,34 @@ async def selara_ai_successful_payment(
                     ),
                     log_event="persistence_retry",
                 )
+            if attempt >= _PAYMENT_RETRY_DEADLETTER_ATTEMPT and permanent:
+                # A deterministic (poison) failure would retry forever and keep the
+                # whole polling loop from reading any other Telegram update. Once the
+                # payment is durably dead-lettered as a rejected payment, give up on
+                # this update: the owner alert and /stars_refund take over, and
+                # polling resumes. Transient failures never enter this terminal
+                # path: while the database is unhealthy or a contended row is held,
+                # the update stays unacknowledged and keeps retrying under the
+                # owner alert, so a valid charge can still be applied.
+                dead_letter_payment_id = await _record_unprocessable_payment(
+                    repository,
+                    message=message,
+                    payment=payment,
+                )
+                if dead_letter_payment_id is not None:
+                    logger.error(
+                        "Telegram Stars payment dead-lettered after retries; "
+                        "resuming polling payment_id=%s attempts=%s exception_type=%s",
+                        dead_letter_payment_id,
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    dead_letter_result = PaymentResult(
+                        "rejected", "processing_failed", payment_id=dead_letter_payment_id
+                    )
+                    await _notify_owner_of_rejected_payment(bot=bot, settings=settings, result=dead_letter_result)
+                    await _send_payment_reconciliation_message(message, dead_letter_result)
+                    return
             await asyncio.sleep(delay)
 
     if result.state == "rejected":

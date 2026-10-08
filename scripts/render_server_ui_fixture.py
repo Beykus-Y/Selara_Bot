@@ -46,7 +46,7 @@ def main() -> None:
         flash=None,
         error=None,
         extra_styles=["admin-overview.css", "admin-feedback.css", "admin-broadcast.css", "admin-table-search.css"],
-        extra_scripts=["admin-overview.js", "admin-feedback.js", "admin-broadcast.js", "admin-table-search.js"],
+        extra_scripts=["admin-overview.js", "admin-backup-status.js", "admin-feedback.js", "admin-broadcast.js", "admin-table-search.js"],
         admin_user_id=77,
         open_feedback_count=1,
         attention_broadcast_count=1,

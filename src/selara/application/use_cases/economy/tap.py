@@ -4,7 +4,13 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
-from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error, to_meta_json
+from selara.application.use_cases.economy.common import (
+    account_lock_key,
+    get_account_or_error,
+    lock_economy_resources,
+    resolve_scope_or_error,
+    to_meta_json,
+)
 from selara.application.use_cases.economy.results import TapResult
 
 
@@ -36,6 +42,8 @@ async def execute(
             tap_streak=0,
         )
 
+    # Serialize cooldown/streak reads with balance, state and ledger writes.
+    await lock_economy_resources(repo, account_lock_key(scope=scope, user_id=user_id))
     account, _ = await get_account_or_error(repo, scope=scope, user_id=user_id)
 
     effective_cd = max(MIN_TAP_COOLDOWN_SECONDS, int(tap_cooldown_seconds) - int(account.tap_glove_level) * 5)

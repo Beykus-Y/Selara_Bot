@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -509,7 +510,8 @@ async def test_forget_all_is_committed_before_telegram_is_called(monkeypatch, se
 
     await _memory_call(memory_handler.memory_callback, query, session, settings)
 
-    assert events[:2] == ["commit", "answer"]
+    # The first commit ends the request transaction before the lease; the deletion commit must still precede the answer.
+    assert events[-2:] == ["commit", "answer"]
 
 
 async def test_forget_all_declined_keeps_everything(monkeypatch, session):
@@ -849,6 +851,28 @@ async def test_forget_all_blocks_new_turns_while_it_deletes(monkeypatch, session
     await _memory_call(memory_handler.memory_callback, _query("pam:fy"), session, settings)
 
     assert seen == [True] and USER_ID not in handler._inflight_users
+
+
+async def test_forget_all_does_nothing_when_a_turn_holds_the_durable_lease(monkeypatch, session):
+    settings = _settings(monkeypatch)
+    await _populate(session)
+    lease_keys: list[str] = []
+
+    @asynccontextmanager
+    async def busy_lease(*, session_factory, lease_key, **_kwargs):
+        lease_keys.append(lease_key)
+        yield False
+
+    async def must_not_delete(self, *, user_id):
+        raise AssertionError("forget-all deleted data while another instance held the turn lease")
+
+    monkeypatch.setattr(handler, "ai_turn_lease", busy_lease)
+    monkeypatch.setattr(PersonalAiRepository, "delete_all_user_data", must_not_delete)
+
+    await _memory_call(memory_handler.memory_callback, _query("pam:fy"), session, settings)
+
+    assert lease_keys == [f"personal_ai:{USER_ID}"]
+    assert USER_ID not in handler._inflight_users
 
 
 async def test_delete_is_committed_before_telegram_is_called(monkeypatch, session):

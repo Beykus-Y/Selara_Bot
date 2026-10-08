@@ -152,6 +152,8 @@ async def test_single_admin_message_can_drive_max_tool_rounds_billed_calls():
         return_value=MagicMock(scalar_one=MagicMock(return_value=0))
     )
     db_session = MagicMock()
+    # _handle commits the turn inside the durable lease, so the session needs an awaitable commit.
+    db_session.commit = AsyncMock()
 
     message = _admin_message("? посчитай статистику")
 

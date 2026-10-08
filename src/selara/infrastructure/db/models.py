@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -545,9 +546,9 @@ class MessageArchiveModel(Base):
     raw_message_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    # Daily summary feature fields (see docs/DAILY_SUMMARY_TODO.md). transcribed_at is
-    # tracked separately from snapshot_at because a transcript can be produced later
-    # than the message itself -- TTL cleanup keys off transcribed_at, not snapshot_at.
+    # Daily summary feature fields (see docs/DAILY_SUMMARY_TODO.md). transcribed_at is the STT claim marker:
+    # set when a worker claims the row and again when its transcript is stored; NULL before the first claim.
+    # Retention keys off snapshot_at and deletes whole rows, so it does not read transcribed_at.
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reply_to_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -556,6 +557,8 @@ class MessageArchiveModel(Base):
         CheckConstraint("snapshot_kind IN ('created', 'edited')", name="ck_messages_snapshot_kind"),
         UniqueConstraint("chat_id", "telegram_message_id", "snapshot_hash", name="uq_messages_chat_message_snapshot"),
         Index("idx_messages_chat_reply_to", "chat_id", "reply_to_telegram_message_id"),
+        # Retention deletes rows older than a cutoff in batches (migration 0107).
+        Index("idx_messages_snapshot_at", "snapshot_at"),
     )
 
 
@@ -575,6 +578,40 @@ class ChatActivityEventSyncStateModel(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ActivityEventInboxModel(Base):
+    """Durable copy of a tracked group message, kept until ActivityBatcher aggregates it or parks it as a dead letter."""
+
+    __tablename__ = "activity_event_inbox"
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    # Chat identity lives in columns, not the payload, so a chat migration can retarget pending rows in one UPDATE.
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    chat_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Failed apply attempts. At the limit the row moves to activity_event_dead_letters.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class ActivityEventDeadLetterModel(Base):
+    """A tracked group message that failed on every attempt. It leaves the inbox so it cannot hold back other rows.
+
+    It stays here for inspection or a manual replay. Its id is the inbox row's id, so the logs can be matched to it.
+    """
+
+    __tablename__ = "activity_event_dead_letters"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ChatInterestingFactStateModel(Base):
     __tablename__ = "chat_interesting_fact_state"
 
@@ -592,6 +629,32 @@ class ChatInterestingFactStateModel(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class ChatInterestingFactDeliveryModel(Base):
+    """One claim per interesting-fact send attempt; written before Telegram is called.
+
+    status: claimed (send in flight or outcome not recorded), sent, failed (Telegram
+    rejected the send, state untouched), abandoned (claim outlived its lease without
+    a recorded outcome; still counts toward cooldown so the slot is not re-sent).
+    """
+
+    __tablename__ = "chat_interesting_fact_deliveries"
+    __table_args__ = (Index("ix_chat_interesting_fact_deliveries_chat_claimed", "chat_id", "claimed_at"),)
+
+    id: Mapped[int] = mapped_column(_AUTOINCREMENT_PK, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fact_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class UserKarmaVoteModel(Base):
@@ -1109,6 +1172,7 @@ class ChatSettingsModel(Base):
     daily_summary_min_messages: Mapped[int] = mapped_column(BigInteger, nullable=False, default=50, server_default="50")
     daily_summary_style: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral", server_default="neutral")
     daily_summary_include_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    instant_stt_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     daily_summary_include_video_notes: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
@@ -1806,6 +1870,13 @@ class AdminBroadcastModel(Base):
     media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     media_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The photo itself, kept until Telegram has returned a reusable file_id, so an interrupted photo broadcast can resume.
+    media_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    # Lease held by the worker that is sending this broadcast; cancelled_at stops it and any resume.
+    lease_owner_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -1834,6 +1905,9 @@ class AdminBroadcastDeliveryModel(Base):
     bot_member_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A pending delivery is claimed by the worker about to send it; an expired claim has no known outcome.
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2252,6 +2326,30 @@ class ChatMemberCountSnapshotModel(Base):
     last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BackupJobClaimModel(Base):
+    """One row per scheduled backup slot; the claim is what stops a second bot instance from dumping again."""
+
+    __tablename__ = "backup_job_claims"
+
+    slot_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AiTurnLeaseModel(Base):
+    """Short durable lease that lets one AI turn per key (user or admin scope) run at a time across instances."""
+
+    __tablename__ = "ai_turn_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class GlobalMetricsModel(Base):
@@ -2755,6 +2853,29 @@ class LlmUsageLogModel(Base):
             "status IN ('succeeded', 'failed', 'validation_failed')",
             name="ck_llm_usage_log_status",
         ),
+    )
+
+
+class SttBudgetReservationModel(Base):
+    """Durable, millisecond-precise admission and completed STT budget charges."""
+
+    __tablename__ = "stt_budget_reservations"
+    token: Mapped[str] = mapped_column(String(36), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chats.telegram_chat_id", ondelete="CASCADE"), nullable=False)
+    archive_row_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    claim_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reserved_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="reserved", server_default="reserved")
+    usage_log_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("llm_usage_log.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("reserved_ms > 0", name="ck_stt_budget_reserved_ms"),
+        CheckConstraint("status IN ('reserved', 'consumed')", name="ck_stt_budget_status"),
+        Index("idx_stt_budget_chat_created", "chat_id", "created_at"),
+        Index("idx_stt_budget_archive_lease", "archive_row_id", "lease_expires_at"),
+        Index("idx_stt_budget_usage_log", "usage_log_id", unique=True),
     )
 
 

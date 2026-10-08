@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -363,11 +364,11 @@ class ToolTurnResult:
     rounds: int = 0
 
 
-def _spent_usd(usages: list) -> Decimal | None:
+def _spent_usd(usages: list) -> tuple[Decimal, bool]:
+    """Priced spend of the successful rounds, and whether every successful round came with a price."""
     succeeded = [usage for usage in usages if getattr(usage, "status", "succeeded") == "succeeded"]
-    if not succeeded or any(getattr(usage, "estimated_cost_usd", None) is None for usage in succeeded):
-        return None
-    return sum((Decimal(usage.estimated_cost_usd) for usage in succeeded), Decimal(0))
+    priced = [usage for usage in succeeded if getattr(usage, "estimated_cost_usd", None) is not None]
+    return sum((Decimal(usage.estimated_cost_usd) for usage in priced), Decimal(0)), len(priced) == len(succeeded)
 
 
 async def run_tool_dialogue(
@@ -378,12 +379,15 @@ async def run_tool_dialogue(
     accounting_context=None,
     resolved_model=None,
     usage_sink: list | None = None,
-    on_progress=None,
+    checkpoint: Callable[[], Awaitable[None]] | None = None,
 ) -> ToolTurnResult:
     """Rounds of model calls with tools; the last round (or a spent budget) offers none and says so.
 
     ``usage_sink`` receives the usages of every successful round, so the caller prices the whole turn. A provider
     error propagates as ``LlmClientError`` with that round's usages; earlier rounds are already in the sink.
+
+    ``checkpoint`` is awaited before each model round and before each tool call. It may raise to stop the turn, and then
+    nothing after it runs: no further provider call and no tool, such as ``send_artifact``, that cannot be taken back.
     """
     sink = usage_sink if usage_sink is not None else []
     wind_down = False
@@ -401,8 +405,9 @@ async def run_tool_dialogue(
             if not notice_added:
                 messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
                 notice_added = True
-        if on_progress is not None:
-            await on_progress(round_index)
+        if checkpoint is not None:
+            # Fence the round: a turn that lost its lease must not start another provider call.
+            await checkpoint()
         kwargs: dict[str, Any] = {"max_tokens": run.max_tokens()}
         if accounting_context is not None:
             kwargs["accounting_context"] = accounting_context
@@ -437,6 +442,9 @@ async def run_tool_dialogue(
                 except ValueError:
                     outcome = _err(tool_call.id, tool_call.function.name, "Аргументы должны быть JSON-объектом.")
                 else:
+                    if checkpoint is not None:
+                        # Fence each call: send_artifact reaches the chat and cannot be taken back once it is sent.
+                        await checkpoint()
                     outcome = await run.execute(
                         ToolCall(name=tool_call.function.name, arguments=arguments, call_id=tool_call.id), allowed
                     )
@@ -455,10 +463,12 @@ async def run_tool_dialogue(
                 await repository.session.commit()
             except Exception:
                 log.warning("personal tools: commit between rounds failed", exc_info=True)
-        spent = _spent_usd(sink)
-        if spent is None and run.cost_budget_usd is not None:
-            log.warning("personal tools: spent cost unknown, only the round limit applies")
-        if run.cost_budget_usd is not None and spent is not None and spent >= run.cost_budget_usd * COST_CAP_SHARE:
+        spent, fully_priced = _spent_usd(sink)
+        if run.cost_budget_usd is not None and not fully_priced:
+            # An unpriced round hides what it cost, so the budget cannot be checked: fail closed, no more tool rounds.
+            log.warning("personal tools: a round came back without a price, tools are withdrawn")
+            wind_down = True
+        if run.cost_budget_usd is not None and spent >= run.cost_budget_usd * COST_CAP_SHARE:
             wind_down = True
     return ToolTurnResult("", run.web_used, False, run.total_rounds)
 

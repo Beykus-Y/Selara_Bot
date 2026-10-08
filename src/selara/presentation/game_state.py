@@ -6,6 +6,10 @@ import json
 import logging
 import random
 import re
+import time
+from collections import deque
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -1188,11 +1192,131 @@ class GroupGame:
     economy_rewards_granted: bool = False
 
 
+# Games a single GameStore call mutates. ``RuntimeGameStore`` sets it around each
+# call so it persists only the games that call changed (see ``_note_touched_game``).
+_TOUCHED_GAME_IDS: ContextVar[set[str] | None] = ContextVar("_touched_game_ids", default=None)
+
+
+def _note_touched_game(game_id: str) -> None:
+    """Record that the running GameStore call mutates ``game_id``."""
+    touched = _TOUCHED_GAME_IDS.get()
+    if touched is not None:
+        touched.add(game_id)
+
+
 class GameStore:
+    """Registry of in-process group games.
+
+    Mutation contract: a game may only be changed through a GameStore method.
+    Those methods take the game's lock (``_lock_game``) or, for new games, call
+    ``_note_touched_game``, so the persistence layer knows which games to write.
+
+    Locking model:
+
+    * ``_registry_lock`` guards the game registries (``_by_id`` /
+      ``_active_by_chat``) and the per-game lock table itself. It is only held
+      for short, await-free critical sections, so it never serializes the state
+      mutations of independent games.
+    * Every ``game_id`` gets its own ``asyncio.Lock``, created on demand: two
+      actions of the same game still serialize, actions of different games do
+      not block each other.
+    * Per-game locks are reference counted. As soon as the last holder or
+      waiter releases one it is dropped from the table, so the registry cannot
+      grow without bound.
+    * Lock ordering: a per-game lock may be held while taking
+      ``_registry_lock`` (for example when retiring the active game of a chat),
+      but ``_registry_lock`` is never held while waiting for a per-game lock.
+    """
+
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
+        self._registry_lock = asyncio.Lock()
+        self._game_locks: dict[str, asyncio.Lock] = {}
+        self._game_lock_refs: dict[str, int] = {}
         self._by_id: dict[str, GroupGame] = {}
         self._active_by_chat: dict[int, str] = {}
+
+    @asynccontextmanager
+    async def _lock_game(self, game_id: str) -> AsyncIterator[None]:
+        """Serialize operations that touch a single game.
+
+        The lock object is created on first use and reference counted, so the
+        table only keeps locks that are currently held or awaited.
+        """
+        async with self._registry_lock:
+            lock = self._game_locks.get(game_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._game_locks[game_id] = lock
+            self._game_lock_refs[game_id] = self._game_lock_refs.get(game_id, 0) + 1
+        try:
+            async with lock:
+                _note_touched_game(game_id)
+                yield
+        finally:
+            async with self._registry_lock:
+                remaining = self._game_lock_refs.get(game_id, 1) - 1
+                if remaining > 0:
+                    self._game_lock_refs[game_id] = remaining
+                else:
+                    self._game_lock_refs.pop(game_id, None)
+                    self._game_locks.pop(game_id, None)
+
+    def _forget_active_locked(self, game: GroupGame) -> None:
+        """Retire the chat -> game mapping of ``game`` (caller holds ``_registry_lock``).
+
+        Only a mapping that still points at this game is removed, so a rematch
+        lobby created in the meantime keeps owning the chat.
+        """
+        if self._active_by_chat.get(game.chat_id) == game.game_id:
+            self._active_by_chat.pop(game.chat_id, None)
+
+    async def _cache_hydrated_game(self, game: GroupGame) -> bool:
+        """Publish a game loaded from Redis into the local registry.
+
+        Returns ``False`` when the game is already in memory: the in-memory
+        copy is authoritative, so the loaded payload must not replace it.
+        """
+        async with self._registry_lock:
+            if game.game_id in self._by_id:
+                return False
+            self._by_id[game.game_id] = game
+            if game.status != "finished":
+                self._active_by_chat[game.chat_id] = game.game_id
+            return True
+
+    @asynccontextmanager
+    async def _lock_active_game(self, chat_id: int) -> AsyncIterator[GroupGame | None]:
+        """Lock the game that is currently active in a chat.
+
+        The chat -> game mapping is read under ``_registry_lock`` and verified
+        again while the per-game lock is held, so a lobby that replaced the
+        previous game in between is picked up instead of being ignored.
+        """
+        for _ in range(4):
+            async with self._registry_lock:
+                active_id = self._active_by_chat.get(chat_id)
+            if active_id is None:
+                break
+            async with self._lock_game(active_id):
+                async with self._registry_lock:
+                    if self._active_by_chat.get(chat_id) != active_id:
+                        continue
+                    game = self._by_id.get(active_id)
+                if game is None or game.status == "finished":
+                    break
+                yield game
+                return
+        yield None
+
+    async def _active_game_ids(self) -> set[str]:
+        """Game ids that are currently mapped to a chat."""
+        async with self._registry_lock:
+            return set(self._active_by_chat.values())
+
+    async def _games_snapshot(self) -> tuple[set[str], dict[str, GroupGame]]:
+        """Snapshot the registry so callers can iterate it without racing writers."""
+        async with self._registry_lock:
+            return set(self._active_by_chat.values()), dict(self._by_id)
 
     async def create_lobby(
         self,
@@ -1208,7 +1332,7 @@ class GameStore:
         zlob_category: str | None = None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._registry_lock:
             active_id = self._active_by_chat.get(chat_id)
             if active_id:
                 active_game = self._by_id.get(active_id)
@@ -1261,10 +1385,11 @@ class GameStore:
                 game.bunker_seats_tuned = False
             self._by_id[game_id] = game
             self._active_by_chat[chat_id] = game_id
+            _note_touched_game(game_id)
             return game, None
 
     async def set_message_id(self, *, game_id: str, message_id: int) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1272,15 +1397,24 @@ class GameStore:
             return game
 
     async def set_execution_confirm_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
             game.execution_confirm_message_id = message_id
             return game
 
+    async def mark_economy_rewards_granted(self, *, game_id: str) -> GroupGame | None:
+        """Record that the game's economy rewards were settled (persisted, so a retry after restart cannot pay twice)."""
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None
+            game.economy_rewards_granted = True
+            return game
+
     async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1288,13 +1422,8 @@ class GameStore:
             return game
 
     async def set_player_label(self, *, chat_id: int, user_id: int, user_label: str) -> GroupGame | None:
-        async with self._lock:
-            active_id = self._active_by_chat.get(chat_id)
-            if active_id is None:
-                return None
-
-            game = self._by_id.get(active_id)
-            if game is None or game.status == "finished":
+        async with self._lock_active_game(chat_id) as game:
+            if game is None:
                 return None
             if user_id not in game.players:
                 return game
@@ -1303,7 +1432,7 @@ class GameStore:
             return game
 
     async def set_mafia_reveal_eliminated_role(self, *, game_id: str, reveal_eliminated_role: bool) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1316,7 +1445,7 @@ class GameStore:
             return game, None
 
     async def set_bred_rounds(self, *, game_id: str, rounds: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1333,7 +1462,7 @@ class GameStore:
             return game, None
 
     async def set_zlob_rounds(self, *, game_id: str, rounds: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1350,7 +1479,7 @@ class GameStore:
             return game, None
 
     async def set_zlob_target_score(self, *, game_id: str, target_score: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1367,7 +1496,7 @@ class GameStore:
             return game, None
 
     async def set_bunker_seats(self, *, game_id: str, seats: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1394,7 +1523,7 @@ class GameStore:
         this when the source game's seats were genuinely tuned by a human;
         an auto-computed count should be left alone so the new lobby keeps
         auto-scaling as players join."""
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1410,7 +1539,7 @@ class GameStore:
         game_id: str,
         category: str | None,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1433,7 +1562,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1459,7 +1588,7 @@ class GameStore:
         category: str | None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1485,7 +1614,7 @@ class GameStore:
         game_id: str,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1515,7 +1644,7 @@ class GameStore:
         category: str | None,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1541,7 +1670,7 @@ class GameStore:
         game_id: str,
         actions_18_enabled: bool = True,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1565,23 +1694,17 @@ class GameStore:
             return game, None
 
     async def get_game(self, game_id: str) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             return self._by_id.get(game_id)
 
     async def get_active_game_for_chat(self, *, chat_id: int) -> GroupGame | None:
-        async with self._lock:
-            active_id = self._active_by_chat.get(chat_id)
-            if active_id is None:
-                return None
-            game = self._by_id.get(active_id)
-            if game is None or game.status == "finished":
-                return None
+        async with self._lock_active_game(chat_id) as game:
             return game
 
     async def list_active_games(self, *, chat_ids: set[int] | None = None) -> list[GroupGame]:
-        async with self._lock:
-            games: list[GroupGame] = []
-            for game_id in self._active_by_chat.values():
+        games: list[GroupGame] = []
+        for game_id in await self._active_game_ids():
+            async with self._lock_game(game_id):
                 game = self._by_id.get(game_id)
                 if game is None or game.status == "finished":
                     continue
@@ -1589,11 +1712,11 @@ class GameStore:
                     continue
                 games.append(game)
 
-            games.sort(
-                key=lambda item: item.started_at or item.created_at,
-                reverse=True,
-            )
-            return games
+        games.sort(
+            key=lambda item: item.started_at or item.created_at,
+            reverse=True,
+        )
+        return games
 
     async def list_recent_games_for_user(
         self,
@@ -1602,27 +1725,27 @@ class GameStore:
         chat_ids: set[int] | None = None,
         limit: int = 6,
     ) -> list[GroupGame]:
-        async with self._lock:
-            games = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.status == "finished"
-                    and user_id in game.players
-                    and (chat_ids is None or game.chat_id in chat_ids)
-                )
-            ]
-            games.sort(
-                key=lambda item: item.started_at or item.created_at,
-                reverse=True,
+        _, games_by_id = await self._games_snapshot()
+        games = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.status == "finished"
+                and user_id in game.players
+                and (chat_ids is None or game.chat_id in chat_ids)
             )
-            return games[: max(1, limit)]
+        ]
+        games.sort(
+            key=lambda item: item.started_at or item.created_at,
+            reverse=True,
+        )
+        return games[: max(1, limit)]
 
     async def migrate_chat_id(self, *, old_chat_id: int, new_chat_id: int, new_chat_title: str | None = None) -> int:
         if old_chat_id == new_chat_id:
             return 0
 
-        async with self._lock:
+        async with self._registry_lock:
             migrated = 0
             old_active_id = self._active_by_chat.pop(old_chat_id, None)
             if old_active_id is not None and new_chat_id not in self._active_by_chat:
@@ -1636,12 +1759,13 @@ class GameStore:
                     game.chat_title = new_chat_title
                 if game.status in {"lobby", "started"} and new_chat_id not in self._active_by_chat:
                     self._active_by_chat[new_chat_id] = game.game_id
+                _note_touched_game(game.game_id)
                 migrated += 1
 
             return migrated
 
     async def join(self, *, game_id: str, user_id: int, user_label: str) -> tuple[GroupGame | None, str]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "not_found"
@@ -1659,7 +1783,7 @@ class GameStore:
             return game, "joined"
 
     async def leave(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "not_found"
@@ -1674,7 +1798,7 @@ class GameStore:
             return game, "left"
 
     async def start(self, *, game_id: str, actions_18_enabled: bool = True) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -1959,7 +2083,7 @@ class GameStore:
             return game, "Неизвестный тип игры"
 
     async def finish(self, *, game_id: str, winner_text: str | None = None) -> GroupGame | None:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
@@ -1969,85 +2093,86 @@ class GameStore:
             game.winner_text = winner_text
             game.execution_confirm_message_id = None
             game.quiz_feed_message_id = None
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
             return game
 
     async def get_role(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None
             return game, game.roles.get(user_id)
 
     async def get_latest_role_game_for_user(self, *, user_id: int) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind in {"spy", "mafia", "whoami"}
-                    and game.status == "started"
-                    and game.roles
-                    and user_id in game.roles
-                )
-            ]
-            if not candidates:
-                return None, None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind in {"spy", "mafia", "whoami"}
+                and game.status == "started"
+                and game.roles
+                and user_id in game.roles
+            )
+        ]
+        if not candidates:
+            return None, None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            game = candidates[0]
-            return game, game.roles.get(user_id)
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        game = candidates[0]
+        return game, game.roles.get(user_id)
 
     async def get_latest_bunker_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if game.kind == "bunker" and game.status == "started" and user_id in game.players
-            ]
-            if not candidates:
-                return None
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if game.kind == "bunker" and game.status == "started" and user_id in game.players
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def get_latest_bred_submission_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind == "bredovukha"
-                    and game.status == "started"
-                    and game.phase == "private_answers"
-                    and user_id in game.players
-                )
-            ]
-            if not candidates:
-                return None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind == "bredovukha"
+                and game.status == "started"
+                and game.phase == "private_answers"
+                and user_id in game.players
+            )
+        ]
+        if not candidates:
+            return None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def get_latest_zlob_submission_game_for_user(self, *, user_id: int) -> GroupGame | None:
-        async with self._lock:
-            candidates = [
-                game
-                for game in self._by_id.values()
-                if (
-                    game.kind == "zlobcards"
-                    and game.status == "started"
-                    and game.phase == "private_answers"
-                    and user_id in game.players
-                )
-            ]
-            if not candidates:
-                return None
+        _, games_by_id = await self._games_snapshot()
+        candidates = [
+            game
+            for game in games_by_id.values()
+            if (
+                game.kind == "zlobcards"
+                and game.status == "started"
+                and game.phase == "private_answers"
+                and user_id in game.players
+            )
+        ]
+        if not candidates:
+            return None
 
-            candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
-            return candidates[0]
+        candidates.sort(key=lambda game: game.started_at or game.created_at, reverse=True)
+        return candidates[0]
 
     async def bred_get_category_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int | None, tuple[str, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, ()
@@ -2060,7 +2185,7 @@ class GameStore:
         actor_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, str | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2091,7 +2216,7 @@ class GameStore:
             return game, category, None
 
     async def bred_force_pick_category(self, *, game_id: str) -> tuple[GroupGame | None, str | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2127,7 +2252,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, SpyVoteResolution | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, None, "Игра не найдена"
@@ -2182,7 +2307,8 @@ class GameStore:
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
 
             resolution = SpyVoteResolution(
                 candidate_user_id=candidate_user_id,
@@ -2203,7 +2329,7 @@ class GameStore:
         actor_user_id: int,
         guessed_location: str,
     ) -> tuple[GroupGame | None, SpyGuessResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2232,7 +2358,8 @@ class GameStore:
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
-            self._active_by_chat.pop(game.chat_id, None)
+            async with self._registry_lock:
+                self._forget_active_locked(game)
 
             resolution = SpyGuessResolution(
                 spy_user_id=actor_user_id,
@@ -2249,7 +2376,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None, 0
@@ -2276,7 +2403,7 @@ class GameStore:
         actor_user_id: int,
         question_text: str,
     ) -> tuple[GroupGame | None, WhoamiQuestionResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2322,7 +2449,7 @@ class GameStore:
         responder_user_id: int,
         answer_code: Literal["yes", "no", "unknown", "irrelevant"],
     ) -> tuple[GroupGame | None, WhoamiAnswerResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2392,7 +2519,7 @@ class GameStore:
         actor_user_id: int,
         guess_text: str,
     ) -> tuple[GroupGame | None, WhoamiGuessResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2453,7 +2580,8 @@ class GameStore:
                     game.phase = "finished"
                     game.winner_text = winner_text
                     game.whoami_current_actor_user_id = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                 else:
                     self._advance_whoami_turn(game)
                     game.phase = "whoami_ask"
@@ -2508,7 +2636,7 @@ class GameStore:
         game_id: str,
         user_id: int,
     ) -> tuple[GroupGame | None, DiceRollResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2534,7 +2662,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
 
             return (
                 game,
@@ -2556,7 +2685,7 @@ class GameStore:
         user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, QuizAnswerResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2590,7 +2719,7 @@ class GameStore:
             )
 
     async def quiz_get_answer_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -2603,7 +2732,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, QuizRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2646,7 +2775,8 @@ class GameStore:
                 game.phase = "finished"
                 game.winner_text = winner_text
                 game.quiz_current_question_index = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.quiz_current_question_index = next_question_index
                 game.round_no = next_question_index + 1
@@ -2678,7 +2808,7 @@ class GameStore:
         user_id: int,
         lie_text: str,
     ) -> tuple[GroupGame | None, BredSubmitResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2734,7 +2864,7 @@ class GameStore:
             )
 
     async def bred_get_submit_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -2748,7 +2878,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -2774,7 +2904,7 @@ class GameStore:
         voter_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, BredVoteResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2804,7 +2934,7 @@ class GameStore:
             )
 
     async def bred_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, tuple[int, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, ()
@@ -2828,7 +2958,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, BredRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -2916,7 +3046,8 @@ class GameStore:
                 game.bred_question_prompt = None
                 game.bred_correct_answer = None
                 game.bred_fact_text = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 next_round_no = current_round_no + 1
                 next_selector_user_id = self._selector_for_round(game, round_no=next_round_no)
@@ -2931,7 +3062,8 @@ class GameStore:
                     game.bred_question_prompt = None
                     game.bred_correct_answer = None
                     game.bred_fact_text = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                     finished = True
                 else:
                     next_selector_label = game.players.get(next_selector_user_id, f"user:{next_selector_user_id}")
@@ -2959,7 +3091,8 @@ class GameStore:
                         game.bred_question_prompt = None
                         game.bred_correct_answer = None
                         game.bred_fact_text = None
-                        self._active_by_chat.pop(game.chat_id, None)
+                        async with self._registry_lock:
+                            self._forget_active_locked(game)
                         finished = True
                         next_round_no = None
                         next_selector_user_id = None
@@ -2994,7 +3127,7 @@ class GameStore:
         user_id: int,
         card_indexes: tuple[int, ...],
     ) -> tuple[GroupGame | None, ZlobSubmitResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3049,7 +3182,7 @@ class GameStore:
             )
 
     async def zlob_get_submit_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -3062,7 +3195,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3088,7 +3221,7 @@ class GameStore:
         voter_user_id: int,
         option_index: int,
     ) -> tuple[GroupGame | None, ZlobVoteResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3125,7 +3258,7 @@ class GameStore:
             )
 
     async def zlob_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, tuple[int, ...]]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, ()
@@ -3149,7 +3282,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, ZlobRoundResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3245,7 +3378,8 @@ class GameStore:
                 game.winner_text = winner_text
                 game.zlob_black_text = None
                 game.zlob_black_slots = 1
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 next_round_no = current_round_no + 1
                 game.round_no = next_round_no
@@ -3262,7 +3396,8 @@ class GameStore:
                     game.winner_text = winner_text
                     game.zlob_black_text = None
                     game.zlob_black_slots = 1
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                     finished = True
                     next_round_no = None
 
@@ -3289,7 +3424,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None
@@ -3306,7 +3441,7 @@ class GameStore:
         actor_user_id: int,
         field_key: str,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3354,7 +3489,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3405,7 +3540,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3430,7 +3565,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, int, int, int | None, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, None, 0
@@ -3461,7 +3596,7 @@ class GameStore:
         game_id: str,
         force: bool,
     ) -> tuple[GroupGame | None, BunkerVoteResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3521,7 +3656,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
                 next_phase = "finished"
             else:
                 game.round_no += 1
@@ -3561,7 +3697,7 @@ class GameStore:
         actor_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3722,7 +3858,7 @@ class GameStore:
             return game, "У вашей роли нет ночного действия"
 
     async def mafia_is_night_ready(self, *, game_id: str) -> tuple[GroupGame | None, bool, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, False, "Игра не найдена"
@@ -3789,7 +3925,7 @@ class GameStore:
             return game, bool(required_checks and all(required_checks)), None
 
     async def mafia_open_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
@@ -3811,7 +3947,7 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
     ) -> tuple[GroupGame | None, int | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -3833,7 +3969,7 @@ class GameStore:
             return game, previous_target_user_id, None
 
     async def mafia_resolve_night(self, *, game_id: str) -> tuple[GroupGame | None, NightResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4367,7 +4503,8 @@ class GameStore:
                 game.status = "finished"
                 game.phase = "finished"
                 game.winner_text = winner_text
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.phase = "day_discussion"
                 game.phase_started_at = datetime.now(timezone.utc)
@@ -4390,7 +4527,7 @@ class GameStore:
             return game, resolution, None
 
     async def mafia_resolve_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4442,7 +4579,8 @@ class GameStore:
                     game.phase = "finished"
                     game.winner_text = winner_text
                     game.execution_confirm_message_id = None
-                    self._active_by_chat.pop(game.chat_id, None)
+                    async with self._registry_lock:
+                        self._forget_active_locked(game)
                 else:
                     game.round_no += 1
                     game.phase = "night"
@@ -4474,7 +4612,7 @@ class GameStore:
         voter_user_id: int,
         approve: bool,
     ) -> tuple[GroupGame | None, bool | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4490,7 +4628,7 @@ class GameStore:
             return game, previous, None
 
     async def mafia_is_execution_confirm_ready(self, *, game_id: str) -> tuple[GroupGame | None, bool, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, False, "Игра не найдена"
@@ -4508,7 +4646,7 @@ class GameStore:
         *,
         game_id: str,
     ) -> tuple[GroupGame | None, ExecutionConfirmResolution | None, str | None]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
@@ -4571,7 +4709,8 @@ class GameStore:
                 game.phase = "finished"
                 game.winner_text = winner_text
                 game.execution_confirm_message_id = None
-                self._active_by_chat.pop(game.chat_id, None)
+                async with self._registry_lock:
+                    self._forget_active_locked(game)
             else:
                 game.round_no += 1
                 game.phase = "night"
@@ -4594,7 +4733,7 @@ class GameStore:
             return game, resolution, None
 
     async def mafia_get_vote_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0
@@ -4603,7 +4742,7 @@ class GameStore:
             return game, unique_votes, alive
 
     async def mafia_get_execution_confirm_snapshot(self, *, game_id: str) -> tuple[GroupGame | None, int, int, int, int]:
-        async with self._lock:
+        async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, 0, 0, 0, 0
@@ -5447,28 +5586,116 @@ class GameStateCodec:
         }
 
 
+class GameWriterFencedError(Exception):
+    """A Redis game write was rejected because this process no longer holds the writer lease."""
+
+
+class GameWriterLeaseHeldError(Exception):
+    """Another instance holds the game writer lease, or took it over since this process last held it."""
+
+
+# Single-writer lease, see `RuntimeGameStore.start_writer_lease`. KEYS[1] is the
+# lease, KEYS[2] the epoch counter (bumped by every acquisition). ARGV[1] is the
+# owner token, ARGV[2] the TTL in ms, ARGV[3] the epoch this owner last saw ('' before
+# its first claim). Returns {status, counter}, counter being the epoch before the call:
+#   0 = held by another owner, 1 = renewed by this owner, 2 = acquired now,
+#   3 = free, but the epoch moved since ARGV[3]: another owner acquired it in between,
+#       so it is not taken silently (the lease stays free for that owner's successor).
+_CLAIM_WRITER_LEASE_LUA = """
+local owner = redis.call('GET', KEYS[1])
+local counter = tonumber(redis.call('GET', KEYS[2]) or '0')
+if owner == ARGV[1] then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return {1, counter}
+end
+if owner then
+  return {0, counter}
+end
+if ARGV[3] ~= '' and tonumber(ARGV[3]) ~= counter then
+  return {3, counter}
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('INCR', KEYS[2])
+return {2, counter}
+"""
+
+# A game write is one script: the lease check and the writes are atomic, so a
+# process that lost the lease cannot land a payload or pointer after its successor
+# has written. KEYS: lease, game payload, chat active pointer, then one recent-games
+# sorted set per player of a finished game. ARGV: owner token, payload, TTL seconds,
+# game id, is_active flag, finished flag, finish score. Returns 0 when fenced.
+_FENCED_SAVE_GAME_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+if ARGV[5] == '1' and ARGV[6] == '0' then
+  redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[3])
+  return 1
+end
+if redis.call('GET', KEYS[3]) == ARGV[4] then
+  redis.call('DEL', KEYS[3])
+end
+if ARGV[6] == '0' then
+  return 1
+end
+for i = 4, #KEYS do
+  redis.call('ZADD', KEYS[i], ARGV[7], ARGV[4])
+  redis.call('EXPIRE', KEYS[i], ARGV[3])
+end
+return 1
+"""
+
+# KEYS: lease, chat active pointer. ARGV: owner token, game id ('' clears the
+# pointer), TTL seconds. Returns 0 when fenced.
+_FENCED_SET_ACTIVE_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if ARGV[2] == '' then
+  redis.call('DEL', KEYS[2])
+else
+  redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+end
+return 1
+"""
+
+
 class RedisGameStateRepository:
     _GAME_KEY_PREFIX = "selara:game"
     _ACTIVE_KEY_PREFIX = "selara:chat_active"
     _RECENT_KEY_PREFIX = "selara:user_recent_games"
+    _WRITER_LEASE_KEY = "selara:game_writer"
+    _WRITER_EPOCH_KEY = "selara:game_writer_epoch"
 
-    def __init__(self, *, client, codec: GameStateCodec, ttl: timedelta) -> None:
+    def __init__(self, *, client, codec: GameStateCodec, ttl: timedelta, writer_token: str) -> None:
         self._client = client
         self._codec = codec
         self._ttl = max(timedelta(minutes=5), ttl)
+        self._writer_token = writer_token
 
     @classmethod
-    def from_url(cls, *, redis_url: str, codec: GameStateCodec, ttl: timedelta) -> "RedisGameStateRepository":
+    def from_url(
+        cls,
+        *,
+        redis_url: str,
+        codec: GameStateCodec,
+        ttl: timedelta,
+        writer_token: str,
+    ) -> "RedisGameStateRepository":
         try:
             from redis.asyncio import Redis
         except ModuleNotFoundError as exc:
             raise RuntimeError("Redis support requires the `redis` package to be installed.") from exc
         client = Redis.from_url(redis_url, decode_responses=True)
-        return cls(client=client, codec=codec, ttl=ttl)
+        return cls(client=client, codec=codec, ttl=ttl, writer_token=writer_token)
 
     @property
     def ttl_seconds(self) -> int:
         return max(300, int(self._ttl.total_seconds()))
+
+    async def ping(self) -> None:
+        await self._client.ping()
 
     def _game_key(self, game_id: str) -> str:
         return f"{self._GAME_KEY_PREFIX}:{game_id}"
@@ -5488,32 +5715,71 @@ class RedisGameStateRepository:
         return game
 
     async def save_game(self, game: GroupGame, *, is_active: bool) -> None:
-        await self._client.set(self._game_key(game.game_id), self._codec.dumps(game), ex=self.ttl_seconds)
-        active_key = self._active_key(game.chat_id)
-        if is_active and game.status != "finished":
-            await self._client.set(active_key, game.game_id, ex=self.ttl_seconds)
-            return
+        """Write the game payload and its pointers, fenced by the writer lease.
 
-        current_active = await self._client.get(active_key)
-        if current_active == game.game_id:
-            await self._client.delete(active_key)
-
-        if game.status != "finished":
-            return
-
-        score = int((game.started_at or game.created_at).timestamp())
-        pipe = self._client.pipeline()
-        for user_id in game.players:
-            recent_key = self._recent_key(user_id)
-            pipe.zadd(recent_key, {game.game_id: score})
-            pipe.expire(recent_key, self.ttl_seconds)
-        await pipe.execute()
+        The whole write is one script that lands only while this process still
+        holds the lease, so a stale writer can never overwrite its successor.
+        """
+        finished = game.status == "finished"
+        keys = [self._WRITER_LEASE_KEY, self._game_key(game.game_id), self._active_key(game.chat_id)]
+        score = 0
+        if finished:
+            keys.extend(self._recent_key(user_id) for user_id in game.players)
+            score = int((game.started_at or game.created_at).timestamp())
+        await self._run_fenced(
+            _FENCED_SAVE_GAME_LUA,
+            keys,
+            [
+                self._writer_token,
+                self._codec.dumps(game),
+                str(self.ttl_seconds),
+                game.game_id,
+                "1" if is_active else "0",
+                "1" if finished else "0",
+                str(score),
+            ],
+        )
 
     async def load_active_game_id(self, chat_id: int) -> str | None:
         value = await self._client.get(self._active_key(chat_id))
         if value is not None:
             await self._client.expire(self._active_key(chat_id), self.ttl_seconds)
         return value
+
+    async def set_active_game_id(self, *, chat_id: int, game_id: str | None) -> None:
+        """Deterministically point the chat's active-game key at `game_id`.
+
+        Used by the post-outage reconciliation so a stale Redis pointer can
+        never resurrect a game this process has already finished or replaced.
+        Passing `game_id=None` clears the key.
+        """
+        await self._run_fenced(
+            _FENCED_SET_ACTIVE_LUA,
+            [self._WRITER_LEASE_KEY, self._active_key(chat_id)],
+            [self._writer_token, game_id or "", str(self.ttl_seconds)],
+        )
+
+    async def claim_writer_lease(self, *, ttl_ms: int, known_epoch: int | None) -> tuple[int, int]:
+        """Acquire or renew the single-writer lease; returns (status, epoch counter before the call).
+
+        ``known_epoch`` is the epoch this process last held the lease at, or None
+        before its first claim. See `_CLAIM_WRITER_LEASE_LUA` for the statuses.
+        """
+        status, counter = await self._client.eval(
+            _CLAIM_WRITER_LEASE_LUA,
+            2,
+            self._WRITER_LEASE_KEY,
+            self._WRITER_EPOCH_KEY,
+            self._writer_token,
+            str(ttl_ms),
+            "" if known_epoch is None else str(known_epoch),
+        )
+        return int(status), int(counter)
+
+    async def _run_fenced(self, script: str, keys: list[str], args: list[str]) -> None:
+        applied = await self._client.eval(script, len(keys), *keys, *args)
+        if int(applied) != 1:
+            raise GameWriterFencedError("this process no longer holds the game writer lease")
 
     async def list_active_game_ids(self, *, chat_ids: set[int] | None = None) -> list[str]:
         if chat_ids:
@@ -5678,16 +5944,158 @@ def _event_type_for_method(name: str) -> str:
     return "game_updated"
 
 
+class _RecoverySupersededError(Exception):
+    """A recovery attempt lost ownership of its candidate Redis runtime."""
+
+
 class RuntimeGameStore:
+    """In-memory game store with best-effort Redis persistence.
+
+    Failure model (see issue #65): a Redis outage degrades the runtime to
+    memory-only; mutations keep working against the in-memory backend while
+    Redis keeps a stale snapshot. A background recovery loop periodically
+    probes Redis and, once it answers, reconciles the diverged state before
+    switching back. Conflict resolution is deterministic: the in-memory view
+    always wins — Redis is never read over a game this process already has,
+    so a restart after recovery cannot resurrect a stale phase or a finished
+    game.
+
+    Guarantees of the recovery path:
+
+    * Active-game pointers are re-asserted from memory only for chats this
+      process actually owned or observed (present in the in-memory active map
+      when the store degraded, or holding an in-memory active game at
+      reconciliation time), plus chats whose Redis pointer targets a game this
+      process has in memory. A pointer to a game this process has never seen
+      is left untouched, so a live game from another epoch is never orphaned.
+    * Reconciliation runs in two passes: the first pushes the memory snapshot
+      while still degraded, the second runs after the live repo/broker are
+      wired in and covers every mutation that interleaved with the first pass
+      (its own write was skipped because the repo was not wired yet). Only
+      after both passes is recovery declared complete.
+    * Redis writes of one chat (its games' payloads and its active pointer)
+      are serialized in this process by a per-chat write lock shared by the
+      recovery passes and the handlers' own syncs. A payload is serialized
+      only after its writer holds the lock and the lock is held until Redis
+      answered, so a handler's write is always ordered after any in-flight
+      recovery write: a stale SET can no longer land on top of a confirmed
+      newer state, even when the recovery attempt is cancelled or times out
+      before it could repair it. Within that order every save also records
+      the game's revision and rewrites from the live object if a mutation
+      moved it while the write was in flight.
+    * A recovery attempt is bound to the runtime generation it started for:
+      if ``configure_runtime``/``use_in_memory``/``close`` replaces the
+      runtime while an attempt is mid-flight, the cancelled attempt only
+      closes its own candidate clients and never degrades or reschedules
+      the freshly installed runtime.
+    * Recovery only declares success while it still owns the runtime: if a
+      concurrent handler degraded the store (e.g. a broker error) or the
+      runtime was replaced during the second pass, the attempt fails, closes
+      its own candidate repo/broker and the loop retries with a fresh pair.
+    * Active-pointer re-assertion never replays a stale snapshot: each chat's
+      decision is read from the live in-memory state right before its write
+      and validated against a mutation version after the write, so a game
+      finished and replaced in a chat while the pass was awaiting another
+      chat's Redis write keeps its freshly persisted pointer instead of being
+      cleared from an outdated copy.
+    * A failed, cancelled or timed-out probe/reconcile — including the second
+      pass — closes the candidate repo/broker and leaves the store degraded; a
+      half-open Redis can never pin the single recovery task forever.
+    * ``close()`` is terminal: it cancels the recovery loop, sets ``_closed``
+      and no later Redis error can re-arm recovery or start a new task.
+    * Single writer (issue #87): only the holder of the Redis writer lease
+      (``start_writer_lease``) persists game state. The heartbeat renews the
+      lease, and every game write is a script that checks the lease atomically,
+      so a stale writer is fenced off instead of overwriting its successor. A
+      second instance never becomes a writer, and a lease taken over by another
+      instance ends this process (``watch_writer_lease``). A lease that merely
+      lapsed while Redis was unreachable is re-claimed by recovery, and only
+      when no other instance acquired it in between (epoch check).
+
+    Lock order across layers: a game lock (``GameStore._lock_game``) may take
+    ``GameStore._registry_lock`` and nothing else, and no game lock is ever
+    held across a Redis call. The per-chat write lock wraps Redis I/O only and
+    is never held while a game or registry lock is taken; handler syncs take
+    it after their mutation has released its game lock. Nothing nests in the
+    reverse direction, so the two layers cannot deadlock.
+    """
+
+    _RECOVERY_RETRY_SECONDS = 15.0
+    _RECOVERY_ATTEMPT_TIMEOUT_SECONDS = 30.0
+    _WRITER_LEASE_TTL_MS = 30_000
+    _WRITER_HEARTBEAT_SECONDS = 10.0
+    _WRITER_START_RETRY_SECONDS = 1.0
+    # A crashed predecessor keeps its lease until the TTL runs out, so a new
+    # process waits slightly longer than that before refusing to start.
+    _WRITER_START_TIMEOUT_SECONDS = 35.0
+    # A lease call that gets no answer in time counts as a Redis outage. It stays
+    # well inside the TTL and the recovery retry interval.
+    _WRITER_CLAIM_TIMEOUT_SECONDS = 5.0
+
     def __init__(self, backend: InMemoryGameStore | None = None) -> None:
         self._backend = backend or InMemoryGameStore()
         self._codec = GameStateCodec()
         self._state_repo: RedisGameStateRepository | None = None
         self._broker: LiveEventBroker | None = None
         self._redis_degraded = False
+        self._redis_url: str | None = None
+        self._redis_ttl: timedelta = timedelta(hours=24)
+        self._recovery_in_progress = False
+        # Bumped after every in-memory mutation or hydration. The pointer
+        # re-assertion pass uses it to detect mutations that interleaved with
+        # its Redis writes (see `_reassert_active_pointers`).
+        self._game_state_version = 0
+        # Bumped for every known game right after an in-memory mutation (and
+        # therefore before that mutation's own Redis sync). Payload writers
+        # record it when serializing and retry from the live object when it
+        # moved under an in-flight write (see `_save_game_until_stable`).
+        self._game_revisions: dict[str, int] = {}
+        # Finished games waiting to leave hot memory: (due monotonic time, game
+        # id, persisted revision). Queued in due order, see `_evict_finished_games`.
+        self._finished_games_to_evict: deque[tuple[float, str, int]] = deque()
+        self._finished_game_hot_seconds: float = 30 * 60
+        # Next monotonic time at which every active game's Redis TTL is renewed.
+        self._next_active_refresh_at: float = 0.0
+        # Bumped whenever the runtime components (backend/repo/broker/mode)
+        # are replaced. Recovery attempts capture it and a cancelled attempt
+        # may only degrade the runtime generation it was serving.
+        self._runtime_generation = 0
+        # Serializes this process's Redis writes per chat (payloads of the
+        # chat's games and its active pointer); see `_chat_write_lock`.
+        self._chat_write_locks: dict[int, asyncio.Lock] = {}
+        # Number of handler/recovery syncs currently writing through a repo,
+        # and repos to close as soon as their last sync is done.
+        self._repo_sync_leases: dict[Any, int] = {}
+        self._repos_closing_after_sync: set[Any] = set()
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_retry_seconds = self._RECOVERY_RETRY_SECONDS
+        self._recovery_attempt_timeout_seconds = self._RECOVERY_ATTEMPT_TIMEOUT_SECONDS
+        self._degraded_owned_chats: set[int] = set()
+        self._closed = False
+        # Single-writer lease (see `start_writer_lease`). The token identifies
+        # this process; the epoch is the lease's acquisition counter as this
+        # process last saw it, so a re-claim can prove nobody else acquired it.
+        self._writer_token = uuid4().hex
+        self._writer_epoch: int | None = None
+        # The repo the lease was last claimed through: the heartbeat renews it, and
+        # during a recovery attempt that is the candidate, not yet the live repo.
+        self._lease_repo: RedisGameStateRepository | None = None
+        self._writer_lease_enabled = False
+        self._writer_heartbeat_task: asyncio.Task[None] | None = None
+        self._writer_fatal: Exception | None = None
+        self._writer_fatal_event = asyncio.Event()
+        self._writer_lease_ttl_ms = self._WRITER_LEASE_TTL_MS
+        self._writer_heartbeat_seconds = self._WRITER_HEARTBEAT_SECONDS
+        self._writer_start_retry_seconds = self._WRITER_START_RETRY_SECONDS
+        self._writer_start_timeout_seconds = self._WRITER_START_TIMEOUT_SECONDS
+        self._writer_claim_timeout_seconds = self._WRITER_CLAIM_TIMEOUT_SECONDS
 
     @staticmethod
     def _is_redis_error(exc: Exception) -> bool:
+        # A fenced write means Redis answers but the lease moved: this process
+        # can no longer write, so it degrades exactly like during an outage.
+        if isinstance(exc, GameWriterFencedError):
+            return True
         return _RedisError is not None and isinstance(exc, _RedisError)
 
     def _degrade_to_in_memory(self, *, stage: str, exc: Exception) -> None:
@@ -5696,11 +6104,18 @@ class RuntimeGameStore:
         self._broker = None
         if was_using_redis and not self._redis_degraded:
             self._redis_degraded = True
+            # Remember which chats had an active-game pointer when the store
+            # degraded: only those pointers are ours to re-assert (a chat this
+            # process later learns about through a cached non-active game may
+            # still have a live pointer owned by another epoch).
+            self._degraded_owned_chats = set(self._backend._active_by_chat)
             logger.warning(
                 "Redis is unavailable during %s; falling back to in-memory game store. Error: %s",
                 stage,
                 exc,
             )
+        if self._redis_degraded:
+            self._schedule_recovery()
 
     @property
     def backend(self) -> InMemoryGameStore:
@@ -5710,24 +6125,465 @@ class RuntimeGameStore:
     def live_broker(self) -> LiveEventBroker | None:
         return self._broker
 
+    @property
+    def redis_recovery_state(self) -> Literal["disabled", "connected", "degraded", "recovering"]:
+        """Operator-visible Redis mode of the game store."""
+        if self._redis_url is None:
+            return "disabled"
+        if self._recovery_in_progress:
+            return "recovering"
+        if self._redis_degraded:
+            return "degraded"
+        return "connected"
+
     def configure_runtime(self, *, redis_url: str, ttl_hours: int) -> None:
         ttl = timedelta(hours=max(1, ttl_hours))
         self._backend = InMemoryGameStore()
-        self._state_repo = RedisGameStateRepository.from_url(redis_url=redis_url, codec=self._codec, ttl=ttl)
+        self._state_repo = RedisGameStateRepository.from_url(
+            redis_url=redis_url, codec=self._codec, ttl=ttl, writer_token=self._writer_token,
+        )
         self._broker = RedisLiveEventBroker.from_url(redis_url=redis_url)
+        self._redis_url = redis_url
+        self._redis_ttl = ttl
         self._redis_degraded = False
+        self._degraded_owned_chats = set()
+        self._closed = False
+        self._writer_lease_enabled = False
+        self._writer_epoch = None
+        self._lease_repo = None
+        self._stop_writer_heartbeat()
+        self._game_revisions = {}
+        self._chat_write_locks = {}
+        self._finished_games_to_evict.clear()
+        # Invalidate the generation *before* cancelling: the cancelled
+        # recovery task must observe that the runtime it was serving is gone
+        # and leave this fresh configuration untouched in its handler.
+        self._runtime_generation += 1
+        self._cancel_recovery_task()
 
     def use_in_memory(self) -> None:
         self._backend = InMemoryGameStore()
         self._state_repo = None
         self._broker = None
+        self._redis_url = None
+        self._writer_lease_enabled = False
+        self._writer_epoch = None
+        self._lease_repo = None
+        self._stop_writer_heartbeat()
         self._redis_degraded = False
+        self._degraded_owned_chats = set()
+        self._game_revisions = {}
+        self._chat_write_locks = {}
+        self._finished_games_to_evict.clear()
+        self._runtime_generation += 1
+        self._cancel_recovery_task()
 
     async def close(self) -> None:
+        # Closing is terminal: no later Redis error may re-arm recovery, and
+        # no recovery task may be created after shutdown.
+        self._closed = True
+        # Same generation guard as reconfiguration: a cancelled recovery must
+        # not null the live repo/broker references out from under this close,
+        # which closes them itself right below.
+        self._runtime_generation += 1
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._stop_writer_heartbeat()
+        # Not released here: a release would fence writes still in flight at
+        # shutdown. The lease runs out on its TTL and a successor waits for it.
+        self._writer_lease_enabled = False
         if self._broker is not None:
             await self._broker.close()
         if self._state_repo is not None:
-            await self._state_repo.close()
+            if self._repo_sync_leases.get(self._state_repo):
+                # An in-flight handler sync still writes through it; that
+                # sync closes the repo once its writes are done.
+                self._repos_closing_after_sync.add(self._state_repo)
+            else:
+                await self._state_repo.close()
+
+    def _schedule_recovery(self) -> None:
+        if self._closed or self._redis_url is None or self._recovery_task is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - degrade only happens in async context
+            return
+        self._recovery_task = loop.create_task(self._recovery_loop(), name="game-store-redis-recovery")
+
+    def _cancel_recovery_task(self) -> None:
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _recovery_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while (
+                not self._closed
+                and self._redis_degraded
+                and self._state_repo is None
+                and self._redis_url is not None
+            ):
+                await asyncio.sleep(self._recovery_retry_seconds)
+                if self._closed or not (self._redis_degraded and self._state_repo is None and self._redis_url is not None):
+                    break
+                try:
+                    await self._attempt_recovery()
+                except GameWriterLeaseHeldError as exc:
+                    # Another instance is the writer now. Retrying would only
+                    # create a second one, so this process stops instead.
+                    self._fail_writer(exc)
+                    return
+                except Exception as exc:
+                    # A timed-out attempt is an ordinary failed attempt: the
+                    # candidates were closed, the store stays degraded and the
+                    # next iteration retries.
+                    if isinstance(exc, (TimeoutError, _RecoverySupersededError)) or self._is_redis_error(exc):
+                        logger.info("Redis recovery attempt failed; will retry. Error: %s", exc)
+                    else:
+                        logger.warning("Redis recovery attempt crashed; will retry.", exc_info=True)
+        finally:
+            if self._recovery_task is current_task:
+                self._recovery_task = None
+
+    def _build_redis_runtime(self) -> tuple[RedisGameStateRepository, RedisLiveEventBroker]:
+        assert self._redis_url is not None
+        return (
+            RedisGameStateRepository.from_url(
+                redis_url=self._redis_url,
+                codec=self._codec,
+                ttl=self._redis_ttl,
+                writer_token=self._writer_token,
+            ),
+            RedisLiveEventBroker.from_url(redis_url=self._redis_url),
+        )
+
+    @staticmethod
+    async def _close_quietly(component: Any) -> None:
+        close = getattr(component, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Failed to close replaced Redis game store component", exc_info=True)
+
+    @classmethod
+    async def _close_candidates_quietly(cls, *components: Any) -> None:
+        """Close every candidate component, surviving a concurrent cancel.
+
+        A cancellation that lands mid-probe must not leak the freshly created
+        redis.asyncio clients, so the closes are best-effort even while the
+        task is being cancelled.
+        """
+        for component in components:
+            if component is None:
+                continue
+            try:
+                await cls._close_quietly(component)
+            except asyncio.CancelledError:
+                # Keep closing the remaining candidates; the caller re-raises
+                # the original CancelledError.
+                continue
+
+    async def _discard_components(self, *components: Any) -> None:
+        """Close dropped repo/broker components, deferring repos still in use.
+
+        A repo some handler sync is still writing through is closed by that
+        sync once it finishes (see ``_sync_cached_state``) instead of being
+        closed under it.
+        """
+        to_close: list[Any] = []
+        for component in components:
+            if component is not None and self._repo_sync_leases.get(component):
+                self._repos_closing_after_sync.add(component)
+            else:
+                to_close.append(component)
+        await self._close_candidates_quietly(*to_close)
+
+    async def _attempt_recovery(self) -> None:
+        """Probe Redis and, if it answers, reconcile before switching back.
+
+        Fail-closed: the fresh repo/broker are only wired in after the whole
+        resync succeeded; otherwise (error, cancellation or timeout) they are
+        closed and the store stays degraded so the loop retries later.
+        The probe+reconcile is bounded by
+        ``_recovery_attempt_timeout_seconds`` so a half-open Redis cannot pin
+        the single recovery task forever. The bound covers both passes: the
+        second pass (final sync + pointer re-assertion) runs under its own
+        ``asyncio.timeout`` budget, so a Redis that starts hanging only after
+        the probe fails the attempt, degrades the store back to memory and
+        lets the loop retry later.
+        """
+        if self._closed or self._redis_url is None:
+            return
+        # This attempt may only touch the runtime generation current at its
+        # start; a reconfigure/close meanwhile installs a different runtime
+        # and the handlers below must leave that one alone.
+        generation = self._runtime_generation
+        self._recovery_in_progress = True
+        try:
+            repo, broker = self._build_redis_runtime()
+            try:
+                async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
+                    await repo.ping()
+                    if self._writer_lease_enabled:
+                        # Re-claim before reconciling: the candidate's writes must be
+                        # fenced like any other writer's, and a lease held by another
+                        # instance (or taken over) makes this attempt fail.
+                        await self._claim_writer_lease(repo)
+                    synced_games = await self._reconcile_degraded_state(repo)
+            except asyncio.CancelledError:
+                await self._discard_components(repo, broker)
+                raise
+            except Exception:
+                await self._discard_components(repo, broker)
+                raise
+
+            # Wire the live runtime first so mutations landing from now on
+            # persist themselves, then push a second pass over memory. A
+            # mutation that interleaved with the pass above had its own write
+            # skipped (`_state_repo` was still None); this pass is what keeps
+            # it from reverting on the next restart.
+            self._state_repo = repo
+            self._broker = broker
+            self._redis_degraded = False
+            try:
+                async with asyncio.timeout(self._recovery_attempt_timeout_seconds):
+                    await self._sync_cached_state()
+                    await self._reassert_active_pointers(repo)
+            except asyncio.CancelledError:
+                if self._runtime_generation == generation:
+                    self._degrade_to_in_memory(stage="recovery:final-sync", exc=asyncio.CancelledError())
+                await self._discard_components(repo, broker)
+                raise
+            except Exception as exc:
+                if self._runtime_generation == generation:
+                    self._degrade_to_in_memory(stage="recovery:final-sync", exc=exc)
+                await self._discard_components(repo, broker)
+                raise
+            if not (
+                self._runtime_generation == generation
+                and self._state_repo is repo
+                and self._broker is broker
+                and not self._redis_degraded
+            ):
+                # A concurrent handler degraded the store (e.g. a broker
+                # publish error on another connection) or the runtime was
+                # replaced while the second pass ran: the candidates were
+                # dropped without being closed and nobody else owns them now.
+                # This attempt is not a success; close whatever is not the
+                # installed runtime and let the loop retry with a fresh pair.
+                await self._discard_components(
+                    *(component for component in (repo, broker) if component not in (self._state_repo, self._broker))
+                )
+                raise _RecoverySupersededError("Redis runtime was degraded or replaced during the final recovery pass")
+            logger.warning(
+                "Redis connectivity restored; re-synced %d in-memory game(s) and re-enabled the Redis game store.",
+                synced_games,
+            )
+        finally:
+            self._recovery_in_progress = False
+
+    async def start_writer_lease(self) -> None:
+        """Claim the single-writer lease before the process serves any update.
+
+        Only the lease holder writes game state to Redis, so two instances that
+        share one Redis can never both persist the same game (issue #87). A second
+        instance waits for a predecessor's lease to expire and then fails with
+        ``GameWriterLeaseHeldError``, so it never becomes a writer. A Redis outage
+        at startup degrades to memory like any other outage; the recovery loop
+        claims the lease once Redis answers. The heartbeat renews the lease while
+        the process runs.
+        """
+        repo = self._state_repo
+        if repo is None:
+            return
+        self._writer_lease_enabled = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._writer_start_timeout_seconds
+        while True:
+            try:
+                await self._claim_writer_lease(repo)
+                break
+            except GameWriterLeaseHeldError:
+                if loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(self._writer_start_retry_seconds)
+            except Exception as exc:
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
+                    raise
+                self._degrade_to_in_memory(stage="writer-lease:start", exc=exc)
+                break
+        self._start_writer_heartbeat()
+
+    async def watch_writer_lease(self) -> None:
+        """Block until this process stops being the writer, then raise to end it.
+
+        Run it beside the process's services (``selara.main._run_services``): the
+        raised error cancels them, so a lost lease never leaves a second writer
+        running next to the instance that took over.
+        """
+        await self._writer_fatal_event.wait()
+        if self._writer_fatal is not None:
+            raise self._writer_fatal
+
+    async def _claim_writer_lease(self, repo: RedisGameStateRepository) -> None:
+        self._lease_repo = repo
+        async with asyncio.timeout(self._writer_claim_timeout_seconds):
+            status, counter = await repo.claim_writer_lease(
+                ttl_ms=self._writer_lease_ttl_ms,
+                known_epoch=self._writer_epoch,
+            )
+        if status == 0:
+            raise GameWriterLeaseHeldError("another instance holds the game writer lease")
+        if status == 3:
+            # Another instance acquired (and released) the lease since this process
+            # last held it, so its writes may be newer than this process's memory.
+            raise GameWriterLeaseHeldError("the game writer lease was taken over by another instance")
+        self._writer_epoch = counter + 1 if status == 2 else counter
+
+    def _start_writer_heartbeat(self) -> None:
+        task = self._writer_heartbeat_task
+        if task is not None and not task.done():
+            return
+        self._writer_heartbeat_task = asyncio.get_running_loop().create_task(
+            self._writer_heartbeat_loop(),
+            name="game-store-writer-heartbeat",
+        )
+
+    def _stop_writer_heartbeat(self) -> None:
+        task = self._writer_heartbeat_task
+        self._writer_heartbeat_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _writer_heartbeat_loop(self) -> None:
+        while self._writer_lease_enabled and not self._closed:
+            await asyncio.sleep(self._writer_heartbeat_seconds)
+            # Renew through the repo the lease was last claimed on, so the lease is
+            # kept alive while a recovery attempt reconciles on its candidate repo.
+            repo = self._lease_repo
+            if repo is None or not self._writer_lease_enabled or self._closed:
+                continue
+            try:
+                await self._claim_writer_lease(repo)
+            except GameWriterLeaseHeldError as exc:
+                self._fail_writer(exc)
+                return
+            except Exception as exc:
+                if not (isinstance(exc, TimeoutError) or self._is_redis_error(exc)):
+                    self._fail_writer(exc)
+                    return
+                if self._state_repo is repo:
+                    # A recovery may have installed a fresh runtime while this claim was
+                    # in flight: the failure is about the runtime the claim was made on.
+                    self._degrade_to_in_memory(stage="writer-lease:heartbeat", exc=exc)
+
+    def _fail_writer(self, exc: Exception) -> None:
+        if self._writer_fatal is None:
+            self._writer_fatal = exc
+            logger.critical(
+                "Game store writer lease was lost to another instance; stopping this process "
+                "so that only one instance writes game state. Error: %s",
+                exc,
+            )
+        self._writer_fatal_event.set()
+
+    async def _reconcile_degraded_state(self, repo: RedisGameStateRepository) -> int:
+        """Push the in-memory view over the stale Redis snapshot.
+
+        The in-memory backend kept accepting mutations during the outage, so
+        it is strictly newer for every game this process knows. All known game
+        payloads are re-saved from memory, and active-game pointers are
+        re-asserted only for chats this process owned/observed (see
+        ``_reassert_active_pointers``); a chat this process merely knows by a
+        cached non-active game keeps the pointer Redis holds, so a live game
+        from another epoch is never orphaned. Chats unknown to this process
+        are left untouched so their games stay hydratable after a restart.
+
+        This is pass one of two: mutations can still interleave while these
+        writes are awaited, so ``_attempt_recovery`` runs a second push after
+        the live repo/broker are wired in.
+        """
+        _, games = await self._backend._games_snapshot()
+        for game in games.values():
+            await self._save_game_until_stable(repo, game)
+        await self._reassert_active_pointers(repo, games=games)
+        return len(games)
+
+    async def _reassert_active_pointers(
+        self,
+        repo: RedisGameStateRepository,
+        *,
+        games: dict[str, GroupGame] | None = None,
+    ) -> None:
+        """Re-assert only the active-game pointers this process is authoritative for.
+
+        A chat is claimable when it had an active pointer at degradation time
+        (``_degraded_owned_chats``) or holds an in-memory active game now. For
+        claimable chats the pointer is rewritten from memory (set to the active
+        game, or cleared when memory has none). For any other known chat the
+        pointer is touched only when it targets a game this process has in
+        memory; a pointer to an unknown game is preserved, so it cannot be
+        orphaned by this process.
+
+        Each chat's decision is read from the live in-memory state right
+        before its write and validated against ``_game_state_version`` after
+        the write. Handlers keep mutating games while these Redis writes are
+        awaited (the final recovery pass runs with the live repo wired in), so
+        a decision computed once from a snapshot is not trusted: if the state
+        changed while the write was in flight, the chat is redone from the
+        fresh state. Without this, finishing B and creating C in B's chat
+        while the pass waited on another chat's write would clear the pointer
+        C's own sync had just persisted, leaving C active in memory but
+        undiscoverable after a restart.
+        """
+        if games is None:
+            games = dict(self._backend._by_id)
+        active_by_chat = dict(self._backend._active_by_chat)
+        claimable_chats = set(self._degraded_owned_chats) | set(active_by_chat)
+        known_chats = {game.chat_id for game in games.values()}
+        for chat_id in sorted(known_chats | claimable_chats):
+            while True:
+                # Under the chat's write lock: a handler's own pointer write for
+                # this chat is ordered strictly after this one, so an
+                # interrupted pass can never leave a stale pointer on top of it.
+                async with self._chat_write_lock(chat_id):
+                    version = self._game_state_version
+                    # Live read: a game finished/created while earlier writes were
+                    # awaited must be seen here, not replayed from the snapshot.
+                    active_id = self._backend._active_by_chat.get(chat_id)
+                    active_game = self._backend._by_id.get(active_id) if active_id is not None else None
+                    if active_game is not None and active_game.status != "finished":
+                        await repo.set_active_game_id(chat_id=chat_id, game_id=active_game.game_id)
+                    elif chat_id in claimable_chats:
+                        await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                    else:
+                        pointer = await repo.load_active_game_id(chat_id)
+                        if pointer is not None and pointer in games:
+                            # Memory wins for games it knows; a pointer to an unknown game
+                            # belongs to another epoch and is left untouched.
+                            await repo.set_active_game_id(chat_id=chat_id, game_id=None)
+                if self._game_state_version == version:
+                    break
+                # A mutation interleaved with the write above: its own sync
+                # re-asserts the newer pointer, and this chat is redone from
+                # the fresh state so the stale decision never lands after it.
+                # A pathological mutation storm is bounded by the recovery
+                # attempt timeout around the final pass.
 
     async def publish_event(
         self,
@@ -5757,14 +6613,24 @@ class RuntimeGameStore:
             raise
 
     async def _hydrate_game(self, game_id: str) -> None:
-        if self._state_repo is None or game_id in self._backend._by_id:
+        if self._state_repo is None:
+            return
+        if game_id in self._backend._by_id:
             return
         game = await self._state_repo.load_game(game_id)
         if game is None:
             return
-        self._backend._by_id[game_id] = game
-        if game.status != "finished":
-            self._backend._active_by_chat[game.chat_id] = game.game_id
+        # The in-memory copy always wins: a game another task registered while
+        # this load was in flight is kept, and the loaded payload is dropped.
+        if not await self._backend._cache_hydrated_game(game):
+            return
+        if game.status == "finished":
+            # Loaded only to be read or acted on: let it leave memory again
+            # once its retention window passes.
+            self._schedule_finished_eviction(game.game_id)
+        # Hydration changes the state pointer re-assertion reads; bump the
+        # version so an in-flight pointer write for this chat is retried.
+        self._game_state_version += 1
 
     async def _hydrate_active_for_chat(self, chat_id: int) -> None:
         if self._state_repo is None:
@@ -5816,12 +6682,166 @@ class RuntimeGameStore:
             if isinstance(chat_id, int):
                 await self._hydrate_active_for_chat(chat_id)
 
-    async def _sync_cached_state(self) -> None:
+    async def _sync_cached_state(self, game_ids: set[str] | None = None) -> None:
+        """Persist cached games to Redis; ``None`` means every cached game.
+
+        Mutations pass the games they touched, so a call writes O(touched)
+        payloads instead of re-serializing the whole registry.
+        """
+        repo = self._state_repo
+        if repo is None:
+            return
+        # A sync that started against the live repo finishes its writes
+        # through it even if the store degrades or recovery fails while it
+        # waits for a chat write lock: memory is the newest state, so these
+        # writes are what keep a stale recovery payload from surviving. The
+        # lease defers closing the repo until the last such sync is done.
+        self._repo_sync_leases[repo] = self._repo_sync_leases.get(repo, 0) + 1
+        try:
+            if game_ids is None:
+                _, snapshot = await self._backend._games_snapshot()
+                targets = list(snapshot.values())
+            else:
+                targets = []
+                for game_id in game_ids:
+                    game = self._backend._by_id.get(game_id)
+                    if game is not None:
+                        targets.append(game)
+            for game in targets:
+                await self._save_game_until_stable(repo, game)
+                if game.status == "finished":
+                    self._schedule_finished_eviction(game.game_id)
+        finally:
+            remaining = self._repo_sync_leases.pop(repo) - 1
+            if remaining:
+                self._repo_sync_leases[repo] = remaining
+            elif repo in self._repos_closing_after_sync:
+                self._repos_closing_after_sync.discard(repo)
+                await self._close_quietly(repo)
+
+    def _chat_write_lock(self, chat_id: int) -> asyncio.Lock:
+        """Return the lock ordering this process's Redis writes for ``chat_id``.
+
+        Redis keeps no revision of its own, so the order in which writes land
+        is the only thing protecting a confirmed newer payload/pointer. Every
+        writer of a chat's keys -- both recovery passes and every handler sync
+        -- holds this lock from serialization until Redis answered, so a
+        writer can only start after the previous one finished or was
+        cancelled, and it always serializes the newest in-memory state.
+        """
+        lock = self._chat_write_locks.get(chat_id)
+        if lock is None:
+            lock = self._chat_write_locks[chat_id] = asyncio.Lock()
+        return lock
+
+    async def _save_game_until_stable(self, repo: RedisGameStateRepository, game: GroupGame) -> None:
+        """Persist ``game``, re-serializing while it mutates under the write.
+
+        ``save_game`` serializes the game before its Redis SET is even sent,
+        so a mutation that happens (and persists itself through its own
+        connection) while that write is in flight would be overwritten by
+        the older serialized payload as soon as the delayed SET lands. Each
+        attempt therefore records the game's revision, writes the payload
+        serialized at that revision, and starts over from the live object if
+        the revision moved while the write was in flight. The loop only
+        stops once a write landed for a revision that is still current: any
+        mutation after that point bumps the revision before its own SET is
+        serialized, so its write is ordered after ours and carries the newer
+        state. A pathological mutation storm is bounded by the recovery
+        attempt timeout around the caller.
+
+        Each attempt runs under the chat's write lock (``_chat_write_lock``),
+        so the revision check is only the in-order repair; ordering is what
+        keeps an interrupted stale write from surviving a newer one.
+        """
+        while True:
+            async with self._chat_write_lock(game.chat_id):
+                revision = self._game_revisions.get(game.game_id, 0)
+                await repo.save_game(
+                    game,
+                    # _active_by_chat maps chat_id -> game_id: look the game up by
+                    # its chat, not by its own id.
+                    is_active=self._backend._active_by_chat.get(game.chat_id) == game.game_id,
+                )
+                if self._game_revisions.get(game.game_id, 0) == revision:
+                    return
+            # The game mutated while the write above was in flight: the
+            # payload just written may already be stale. Re-serialize the
+            # current object and write again.
+
+    def _bump_game_revisions(self, game_ids: set[str]) -> None:
+        """Invalidate payload freshness for the games a mutation changed.
+
+        Called right after a backend mutation returns and before that
+        mutation's own Redis sync: the in-memory objects are now newer than
+        every payload serialized before this point, and a writer whose SET
+        only lands while this sync is still running must be able to detect
+        that. Bumping before the sync (not only after it) closes the window
+        where a stale write could return without seeing the mutation.
+        """
+        for game_id in game_ids:
+            self._game_revisions[game_id] = self._game_revisions.get(game_id, 0) + 1
+
+    async def _game_ids_to_sync(self, touched: set[str]) -> set[str]:
+        """Games to persist after a mutation: the touched ones, plus active games when their TTL is due.
+
+        Redis expires a payload ``ttl`` after its last write, and before this
+        change every mutation rewrote every cached game, which kept idle lobbies
+        alive. Now only touched games are written, so every active game is
+        re-saved once per quarter of the TTL instead. That keeps Redis writes
+        O(touched) per action and O(active games) per interval.
+        """
+        if self._state_repo is None:
+            return touched
+        now = time.monotonic()
+        if now < self._next_active_refresh_at:
+            return touched
+        self._next_active_refresh_at = now + self._redis_ttl.total_seconds() / 4
+        return touched | await self._backend._active_game_ids()
+
+    def _schedule_finished_eviction(self, game_id: str) -> None:
+        """Queue a just-persisted finished game for eviction from hot memory.
+
+        The entry remembers the revision that was persisted, so a later
+        mutation (which bumps the revision and re-queues on its own sync) makes
+        the entry stale instead of evicting newer state.
+        """
+        due = time.monotonic() + self._finished_game_hot_seconds
+        self._finished_games_to_evict.append((due, game_id, self._game_revisions.get(game_id, 0)))
+
+    def _evict_finished_games(self) -> None:
+        """Drop finished games whose hot-memory window has passed.
+
+        An evicted game is served from Redis on the next access (see
+        ``_hydrate_game``), so memory stays bounded by the games still in
+        play instead of every game this process ever finished. Entries are
+        appended in due-time order, so the sweep stops at the first one that
+        is not due yet and costs amortized O(1) per finished game.
+        """
         if self._state_repo is None:
             return
-        active_ids = set(self._backend._active_by_chat.values())
-        for game in self._backend._by_id.values():
-            await self._state_repo.save_game(game, is_active=game.game_id in active_ids)
+        registry_lock = self._backend._registry_lock
+        now = time.monotonic()
+        queue = self._finished_games_to_evict
+        # One pass over the entries queued so far: a requeued entry must not be
+        # picked up again within the same sweep.
+        for _ in range(len(queue)):
+            if not queue or queue[0][0] > now:
+                break
+            if registry_lock.locked():
+                return
+            _, game_id, revision = queue.popleft()
+            game = self._backend._by_id.get(game_id)
+            if game is None or game.status != "finished" or self._game_revisions.get(game_id, 0) != revision:
+                # Already gone, or changed since it was persisted; a newer
+                # sync queues it again if it is still a finished game.
+                continue
+            if game_id in self._backend._game_lock_refs:
+                # Being acted on right now: retry after another retention window.
+                queue.append((now + self._finished_game_hot_seconds, game_id, revision))
+                continue
+            del self._backend._by_id[game_id]
+            self._game_revisions.pop(game_id, None)
 
     async def _publish_after_call(self, name: str, result: Any, kwargs: dict[str, Any]) -> None:
         if self._broker is None:
@@ -5830,7 +6850,8 @@ class RuntimeGameStore:
         if not games:
             game_id = kwargs.get("game_id")
             if isinstance(game_id, str):
-                current = self._backend._by_id.get(game_id)
+                async with self._backend._registry_lock:
+                    current = self._backend._by_id.get(game_id)
                 if current is not None:
                     games = [current]
         if not games:
@@ -5857,16 +6878,33 @@ class RuntimeGameStore:
                     self._degrade_to_in_memory(stage=f"{name}:hydrate", exc=exc)
                 else:
                     raise
-            result = await attr(*args, **kwargs)
+            touched: set[str] = set()
+            token = _TOUCHED_GAME_IDS.set(touched)
+            try:
+                result = await attr(*args, **kwargs)
+            finally:
+                _TOUCHED_GAME_IDS.reset(token)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
+                # The mutation is in: invalidate payload freshness right away
+                # (not only after the sync below) so any write already in
+                # flight for these games detects it and re-serializes instead
+                # of landing a stale payload over a confirmed newer state.
+                self._bump_game_revisions(touched)
                 try:
-                    await self._sync_cached_state()
+                    await self._sync_cached_state(await self._game_ids_to_sync(touched))
+                    # The mutation (and its persisted sync) is now visible in
+                    # memory; invalidate any pointer decision computed before
+                    # it so the recovery pass cannot replay stale pointers.
+                    self._game_state_version += 1
                     await self._publish_after_call(name, result, kwargs)
                 except Exception as exc:
                     if self._is_redis_error(exc):
                         self._degrade_to_in_memory(stage=f"{name}:sync", exc=exc)
                     else:
                         raise
+            # After publishing, so it still finds the games it reports. Runs for
+            # reads too: a read-only workload hydrates finished games as well.
+            self._evict_finished_games()
             return result
 
         return _wrapped

@@ -21,7 +21,7 @@ from selara.core.config import Settings
 from selara.core.web_auth import digest_admin_session_token
 from selara.infrastructure.db.admin_auth import SqlAlchemyAdminAuthRepository
 from selara.infrastructure.db.base import Base
-from selara.infrastructure.db.models import ChatAuditLogModel, UserFeatureRequestModel, UserModel
+from selara.infrastructure.db.models import AdminSessionModel, ChatAuditLogModel, UserFeatureRequestModel, UserModel
 from selara.web import app as web_app_module
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("aiosqlite") is None, reason="aiosqlite is not installed")
@@ -378,5 +378,68 @@ async def test_admin_table_api_delete_rolls_back_deletion_and_audit_when_audit_w
         assert row.status == "open"
         remaining = (await session.execute(select(ChatAuditLogModel))).scalars().all()
         assert remaining == []
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_read_only_table_rejects_update_and_delete_without_mutating() -> None:
+    session_token = "admin-crud-session"
+    client, engine, session_factory = await _seeded_client(session_token)
+    session_digest = digest_admin_session_token(
+        secret=_settings().resolved_web_auth_secret, token=session_token
+    )
+    try:
+        update_response = await client.post(
+            "/app/admin/table/admin_sessions/update",
+            data={"session_token": session_digest, "admin_user_id": "78"},
+            follow_redirects=False,
+        )
+        delete_response = await client.post(
+            "/app/admin/table/admin_sessions/delete",
+            data={"session_token": session_digest},
+            follow_redirects=False,
+        )
+        edit_response = await client.get(
+            "/app/admin/table/admin_sessions/edit",
+            params={"session_token": session_digest},
+            follow_redirects=False,
+        )
+    finally:
+        await client.aclose()
+
+    for response in (update_response, delete_response, edit_response):
+        assert response.status_code == 303
+        assert "error=" in response.headers["location"]
+
+    async with session_factory() as session:
+        remaining = (await session.execute(select(AdminSessionModel))).scalars().all()
+        assert len(remaining) == 1
+        assert remaining[0].session_token == session_digest
+        assert remaining[0].admin_user_id == _settings().admin_user_id
+
+    await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_refuses_parent_row_with_read_only_dependents() -> None:
+    client, engine, session_factory = await _seeded_client()
+    try:
+        response = await client.post(
+            "/app/admin/table/users/delete",
+            data={"telegram_user_id": "901"},
+            follow_redirects=False,
+        )
+    finally:
+        await client.aclose()
+
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+
+    async with session_factory() as session:
+        row = await session.get(UserModel, 901)
+        assert row is not None
+        assert row.username == "crud_author"
 
     await engine.dispose()

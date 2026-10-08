@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat, TelegramRetryAfter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.core.chat_settings import ChatSettings
@@ -21,12 +22,28 @@ logger = logging.getLogger(__name__)
 
 _MISSING_FILE_SIGNATURE = (-1, -1)
 _SCHEDULER_INTERVAL_SECONDS = 600
+_CLAIM_LEASE_SECONDS = 300
+# A claim cools the chat down unless Telegram definitively rejected it. Ambiguous outcomes
+# (crash, DB error after send, lease expiry) therefore never re-send the same slot.
+_COOLDOWN_CLAIM_STATUSES = ("claimed", "sent", "abandoned")
+# Telegram answered without delivering the message, so the slot may be retried. Anything else
+# (network error, timeout, 5xx) may have delivered it and must not be retried.
+_DEFINITE_SEND_REJECTIONS = (TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat, TelegramRetryAfter)
 
 
 @dataclass(frozen=True)
 class InterestingFact:
     fact_id: str
     text: str
+
+
+@dataclass(frozen=True)
+class _FactClaim:
+    claim_id: int
+    chat: ChatSnapshot
+    fact: InterestingFact
+    claimed_at: datetime
+    used_fact_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -211,18 +228,85 @@ class InterestingFactsScheduler:
         now: datetime,
     ) -> bool:
         active_game = await GAME_STORE.get_active_game_for_chat(chat_id=chat.telegram_chat_id)
+        claim = await self._claim_next_fact(
+            chat=chat,
+            facts=facts,
+            now=now,
+            has_active_game=active_game is not None,
+        )
+        if claim is None:
+            return False
+
+        try:
+            sent_message = await self._bot.send_message(
+                chat_id=chat.telegram_chat_id,
+                text=format_interesting_fact_message(claim.fact.text),
+                disable_web_page_preview=True,
+            )
+        except asyncio.CancelledError:
+            # Left as "claimed": it cools the chat down and is abandoned once its lease expires.
+            raise
+        except Exception as exc:
+            if isinstance(exc, _DEFINITE_SEND_REJECTIONS):
+                logger.exception("Failed to send interesting fact", extra={"chat_id": chat.telegram_chat_id})
+                await self._finish_claim(claim, status="failed", error_summary=type(exc).__name__)
+            else:
+                # Outcome unknown: the claim stays "claimed" and cools the chat down until it is abandoned.
+                logger.exception(
+                    "Interesting fact send outcome unknown; slot stays claimed",
+                    extra={"chat_id": chat.telegram_chat_id, "claim_id": claim.claim_id},
+                )
+            return False
+
+        message_id = getattr(sent_message, "message_id", None)
+        await self._finish_claim(
+            claim,
+            status="sent",
+            telegram_message_id=message_id if isinstance(message_id, int) else None,
+        )
+        return True
+
+    async def _claim_next_fact(
+        self,
+        *,
+        chat: ChatSnapshot,
+        facts: tuple[InterestingFact, ...],
+        now: datetime,
+        has_active_game: bool,
+    ) -> _FactClaim | None:
         async with self._session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
+            # Held until commit: concurrent replicas decide and claim one slot per chat in turn.
+            await repo.lock_chat_interesting_fact_dispatch(chat_id=chat.telegram_chat_id)
+            abandoned = await repo.abandon_expired_interesting_fact_claims(chat_id=chat.telegram_chat_id, now=now)
+            if abandoned:
+                logger.warning(
+                    "Interesting fact claims expired without a recorded outcome",
+                    extra={"chat_id": chat.telegram_chat_id, "abandoned_count": abandoned},
+                )
+
+            # One slot in flight per chat: a newer claim must not start while an older one may still deliver.
+            if await repo.has_open_interesting_fact_claim(chat_id=chat.telegram_chat_id):
+                await session.commit()
+                return None
+
             settings = await repo.get_chat_settings(chat_id=chat.telegram_chat_id)
             if settings is None or not settings.interesting_facts_enabled:
-                return False
+                await session.commit()
+                return None
 
-            state = await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
+            stored_state = await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
+            last_claimed_at = await repo.get_latest_interesting_fact_claim_at(
+                chat_id=chat.telegram_chat_id,
+                statuses=_COOLDOWN_CLAIM_STATUSES,
+            )
+            state = _cooldown_state(stored_state, chat_id=chat.telegram_chat_id, last_claimed_at=last_claimed_at)
+
             interval_delta = timedelta(minutes=settings.interesting_facts_interval_minutes)
             sleep_cap_delta = timedelta(minutes=settings.interesting_facts_sleep_cap_minutes)
             interval_start = now - interval_delta
             sleep_cap_start = now - sleep_cap_delta
-            reference_start = state.last_sent_at if state is not None and state.last_sent_at is not None else interval_start
+            reference_start = state.last_sent_at if state.last_sent_at is not None else interval_start
 
             messages_in_sleep_cap = await repo.count_human_messages_since(
                 chat_id=chat.telegram_chat_id,
@@ -238,51 +322,96 @@ class InterestingFactsScheduler:
                 else await repo.count_human_messages_since(chat_id=chat.telegram_chat_id, since=reference_start)
             )
 
-        eligibility = evaluate_interesting_fact_eligibility(
-            now=now,
-            settings=settings,
-            state=state,
-            has_facts=bool(facts),
-            has_active_game=active_game is not None,
-            messages_since_reference=messages_since_reference,
-            messages_in_interval=messages_in_interval,
-            messages_in_sleep_cap=messages_in_sleep_cap,
-        )
-        if not eligibility.eligible:
-            return False
-
-        fact, next_used_ids = select_next_interesting_fact(facts=facts, state=state)
-        if fact is None:
-            return False
-
-        try:
-            await self._bot.send_message(
-                chat_id=chat.telegram_chat_id,
-                text=format_interesting_fact_message(fact.text),
-                disable_web_page_preview=True,
+            eligibility = evaluate_interesting_fact_eligibility(
+                now=now,
+                settings=settings,
+                state=state,
+                has_facts=bool(facts),
+                has_active_game=has_active_game,
+                messages_since_reference=messages_since_reference,
+                messages_in_interval=messages_in_interval,
+                messages_in_sleep_cap=messages_in_sleep_cap,
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Failed to send interesting fact", extra={"chat_id": chat.telegram_chat_id})
-            return False
+            fact, next_used_ids = (None, ())
+            if eligibility.eligible:
+                fact, next_used_ids = select_next_interesting_fact(facts=facts, state=state)
+            if fact is None:
+                await session.commit()
+                return None
 
+            claim_id = await repo.create_interesting_fact_claim(
+                chat_id=chat.telegram_chat_id,
+                fact_id=fact.fact_id,
+                claimed_at=now,
+                lease_until=now + timedelta(seconds=_CLAIM_LEASE_SECONDS),
+            )
+            await session.commit()
+
+        return _FactClaim(
+            claim_id=claim_id,
+            chat=chat,
+            fact=fact,
+            claimed_at=now,
+            used_fact_ids=next_used_ids,
+        )
+
+    async def _finish_claim(
+        self,
+        claim: _FactClaim,
+        *,
+        status: str,
+        telegram_message_id: int | None = None,
+        error_summary: str | None = None,
+    ) -> None:
         try:
             async with self._session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
-                await repo.upsert_chat_interesting_fact_state(
-                    chat=chat,
-                    last_sent_at=now,
-                    last_fact_id=fact.fact_id,
-                    used_fact_ids=next_used_ids,
+                # Claim the outcome first: a claim already abandoned by lease expiry must not touch chat state.
+                finished = await repo.finish_interesting_fact_claim(
+                    claim_id=claim.claim_id,
+                    status=status,
+                    finished_at=datetime.now(timezone.utc),
+                    telegram_message_id=telegram_message_id,
+                    error_summary=error_summary,
                 )
+                if finished and status == "sent":
+                    await repo.upsert_chat_interesting_fact_state(
+                        chat=claim.chat,
+                        last_sent_at=claim.claimed_at,
+                        last_fact_id=claim.fact.fact_id,
+                        used_fact_ids=claim.used_fact_ids,
+                    )
                 await session.commit()
+            if not finished:
+                logger.warning(
+                    "Interesting fact claim was no longer claimed when its outcome was recorded",
+                    extra={"chat_id": claim.chat.telegram_chat_id, "claim_id": claim.claim_id},
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Failed to persist interesting fact state", extra={"chat_id": chat.telegram_chat_id})
+            # The claim stays "claimed" and cools the chat down until its lease expires, so it is not re-sent.
+            logger.exception(
+                "Failed to record interesting fact outcome",
+                extra={"chat_id": claim.chat.telegram_chat_id, "claim_id": claim.claim_id, "status": status},
+            )
 
-        return True
+
+def _cooldown_state(
+    state: ChatInterestingFactState | None,
+    *,
+    chat_id: int,
+    last_claimed_at: datetime | None,
+) -> ChatInterestingFactState:
+    last_sent_at = state.last_sent_at if state is not None else None
+    if last_claimed_at is not None and (last_sent_at is None or last_claimed_at > last_sent_at):
+        last_sent_at = last_claimed_at
+    return ChatInterestingFactState(
+        chat_id=chat_id,
+        last_sent_at=last_sent_at,
+        last_fact_id=state.last_fact_id if state is not None else None,
+        used_fact_ids=state.used_fact_ids if state is not None else (),
+    )
 
 
 async def run_interesting_facts_scheduler(

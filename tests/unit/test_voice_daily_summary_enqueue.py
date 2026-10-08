@@ -13,8 +13,9 @@ import pytest
 from selara.application.daily_summary.transcription import TranscriptionJob
 from selara.core.chat_settings import default_chat_settings
 from selara.core.config import Settings
-from selara.presentation.handlers import voice as voice_module
 from selara.presentation.handlers.voice import video_note_message_handler, voice_message_handler
+
+pytestmark = pytest.mark.usefixtures("stt_cooldown_stub")
 
 
 def _settings() -> Settings:
@@ -43,13 +44,6 @@ def _fake_bot():
         get_file=AsyncMock(return_value=SimpleNamespace(file_path="voice.ogg")),
         download_file=AsyncMock(return_value=SimpleNamespace(read=lambda: b"voice")),
     )
-
-
-@pytest.fixture(autouse=True)
-def _clear_cooldown():
-    voice_module._last_request_at.clear()
-    yield
-    voice_module._last_request_at.clear()
 
 
 @pytest.mark.asyncio

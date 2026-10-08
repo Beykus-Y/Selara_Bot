@@ -383,17 +383,28 @@ async def memory_callback(
         return
 
     if action == "fy":
+        busy = "Я ещё отвечаю на ваше сообщение. Повторите через пару секунд."
         if user_id in personal_ai._inflight_users:
-            await query.answer("Я ещё отвечаю на ваше сообщение. Повторите через пару секунд.", show_alert=True)
+            await query.answer(busy, show_alert=True)
             return
         # Hold the same per-user lock a reply does, so a turn cannot start from the old data mid-deletion.
+        # The durable lease does the same across bot instances, where _inflight_users cannot see a running turn.
         personal_ai._inflight_users.add(user_id)
         try:
-            removed = await repo.delete_all_user_data(user_id=user_id)
-            personal_ai._pending_inputs.pop(user_id, None)
-            _pending_memories.pop(user_id, None)
-            # Persist the deletion before any Telegram call: a failed edit must not roll the user's data back.
+            # End the callback transaction first: the lease takes its own connection, and a small pool would
+            # otherwise wait on this request's connection.
             await db_session.commit()
+            async with personal_ai.ai_turn_lease(
+                session_factory=session_factory, lease_key=f"personal_ai:{user_id}"
+            ) as acquired:
+                if not acquired:
+                    await query.answer(busy, show_alert=True)
+                    return
+                removed = await repo.delete_all_user_data(user_id=user_id)
+                personal_ai._pending_inputs.pop(user_id, None)
+                _pending_memories.pop(user_id, None)
+                # Persist the deletion before any Telegram call: a failed edit must not roll the user's data back.
+                await db_session.commit()
         finally:
             personal_ai._inflight_users.discard(user_id)
         await query.answer("Удалено")

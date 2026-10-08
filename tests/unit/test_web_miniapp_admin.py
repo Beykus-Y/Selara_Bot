@@ -7,6 +7,7 @@ from decimal import Decimal
 import httpx
 import pytest
 import logging
+from aiogram.types import BufferedInputFile
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 import hashlib
@@ -52,6 +53,8 @@ def _settings(admin_user_id: int | None = 77, **extra) -> Settings:
             "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
             "WEB_AUTH_SECRET": "test-secret",
             "WEB_BASE_URL": "http://testserver",
+            "WEB_SESSION_COOKIE_SECURE": False,
+            "ADMIN_SESSION_COOKIE_SECURE": False,
             "ADMIN_USER_ID": admin_user_id,
         }
     )
@@ -768,3 +771,153 @@ async def test_personal_config_put_is_owner_only_and_rejects_bad_values_with_422
         for body in bad_bodies:
             response = await client.put(url, content=body, headers={"content-type": "application/json"})
             assert response.status_code == 422, body
+
+
+def _seed_broadcast(session_factory, *, statuses: list[tuple[int, str]], media: bytes | None = None) -> int:
+    """A broadcast whose deliveries already have the given statuses, as if the worker stopped part-way."""
+    now = datetime.now(timezone.utc)
+    with Session(session_factory._engine) as session:
+        broadcast = AdminBroadcastModel(
+            body="<b>Проверка</b>",
+            rendered_body="<b>Проверка</b>",
+            active_since_days=3,
+            media_type="photo" if media is not None else None,
+            media_content=media,
+            media_filename="broadcast.jpg" if media is not None else None,
+            created_by_user_id=77,
+        )
+        session.add(broadcast)
+        session.flush()
+        broadcast_id = int(broadcast.id)
+        session.add_all(
+            AdminBroadcastDeliveryModel(
+                broadcast_id=broadcast_id,
+                chat_id=chat_id,
+                chat_title_snapshot=f"Чат {chat_id}",
+                status=status,
+                telegram_message_id=501 if status == "sent" else None,
+                sent_at=now if status == "sent" else None,
+            )
+            for chat_id, status in statuses
+        )
+        session.commit()
+    return broadcast_id
+
+
+async def _wait_for_broadcast_status(client, broadcast_id: int, expected: str) -> dict:
+    status: dict = {}
+    for _ in range(300):
+        status = (await client.get(f"/api/miniapp/admin/broadcast/{broadcast_id}")).json()
+        if status.get("status") == expected:
+            break
+        await asyncio.sleep(0.01)
+    return status
+
+
+@pytest.mark.asyncio
+async def test_interrupted_broadcast_resume_sends_only_the_unsent_deliveries(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+
+    class FakeBot:
+        def __init__(self):
+            self.chat_ids = []
+            self.session = SimpleNamespace(close=self.close)
+
+        async def close(self):
+            return None
+
+        async def send_message(self, **kwargs):
+            self.chat_ids.append(kwargs["chat_id"])
+            return SimpleNamespace(message_id=800 + len(self.chat_ids), date=datetime.now(timezone.utc))
+
+    bot = FakeBot()
+    monkeypatch.setattr(web_app_module, "Bot", lambda token: bot)
+    async with _client(monkeypatch, current_user=admin) as (client, session_factory):
+        broadcast_id = _seed_broadcast(
+            session_factory, statuses=[(-1001, "sent"), (-1002, "pending"), (-1003, "pending")]
+        )
+        before = await client.get(f"/api/miniapp/admin/broadcast/{broadcast_id}")
+        resumed = await client.post(f"/api/miniapp/admin/broadcast/{broadcast_id}/resume")
+        status = await _wait_for_broadcast_status(client, broadcast_id, "completed")
+
+    assert before.json()["status"] == "interrupted"
+    assert resumed.status_code == 200
+    assert status["status"] == "completed"
+    assert status["sent_count"] == 3 and status["failed_count"] == 0
+    assert bot.chat_ids == [-1002, -1003]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_photo_broadcast_resumes_from_the_photo_stored_before_the_first_send(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+    photo_bytes = b"\x89PNG\r\n\x1a\nstored-before-the-first-send"
+
+    class FakeBot:
+        def __init__(self):
+            self.photos = []
+            self.session = SimpleNamespace(close=self.close)
+
+        async def close(self):
+            return None
+
+        async def send_photo(self, **kwargs):
+            self.photos.append(kwargs["photo"])
+            return SimpleNamespace(
+                message_id=900 + len(self.photos),
+                date=datetime.now(timezone.utc),
+                photo=[SimpleNamespace(file_id="AgACAgIstored", file_unique_id="stored-unique")],
+            )
+
+    bot = FakeBot()
+    monkeypatch.setattr(web_app_module, "Bot", lambda token: bot)
+    async with _client(monkeypatch, current_user=admin) as (client, session_factory):
+        broadcast_id = _seed_broadcast(
+            session_factory, statuses=[(-1001, "pending"), (-1002, "pending")], media=photo_bytes
+        )
+        resumed = await client.post(f"/api/miniapp/admin/broadcast/{broadcast_id}/resume")
+        status = await _wait_for_broadcast_status(client, broadcast_id, "completed")
+        with Session(session_factory._engine) as session:
+            stored = session.get(AdminBroadcastModel, broadcast_id)
+            stored_file_id, stored_bytes = stored.media_file_id, stored.media_content
+
+    assert resumed.status_code == 200
+    assert status["status"] == "completed" and status["sent_count"] == 2
+    first, second = bot.photos
+    assert isinstance(first, BufferedInputFile) and first.data == photo_bytes
+    assert second == "AgACAgIstored"
+    assert stored_file_id == "AgACAgIstored" and stored_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_unsent_deliveries_and_a_cancelled_broadcast_cannot_resume(monkeypatch) -> None:
+    admin = UserSnapshot(telegram_user_id=77, username="owner", first_name="Admin", last_name=None, is_bot=False)
+
+    class FakeBot:
+        def __init__(self):
+            self.chat_ids = []
+            self.session = SimpleNamespace(close=self.close)
+
+        async def close(self):
+            return None
+
+        async def send_message(self, **kwargs):
+            self.chat_ids.append(kwargs["chat_id"])
+            return SimpleNamespace(message_id=1, date=datetime.now(timezone.utc))
+
+    bot = FakeBot()
+    monkeypatch.setattr(web_app_module, "Bot", lambda token: bot)
+    async with _client(monkeypatch, current_user=admin) as (client, session_factory):
+        broadcast_id = _seed_broadcast(
+            session_factory, statuses=[(-1001, "sent"), (-1002, "pending"), (-1003, "pending")]
+        )
+        cancelled = await client.post(f"/api/miniapp/admin/broadcast/{broadcast_id}/cancel")
+        status = (await client.get(f"/api/miniapp/admin/broadcast/{broadcast_id}")).json()
+        resumed = await client.post(f"/api/miniapp/admin/broadcast/{broadcast_id}/resume")
+        cancelled_again = await client.post(f"/api/miniapp/admin/broadcast/{broadcast_id}/cancel")
+
+    assert cancelled.status_code == 200 and cancelled.json()["cancelled_count"] == 2
+    assert status["status"] == "cancelled"
+    assert status["sent_count"] == 1 and status["failed_count"] == 2
+    assert resumed.status_code == 409
+    assert cancelled_again.status_code == 409
+    assert bot.chat_ids == []

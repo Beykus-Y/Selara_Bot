@@ -1,7 +1,10 @@
+import warnings
+from ipaddress import ip_address, ip_network
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +18,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # #71: get_settings() runs before logging is configured, so a failed
+        # validation dumps its raw traceback straight to stderr. By default
+        # pydantic embeds the whole input dict ("input_value") in that text --
+        # including BOT_TOKEN, WEB_AUTH_SECRET and database credentials --
+        # so the input must stay hidden and only the error text is printed.
+        hide_input_in_errors=True,
     )
 
     bot_token: str = Field(..., validation_alias="BOT_TOKEN")
@@ -33,6 +42,14 @@ class Settings(BaseSettings):
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
     activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")
     activity_batch_max_events: int = Field(default=1000, validation_alias="ACTIVITY_BATCH_MAX_EVENTS")
+    # How long shutdown waits for the activity inbox to drain. Keep it well under Docker's default 10 s stop timeout.
+    activity_batch_close_grace_seconds: float = Field(
+        default=5.0, gt=0, le=60, validation_alias="ACTIVITY_BATCH_CLOSE_GRACE_SECONDS"
+    )
+    # Archived group messages (text, raw JSON, transcripts) and parked dead letters older than this many days are
+    # deleted for good. 0 (the default) keeps everything. Enabling it cannot be undone, so back up first.
+    # See docs/MESSAGE_ARCHIVE_RETENTION.md.
+    message_archive_retention_days: int = Field(default=0, ge=0, validation_alias="MESSAGE_ARCHIVE_RETENTION_DAYS")
     achievements_catalog_path: str = Field(
         default="src/selara/core/achievements.json",
         validation_alias="ACHIEVEMENTS_CATALOG_PATH",
@@ -96,6 +113,7 @@ class Settings(BaseSettings):
     web_enabled: bool = Field(default=True, validation_alias="WEB_ENABLED")
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(default=8080, validation_alias="WEB_PORT")
+    web_forwarded_allow_ips: str = Field(default="127.0.0.1,::1", validation_alias="WEB_FORWARDED_ALLOW_IPS")
     web_domain: str | None = Field(default=None, validation_alias="WEB_DOMAIN")
     web_base_url: str = Field(default="http://127.0.0.1:8080", validation_alias="WEB_BASE_URL")
     gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
@@ -107,12 +125,30 @@ class Settings(BaseSettings):
     gacha_service_token: str = Field(default="", validation_alias="GACHA_SERVICE_TOKEN")
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
+    backup_pg_dump_timeout_seconds: float = Field(default=1800.0, validation_alias="BACKUP_PG_DUMP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
+    backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
+    # Restore drill: each dump is restored into a scratch database on the bot's PostgreSQL server before it is encrypted.
+    # Opt-in: it needs CREATEDB and free disk for a copy of the database, and a failure stops every backup.
+    backup_restore_drill_enabled: bool = Field(default=False, validation_alias="BACKUP_RESTORE_DRILL_ENABLED")
+    backup_restore_drill_timeout_seconds: float = Field(
+        default=1800.0,
+        validation_alias="BACKUP_RESTORE_DRILL_TIMEOUT_SECONDS",
+    )
+    # Public half of the X25519 backup key (base64). Only this key lives on the bot host; the private key stays with the operator.
+    backup_encryption_public_key: str | None = Field(default=None, validation_alias="BACKUP_ENCRYPTION_PUBLIC_KEY")
     web_auth_secret: str | None = Field(default=None, validation_alias="WEB_AUTH_SECRET")
+    # #71: the dev-only opt-in that allows the missing-WEB_AUTH_SECRET fallback
+    # to BOT_TOKEN. Defaults to false so a fresh production install (including
+    # one shipped from .env.example with the default APP_ENV=dev) fails closed
+    # instead of silently reusing the Telegram credential as the web auth key.
+    web_auth_allow_bot_token_fallback: bool = Field(
+        default=False, validation_alias="WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK"
+    )
     web_login_code_ttl_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_CODE_TTL_MINUTES")
     web_session_ttl_hours: int = Field(default=168, validation_alias="WEB_SESSION_TTL_HOURS")
     web_session_cookie_name: str = Field(default="selara_session", validation_alias="WEB_SESSION_COOKIE_NAME")
-    web_session_cookie_secure: bool = Field(default=False, validation_alias="WEB_SESSION_COOKIE_SECURE")
+    web_session_cookie_secure: bool = Field(default=True, validation_alias="WEB_SESSION_COOKIE_SECURE")
     web_login_attempt_limit: int = Field(default=8, validation_alias="WEB_LOGIN_ATTEMPT_LIMIT")
     web_login_attempt_window_minutes: int = Field(default=5, validation_alias="WEB_LOGIN_ATTEMPT_WINDOW_MINUTES")
 
@@ -256,7 +292,52 @@ class Settings(BaseSettings):
     llm_group_provider_preferences_json: str = Field(default="", validation_alias="LLM_GROUP_PROVIDER_PREFERENCES_JSON")
     admin_session_ttl_hours: int = Field(default=24, validation_alias="ADMIN_SESSION_TTL_HOURS")
     admin_session_cookie_name: str = Field(default="selara_admin_session", validation_alias="ADMIN_SESSION_COOKIE_NAME")
-    admin_session_cookie_secure: bool = Field(default=False, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+    admin_session_cookie_secure: bool = Field(default=True, validation_alias="ADMIN_SESSION_COOKIE_SECURE")
+
+    @model_validator(mode="after")
+    def _check_message_archive_retention(self):
+        # The daily summary and its tools read the last day or two of the archive, so a shorter window would
+        # delete data they still need.
+        days = self.message_archive_retention_days
+        if 0 < days < 7:
+            raise ValueError("MESSAGE_ARCHIVE_RETENTION_DAYS must be 0 (off) or at least 7")
+        return self
+
+    @model_validator(mode="after")
+    def _check_trusted_web_proxies(self):
+        for host in self.web_forwarded_allow_ips.split(","):
+            host = host.strip()
+            if not host:
+                continue
+            try:
+                network = ip_network(host)
+            except ValueError:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS accepts explicit proxy IPs/CIDRs; wildcard trust is forbidden") from None
+            if network.prefixlen == 0:
+                raise ValueError("WEB_FORWARDED_ALLOW_IPS must not trust every client")
+        return self
+
+    @model_validator(mode="after")
+    def _check_session_cookie_security(self):
+        url = urlsplit(self.resolved_web_base_url)
+        hostname = (url.hostname or "").lower()
+        local = hostname == "localhost" or hostname.endswith(".localhost")
+        try:
+            local = local or ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        https = url.scheme.lower() == "https"
+        default_secure = https or not local
+        for field_name, env_name in (
+            ("web_session_cookie_secure", "WEB_SESSION_COOKIE_SECURE"),
+            ("admin_session_cookie_secure", "ADMIN_SESSION_COOKIE_SECURE"),
+        ):
+            if field_name not in self.model_fields_set:
+                # Only HTTP loopback defaults to insecure cookies for local dev.
+                object.__setattr__(self, field_name, default_secure)
+            elif self.web_enabled and https and not getattr(self, field_name):
+                raise ValueError(f"{env_name} must be true for an HTTPS web panel")
+        return self
 
     @model_validator(mode="after")
     def _check_personal_limits(self):
@@ -279,6 +360,47 @@ class Settings(BaseSettings):
             raise ValueError("GROUP_TOOL_ROUNDS_PAID must not be lower than GROUP_TOOL_ROUNDS_FREE")
         return self
 
+    @model_validator(mode="after")
+    def _check_web_auth_secret(self):
+        # #71: BOT_TOKEN doubles as the Telegram Bot API credential and, via
+        # the fallback below, the HMAC key for web login/session digests.
+        # Coupling the two security domains means rotating or leaking the bot
+        # token silently compromises web auth. The fallback never triggers by
+        # default -- it requires the explicit WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK
+        # opt-in, which is meant for local development only.
+        if not self.web_enabled:
+            return self
+        secret = (self.web_auth_secret or "").strip()
+        if not secret:
+            if not self.web_auth_allow_bot_token_fallback:
+                raise ValueError(
+                    "WEB_AUTH_SECRET is required while the web panel is enabled; set a separate "
+                    "random secret, or opt into the dev-only BOT_TOKEN fallback with "
+                    "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true"
+                )
+            warnings.warn(
+                "WEB_AUTH_SECRET is not set; falling back to BOT_TOKEN for web auth "
+                "(WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true). This couples the web auth HMAC "
+                "domain to the Telegram bot credential -- set a separate WEB_AUTH_SECRET.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self
+        if secret == (self.bot_token or "").strip():
+            if self.web_auth_allow_bot_token_fallback:
+                warnings.warn(
+                    "WEB_AUTH_SECRET equals BOT_TOKEN; web auth and the Telegram bot credential "
+                    "share one secret. Set a separate WEB_AUTH_SECRET.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return self
+            raise ValueError(
+                "WEB_AUTH_SECRET must differ from BOT_TOKEN; use a separate random secret "
+                "so the web auth and Telegram credentials can be rotated independently"
+            )
+        return self
+
     @property
     def supported_chat_types(self) -> set[str]:
         return {"private", "group", "supergroup"}
@@ -288,6 +410,16 @@ class Settings(BaseSettings):
         value = (self.web_auth_secret or "").strip()
         if value:
             return value
+        # Defense in depth (#71): Settings validation already rejects this
+        # state unless WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK is explicitly set,
+        # but any caller of this property is about to derive web auth HMAC
+        # keys from it, so fail closed here too instead of silently reusing
+        # the bot token.
+        if not self.web_auth_allow_bot_token_fallback:
+            raise RuntimeError(
+                "WEB_AUTH_SECRET is required; the BOT_TOKEN fallback needs the explicit "
+                "WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true opt-in (development only)"
+            )
         return self.bot_token
 
     @property

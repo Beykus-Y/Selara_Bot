@@ -9,6 +9,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.use_cases.economy.claim_daily import execute as claim_daily
+from selara.application.use_cases.economy.tap import execute as tap
+from selara.application.use_cases.economy.growth import perform_action as growth
 from selara.application.use_cases.economy.market_buy_listing import (
     execute as buy_listing,
 )
@@ -100,6 +102,92 @@ async def _database():
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+@pytest.mark.parametrize("mode,chat_id", [("global", None), ("local", -100)])
+async def test_cooldown_actions_have_one_winner_and_one_ledger_entry(action, mode, chat_id):
+    engine, session_factory = await _database()
+    event_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyEconomyRepository(session)
+            scope, _ = await repo.resolve_scope(mode=mode, chat_id=chat_id, user_id=10)
+            account, _ = await repo.get_or_create_account(scope=scope, user_id=10)
+            account_id = account.id
+            await session.commit()
+
+        rendezvous = _Rendezvous()
+
+        async def invoke():
+            async with session_factory() as session:
+                repo = _DailyRaceRepository(session, rendezvous)
+                kwargs = dict(economy_mode=mode, chat_id=chat_id, user_id=10, event_at=event_at)
+                result = await tap(repo, tap_cooldown_seconds=45, **kwargs) if action == "tap" else await growth(repo, **kwargs)
+                await session.commit()
+                return result
+
+        results = await asyncio.wait_for(asyncio.gather(invoke(), invoke()), timeout=10)
+        assert sum(result.accepted for result in results) == 1
+        winner = next(result for result in results if result.accepted)
+        async with session_factory() as session:
+            stored = await session.get(EconomyAccountModel, account_id)
+            rows = (await session.execute(select(EconomyLedgerModel).where(
+                EconomyLedgerModel.account_id == account_id,
+            ))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].amount == winner.reward
+            assert rows[0].reason == ("tap" if action == "tap" else "growth_action")
+            assert stored.balance == winner.reward
+            if action == "tap":
+                assert stored.tap_streak == 1
+                assert stored.last_tap_at == event_at
+            else:
+                assert stored.growth_actions == 1
+                assert stored.growth_size_mm == winner.new_size_mm
+                assert stored.growth_stress_pct == winner.new_stress_pct
+                assert stored.last_growth_at == event_at
+                assert stored.growth_boost_pct == stored.growth_cooldown_discount_seconds == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tap", "growth"])
+async def test_cooldown_actions_for_different_accounts_progress_concurrently(action):
+    engine, session_factory = await _database()
+    event_at = datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc)
+    barrier = asyncio.Barrier(2)
+
+    class ParallelRepository(SqlAlchemyEconomyRepository):
+        async def add_balance(self, *, account_id, delta):
+            # A global lock would prevent the second account reaching this point.
+            await asyncio.wait_for(barrier.wait(), timeout=5)
+            return await super().add_balance(account_id=account_id, delta=delta)
+
+    try:
+        async with session_factory() as session:
+            repo = SqlAlchemyEconomyRepository(session)
+            scope, _ = await repo.resolve_scope(mode="global", chat_id=None, user_id=10)
+            for user_id in (10, 11):
+                await repo.get_or_create_account(scope=scope, user_id=user_id)
+            await session.commit()
+
+        async def invoke(user_id):
+            async with session_factory() as session:
+                repo = ParallelRepository(session)
+                kwargs = dict(economy_mode="global", chat_id=None, user_id=user_id, event_at=event_at)
+                result = await tap(repo, tap_cooldown_seconds=45, **kwargs) if action == "tap" else await growth(repo, **kwargs)
+                await session.commit()
+                return result
+
+        results = await asyncio.wait_for(asyncio.gather(invoke(10), invoke(11)), timeout=10)
+        assert all(result.accepted for result in results)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.integration

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
 from aiogram import Bot
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
@@ -13,6 +15,8 @@ from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.ai_accounting import AiAccountingService
 from selara.infrastructure.db.activity_event_sync import run_message_event_backfill
 from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count_snapshot_scheduler
+from selara.infrastructure.db.market_expiry_sweeper import run_market_expiry_scheduler
+from selara.infrastructure.db.message_archive_retention import run_message_archive_retention_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.infrastructure.db.session import create_engine, create_session_factory
 from selara.infrastructure.http.web_search import build_web_search_client
@@ -145,6 +149,7 @@ async def _run_bot(settings, session_factory) -> None:
         catalog=achievement_catalog,
         flush_seconds=settings.activity_batch_flush_seconds,
         max_events=settings.activity_batch_max_events,
+        close_grace_seconds=settings.activity_batch_close_grace_seconds,
         live_event_publisher=GAME_STORE.publish_event,
     )
     stt_client = _build_stt_client(settings)
@@ -184,7 +189,10 @@ async def _run_bot(settings, session_factory) -> None:
         name="interesting-facts",
     )
     if settings.admin_user_id is not None:
-        backup_task = asyncio.create_task(run_daily_backup_scheduler(bot=bot, settings=settings), name="daily-backup")
+        backup_task = asyncio.create_task(
+            run_daily_backup_scheduler(bot=bot, settings=settings, session_factory=session_factory),
+            name="daily-backup",
+        )
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
     gacha_warmup_task = asyncio.create_task(
@@ -193,6 +201,17 @@ async def _run_bot(settings, session_factory) -> None:
     chat_member_snapshot_task = asyncio.create_task(
         run_chat_member_count_snapshot_scheduler(bot=bot, session_factory=session_factory),
         name="chat-member-count-snapshots",
+    )
+    market_expiry_task = asyncio.create_task(
+        run_market_expiry_scheduler(session_factory=session_factory),
+        name="market-expiry-sweep",
+    )
+    message_archive_retention_task = asyncio.create_task(
+        run_message_archive_retention_scheduler(
+            session_factory=session_factory,
+            retention_days=settings.message_archive_retention_days,
+        ),
+        name="message-archive-retention",
     )
     daily_summary_task = None
     if llm_client is not None:
@@ -242,6 +261,10 @@ async def _run_bot(settings, session_factory) -> None:
         await asyncio.gather(gacha_warmup_task, return_exceptions=True)
         chat_member_snapshot_task.cancel()
         await asyncio.gather(chat_member_snapshot_task, return_exceptions=True)
+        market_expiry_task.cancel()
+        await asyncio.gather(market_expiry_task, return_exceptions=True)
+        message_archive_retention_task.cancel()
+        await asyncio.gather(message_archive_retention_task, return_exceptions=True)
         if daily_summary_task is not None:
             daily_summary_task.cancel()
             await asyncio.gather(daily_summary_task, return_exceptions=True)
@@ -268,6 +291,8 @@ async def _run_web_panel(settings, session_factory) -> None:
         app,
         host=settings.web_host,
         port=settings.web_port,
+        proxy_headers=True,
+        forwarded_allow_ips=settings.web_forwarded_allow_ips,
         log_level=settings.log_level.lower(),
     )
     server = uvicorn.Server(config)
@@ -286,6 +311,20 @@ async def _run_web_panel(settings, session_factory) -> None:
         raise
 
 
+async def _run_services(*services: Coroutine[Any, Any, None], lease_watch: Coroutine[Any, Any, None]) -> None:
+    """Run the services until they have all ended, or until the game writer lease is lost.
+
+    A lost lease raises out of ``lease_watch``, which cancels the services. The
+    watch never ends on its own, so it is cancelled once the services are done:
+    a clean shutdown must not wait for it.
+    """
+    async with asyncio.TaskGroup() as tg:
+        tasks = [tg.create_task(service) for service in services]
+        watch = tg.create_task(lease_watch, name="game-store-writer-lease")
+        await asyncio.wait(tasks)
+        watch.cancel()
+
+
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings)
@@ -300,10 +339,16 @@ async def run() -> None:
     renderer_service = PlaywrightRendererService.get_instance()
 
     try:
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(run_message_event_backfill(session_factory))
-            tg.create_task(_run_bot(settings, session_factory))
-            tg.create_task(_run_web_panel(settings, session_factory))
+        # Only one instance may write game state to Redis. A process that cannot
+        # claim the writer lease fails here, before it serves any update, and a
+        # process that loses the lease later stops through the task group.
+        await GAME_STORE.start_writer_lease()
+        await _run_services(
+            run_message_event_backfill(session_factory),
+            _run_bot(settings, session_factory),
+            _run_web_panel(settings, session_factory),
+            lease_watch=GAME_STORE.watch_writer_lease(),
+        )
     finally:
         await renderer_service.stop()
         await GAME_STORE.close()

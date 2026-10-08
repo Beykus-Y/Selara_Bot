@@ -7,6 +7,8 @@
 ### 1.1 Обязательные компоненты
 - Python **3.11+**.
 - PostgreSQL (рекомендуется 16).
+- `postgresql-client` (`pg_dump`/`pg_restore` в `PATH`) — нужен суточному backup;
+  Docker-образ уже его ставит.
 - Redis (рекомендуется 7).
 - Доступ к Telegram Bot API (токен от `@BotFather`).
 
@@ -27,9 +29,10 @@
 git clone <URL_вашего_репозитория>
 cd Selara_Bot
 cp .env.example .env
-python -m venv .venv
+# Установите uv 0.11.33, затем используйте committed lock.
+uv sync --locked --all-packages --all-extras --group build --group audit --no-install-workspace --no-build
+uv sync --locked --all-packages --all-extras --group build --group audit --no-build-isolation
 source .venv/bin/activate
-pip install -e .[dev]
 docker compose up -d postgres redis
 alembic upgrade head
 python -m selara.main
@@ -38,6 +41,9 @@ python -m selara.main
 После запуска:
 - Telegram-бот работает в polling-режиме;
 - web-панель доступна по адресу `http://127.0.0.1:8080/login`.
+
+Обновление зависимостей и правила воспроизводимых Python builds:
+[PYTHON_DEPENDENCIES.md](docs/PYTHON_DEPENDENCIES.md).
 
 ---
 
@@ -55,9 +61,14 @@ WEB_SESSION_COOKIE_SECURE=false
 ```
 
 ### 3.2 Важные замечания
-- `WEB_AUTH_SECRET` нельзя оставлять дефолтным в production.
+- `WEB_AUTH_SECRET` обязателен: без него (или если он совпадает с `BOT_TOKEN`) процесс завершается с `pydantic_core.ValidationError` ещё до старта бота и веб-панели (настройки проверяются при загрузке конфигурации) — независимо от `APP_ENV`. Fallback на `BOT_TOKEN` существует только для локальной разработки и включается явным флагом `WEB_AUTH_ALLOW_BOT_TOKEN_FALLBACK=true` (с предупреждением в лог); по умолчанию он выключен, поэтому «свежий» deployment из `.env.example` не может тихо получить небезопасную конфигурацию.
 - `WEB_BASE_URL` должен соответствовать фактическому публичному URL.
-- При HTTPS выставляйте `WEB_SESSION_COOKIE_SECURE=true`.
+- Для HTTPS и публичного домена обе session cookies автоматически получают
+  `Secure=true`. HTTP localhost/loopback по умолчанию сохраняет `Secure=false`.
+  Не переносите dev override `WEB_SESSION_COOKIE_SECURE=false` или
+  `ADMIN_SESSION_COOKIE_SECURE=false` в HTTPS production: запуск завершится
+  ошибкой конфигурации. Для явного значения выставляйте обе переменные в `true`.
+- `MESSAGE_ARCHIVE_RETENTION_DAYS` по умолчанию `0`: очистка архива выключена, ничего не удаляется. Если задать N от 7 и больше, бот навсегда удалит старше N дней сообщения групп (текст, raw JSON, расшифровки) и отложенные dead letters: первый запуск через минуту после старта, затем раз в час. Значения 1–6 приводят к ошибке конфигурации. Отменить очистку нельзя, поэтому перед включением сделайте бэкап и проверьте, что он восстанавливается (§3.5). Подробности: `docs/MESSAGE_ARCHIVE_RETENTION.md`.
 
 ### 3.3 Опционально: AI-ассистент и голос (STT/LLM)
 
@@ -83,6 +94,14 @@ LLM_COOLDOWN_SECONDS=5
 Оба блока принимают любой OpenAI-совместимый API (OpenAI, Groq и т.д.) —
 достаточно поменять `*_BASE_URL`/`*_MODEL`/`*_API_KEY` под своего
 провайдера. Полный список параметров — в `.env.example`.
+
+Мгновенное распознавание голосовых и кружков использует общий cooldown
+`STT_COOLDOWN_SECONDS` на пару `(chat_id, user_id)` в `REDIS_URL`.
+Атомарный `SET NX PX` сохраняет ограничение при рестарте приложения и разделяет
+его между репликами; Redis автоматически удаляет истёкшие ключи. При недоступном
+Redis запрос отклоняется до скачивания файла и вызова провайдера (fail-closed,
+с предупреждением в логах). `STT_COOLDOWN_SECONDS=0` явно отключает ограничение.
+Очередь транскрипций для «Итогов дня» работает отдельно от этого cooldown.
 
 ### 3.4 Опционально: веб-поиск для AI-ассистента
 
@@ -118,6 +137,119 @@ searxng не запускает.
 Альтернатива — ключевой провайдер: задайте `WEB_SEARCH_PROVIDER=tavily` (или `brave`) и
 `WEB_SEARCH_API_KEY`; при сбое такого провайдера бот пробует DuckDuckGo.
 
+### 3.5 Бэкапы и проверка восстанавливаемости
+
+Суточный backup (ночное расписание и кнопка в `/app/admin`) перед отправкой в
+Telegram проверяет каждый дамп: PostgreSQL custom-формат разбирается
+`pg_restore` офлайн — без подключения к базе данных весь SQL-скрипт дампа
+выводится в null device, — а SQLite-дампы gacha (`*.sqlite3`) проходят
+`PRAGMA integrity_check`. Если проверка не прошла, **дамп не отправляется**,
+а в Telegram приходит причина сбоя.
+
+Для этого `pg_restore` должен быть доступен в `PATH` runtime-контейнера:
+Docker-образ ставит пакет `postgresql-client`; при запуске без Docker его нужно
+установить отдельно (`apt install postgresql-client` или аналог). Проверка `pg_restore` и загрузка дампа gacha ограничены `BACKUP_TIMEOUT_SECONDS`
+(по умолчанию 300): по истечении таймаута backup завершается ошибкой, а дочерний
+процесс `pg_restore` останавливается. `pg_dump` основной БД ограничен отдельно,
+`BACKUP_PG_DUMP_TIMEOUT_SECONDS` (по умолчанию 1800), потому что сжатый дамп большой
+базы может идти дольше 300 секунд. Если дамп не укладывается в свой срок, увеличьте
+это значение. Lease backup продлевается во время дампа, поэтому длинный дамп не
+приводит к потере блокировки.
+
+```env
+BACKUP_TIMEOUT_SECONDS=300
+BACKUP_PG_DUMP_TIMEOUT_SECONDS=1800
+BACKUP_PG_DUMP_PATH=pg_dump
+BACKUP_PG_RESTORE_PATH=pg_restore
+BACKUP_ENCRYPTION_PUBLIC_KEY=<публичный ключ из keygen>
+```
+
+**Шифрование.** Каждый архив (дамп основной БД и дамп gacha) шифруется до
+разбиения на части и отправки. В Telegram уходят только зашифрованные части
+и манифест с нешифрованными метаданными (имена, размеры, SHA-256 зашифрованных
+файлов, отпечаток ключа). Бот хранит только публичный ключ X25519; приватный
+ключ на сервер не попадает. Если `BACKUP_ENCRYPTION_PUBLIC_KEY` не задан или
+некорректен, либо шифрование не удалось, backup **не отправляется вовсе**.
+Причина уходит администратору в Telegram при ночном запуске; при ручном запросе
+из `/app/admin` она записывается в логи.
+
+Пара ключей создаётся один раз на доверенной машине оператора (не на хосте бота):
+
+```bash
+PYTHONPATH=src python3 scripts/backup_restore.py keygen \
+  --private-key backup.key --public-key backup.pub
+```
+
+Публичный ключ из вывода команды укажите в `BACKUP_ENCRYPTION_PUBLIC_KEY`.
+Файл `backup.key` храните офлайн (менеджер паролей или зашифрованный носитель);
+без него архивы не расшифровать. Потеря приватного ключа делает все прежние
+backup нечитаемыми. Если приватный ключ скомпрометирован, все backup, созданные
+с его публичной парой, считаются раскрытыми: после замены ключа на хосте
+старые архивы нужно считать утёкшими.
+
+**Восстановление.** Соберите все части одного набора из чата в одну папку
+вместе с `selara-daily-backup-<ts>.manifest.json`, затем на машине оператора:
+
+```bash
+PYTHONPATH=src python3 scripts/backup_restore.py restore \
+  --manifest DIR/selara-daily-backup-<ts>.manifest.json --parts-dir DIR \
+  --identity backup.key --output-dir restored
+pg_restore --clean --if-exists --no-owner --no-privileges \
+  -d "<target-url>" restored/bot_pg_dump.dump
+```
+
+Команда сверяет размер и SHA-256 каждого файла по манифесту, затем проверяет
+аутентичность каждого зашифрованного кадра; повреждённые, переставленные или
+обрезанные части не расшифровываются. Архив `gacha_pg_dump.dump` (gacha в продакшене работает на PostgreSQL) восстанавливается
+`pg_restore` в отдельную базу; `gacha_pg_dump.sqlite3`, если он есть, — обычная SQLite-база.
+
+Офлайн-проверка подтверждает, что архив целиком разбирается и распаковывается,
+но не исполняет восстановленный SQL, поэтому за ней идёт **restore drill** (по умолчанию выключен, см. ниже): каждый
+дамп восстанавливается во временную базу на PostgreSQL-сервере бота
+(`CREATE DATABASE ... TEMPLATE template0`, затем `pg_restore --exit-on-error`), после
+чего проверяются:
+
+- версия схемы (`alembic_version`) восстановленной основной БД совпадает с версией живой БД бота;
+- критические таблицы основной БД на месте, а `users` и `chats` в ней не пусты;
+- дамп gacha содержит таблицы `gacha_players`, `gacha_player_cards`, `gacha_pull_history` и ровно одну запись версии схемы.
+
+Временная база удаляется сразу после проверки. Если любая проверка не прошла, ни один
+архив не шифруется и не отправляется, а в Telegram приходит причина. Drill работает
+с открытым дампом до шифрования, поэтому приватный ключ ему не нужен.
+
+```env
+BACKUP_RESTORE_DRILL_ENABLED=false
+BACKUP_RESTORE_DRILL_TIMEOUT_SECONDS=1800
+```
+
+По умолчанию проверка выключена, и дампы уходят без неё. Перед тем как включить её (`true`), убедитесь, что у роли базы бота есть право `CREATEDB` (суперпользователь, которого образ `postgres` создаёт из `POSTGRES_USER`, его имеет), и что на томе БД есть место примерно под размер базы: пока идёт проверка, там лежит её копия. Если копию не удаётся создать или дамп не восстанавливается, каждый ночной бэкап падает и ни один архив не уходит. Если процесс оборвался и осталась база `selara_restore_drill_*`, следующий drill удалит её, когда она будет старше двух таймаутов drill плюс час; раньше удалите её вручную.
+
+**Ручной restore drill и RTO.** Drill на собственной копии оператора проверяет то, что
+понадобится при аварии, и даёт время восстановления для RTO. Проводите его после смены
+версии схемы и хотя бы раз в квартал.
+
+1. Поднимите отдельный PostgreSQL 16, не продакшен-сервер, например
+   `docker run --rm -p 55432:5432 -e POSTGRES_PASSWORD=drill postgres:16-alpine`.
+   На машине оператора нужен `pg_restore` не старее клиента, который делал дамп.
+2. Соберите части набора и манифест в одну папку `DIR`.
+3. Передайте приватный ключ переменной окружения, а не файлом на сервере бота:
+   `export BACKUP_RESTORE_IDENTITY="$(cat backup.key)"`.
+4. Запустите drill из checkout релиза, с которого сделан backup: головы схем берутся из репозитория.
+
+   ```bash
+   BACKUP_DRILL_DATABASE_URL=postgresql+asyncpg://postgres:drill@127.0.0.1:55432/postgres \
+   PYTHONPATH=src python3 scripts/backup_restore.py drill \
+     --manifest DIR/selara-daily-backup-<ts>.manifest.json --parts-dir DIR
+   ```
+
+   Строка `PASS` по каждому архиву означает, что дамп восстанавливается, его схема совпадает
+   с релизом, а критические таблицы на месте. При ошибке она называет проверку, которая не прошла.
+5. Реальное восстановление: `restore` и `pg_restore` из раздела выше в пустую целевую базу,
+   затем запуск бота тем же релизом. RTO — время от решения о восстановлении до работающего
+   бота; замерьте его на шагах 4 и 5 и запишите вместе с датой проверки.
+6. Удалите расшифрованные файлы из `restored/`: `drill` убирает свои временные архивы сам,
+   а `restore` оставляет их на диске.
+
 ---
 
 ## 4. Локальный запуск через Docker Compose
@@ -136,10 +268,13 @@ docker compose logs -f app
 ### 4.2 Проверка web health endpoint
 
 ```bash
-curl -i http://127.0.0.1:8080/healthz
+curl -i http://127.0.0.1:8080/livez
+curl -i http://127.0.0.1:8080/readyz
 ```
 
-Ожидается успешный HTTP-ответ.
+`/livez` показывает жизнь процесса. `/readyz` (и alias `/healthz`) проверяет
+БД, Redis и polling heartbeat; во время startup или outage отвечает 503.
+Подробности: [RUNTIME_READINESS.md](docs/RUNTIME_READINESS.md).
 
 ### 4.3 Важная особенность compose-конфига
 В `docker-compose.yml` используется внешняя сеть `edge`. На «чистом» сервере её нужно создать заранее:
@@ -206,6 +341,11 @@ docker compose logs -f app
 
 ### 5.1 Публикация образа
 
+Для production используйте `Publish Docker Image` после CI на `main`: он
+сохраняет единый digest manifest app/web/gacha. Номер успешного запуска —
+release ID для deploy. Команды ниже публикуют только удобный mutable alias
+для ручных экспериментов, без production release manifest.
+
 ```bash
 docker build -t ghcr.io/<your-user>/selara:latest .
 docker push ghcr.io/<your-user>/selara:latest
@@ -214,7 +354,9 @@ docker push ghcr.io/<your-user>/selara:latest
 ### 5.2 Настройка окружения на VPS
 
 ```env
-SELARA_IMAGE=ghcr.io/<your-user>/selara:latest
+# Digest из release manifest; workflow задаёт образы из manifest самостоятельно.
+SELARA_IMAGE=ghcr.io/<your-user>/selara@sha256:<digest>
+SELARA_WEB_IMAGE=ghcr.io/<your-user>/selara-web@sha256:<digest>
 SELARA_POSTGRES_DB=selara
 SELARA_POSTGRES_USER=selara
 SELARA_POSTGRES_PASSWORD=<сгенерированный_пароль_БД>
@@ -229,9 +371,27 @@ WEB_AUTH_SECRET=<длинный_случайный_секрет>
 
 ### 5.3 Обновление приложения на сервере
 
+**Важно: перед обновлением задайте отдельный `WEB_AUTH_SECRET` в `.env`.** В текущей версии `WEB_AUTH_SECRET` обязателен при включённой веб-панели, а `.env` не хранится в git, поэтому `docker compose pull` его не добавит и не обновит. Если секрета нет, процесс завершится с `pydantic_core.ValidationError` ещё до старта бота и веб-панели, а при `restart: unless-stopped` контейнер уйдёт в crash-loop.
+
+Проверьте `.env` на сервере и при необходимости добавьте отдельный случайный секрет (не равный `BOT_TOKEN`):
+
 ```bash
-docker compose pull app
-docker compose up -d app
+openssl rand -hex 32
+```
+
+```env
+WEB_AUTH_SECRET=<сгенерированный_секрет>
+```
+
+Только после этого запустите `Deploy To VPS` с `release_run_id` успешного
+publisher на `main`. Workflow загрузит фиксированный manifest, проверит
+запущенные image IDs/digests и сохранит previous release для rollback.
+Подробности и ограничения срока хранения: [IMMUTABLE_DEPLOY.md](docs/IMMUTABLE_DEPLOY.md).
+
+При ручном обновлении с тем же manifest:
+
+```bash
+python3 scripts/release_manifest.py deploy /path/to/manifest.json
 ```
 
 ---

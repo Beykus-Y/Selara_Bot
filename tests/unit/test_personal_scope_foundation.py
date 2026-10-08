@@ -495,7 +495,23 @@ def test_new_migrations_extend_the_single_alembic_chain():
     assert grants.down_revision == pets_default.revision
     personal_tools = _load_migration("0099_personal_ai_tools.py")
     assert personal_tools.down_revision == grants.revision
-    assert revisions - parents == {personal_tools.revision}
+    stt_budget = _load_migration("0100_stt_budget_reservations.py")
+    assert stt_budget.down_revision == personal_tools.revision
+    instant_stt = _load_migration("0101_chat_instant_stt.py")
+    assert instant_stt.down_revision == stt_budget.revision
+    backup_claims = _load_migration("0102_backup_job_claims.py")
+    assert backup_claims.down_revision == instant_stt.revision
+    turn_leases = _load_migration("0103_ai_turn_leases.py")
+    assert turn_leases.down_revision == backup_claims.revision
+    interesting_fact_claims = _load_migration("0104_interesting_fact_claims.py")
+    assert interesting_fact_claims.down_revision == turn_leases.revision
+    broadcast_resume = _load_migration("0105_broadcast_resume.py")
+    assert broadcast_resume.down_revision == interesting_fact_claims.revision
+    activity_inbox = _load_migration("0106_activity_event_inbox.py")
+    assert activity_inbox.down_revision == broadcast_resume.revision
+    message_archive_index = _load_migration("0107_message_archive_index.py")
+    assert message_archive_index.down_revision == activity_inbox.revision
+    assert revisions - parents == {message_archive_index.revision}
     assert len(feature_routes.revision) <= 32
     assert len(model_ail.revision) <= 32
     assert len(settlement.revision) <= 32

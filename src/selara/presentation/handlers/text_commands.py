@@ -35,6 +35,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.exc import SQLAlchemyError
 
+from selara.application.dto import CommandIntent
 from selara.application.use_cases.gacha import (
     GACHA_CURRENCY_PER_COIN_RATE,
     GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT,
@@ -73,7 +74,11 @@ from selara.presentation.commands.catalog import (
     resolve_builtin_command_key,
 )
 from selara.presentation.commands.normalizer import normalize_text_command
-from selara.presentation.commands.resolver import TextCommandResolutionError, resolve_text_command
+from selara.presentation.commands.resolver import (
+    TextCommandResolutionError,
+    resolve_persona_target_text_candidate,
+    resolve_text_command,
+)
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 from selara.presentation.middlewares.error_handler import notify_operational_error
@@ -1914,13 +1919,35 @@ def _apply_alias_mode_to_text(
         return text
 
     builtin_match = match_builtin_command(text)
-    if builtin_match is None:
-        return text
+    if builtin_match is not None:
+        command_key = builtin_match.command_key
+    else:
+        # A persona-name form is a builtin command once confirmed, so it is suppressed the same way.
+        persona_candidate = resolve_persona_target_text_candidate(text)
+        if persona_candidate is None:
+            return text
+        command_key = persona_candidate.name
 
     commands_with_aliases = {alias.command_key for alias in aliases}
-    if builtin_match.command_key in commands_with_aliases:
+    if command_key in commands_with_aliases:
         return None
     return text
+
+
+async def _resolve_persona_target_intent(message: Message, activity_repo, *, text: str) -> CommandIntent | None:
+    # A reply makes the handlers act on the replied-to user, not on the named persona, so skip the form.
+    if message.reply_to_message is not None:
+        return None
+    candidate = resolve_persona_target_text_candidate(text)
+    if candidate is None:
+        return None
+    target = await resolve_chat_target_user(
+        message,
+        activity_repo,
+        explicit_target=candidate.args["raw_args"],
+        prefer_reply=False,
+    )
+    return candidate if target is not None else None
 
 
 async def _answer_quiet(message: Message, text: str, **kwargs) -> None:
@@ -6114,6 +6141,11 @@ async def text_commands_handler(
     except TextCommandResolutionError as exc:
         await message.answer(str(exc))
         return
+
+    if intent is None:
+        # Bare persona names ("пара Коломбина") fail the tail validator; accept them only
+        # when they resolve to a chat persona, the same lookup the slash commands use.
+        intent = await _resolve_persona_target_intent(message, activity_repo, text=text)
 
     if intent is None:
         if (

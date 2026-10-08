@@ -252,7 +252,7 @@ async def test_admin_overview_backup_confirmation_restores_focus() -> None:
                 # Never resolves within the test's lifetime — keeps the button
                 # in its "submitting" state so the disabled check below can't race.
                 await asyncio.sleep(5)
-                await route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+                await route.fulfill(status=202, content_type="application/json", body='{"ok": true, "message": "Backup запущен."}')
 
             await page.route("**/api/admin/request-backup", handle_backup)
             submit = dialog.locator("[data-admin-backup-submit]")
