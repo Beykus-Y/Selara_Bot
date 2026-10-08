@@ -9,8 +9,6 @@ import type { MiniAppHomePageData } from '@/shared/miniapp/model'
 import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
-const BOT_ADD_URL = 'https://t.me/Selara_Bot?startgroup=true'
-
 function parseXp(value: string) {
   const match = value.replace(/\s/g, '').match(/(\d+)\/(\d+)/)
   if (!match) return null
@@ -46,7 +44,7 @@ export function HomePage() {
 
   const data = homeQuery.data
   const adminGroups = data.admin_groups ?? []
-  const chats = mergeGroups(adminGroups, data.recent_groups ?? [])
+  const chats = mergeGroups(data.recent_groups ?? [], adminGroups)
   const games = data.recent_games ?? []
   const isNew = chats.length === 0
   const isAdmin = adminGroups.length > 0
@@ -73,7 +71,7 @@ export function HomePage() {
           <div className="v2-step"><i>2</i><div><b>Начните первую партию</b><span>Напишите /game в группе.</span></div></div>
           <div className="v2-step"><i>3</i><div><b>Посмотрите команды</b><span>Напишите /help — там весь список.</span></div></div>
         </div>
-        <a className="v2-btn" href={BOT_ADD_URL} target="_blank" rel="noreferrer">Добавить бота в группу</a>
+        <a className="v2-btn" href={data.bot_add_url} target="_blank" rel="noreferrer">Добавить бота в группу</a>
         <p className="v2-muted" style={{ textAlign: 'center', fontSize: 12 }}>Ваши чаты появятся здесь после первой активности.</p>
       </div>
     )

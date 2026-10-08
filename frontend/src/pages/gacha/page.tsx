@@ -44,11 +44,13 @@ export function GachaCollectionPage() {
   }
 
   const rarityColor: Record<string, string> = {
+    mythic: 'oklch(0.66 0.2 25)',
     legendary: 'oklch(0.84 0.13 80)',
     epic: 'oklch(0.7 0.16 320)',
     rare: 'oklch(0.76 0.12 250)',
   }
   const rarityLabel: Record<string, string> = {
+    mythic: 'Мифическая',
     legendary: 'Легендарная',
     epic: 'Эпическая',
     rare: 'Редкая',

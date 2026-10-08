@@ -680,6 +680,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     )
     chat_settings_defaults = default_chat_settings(settings)
     bot_username = (settings.bot_username or settings.bot_name or "selara_ru_bot").lstrip("@")
+    bot_add_url = f"https://t.me/{bot_username}?startgroup=true"
     game_bot: Bot | None = None
     miniapp_broadcast_tasks: dict[int, asyncio.Task] = {}
 
@@ -4940,6 +4941,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     ],
                     "recent_games": [_miniapp_recent_game_payload(game) for game in recent_games[:3]],
                     "global_dashboard": home_context["global_dashboard"],
+                    "bot_add_url": bot_add_url,
                     "desktop_url": "/app",
                 },
             },
@@ -4973,6 +4975,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         _miniapp_group_payload(group, is_admin=group.chat_id in admin_ids)
                         for group in activity_groups
                     ],
+                    "bot_add_url": bot_add_url,
                     "desktop_url": "/app",
                 },
             },

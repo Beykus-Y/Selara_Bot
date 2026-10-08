@@ -74,7 +74,7 @@ export function GroupsPage() {
       {shown.length === 0 ? (
         <p className="v2-muted">В этом списке пока пусто. Чаты появятся после активности бота.</p>
       ) : null}
-      <a className="v2-link" href="https://t.me/Selara_Bot?startgroup=true" target="_blank" rel="noreferrer">
+      <a className="v2-link" href={groupsQuery.data.bot_add_url} target="_blank" rel="noreferrer">
         + Добавить бота в ещё один чат
       </a>
     </div>
