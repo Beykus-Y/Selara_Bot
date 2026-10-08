@@ -1625,8 +1625,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         parts = callback_data.split(":")
         if not parts:
             return None
-        if parts[0] == "game" and len(parts) == 3:
+        if parts[0] == "game" and (len(parts) == 3 or (len(parts) == 5 and parts[1] == "advance")):
             return parts[2]
+        if parts[0] == "gwebconfirm" and len(parts) == 3:
+            return parts[1]
         if parts[0] in {
             "gcfg",
             "gquiz",
@@ -3338,6 +3340,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 can_manage_games=can_manage_games,
                 is_member=is_member,
             )
+            if can_manage_games and game.status == "started":
+                board_buttons.extend(_keyboard_to_buttons(
+                    game_router_module._build_game_admin_controls(game),
+                    game=game,
+                    user_id=user.telegram_user_id,
+                    can_manage_games=can_manage_games,
+                    is_member=is_member,
+                ))
             private_buttons = _keyboard_to_buttons(
                 game_router_module._build_private_phase_keyboard(game, actor_user_id=user.telegram_user_id),
                 game=game,
@@ -3689,8 +3699,13 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         economy_repo: SqlAlchemyEconomyRepository,
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
-        if len(parts) != 3:
+        if len(parts) == 5 and parts[:2] == ["game", "advance"] and parts[4].isdigit():
+            if game.status != "started" or (game.phase, game.round_no) != (parts[3], int(parts[4])):
+                return False, "Этап игры уже изменился. Обновите экран управления."
+        elif len(parts) != 3:
             return False, "Некорректные параметры игрового действия."
+        elif parts[:2] == ["game", "advance"]:
+            return False, "Старая кнопка этапа недействительна. Обновите экран."
 
         prefix = parts[0]
         payload = parts[2]
@@ -3912,35 +3927,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if action in {"cancel", "advance", "reveal"} and not can_manage_games:
                 return False, "Недостаточно прав для управления игрой."
 
-            if action == "cancel":
-                game_router_module._cancel_phase_timer(game.game_id)
-                if game.kind == "quiz":
-                    await game_router_module._sync_quiz_feed_message(bot, game, question_no=None)
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(
-                    bot,
-                    finished_game,
-                    chat_settings,
-                    include_reveal=(finished_game.kind in {"spy", "mafia"}),
-                )
-                await game_router_module._send_game_feed_event(bot, finished_game, text="<b>Ведущий:</b> Игра остановлена ведущим.")
-                return True, "Игра завершена."
-
-            if action == "reveal":
-                if game.kind != "spy" or game.status != "started":
-                    return False, "Раскрытие доступно только в активной игре «Шпион»."
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-                await game_router_module._send_game_feed_event(
-                    bot,
-                    finished_game,
-                    text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.",
-                )
-                return True, "Роли раскрыты."
+            if action in {"cancel", "reveal"}:
+                return False, "Подтвердите действие в актуальной панели игры."
 
             if action == "advance":
                 if game.status != "started":
