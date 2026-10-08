@@ -2542,6 +2542,17 @@ class SqlAlchemyActivityRepository:
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)
 
+    async def has_open_interesting_fact_claim(self, *, chat_id: int) -> bool:
+        stmt = (
+            select(ChatInterestingFactDeliveryModel.id)
+            .where(
+                ChatInterestingFactDeliveryModel.chat_id == chat_id,
+                ChatInterestingFactDeliveryModel.status == "claimed",
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+
     async def get_latest_interesting_fact_claim_at(self, *, chat_id: int, statuses: Sequence[str]) -> datetime | None:
         stmt = select(func.max(ChatInterestingFactDeliveryModel.claimed_at)).where(
             ChatInterestingFactDeliveryModel.chat_id == chat_id,

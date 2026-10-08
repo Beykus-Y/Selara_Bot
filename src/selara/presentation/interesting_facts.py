@@ -285,6 +285,11 @@ class InterestingFactsScheduler:
                     extra={"chat_id": chat.telegram_chat_id, "abandoned_count": abandoned},
                 )
 
+            # One slot in flight per chat: a newer claim must not start while an older one may still deliver.
+            if await repo.has_open_interesting_fact_claim(chat_id=chat.telegram_chat_id):
+                await session.commit()
+                return None
+
             settings = await repo.get_chat_settings(chat_id=chat.telegram_chat_id)
             if settings is None or not settings.interesting_facts_enabled:
                 await session.commit()
@@ -361,13 +366,7 @@ class InterestingFactsScheduler:
         try:
             async with self._session_factory() as session:
                 repo = SqlAlchemyActivityRepository(session)
-                if status == "sent":
-                    await repo.upsert_chat_interesting_fact_state(
-                        chat=claim.chat,
-                        last_sent_at=claim.claimed_at,
-                        last_fact_id=claim.fact.fact_id,
-                        used_fact_ids=claim.used_fact_ids,
-                    )
+                # Claim the outcome first: a claim already abandoned by lease expiry must not touch chat state.
                 finished = await repo.finish_interesting_fact_claim(
                     claim_id=claim.claim_id,
                     status=status,
@@ -375,6 +374,13 @@ class InterestingFactsScheduler:
                     telegram_message_id=telegram_message_id,
                     error_summary=error_summary,
                 )
+                if finished and status == "sent":
+                    await repo.upsert_chat_interesting_fact_state(
+                        chat=claim.chat,
+                        last_sent_at=claim.claimed_at,
+                        last_fact_id=claim.fact.fact_id,
+                        used_fact_ids=claim.used_fact_ids,
+                    )
                 await session.commit()
             if not finished:
                 logger.warning(
