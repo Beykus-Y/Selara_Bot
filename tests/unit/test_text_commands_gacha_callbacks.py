@@ -549,6 +549,10 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert "Монеты бота" in text
     assert "🪙 Монеты бота: <b>200 942</b>" in text
     assert "💱 Курс: <b>1</b> валюта = <b>10</b> монет" in text
+    assert "«гача генш» или «гача хср» в чате" in text
+    assert "«моя гача генш» или «моя гача хср»" in text
+    assert "⬜ обычная, 🟦 редкая, 🟪 эпическая, 🟨 легендарная, 🟥 мифическая" in text
+    assert "/help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR" in text
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
     assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None
@@ -562,6 +566,106 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert markup.inline_keyboard[3][0].icon_custom_emoji_id is None
     assert "Вкл" in markup.inline_keyboard[4][0].text
     assert markup.inline_keyboard[4][0].callback_data == "gacha:animtoggle:u1"
+
+
+@pytest.mark.asyncio
+async def test_gacha_sell_callback_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    query = _DummyQuery(
+        data=text_commands._gacha_sell_callback_data(banner="genshin", pull_id=42, owner_user_id=99),
+        user_id=1,
+    )
+    sell_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "sell_gacha_pull", sell_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    sell_mock.assert_not_awaited()
+    assert query.message.edit_reply_markup_calls == []
+    assert query.answers == [("Эта кнопка не для вас.", True)]
+
+
+@pytest.mark.asyncio
+async def test_gacha_currency_callback_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    query = _DummyQuery(
+        data=text_commands._gacha_currency_buy_callback_data(
+            banner="genshin", amount=160, owner_user_id=99
+        ),
+        user_id=1,
+    )
+    buy_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "buy_gacha_currency_with_coins", buy_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    buy_mock.assert_not_awaited()
+    assert query.answers == [("Эта кнопка не для вас.", True)]
+
+
+@pytest.mark.asyncio
+async def test_gacha_sell_callback_rejects_second_press_while_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = text_commands._gacha_sell_callback_data(banner="genshin", pull_id=42, owner_user_id=1)
+    first_query = _DummyQuery(data=data, user_id=1)
+    second_query = _DummyQuery(data=data, user_id=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def sell(*args, **kwargs):
+        _ = (args, kwargs)
+        started.set()
+        await release.wait()
+        return SimpleNamespace(message="Продажа: +54 примогемов. Баланс: 120.")
+
+    sell_mock = AsyncMock(side_effect=sell)
+    monkeypatch.setattr(text_commands, "sell_gacha_pull", sell_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    first_task = asyncio.create_task(
+        text_commands.gacha_callback(
+            first_query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+            activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+        )
+    )
+    await started.wait()
+    await text_commands.gacha_callback(
+        second_query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+    release.set()
+    await first_task
+
+    # One sale only: the second tap is refused before it reaches the gacha service.
+    sell_mock.assert_awaited_once()
+    assert second_query.answers == [("Запрос уже обрабатывается.", True)]
+
+
+@pytest.mark.asyncio
+async def test_gacha_sell_callback_shows_already_sold_error_without_touching_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = _DummyQuery(data="gacha:sell:genshin:42:u1", user_id=1)
+    sell_mock = AsyncMock(side_effect=GachaUseCaseError("Эта копия уже продана."))
+    monkeypatch.setattr(text_commands, "sell_gacha_pull", sell_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    assert query.answers == [("Эта копия уже продана.", True)]
+    assert query.message.edit_reply_markup_calls == []
 
 
 def _profile_with_balance(total_primogems: int) -> SimpleNamespace:
@@ -580,6 +684,41 @@ def _profile_with_balance(total_primogems: int) -> SimpleNamespace:
     )
 
 
+def test_gacha_sell_button_shows_sale_price_before_tap() -> None:
+    response = SimpleNamespace(pull_id=5, sell_offer=SimpleNamespace(sale_price=30))
+    markup = text_commands._build_gacha_pull_markup(response=response, banner="hsr", owner_user_id=1)
+    no_offer = text_commands._build_gacha_pull_markup(
+        response=SimpleNamespace(pull_id=5, sell_offer=None), banner="hsr", owner_user_id=1
+    )
+
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].text == "Продать за 30 валюты"
+    assert no_offer is None
+
+
+def test_gacha_subscription_prompt_cooldown_starts_only_after_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_commands, "_gacha_subscription_prompt_sent_at", {})
+
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+    # A failed send never marks the prompt, so the next tap still gets the link.
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+
+    text_commands._mark_gacha_subscription_prompt_sent(chat_id=-100, user_id=1)
+    assert not text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=1)
+    assert text_commands._gacha_subscription_prompt_is_due(chat_id=-100, user_id=2)
+
+
+def test_gacha_subscription_prompt_marking_prunes_expired_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    expired_at = text_commands.time.monotonic() - text_commands._GACHA_SUBSCRIPTION_PROMPT_COOLDOWN - 1
+    sent_at = {(-200, 2): expired_at}
+    monkeypatch.setattr(text_commands, "_gacha_subscription_prompt_sent_at", sent_at)
+
+    text_commands._mark_gacha_subscription_prompt_sent(chat_id=-100, user_id=1)
+
+    assert (-200, 2) not in sent_at
+    assert (-100, 1) in sent_at
+
+
 def test_gacha_currency_button_shows_cost_in_coins() -> None:
     assert text_commands._gacha_currency_button_label("genshin") == "+160 примогемов за 1600 монет"
     assert text_commands._gacha_currency_button_label("hsr") == "+160 нефрита за 1600 монет"
@@ -593,8 +732,52 @@ def test_gacha_info_section_hints_top_up_when_balance_below_pull_price() -> None
         banner="genshin", response=_profile_with_balance(160), use_custom_emojis=False
     )
 
-    assert "Платная крутка: 160 валюты, у вас <b>50</b>. Пополнить можно кнопкой ниже." in low
+    assert "Платная крутка за 160 валюты, у вас <b>50</b>." in low
+    assert "Бесплатная крутка от валюты не зависит" in low
     assert "Платная крутка" not in enough
+
+
+def test_gacha_info_section_shows_first_pull_hint_only_for_empty_collection() -> None:
+    empty = text_commands._render_gacha_info_section(
+        banner="genshin", response=_profile_with_balance(500), use_custom_emojis=False
+    )
+    filled_profile = _profile_with_balance(500)
+    filled_profile.unique_cards = 1
+    filled = text_commands._render_gacha_info_section(
+        banner="genshin", response=filled_profile, use_custom_emojis=False
+    )
+    hsr_empty = text_commands._render_gacha_info_section(
+        banner="hsr", response=_profile_with_balance(500), use_custom_emojis=False
+    )
+
+    assert "Коллекция пока пуста: начните с бесплатной крутки командой «гача генш»" in empty
+    assert "Коллекция пока пуста" not in filled
+    assert "командой «гача хср»" in hsr_empty
+
+
+@pytest.mark.asyncio
+async def test_gacha_subscription_prompt_link_is_not_repeated_on_every_tap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(text_commands, "_gacha_subscription_prompt_sent_at", {})
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=False))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+    first = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    second = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+
+    for query in (first, second):
+        await text_commands.gacha_callback(
+            query,
+            bot=AsyncMock(),
+            settings=SimpleNamespace(),
+            economy_repo=object(),
+            activity_repo=activity_repo,
+            chat_settings=_CHAT_SETTINGS,
+        )
+
+    # The alert is shown on every tap, the chat link only once per chat and user.
+    assert first.answers == [("Для гачи нужно подписаться на канал @SelaraBot_Chanel", True)]
+    assert second.answers == [("Для гачи нужно подписаться на канал @SelaraBot_Chanel", True)]
+    assert len(first.message.answer_calls) == 1
+    assert second.message.answer_calls == []
 
 
 @pytest.mark.asyncio
