@@ -2011,23 +2011,23 @@ def _build_game_admin_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
             advance_text = "⚖️ Подвести голоса"
         elif game.phase == "day_execution_confirm":
             advance_text = "☠️ Закрыть казнь"
-        builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
+        builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "quiz" and game.phase == "freeplay":
-        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "category_pick":
-        builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "zlobcards" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "zlobcards" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "bunker" and game.phase == "bunker_reveal":
-        builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
     if game.kind == "bunker" and game.phase == "bunker_vote":
-        builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
 
     if game.kind == "spy" and game.phase == "freeplay":
         builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
@@ -4330,11 +4330,19 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    phase_guard: tuple[str, int] | None = None
+    if len(parts) == 5 and parts[1] == "advance" and parts[4].isdigit():
+        _, action, game_id, expected_phase, expected_round = parts
+        phase_guard = (expected_phase, int(expected_round))
+    elif len(parts) == 3:
+        _, action, game_id = parts
+    else:
         await query.answer("Некорректные параметры", show_alert=False)
         return
-
-    _, action, game_id = parts
+    if action == "advance" and phase_guard is None:
+        # Legacy buttons cannot advance an unknown/current phase by accident.
+        await query.answer("Кнопка управления устарела. Откройте /gamecontrol.", show_alert=True)
+        return
     if action == "new":
         await query.answer()
         return
@@ -4346,6 +4354,12 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
     if query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
+        return
+    if phase_guard is not None and (
+        game.status != "started"
+        or (game.phase, game.round_no) != phase_guard
+    ):
+        await query.answer("Этап уже изменился. Откройте /gamecontrol заново.", show_alert=True)
         return
 
     actor_id = query.from_user.id
