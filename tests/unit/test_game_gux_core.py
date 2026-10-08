@@ -287,3 +287,35 @@ async def test_confirmed_lobby_cancel_is_idempotent_without_prompt(monkeypatch):
         )
     assert (await store.get_game(lobby.game_id)).status == "finished"
     b.send_message.assert_not_awaited()
+
+
+def test_quiz_admin_advance_button_is_question_scoped():
+    game = GroupGame(
+        game_id="quiz1", kind="quiz", chat_id=-100, chat_title="chat",
+        owner_user_id=1, players={1: "Owner", 2: "User"},
+        status="started", phase="freeplay", round_no=1,
+        quiz_current_question_index=0,
+    )
+    first = callbacks(game_router._build_game_admin_controls(game))
+    game.quiz_current_question_index = 1
+    second = callbacks(game_router._build_game_admin_controls(game))
+    assert "game:advance:quiz1:freeplay.0:1" in first
+    assert "game:advance:quiz1:freeplay.1:1" in second
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_quiz_stop_token_cannot_finish_later_question_in_same_round():
+    store, game = await started_store("quiz")
+    original_index = game.quiz_current_question_index
+    assert original_index is not None
+    game.quiz_current_question_index = original_index + 1
+    result, status = await store.finish_if_current(
+        game_id=game.game_id, expected_phase=game.phase,
+        expected_round=game.round_no,
+        expected_quiz_question_index=original_index,
+        winner_text="cancelled",
+    )
+    assert status == "stale"
+    assert result is game
+    assert (await store.get_game(game.game_id)).status == "started"
