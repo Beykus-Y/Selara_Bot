@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.achievements import (
@@ -33,7 +35,7 @@ from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
 logger = logging.getLogger(__name__)
 
-# A row moves to the dead-letter table after this many failed applies.
+# A row moves to the dead-letter table after this many failed applies. Database errors do not count; see below.
 DEFAULT_MAX_ROW_ATTEMPTS = 5
 # The backlog is logged at most this often. It is also logged whenever a row is parked.
 _BACKLOG_LOG_INTERVAL_SECONDS = 300
@@ -43,6 +45,19 @@ _BACKLOG_ALERT_AGE_SECONDS = 600
 DEFAULT_CLOSE_GRACE_SECONDS = 5.0
 # A cancelled flusher, and the final backlog read, get this long to finish before close() stops waiting for them.
 _CLOSE_UNWIND_SECONDS = 1.0
+# Errors that come from the database or its connection, not from the row. The same row can apply on a later flush.
+_TRANSIENT_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    OperationalError,
+    InterfaceError,
+    PoolTimeoutError,
+    ConnectionError,
+    TimeoutError,
+)
+# PostgreSQL SQLSTATEs for contention, a cancelled statement, or a server that is going away: serialization
+# failure, deadlock, lock not available, query cancelled, and the shutdown codes. Classes 08 (connection
+# exception) and 53 (insufficient resources) are transient as a whole.
+_TRANSIENT_SQLSTATES = frozenset({"40001", "40P01", "55P03", "57014", "57P01", "57P02", "57P03"})
+_TRANSIENT_SQLSTATE_CLASSES = ("08", "53")
 
 
 class _BatchFailed(Exception):
@@ -74,13 +89,28 @@ def _seconds_since(moment: datetime | None) -> float | None:
     return (datetime.now(timezone.utc) - moment).total_seconds()
 
 
+def _is_transient_database_error(exc: BaseException) -> bool:
+    """True when the database failed, not the row. Any other failure is counted against the row."""
+    if isinstance(exc, _TRANSIENT_ERROR_TYPES):
+        return True
+    if not isinstance(exc, DBAPIError):
+        return False
+    if exc.connection_invalidated:
+        return True
+    sqlstate = getattr(exc.orig, "sqlstate", None)
+    return isinstance(sqlstate, str) and (
+        sqlstate in _TRANSIENT_SQLSTATES or sqlstate.startswith(_TRANSIENT_SQLSTATE_CLASSES)
+    )
+
+
 class ActivityBatcher:
     """Aggregates tracked group messages into activity counters and the message archive.
 
     `enqueue_message` writes each event to `activity_event_inbox` and returns only after that commit, so a
     crash cannot lose it. A background task applies inbox rows in batches. Each batch is aggregated and its
     rows are deleted in one transaction. If a batch fails, its rows are applied one at a time, so one bad row
-    cannot hold back the others. A row that fails `max_row_attempts` times moves to the dead-letter table.
+    cannot hold back the others. A row that fails `max_row_attempts` times moves to the dead-letter table. A
+    database error is not the row's fault, so it is not counted: the rows wait for a later flush.
     """
 
     def __init__(
@@ -309,6 +339,14 @@ class ActivityBatcher:
             try:
                 result = await self._apply_one_row(row.id)
             except Exception as exc:
+                if _is_transient_database_error(exc):
+                    # The database failed, not the row. Stop here so the rest wait uncounted for the backoff.
+                    logger.warning(
+                        "Activity inbox database error; the rows wait for the next flush",
+                        extra={"inbox_row_id": row.id, "inbox_error": type(exc).__name__},
+                    )
+                    transient = True
+                    break
                 try:
                     counted = await self._record_row_failure(row, exc)
                 except Exception:
