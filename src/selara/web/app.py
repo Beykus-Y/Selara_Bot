@@ -1767,6 +1767,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 continue
 
             callback_data = button.get("callback_data", "")
+            # Telegram-only navigation opens a message in chat; the web
+            # dashboard provides its own navigation and controls.
+            if callback_data.startswith(("game:manage:", "game:lrules:")):
+                continue
             if callback_data.startswith("gbredcat:"):
                 grouped["category_buttons"].append(button)
                 continue
@@ -3346,7 +3350,29 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 is_member=is_member,
             )
             grouped_board_buttons = _group_game_buttons(game, board_buttons)
-            manage_buttons = grouped_board_buttons["manage_buttons"]
+            manage_buttons = list(grouped_board_buttons["manage_buttons"])
+            if game.status == "started" and can_manage_games:
+                # GUX-03 moved manager-only actions off the shared Telegram
+                # board. The authenticated web panel remains role-filtered
+                # and must explicitly display that separate manager surface.
+                web_manager_buttons = _keyboard_to_buttons(
+                    game_router_module._build_game_manager_controls(game),
+                    game=game,
+                    user_id=user.telegram_user_id,
+                    can_manage_games=can_manage_games,
+                    is_member=is_member,
+                )
+                for button in web_manager_buttons:
+                    if button.get("callback_data", "").startswith("game:adv:"):
+                        # Existing web action router speaks the legacy
+                        # three-part action; only its web transport is
+                        # adapted, never the Telegram callback contract.
+                        button = {
+                            **button,
+                            "callback_data": f"game:advance:{game.game_id}",
+                            "variant": "primary",
+                        }
+                    manage_buttons.append(button)
             if game.kind == "spy":
                 manage_buttons = [
                     button

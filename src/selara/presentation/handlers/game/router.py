@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+from time import time
 from html import escape
 from typing import Any
 
@@ -1984,6 +1985,65 @@ def _add_stepper_row(
     lobby_row_sizes.append(3)
 
 
+def _build_lifecycle_confirmation_keyboard(
+    *, game: GroupGame, action: str, issued_at: int,
+) -> InlineKeyboardMarkup:
+    # The game board stays intact; phase and round are verified at commit.
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Подтвердить завершение" if action == "stop" else "🔎 Подтвердить раскрытие",
+        callback_data=f"game:{'sok' if action == 'stop' else 'rok'}:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.button(
+        text="← Назад к игре",
+        callback_data=f"game:back:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
+    """Separate phase controls from participants' shared action keyboard."""
+    if game.status != "started":
+        return None
+    builder = InlineKeyboardBuilder()
+    if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
+        advance_text = "⏭ Следующая фаза"
+        if game.phase == "night":
+            advance_text = "🌅 Завершить ночь"
+        elif game.phase == "day_discussion":
+            advance_text = "🗳 Открыть голосование"
+        elif game.phase == "day_vote":
+            advance_text = "⚖️ Подвести голоса"
+        elif game.phase == "day_execution_confirm":
+            advance_text = "☠️ Закрыть казнь"
+        builder.button(text=advance_text, callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "quiz" and game.phase == "freeplay":
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "category_pick":
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "zlobcards" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "zlobcards" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bunker" and game.phase == "bunker_vote":
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+
+    if game.kind == "spy" and game.phase == "freeplay":
+        builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
+
+    builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboardMarkup | None:
     builder = InlineKeyboardBuilder()
 
@@ -2052,41 +2112,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
         return builder.as_markup()
 
     elif game.status == "started":
-        if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
-            advance_text = "⏭ Следующая фаза"
-            if game.phase == "night":
-                advance_text = "🌅 Завершить ночь"
-            elif game.phase == "day_discussion":
-                advance_text = "🗳 Открыть голосование"
-            elif game.phase == "day_vote":
-                advance_text = "⚖️ Подвести голоса"
-            elif game.phase == "day_execution_confirm":
-                advance_text = "☠️ Закрыть казнь"
-            builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "quiz" and game.phase == "freeplay":
-            builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "category_pick":
-            builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_reveal":
-            builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_vote":
-            builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "dice" and game.phase == "freeplay":
             builder.button(text="🎲 Бросить", callback_data=f"gdice:{game.game_id}:roll")
-
         if game.kind == "spy" and game.phase == "freeplay":
             builder.button(text="📍 Сводка голосов", callback_data=f"gspy:{game.game_id}:noop")
-            builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
-
-        builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
 
     elif game.status == "finished":
         builder.button(text="🔁 Ещё раз", callback_data=f"game:rematch:{game.game_id}")
@@ -2147,6 +2176,17 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             for button in row:
                 builder.add(button)
 
+    if game.status == "started":
+        # All primary actions (votes, answers, private links) precede this
+        # separate footer. Admin actions are reached via a checked surface.
+        footer = InlineKeyboardBuilder()
+        footer.button(text="❓ Как играть", callback_data=f"game:lrules:{game.game_id}")
+        footer.button(text="⚙️ Ведущему", callback_data=f"game:manage:{game.game_id}")
+        footer.adjust(2)
+        builder.adjust(2)
+        return InlineKeyboardMarkup(
+            inline_keyboard=[*builder.as_markup().inline_keyboard, *footer.as_markup().inline_keyboard],
+        )
     if not builder.buttons:
         return None
 
@@ -3798,6 +3838,39 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
     await GAME_STORE.set_message_id(game_id=game.game_id, message_id=sent.message_id)
 
 
+@router.message(Command("gameboard"))
+async def game_board_command(message: Message, bot: Bot, chat_settings: ChatSettings) -> None:
+    """Recover the current public board without requiring manage_games.
+
+    A reply to the existing board is a Telegram-native jump target. Do not
+    clone active keyboards or expose private hands/roles. If the board was
+    deleted, the existing safe board helper recreates its single anchor.
+    """
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Игровая доска доступна в групповом чате.")
+        return
+
+    game = await GAME_STORE.get_active_game_for_chat(chat_id=message.chat.id)
+    if game is None:
+        await message.answer("Сейчас в этом чате нет активной игры. Ведущий может создать её через /game.")
+        return
+
+    if game.message_id is not None:
+        try:
+            await message.answer(
+                f"🎲 <b>{escape(GAME_DEFINITIONS[game.kind].title)}</b> — "
+                f"{escape(_phase_title(game))}. Нажмите на сообщение, на которое отвечает бот, чтобы перейти к доске.",
+                parse_mode="HTML",
+                reply_to_message_id=game.message_id,
+            )
+            return
+        except TelegramBadRequest:
+            # Message may have been deleted, moved or become unreachable.
+            pass
+
+    await _safe_edit_or_send_game_board(bot, game, chat_settings)
+
+
 @router.callback_query(F.data.startswith("game:new:"))
 async def game_new_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
     if query.message is None or not query.data or query.from_user is None:
@@ -4276,11 +4349,24 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) not in {3, 5, 6}:
         await query.answer("Некорректные параметры", show_alert=False)
         return
 
-    _, action, game_id = parts
+    _, action, game_id = parts[:3]
+    confirmation = parts[3:] if len(parts) == 6 else None
+    versioned_advance = len(parts) == 5 and action == "adv"
+    if len(parts) == 5 and not versioned_advance:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+    if confirmation is not None and action not in {"sok", "rok", "back"}:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+    if confirmation is None and action in {"sok", "rok", "back"}:
+        await query.answer("Подтверждение устарело. Откройте управление игрой заново.", show_alert=True)
+        return
+    if versioned_advance:
+        action = "advance"
     if action == "new":
         await query.answer()
         return
@@ -4293,6 +4379,17 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
     if query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
+
+    if versioned_advance:
+        expected_phase, expected_round_raw = parts[3:]
+        if (
+            not expected_round_raw.isdecimal()
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != int(expected_round_raw)
+        ):
+            await query.answer("Фаза игры изменилась. Найдите текущую доску через /gameboard.", show_alert=True)
+            return
 
     actor_id = query.from_user.id
     actor = UserSnapshot(
@@ -4356,6 +4453,22 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if game.status != "finished":
             await query.answer("Эта игра ещё не завершена", show_alert=False)
             return
+        # A rematch creates a new game.  Recheck the same permission as /game
+        # on every press, including old keyboards and former lobby owners.
+        allowed = await _actor_can_manage_games(
+            activity_repo,
+            chat_id=game.chat_id,
+            chat_type=query.message.chat.type,
+            chat_title=query.message.chat.title,
+            user=actor,
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            await query.answer("Недостаточно прав для запуска игр в этом чате.", show_alert=True)
+            return
+        if game.kind not in GAME_LAUNCHABLE_KINDS:
+            await query.answer("Эта игра больше недоступна для новых запусков.", show_alert=True)
+            return
 
         owner_label = await _resolve_chat_player_label(
             activity_repo,
@@ -4405,7 +4518,14 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
     if action == "lrules":
         if game.status != "lobby":
-            await query.answer("Правила доступны до старта игры — используйте кнопку «Моя роль»/доску игры.", show_alert=True)
+            # Rules are read-only during play; never overwrite a live board.
+            await bot.send_message(
+                chat_id=game.chat_id,
+                text=_render_game_rules_text(game.kind),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            await query.answer("Правила отправлены отдельно — игра продолжается.", show_alert=False)
             return
         try:
             await bot.edit_message_text(
@@ -4426,7 +4546,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer()
         return
 
-    if action in {"cancel", "advance", "reveal"}:
+    if action in {"cancel", "advance", "reveal", "manage", "sok", "rok", "back"}:
         allowed = await _actor_can_manage_games(
             activity_repo,
             chat_id=game.chat_id,
@@ -4438,6 +4558,28 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if not allowed:
             await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
             return
+
+    if action == "manage" or (action == "advance" and not versioned_advance):
+        if game.status != "started":
+            await query.answer("Эта партия не активна. Найдите актуальную доску.", show_alert=True)
+            return
+        controls = _build_game_manager_controls(game)
+        if controls is None:
+            await query.answer("Для этого этапа нет управления.", show_alert=False)
+            return
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text=(
+                f"<b>⚙️ Ведущему: {escape(GAME_DEFINITIONS[game.kind].title)}</b>\n"
+                f"<b>Этап:</b> {escape(_phase_title(game))}\n"
+                "Только пользователи с правом управления играми могут менять этап или завершать партию."
+            ),
+            parse_mode="HTML",
+            reply_markup=controls,
+            disable_notification=True,
+        )
+        await query.answer("Кнопки управления открыты отдельно.", show_alert=False)
+        return
 
     if action == "start":
         can_start = await _actor_can_start_game(
@@ -4763,45 +4905,131 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer("Сейчас нечего переключать", show_alert=False)
         return
 
+    if action in {"sok", "rok", "back"}:
+        assert confirmation is not None
+        expected_phase, expected_round_raw, issued_raw = confirmation
+        if not expected_round_raw.isdecimal() or not issued_raw.isdecimal():
+            await query.answer("Некорректное подтверждение", show_alert=True)
+            return
+        expected_round = int(expected_round_raw)
+        issued_at = int(issued_raw)
+        # Dismissing a confirmation is always harmless, even if its phase
+        # has ended or the time window expired.
+        if action == "back":
+            try:
+                await bot.edit_message_text(
+                    chat_id=game.chat_id,
+                    message_id=query.message.message_id,
+                    text="Подтверждение отменено. Основная доска игры не изменена.",
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+            await query.answer("Отменено", show_alert=False)
+            return
+        now = time()
+        if (
+            now - issued_at > 180 or now < issued_at - 30
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != expected_round
+        ):
+            await query.answer("Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.", show_alert=True)
+            return
+        if action == "rok" and game.kind != "spy":
+            await query.answer("Раскрытие доступно только в игре «Шпион».", show_alert=True)
+            return
+
+        # The transition is protected by the GameStore per-game lock. A
+        # concurrent click or phase switch cannot finalize the wrong state.
+        previous_quiz_feed_id = game.quiz_feed_message_id if action == "sok" and game.kind == "quiz" else None
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text=(
+                "Игра завершена по решению ведущего."
+                if action == "rok" else "Игра остановлена ведущим."
+            ),
+            expected_status="started",
+            expected_phase=expected_phase,
+            expected_round_no=expected_round,
+        )
+        if finished_game is None:
+            await query.answer("Игра уже изменилась или завершена. Повторное действие не выполнено.", show_alert=True)
+            return
+        _cancel_phase_timer(game.game_id)
+        # A successful confirmation must not leave actionable stop/reveal
+        # buttons behind in the group. Failure to edit cannot undo finish.
+        try:
+            await bot.edit_message_text(
+                chat_id=game.chat_id,
+                message_id=query.message.message_id,
+                text="✅ Роли раскрыты, партия завершена." if action == "rok" else "✅ Партия завершена ведущим.",
+            )
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        if previous_quiz_feed_id is not None:
+            try:
+                await bot.delete_message(chat_id=game.chat_id, message_id=previous_quiz_feed_id)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+
+        await _safe_edit_or_send_game_board(
+            bot, finished_game, chat_settings,
+            include_reveal=(action == "rok" or finished_game.kind in {"spy", "mafia"}),
+        )
+        if action == "rok":
+            event_text = "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game)
+        else:
+            event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
+            if finished_game.kind in {"spy", "mafia"}:
+                event_text += "\n" + _render_roles_reveal(finished_game)
+        await _send_game_feed_event(bot, finished_game, text=event_text)
+        await query.answer("Роли раскрыты" if action == "rok" else "Игра завершена", show_alert=False)
+        return
+
     if action == "reveal":
         if game.kind != "spy" or game.status != "started":
             await query.answer("Раскрытие доступно для активной игры «Шпион»", show_alert=False)
             return
-
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
-            return
-
-        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-        await _send_game_feed_event(
-            bot,
-            finished_game,
-            text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game),
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text="<b>Раскрыть роли?</b> Это немедленно завершит «Шпиона» и покажет роли всем участникам.",
+            parse_mode="HTML",
+            reply_markup=_build_lifecycle_confirmation_keyboard(
+                game=game, action="reveal", issued_at=int(time()),
+            ),
+            disable_notification=True,
         )
-        await query.answer("Роли раскрыты", show_alert=False)
+        await query.answer("Подтвердите раскрытие в отдельном сообщении.", show_alert=False)
         return
 
     if action == "cancel":
-        _cancel_phase_timer(game.game_id)
-        if game.kind == "quiz":
-            await _sync_quiz_feed_message(bot, game, question_no=None)
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
+        if game.status == "started":
+            await bot.send_message(
+                chat_id=game.chat_id,
+                text="<b>Завершить партию?</b> Текущая игра остановится, а результат будет показан в чате.",
+                parse_mode="HTML",
+                reply_markup=_build_lifecycle_confirmation_keyboard(
+                    game=game, action="stop", issued_at=int(time()),
+                ),
+                disable_notification=True,
+            )
+            await query.answer("Подтвердите завершение в отдельном сообщении.", show_alert=False)
+            return
+        if game.status != "lobby":
+            await query.answer("Игра уже завершена. Ничего не изменено.", show_alert=False)
             return
 
-        await _safe_edit_or_send_game_board(
-            bot,
-            finished_game,
-            chat_settings,
-            include_reveal=(finished_game.kind in {"spy", "mafia"}),
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text="Лобби отменено ведущим.",
+            expected_status="lobby",
+            expected_phase="lobby",
         )
-        event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
-        if finished_game.kind in {"spy", "mafia"}:
-            event_text = f"{event_text}\n{_render_roles_reveal(finished_game)}"
-        await _send_game_feed_event(bot, finished_game, text=event_text)
-        await query.answer("Игра завершена", show_alert=False)
+        if finished_game is None:
+            await query.answer("Лобби уже изменилось. Действие не выполнено.", show_alert=True)
+            return
+        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+        await query.answer("Лобби отменено", show_alert=False)
         return
 
     await query.answer("Неизвестное действие", show_alert=False)
