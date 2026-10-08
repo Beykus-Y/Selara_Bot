@@ -96,6 +96,11 @@ def test_aggregate_lines_skip_unknown_events() -> None:
     assert lines == ["Лиза гладил(а) меня 5 раз(а) за неделю", "Вася обижал(а) меня 1 раз(а) за неделю"]
 
 
+def test_aggregate_lines_uses_person_label_for_the_person_only() -> None:
+    lines = d.aggregate_lines([(42, "pat", 2)], person_label=lambda uid: f"[{uid}]")
+    assert lines == ["[42] гладил(а) меня 2 раз(а) за неделю"]
+
+
 def test_parse_notes_keeps_two_clean_lines() -> None:
     raw = "1. Мне понравился мячик\n- Лиза смешно шутит\n@spam смотри t.me/x\nтретья заметка"
     assert d.parse_notes(raw) == ["Мне понравился мячик", "Лиза смешно шутит"]

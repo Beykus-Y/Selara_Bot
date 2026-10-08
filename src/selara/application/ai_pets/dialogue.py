@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence, TypeVar
 
 from selara.application.ai_character import sanitize_profile_text
 from selara.application.ai_pets import mechanics as m
@@ -168,8 +168,15 @@ def build_pet_messages(context: PetContext, *, user_text: str) -> list[dict]:
     ]
 
 
-def aggregate_lines(rows: Iterable[tuple[str, str, int]]) -> list[str]:
-    """Turn ``(person, event_type, count)`` of the last week into the pet's own memories."""
+_Person = TypeVar("_Person")
+
+
+def aggregate_lines(rows: Iterable[tuple[_Person, str, int]], *, person_label: Callable[[_Person], str] = str) -> list[str]:
+    """Turn ``(person, event_type, count)`` of the last week into the pet's own memories.
+
+    ``person_label`` renders the person in the line: plain text for the model prompt,
+    a ready user link for ``/pet_memory`` (the caller escapes it, not this function).
+    """
     verbs = {
         "pat": "гладил(а) меня",
         "play": "играл(а) со мной",
@@ -189,7 +196,7 @@ def aggregate_lines(rows: Iterable[tuple[str, str, int]]) -> list[str]:
         verb = verbs.get(event_type)
         if verb is None or count <= 0:
             continue
-        lines.append(f"{person} {verb} {count} раз(а) за неделю")
+        lines.append(f"{person_label(person)} {verb} {count} раз(а) за неделю")
     return lines
 
 

@@ -182,3 +182,37 @@ async def test_traits_command_only_shows_and_memory_is_per_chat(monkeypatch: pyt
     private = SimpleNamespace(from_user=SimpleNamespace(id=5), chat=SimpleNamespace(id=5, type="private"), answer=AsyncMock())
     await ai_pets.pet_memory_command(private, None, None, None)
     assert "в той группе" in private.answer.await_args.args[0]
+
+
+async def test_pet_memory_keeps_user_links_and_escapes_names_and_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    pet = SimpleNamespace(id=1, name="<b>Мурка</b>", emoji="🐱")
+    service = SimpleNamespace(get_owner_pet=AsyncMock(return_value=pet))
+    monkeypatch.setattr(ai_pets, "_service", lambda *a, **k: service)
+    dialogue_repo = SimpleNamespace(
+        notes=AsyncMock(return_value=["Любит <a href='x'>мяч</a>"]),
+        weekly_aggregates=AsyncMock(return_value=[(42, "pat", 3), (43, "hurt", 1)]),
+    )
+    monkeypatch.setattr(ai_pets, "AiPetDialogueRepository", lambda session: dialogue_repo)
+    names = {42: "Лиза & <Вася>"}
+    activity_repo = SimpleNamespace(get_chat_display_name=AsyncMock(side_effect=lambda chat_id, user_id: names.get(user_id)))
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=5), chat=SimpleNamespace(id=-1, type="supergroup"), answer=AsyncMock()
+    )
+    await ai_pets.pet_memory_command(message, None, None, activity_repo)
+    text = message.answer.await_args.args[0]
+    assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
+    assert "&lt;a" not in text and "&amp;lt;" not in text
+    assert '• <a href="tg://user?id=42">Лиза &amp; &lt;Вася&gt;</a> гладил(а) меня 3 раз(а) за неделю' in text
+    assert '• <a href="tg://user?id=43">хозяин</a> обижал(а) меня 1 раз(а) за неделю' in text
+    assert "<b>&lt;b&gt;Мурка&lt;/b&gt;</b>" in text
+    assert "• Любит &lt;a href=&#x27;x&#x27;&gt;мяч&lt;/a&gt;" in text
+
+
+async def test_owner_label_escapes_display_name() -> None:
+    from unittest.mock import AsyncMock
+
+    activity_repo = SimpleNamespace(get_chat_display_name=AsyncMock(return_value="<i>Вася</i>"))
+    label = await ai_pets._owner_label(activity_repo, chat_id=-1, user_id=9)
+    assert label == '<a href="tg://user?id=9">&lt;i&gt;Вася&lt;/i&gt;</a>'

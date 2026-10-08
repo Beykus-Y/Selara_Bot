@@ -121,12 +121,18 @@ def _actor_link(user) -> str:
     return format_user_link(user_id=user.id, label=label)
 
 
-async def _owner_label(activity_repo, *, chat_id: int, user_id: int) -> str:
+async def _owner_name(activity_repo, *, chat_id: int, user_id: int) -> str:
+    """Plain display name, not escaped: escape it where it is put into HTML."""
     try:
         label = await activity_repo.get_chat_display_name(chat_id=chat_id, user_id=user_id)
     except Exception:  # display only; never fail the command over a name
         label = None
-    return format_user_link(user_id=user_id, label=label or "хозяин")
+    return label or "хозяин"
+
+
+async def _owner_label(activity_repo, *, chat_id: int, user_id: int) -> str:
+    name = await _owner_name(activity_repo, chat_id=chat_id, user_id=user_id)
+    return format_user_link(user_id=user_id, label=name)
 
 
 def pet_keyboard(pet_id: int) -> InlineKeyboardMarkup:
@@ -367,13 +373,15 @@ async def pet_memory_command(message: Message, db_session, economy_repo, activit
     notes = await repo.notes(pet_id=pet.id, chat_id=message.chat.id)
     rows = await repo.weekly_aggregates(pet_id=pet.id, chat_id=message.chat.id, now=_now())
     names: dict[int, str] = {}
-    aggregates = []
-    for actor, event_type, count in rows:
+    for actor, _event_type, _count in rows:
         if actor not in names:
-            names[actor] = await _owner_label(activity_repo, chat_id=message.chat.id, user_id=actor)
-        aggregates.append((names[actor], event_type, count))
+            names[actor] = await _owner_name(activity_repo, chat_id=message.chat.id, user_id=actor)
+    # Each line is ready HTML: the person is a user link and the rest is fixed text, so it must not be escaped again.
+    memories = dialogue_rules.aggregate_lines(
+        rows, person_label=lambda actor: format_user_link(user_id=actor, label=names[actor])
+    )
     lines = [f"{pet.emoji} <b>{escape(pet.name)}</b> помнит в этом чате:"]
-    lines.extend("• " + escape(line) for line in dialogue_rules.aggregate_lines(aggregates))
+    lines.extend("• " + line for line in memories)
     lines.extend("• " + escape(note) for note in notes)
     if len(lines) == 1:
         lines.append("Пока ничего особенного.")
