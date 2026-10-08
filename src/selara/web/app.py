@@ -6015,7 +6015,99 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             success = False
             message = "Неизвестная операция."
 
-            if callback_data:
+            if callback_data.startswith(("game:cancel:", "game:reveal:")) and game.status == "started":
+                if not can_manage_games:
+                    await session.commit()
+                    message = "Недостаточно прав для управления игрой."
+                    return _json_result(ok=False, message=message, status_code=403) if prefers_json else _redirect(
+                        _with_message(redirect_base_path, key="error", text=message)
+                    )
+                action = callback_data.split(":")[1]
+                if action == "reveal" and game.kind != "spy":
+                    await session.commit()
+                    message = "Раскрытие доступно только в «Шпионе»."
+                    return _json_result(ok=False, message=message, status_code=400) if prefers_json else _redirect(
+                        _with_message(redirect_base_path, key="error", text=message)
+                    )
+                now = game_router_module.time.monotonic()
+                for key, request_info in list(game_router_module._GAME_CONFIRM_REQUESTS.items()):
+                    if request_info[6] <= now:
+                        game_router_module._GAME_CONFIRM_REQUESTS.pop(key, None)
+                token = game_router_module.secrets.token_urlsafe(9)
+                game_router_module._GAME_CONFIRM_REQUESTS[token] = (
+                    game.game_id, game.chat_id, user.telegram_user_id, action,
+                    game.phase, game.round_no,
+                    now + game_router_module._GAME_CONFIRM_TTL_SECONDS,
+                )
+                await session.commit()
+                message = (
+                    "Раскрыть роли и завершить текущую партию? Это необратимо."
+                    if action == "reveal"
+                    else "Завершить текущую партию? Это необратимо."
+                )
+                if prefers_json:
+                    return JSONResponse(content={
+                        "ok": True, "confirmation_required": True,
+                        "confirmation_callback_data": f"gwebconfirm:{game.game_id}:{token}",
+                        "message": message,
+                    })
+                return _redirect(_with_message(
+                    redirect_base_path, key="error", text="Подтвердите действие в веб-панели.",
+                ))
+
+            if callback_data.startswith("gwebconfirm:"):
+                parts = callback_data.split(":")
+                request_info = (
+                    game_router_module._GAME_CONFIRM_REQUESTS.get(parts[2])
+                    if len(parts) == 3 else None
+                )
+                if (
+                    not can_manage_games or request_info is None
+                    or request_info[0] != game.game_id
+                    or request_info[1] != game.chat_id
+                    or request_info[2] != user.telegram_user_id
+                    or request_info[6] <= game_router_module.time.monotonic()
+                ):
+                    await session.commit()
+                    message = "Подтверждение истекло или недостаточно прав. Обновите экран игры."
+                    return _json_result(ok=False, message=message, status_code=403) if prefers_json else _redirect(
+                        _with_message(redirect_base_path, key="error", text=message)
+                    )
+                # Pop BEFORE the first await: concurrent confirms cannot both win.
+                game_router_module._GAME_CONFIRM_REQUESTS.pop(parts[2], None)
+                _, _, _, confirm_action, expected_phase, expected_round, _ = request_info
+                finished_game, status = await GAME_STORE.finish_if_current(
+                    game_id=game.game_id,
+                    expected_phase=expected_phase,
+                    expected_round=expected_round,
+                    winner_text=(
+                        "Игра завершена по решению ведущего."
+                        if confirm_action == "reveal" else "Игра остановлена ведущим."
+                    ),
+                )
+                if status != "finished" or finished_game is None:
+                    await session.commit()
+                    message = "Этап уже изменился или партия завершена. Обновите экран."
+                    return _json_result(ok=False, message=message, status_code=409) if prefers_json else _redirect(
+                        _with_message(redirect_base_path, key="error", text=message)
+                    )
+                game_router_module._cancel_phase_timer(game.game_id)
+                if game.kind == "quiz":
+                    await game_router_module._sync_quiz_feed_message(bot, finished_game, question_no=None)
+                await game_router_module._safe_edit_or_send_game_board(
+                    bot, finished_game, chat_settings,
+                    include_reveal=(game.kind in {"spy", "mafia"}),
+                )
+                text = (
+                    "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты."
+                    if confirm_action == "reveal" else "<b>Ведущий:</b> Игра остановлена ведущим."
+                )
+                if game.kind in {"spy", "mafia"}:
+                    text += "\n" + game_router_module._render_roles_reveal(finished_game)
+                await game_router_module._send_game_feed_event(bot, finished_game, text=text)
+                success = True
+                message = "Роли раскрыты." if confirm_action == "reveal" else "Игра завершена."
+            elif callback_data:
                 success, message = await _execute_web_callback(
                     callback_data,
                     bot=bot,
