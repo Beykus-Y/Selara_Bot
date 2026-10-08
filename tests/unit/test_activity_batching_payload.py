@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from selara.infrastructure.db.activity_batching import (
     ActivityBatchMessage,
     activity_batch_message_from_payload,
@@ -88,3 +90,33 @@ def test_archive_free_events_roundtrip_without_snapshot_fields() -> None:
     )
 
     assert _restore(activity_batch_message_to_payload(event), event) == event
+
+
+def test_unix_seconds_are_stored_as_utc_datetimes() -> None:
+    # aiogram hands Message.edit_date over as Unix seconds, so the serializer must accept plain numbers.
+    edited_at = int(datetime(2026, 10, 7, 9, 31, tzinfo=timezone.utc).timestamp())
+    event = _event(snapshot_at=edited_at, edited_at=edited_at)
+
+    payload = activity_batch_message_to_payload(event)
+
+    assert payload["snapshot_at"] == "2026-10-07T09:31:00+00:00"
+    assert payload["edited_at"] == "2026-10-07T09:31:00+00:00"
+
+
+def test_millisecond_timestamps_are_recognised_by_magnitude() -> None:
+    edited_at = int(datetime(2026, 10, 7, 9, 31, tzinfo=timezone.utc).timestamp()) * 1000
+
+    payload = activity_batch_message_to_payload(_event(edited_at=edited_at))
+
+    assert payload["edited_at"] == "2026-10-07T09:31:00+00:00"
+
+
+@pytest.mark.parametrize("bad_value", ["2026-10-07T09:31:00Z", True])
+def test_unsupported_timestamp_types_raise_value_error(bad_value: object) -> None:
+    with pytest.raises(ValueError, match="Unsupported timestamp type"):
+        activity_batch_message_to_payload(_event(edited_at=bad_value))
+
+
+def test_out_of_range_timestamps_raise_value_error() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        activity_batch_message_to_payload(_event(edited_at=10**20))
