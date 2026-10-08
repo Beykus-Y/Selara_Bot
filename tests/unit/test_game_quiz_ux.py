@@ -82,7 +82,7 @@ async def test_answer_toast_echoes_the_chosen_letter(monkeypatch) -> None:
     started, start_error = await store.start(game_id=game.game_id)
     assert start_error is None
 
-    query = FakeQuery(user_id=1, data=f"gquiz:{started.game_id}:1")
+    query = FakeQuery(user_id=1, data=f"gquiz:{started.game_id}:{started.quiz_current_question_index}:1")
     await game_router.quiz_answer_callback(query, bot=SimpleNamespace(), chat_settings=_chat_settings(), economy_repo=SimpleNamespace())
 
     assert query.answers[-1] == ("Ответ принят: B", False)
