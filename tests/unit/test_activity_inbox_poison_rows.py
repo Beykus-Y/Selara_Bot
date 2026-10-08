@@ -5,12 +5,22 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import (
+    DataError,
+    DBAPIError,
+    IntegrityError,
+    OperationalError,
+    ProgrammingError,
+)
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from selara.application.achievements import AchievementCatalogService
 from selara.infrastructure.db import activity_batcher as activity_batcher_module
-from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.activity_batcher import (
+    ActivityBatcher,
+    _is_transient_database_error,
+)
 from selara.infrastructure.db.activity_inbox import retarget_activity_inbox_chat
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.models import (
@@ -177,6 +187,67 @@ async def test_a_database_outage_never_parks_inbox_rows(monkeypatch) -> None:
     assert await _count(session_factory, ActivityEventInboxModel) == 0
     assert await _count(session_factory, MessageArchiveModel) == 3
     await engine.dispose()
+
+
+class _DriverError(Exception):
+    """A driver error with a PostgreSQL SQLSTATE, the attribute SQLAlchemy copies onto its translated errors."""
+
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(f"SQLSTATE {sqlstate}")
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.asyncio
+async def test_a_database_error_in_the_flush_never_parks_valid_rows(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    enqueue = _batcher(session_factory)
+    for message_id in range(1, 4):
+        await enqueue.enqueue_message(**_message(chat_id=7501, user_id=751, message_id=message_id))
+
+    original = SqlAlchemyActivityRepository.flush_activity_batch
+
+    async def _deadlocked(self, events):
+        raise OperationalError("UPDATE user_stats", {}, _DriverError("40P01"))
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", _deadlocked)
+
+    # The attempt limit is three. A deadlocked flush is the database's failure, so it leaves the rows queued.
+    for _ in range(3):
+        await _flusher_run(session_factory)
+        assert await _inbox_attempts(session_factory) == [0, 0, 0]
+    assert await _count(session_factory, ActivityEventDeadLetterModel) == 0
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", original)
+    await _flusher_run(session_factory)
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    assert await _count(session_factory, MessageArchiveModel) == 3
+    assert await _message_count(session_factory, chat_id=7501, user_id=751) == 3
+    await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (OperationalError("UPDATE activity_event_inbox", {}, ConnectionError("database is down")), True),
+        (OperationalError("UPDATE user_stats", {}, _DriverError("40P01")), True),
+        (DBAPIError("UPDATE user_stats", {}, _DriverError("40001")), True),
+        (DBAPIError("UPDATE user_stats", {}, _DriverError("55P03")), True),
+        (DBAPIError("SELECT 1", {}, _DriverError("08006")), True),
+        (DBAPIError("SELECT 1", {}, ValueError("connection reset"), connection_invalidated=True), True),
+        (PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached"), True),
+        (IntegrityError("INSERT message_archive", {}, _DriverError("23505")), False),
+        (DataError("INSERT message_archive", {}, _DriverError("22001")), False),
+        (ProgrammingError("SELECT user_stats", {}, _DriverError("42703")), False),
+        (ValueError("this message can never be applied"), False),
+        (KeyError("chat_id"), False),
+    ],
+)
+def test_only_database_outages_and_contention_are_transient(error: BaseException, transient: bool) -> None:
+    assert _is_transient_database_error(error) is transient
 
 
 @pytest.mark.asyncio
