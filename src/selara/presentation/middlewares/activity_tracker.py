@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import BaseMiddleware
@@ -10,6 +11,7 @@ from aiogram.types import Message
 
 from selara.domain.entities import ChatSnapshot, UserSnapshot
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.activity_batching import as_utc_datetime
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.filters import is_trackable_message
 
@@ -69,12 +71,35 @@ def _serialize_message(message: Message) -> dict[str, object]:
     return message.model_dump(mode="json", exclude_none=True, fallback=_fallback)
 
 
+def _utc_timestamp(value: datetime | int, *, field: str) -> datetime:
+    # aiogram converts date to a datetime but leaves edit_date as the raw Unix seconds from Telegram.
+    try:
+        return as_utc_datetime(value)
+    except ValueError:
+        raise ValueError(f"Unusable message timestamp in {field!r} of type {type(value).__name__}") from None
+
+
+def _event_at(message: Message) -> datetime:
+    # A bad date must not drop the activity count, so the event falls back to the current time.
+    try:
+        return _utc_timestamp(message.date, field="date")
+    except ValueError:
+        logger.warning(
+            "Message date is unusable; counting its activity at the current time",
+            extra={"field": "date", "value_type": type(message.date).__name__},
+        )
+        return datetime.now(timezone.utc)
+
+
 def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> dict[str, object]:
     raw_message_json = _serialize_message(message)
     canonical_snapshot = json.dumps(raw_message_json, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    snapshot_at = getattr(message, "edit_date", None) if snapshot_kind == "edited" else message.date
+    sent_at = _utc_timestamp(message.date, field="date")
+    edit_date = getattr(message, "edit_date", None)
+    edited_at = _utc_timestamp(edit_date, field="edit_date") if edit_date is not None else None
+    snapshot_at = edited_at if snapshot_kind == "edited" else None
     if snapshot_at is None:
-        snapshot_at = message.date
+        snapshot_at = sent_at
 
     reply_to_message = getattr(message, "reply_to_message", None)
     reply_to_telegram_message_id = getattr(reply_to_message, "message_id", None)
@@ -82,8 +107,8 @@ def _build_message_archive_payload(message: Message, *, snapshot_kind: str) -> d
     return {
         "snapshot_kind": snapshot_kind,
         "snapshot_at": snapshot_at,
-        "sent_at": message.date,
-        "edited_at": getattr(message, "edit_date", None),
+        "sent_at": sent_at,
+        "edited_at": edited_at,
         "message_type": _message_content_type(message),
         "text": message.text,
         "caption": message.caption,
@@ -215,7 +240,7 @@ class ActivityTrackerMiddleware(BaseMiddleware):
             first_name=event.from_user.first_name,
             last_name=event.from_user.last_name,
             is_bot=event.from_user.is_bot,
-            event_at=event.date,
+            event_at=_event_at(event),
             telegram_message_id=event.message_id,
             count_as_activity=count_as_activity,
             snapshot_kind=archive_payload["snapshot_kind"] if archive_payload is not None else None,
