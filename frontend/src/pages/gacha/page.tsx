@@ -43,117 +43,86 @@ export function GachaCollectionPage() {
     return <LoadingShell eyebrow="Gacha" title="Готовлю экран коллекции" cards={3} />
   }
 
+  const rarityColor: Record<string, string> = {
+    mythic: 'oklch(0.66 0.2 25)',
+    legendary: 'oklch(0.84 0.13 80)',
+    epic: 'oklch(0.7 0.16 320)',
+    rare: 'oklch(0.76 0.12 250)',
+  }
+  const rarityLabel: Record<string, string> = {
+    mythic: 'Мифическая',
+    legendary: 'Легендарная',
+    epic: 'Эпическая',
+    rare: 'Редкая',
+    common: 'Обычная',
+  }
+  const switchBanner = (next: 'genshin' | 'hsr') => {
+    const nextParams = new URLSearchParams(searchParams)
+    if (next === 'hsr') nextParams.set('banner', 'hsr')
+    else nextParams.delete('banner')
+    setSearchParams(nextParams, { replace: true })
+  }
+
   return (
-    <div className="miniapp-page-stack">
-      {/* Title */}
-      <div>
-        <div className="eyebrow">Гача</div>
-        <h1 className="page">Коллекция</h1>
-        <div className="page-sub">Карточки и история круток по баннеру</div>
+    <div className="v2">
+      <h1 className="v2-title">Коллекция</h1>
+      <p className="v2-sub">Карточки и история круток по баннеру.</p>
+
+      <div className="v2-tabs" role="tablist" aria-label="Выбор баннера">
+        <button type="button" role="tab" aria-selected={banner === 'genshin'} className={banner === 'genshin' ? 'on' : ''} onClick={() => switchBanner('genshin')}>Genshin</button>
+        <button type="button" role="tab" aria-selected={banner === 'hsr'} className={banner === 'hsr' ? 'on' : ''} onClick={() => switchBanner('hsr')}>HSR</button>
       </div>
 
-      {/* Banner Switch */}
-      <div className="banner-switch">
+      <div style={{ marginTop: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.5 }}>Крутки запускаются в Telegram-боте.</span>
         <button
-          className={banner === 'genshin' ? 'on' : ''}
+          type="button"
+          className="v2-pill-btn"
           onClick={() => {
-            const nextParams = new URLSearchParams(searchParams)
-            nextParams.delete('banner')
-            setSearchParams(nextParams, { replace: true })
+            setShowInviteText(true)
+            setTimeout(() => setShowInviteText(false), 4500)
           }}
         >
-          Genshin
-        </button>
-        <button
-          className={banner === 'hsr' ? 'on' : ''}
-          onClick={() => {
-            const nextParams = new URLSearchParams(searchParams)
-            nextParams.set('banner', 'hsr')
-            setSearchParams(nextParams, { replace: true })
-          }}
-        >
-          HSR
+          Как крутить
         </button>
       </div>
-
-      {/* Roll Invitation Info */}
       {showInviteText && (
-        <div
-          style={{
-            background: 'var(--violet-soft)',
-            color: 'var(--violet)',
-            padding: '12px',
-            borderRadius: '12px',
-            fontSize: '12.5px',
-            textAlign: 'center',
-            border: '1px solid var(--line-strong)',
-          }}
-        >
-          Крутки запускаются в Telegram-боте! Напишите боту: <code>гача {banner === 'hsr' ? 'хср' : 'генш'}</code>
-        </div>
+        <p style={{ fontSize: 13, color: '#c9c4da', margin: '12px 0 0', lineHeight: 1.5 }}>
+          Напишите боту в личку: <b style={{ color: 'var(--text)' }}>гача {banner === 'hsr' ? 'хср' : 'генш'}</b>
+        </p>
       )}
 
-      {/* CTA Button */}
-      <button
-        className="btn primary block"
-        type="button"
-        onClick={() => {
-          setShowInviteText(true)
-          setTimeout(() => setShowInviteText(false), 5000)
-        }}
-      >
-        🎰 Крутить в Telegram-боте
-      </button>
-
-      {/* Recent Pulls */}
-      <h2 className="sec">Последние крутки</h2>
+      <div className="v2-sec"><span>Последние крутки</span></div>
       {profileQuery.data.recent_pulls.length > 0 ? (
-        <div>
-          {profileQuery.data.recent_pulls.map((pull) => {
-            const isLegendary = pull.rarity === 'legendary'
-            const isEpic = pull.rarity === 'epic'
-            const firstTwoLetters = pull.card_name.trim().slice(0, 2).toLowerCase() || '??'
-
-            return (
-              <div
-                key={`${pull.pulled_at}-${pull.card_name}`}
-                className={`drop ${isLegendary ? 'legendary' : isEpic ? 'epic' : ''}`}
-              >
-                <div className="drop-ava">{firstTwoLetters}</div>
-                <div className="drop-body">
-                  <div className="drop-name">
-                    <b>{pull.card_name}</b>
-                    {(isLegendary || isEpic) && (
-                      <span className={`chip ${isLegendary ? 'legendary' : 'epic'}`}>
-                        {isLegendary ? '★ легендарная' : 'эпическая'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="drop-reward">
-                    <span className="pts">+{pull.points} pts</span> · +{pull.adventure_xp_gained} XP
-                  </div>
-                </div>
-                <div className="drop-when">
-                  {pull.pulled_at}
-                </div>
-              </div>
-            )
-          })}
-        </div>
+        profileQuery.data.recent_pulls.map((pull) => {
+          const color = rarityColor[pull.rarity] ?? '#3a3550'
+          return (
+            <div key={`${pull.pulled_at}-${pull.card_name}`} className="v2-row" style={{ cursor: 'default' }}>
+              <span style={{ width: 4, height: 34, borderRadius: 2, flex: 'none', background: color }} />
+              <span className="v2-main">
+                <b style={{ fontSize: 14 }}>{pull.card_name}</b>
+                <span style={{ color: pull.rarity === 'common' ? undefined : color, marginTop: 4 }}>
+                  {rarityLabel[pull.rarity] ?? pull.rarity}
+                </span>
+              </span>
+              <span style={{ textAlign: 'right', flex: 'none' }}>
+                <span style={{ display: 'block', fontSize: 12.5, color: '#c9c4da' }}>+{pull.points} pts · +{pull.adventure_xp_gained} XP</span>
+                <span style={{ display: 'block', fontSize: 11, color: 'var(--text-3)', marginTop: 3 }}>{pull.pulled_at}</span>
+              </span>
+            </div>
+          )
+        })
       ) : (
-        <div className="card" style={{ textAlign: 'center', padding: '24px' }}>
-          <strong style={{ display: 'block', marginBottom: '4px' }}>Пока нет круток</strong>
-          <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-3)' }}>
-            История появится после первых круток на этом баннере.
-          </p>
-        </div>
+        <p className="v2-muted">История появится после первых круток на этом баннере.</p>
       )}
 
-      {/* Collection Grid */}
-      <h2 className="sec">
-        Коллекция <span style={{ color: 'var(--text-3)' }}>всего карт: {collectionQuery.data.total_copies}</span>
-      </h2>
-      <CollectionGrid cards={collectionQuery.data.cards} banner={collectionQuery.data.banner} />
+      <div className="v2-sec">
+        <span>Коллекция</span>
+        <span style={{ fontSize: 12, color: 'var(--text-3)' }}>всего карт: {collectionQuery.data.total_copies}</span>
+      </div>
+      <div style={{ marginTop: 14 }}>
+        <CollectionGrid cards={collectionQuery.data.cards} banner={collectionQuery.data.banner} />
+      </div>
     </div>
   )
 }

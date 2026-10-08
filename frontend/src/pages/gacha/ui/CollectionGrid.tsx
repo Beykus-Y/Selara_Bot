@@ -6,6 +6,7 @@ interface CollectionGridProps {
 }
 
 function getRarityClass(rarity: string): string {
+  if (rarity === 'mythic') return 'm'
   if (rarity === 'legendary') return 'l'
   if (rarity === 'epic') return 'e'
   if (rarity === 'rare') return 'r'

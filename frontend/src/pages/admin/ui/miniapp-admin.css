@@ -95,7 +95,7 @@ body.miniapp-mode .miniapp-shell__main:has(.miniapp-admin) {
   -webkit-tap-highlight-color: transparent;
 }
 
-.miniapp-admin__nav-item > span {
+.miniapp-admin__nav-item > .miniapp-admin__nav-icon {
   font-size: 19px;
   line-height: 1;
 }

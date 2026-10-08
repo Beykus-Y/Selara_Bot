@@ -39,6 +39,7 @@ export type MiniAppHomePageData = {
   admin_groups: MiniAppGroup[]
   recent_games: MiniAppRecentGameSummary[]
   global_dashboard: HomeDashboardPanel
+  bot_add_url: string
   desktop_url: string
 }
 
@@ -47,6 +48,7 @@ export type MiniAppGroupsPageData = {
   hero_subtitle: string
   admin_groups: MiniAppGroup[]
   activity_groups: MiniAppGroup[]
+  bot_add_url: string
   desktop_url: string
 }
 

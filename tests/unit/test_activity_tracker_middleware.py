@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,7 +11,9 @@ from aiogram.client.default import Default
 from aiogram.types import Chat, Message, User
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from selara.application.achievements import AchievementCatalogService
 from selara.domain.entities import AdminBroadcastTarget, ChatSnapshot, UserSnapshot
+from selara.infrastructure.db.activity_batcher import ActivityBatcher
 from selara.infrastructure.db.base import Base
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 from selara.presentation.middlewares.activity_tracker import (
@@ -230,7 +233,8 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
     middleware = ActivityTrackerMiddleware(batcher)
     handler = AsyncMock(return_value=None)
     event = _event(text="edited text")
-    event.edit_date = datetime(2026, 3, 13, 12, 5, tzinfo=timezone.utc)
+    edited_at = datetime(2026, 3, 13, 12, 5, tzinfo=timezone.utc)
+    event.edit_date = int(edited_at.timestamp())  # aiogram types edit_date as Unix seconds
     raw_payload = {"message_id": 777, "text": "edited text", "edit_date": "2026-03-13T12:05:00Z"}
     event.model_dump.return_value = raw_payload
     expected_hash = hashlib.sha256(
@@ -259,9 +263,9 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
         telegram_message_id=777,
         count_as_activity=False,
         snapshot_kind="edited",
-        snapshot_at=event.edit_date,
+        snapshot_at=edited_at,
         sent_at=event.date,
-        edited_at=event.edit_date,
+        edited_at=edited_at,
         message_type="text",
         text="edited text",
         caption=None,
@@ -270,6 +274,131 @@ async def test_activity_tracker_enqueues_edited_message_as_archive_only() -> Non
         reply_to_telegram_message_id=None,
         session=None,
     )
+
+
+EDITED_AT = datetime(2026, 10, 7, 9, 31, tzinfo=timezone.utc)
+_SETTINGS = SimpleNamespace(supported_chat_types={"private", "group", "supergroup"})
+
+
+def _real_group_message(*, edit_date: int | None) -> Message:
+    # Built through aiogram itself, so these tests see the field types the library produces.
+    return Message(
+        message_id=778,
+        date=datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc),
+        edit_date=edit_date,
+        chat=Chat(id=-1001, type="supergroup", title="Test Chat"),
+        from_user=User(id=501, is_bot=False, first_name="Alice"),
+        text="edited text",
+    )
+
+
+class _FakeSession:
+    """Collects the rows the batcher stages into the request's transaction."""
+
+    def __init__(self) -> None:
+        self.staged: list[object] = []
+
+    def add_all(self, rows: list[object]) -> None:
+        self.staged.extend(rows)
+
+
+def _batcher() -> ActivityBatcher:
+    # Only the staging path runs here, so no background flush task is started.
+    catalog = AchievementCatalogService.load(Path("src/selara/core/achievements.json"))
+    return ActivityBatcher(session_factory=None, catalog=catalog, flush_seconds=60, max_events=100)
+
+
+@pytest.mark.asyncio
+async def test_edited_message_with_unix_edit_date_is_archived_at_the_edit_time() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+
+    await middleware(
+        AsyncMock(return_value=None),
+        _real_group_message(edit_date=int(EDITED_AT.timestamp())),
+        {"settings": _SETTINGS, "chat_settings": SimpleNamespace(save_message=True)},
+    )
+
+    kwargs = batcher.enqueue_message.await_args.kwargs
+    assert kwargs["snapshot_kind"] == "edited"
+    assert kwargs["snapshot_at"] == EDITED_AT
+    assert kwargs["edited_at"] == EDITED_AT
+    assert kwargs["count_as_activity"] is False
+
+
+@pytest.mark.asyncio
+async def test_edited_message_reaches_the_activity_inbox_as_utc_timestamps() -> None:
+    session = _FakeSession()
+    middleware = ActivityTrackerMiddleware(_batcher())
+
+    await middleware(
+        AsyncMock(return_value=None),
+        _real_group_message(edit_date=int(EDITED_AT.timestamp())),
+        {"settings": _SETTINGS, "chat_settings": SimpleNamespace(save_message=True), "db_session": session},
+    )
+
+    (row,) = session.staged
+    assert row.payload["snapshot_kind"] == "edited"
+    assert row.payload["sent_at"] == "2026-10-07T09:30:00+00:00"
+    assert row.payload["snapshot_at"] == "2026-10-07T09:31:00+00:00"
+    assert row.payload["edited_at"] == "2026-10-07T09:31:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_edited_message_is_not_staged_when_save_message_is_disabled() -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+
+    result = await middleware(
+        AsyncMock(return_value="handled"),
+        _real_group_message(edit_date=int(EDITED_AT.timestamp())),
+        {"settings": _SETTINGS, "chat_settings": SimpleNamespace(save_message=False)},
+    )
+
+    assert result == "handled"
+    batcher.enqueue_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unusable_edit_date_skips_the_archive_without_failing_the_handler(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    event = _event(text="edited text")
+    event.edit_date = "2026-10-07T09:31:00Z"
+
+    result = await middleware(
+        AsyncMock(return_value="handled"),
+        event,
+        {"settings": _SETTINGS, "chat_settings": SimpleNamespace(save_message=True)},
+    )
+
+    assert result == "handled"
+    batcher.enqueue_message.assert_not_awaited()
+    assert "Unusable message timestamp in 'edit_date' of type str" in caplog.text
+    assert "2026-10-07T09:31:00Z" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unusable_message_date_is_counted_at_the_current_time(caplog: pytest.LogCaptureFixture) -> None:
+    batcher = SimpleNamespace(enqueue_message=AsyncMock())
+    middleware = ActivityTrackerMiddleware(batcher)
+    event = _event(text="hello")
+    event.date = "2026-10-07 09:30"
+    before = datetime.now(timezone.utc)
+
+    await middleware(
+        AsyncMock(return_value=None),
+        event,
+        {"settings": _SETTINGS, "chat_settings": SimpleNamespace(save_message=True)},
+    )
+
+    kwargs = batcher.enqueue_message.await_args.kwargs
+    assert kwargs["count_as_activity"] is True
+    assert kwargs["snapshot_kind"] is None
+    assert before <= kwargs["event_at"] <= datetime.now(timezone.utc)
+    assert "Unusable message timestamp in 'date' of type str" in caplog.text
 
 
 @pytest.mark.asyncio

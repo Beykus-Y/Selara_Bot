@@ -876,6 +876,10 @@ body.miniapp-mode .coll.r {
   border-color: rgba(86, 164, 248, .35);
   background: linear-gradient(160deg, rgba(86, 164, 248, .14), var(--surface));
 }
+body.miniapp-mode .coll.m {
+  border-color: rgba(230, 60, 70, .55);
+  background: linear-gradient(160deg, rgba(230, 60, 70, .22), var(--surface));
+}
 body.miniapp-mode .coll .c {
   position: absolute;
   top: 6px;

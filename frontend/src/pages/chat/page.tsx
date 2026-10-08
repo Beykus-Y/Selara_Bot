@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router-dom'
+import { useLocation, useParams } from 'react-router-dom'
 
 import type { ChatLeaderboardData, ChatLeaderboardMode } from '@/pages/chat/model/types'
 import { routes } from '@/shared/config/routes'
@@ -27,6 +27,7 @@ function modeLabel(mode: ChatLeaderboardMode) {
 
 export function ChatPage() {
   const { chatId } = useParams()
+  const location = useLocation()
   const [mode, setMode] = useState<ChatLeaderboardMode>('mix')
   const [page, setPage] = useState(1)
   const [query, setQuery] = useState('')
@@ -55,6 +56,14 @@ export function ChatPage() {
 
   // Starts loading the Selara AI status in parallel; it never gates the rest of the page.
   useChatAiAccess(chatId)
+
+  const leaderboardReady = Boolean(overviewQuery.data && leaderboardQuery.data)
+
+  // Deep link from the Mini App home ("Лидерборд"): scroll to the ranking section once it is rendered.
+  useEffect(() => {
+    if (location.hash !== '#leaderboard' || !leaderboardReady) return
+    document.getElementById('leaderboard')?.scrollIntoView({ block: 'start' })
+  }, [location.hash, leaderboardReady])
 
   usePageTitle(overviewQuery.data?.chat_title || 'Group')
 
@@ -236,7 +245,7 @@ export function ChatPage() {
         </div>
       </section>
 
-      <section className="miniapp-table-card">
+      <section className="miniapp-table-card" id="leaderboard">
         <div className="miniapp-section-head">
           <div>
             <h2>Leaderboard</h2>

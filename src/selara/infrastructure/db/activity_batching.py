@@ -50,7 +50,7 @@ def activity_batch_message_to_payload(event: ActivityBatchMessage) -> dict[str, 
     for name in _PAYLOAD_DATETIME_FIELDS:
         value = payload[name]
         if value is not None:
-            payload[name] = _as_utc(value).isoformat()
+            payload[name] = as_utc_datetime(value).isoformat()
     return payload
 
 
@@ -74,7 +74,20 @@ def activity_batch_message_from_payload(
     return ActivityBatchMessage(chat_id=chat_id, chat_type=chat_type, chat_title=chat_title, **values)
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+# Telegram sends Unix seconds. A number above this bound can only be milliseconds (in seconds, that is year 5138).
+_UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000
+
+
+def as_utc_datetime(value: datetime | int | float) -> datetime:
+    """Return an aware UTC datetime. Numbers are Unix timestamps in seconds, or in milliseconds above 1e11."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Unsupported timestamp type: {type(value).__name__}")
+    seconds = value / 1000 if value > _UNIX_MILLISECONDS_THRESHOLD else value
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("Timestamp is out of range") from exc
