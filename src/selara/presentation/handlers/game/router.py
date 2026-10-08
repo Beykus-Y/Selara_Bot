@@ -3838,6 +3838,39 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
     await GAME_STORE.set_message_id(game_id=game.game_id, message_id=sent.message_id)
 
 
+@router.message(Command("gameboard"))
+async def game_board_command(message: Message, bot: Bot, chat_settings: ChatSettings) -> None:
+    """Recover the current public board without requiring manage_games.
+
+    A reply to the existing board is a Telegram-native jump target. Do not
+    clone active keyboards or expose private hands/roles. If the board was
+    deleted, the existing safe board helper recreates its single anchor.
+    """
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Игровая доска доступна в групповом чате.")
+        return
+
+    game = await GAME_STORE.get_active_game_for_chat(chat_id=message.chat.id)
+    if game is None:
+        await message.answer("Сейчас в этом чате нет активной игры. Ведущий может создать её через /game.")
+        return
+
+    if game.message_id is not None:
+        try:
+            await message.answer(
+                f"🎲 <b>{escape(GAME_DEFINITIONS[game.kind].title)}</b> — "
+                f"{escape(_phase_title(game))}. Нажмите на сообщение, на которое отвечает бот, чтобы перейти к доске.",
+                parse_mode="HTML",
+                reply_to_message_id=game.message_id,
+            )
+            return
+        except TelegramBadRequest:
+            # Message may have been deleted, moved or become unreachable.
+            pass
+
+    await _safe_edit_or_send_game_board(bot, game, chat_settings)
+
+
 @router.callback_query(F.data.startswith("game:new:"))
 async def game_new_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSettings, activity_repo) -> None:
     if query.message is None or not query.data or query.from_user is None:
@@ -4355,7 +4388,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             or game.phase != expected_phase
             or game.round_no != int(expected_round_raw)
         ):
-            await query.answer("Фаза игры изменилась. Откройте свежие кнопки ведущего.", show_alert=True)
+            await query.answer("Фаза игры изменилась. Найдите текущую доску через /gameboard.", show_alert=True)
             return
 
     actor_id = query.from_user.id
@@ -4900,7 +4933,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             or game.phase != expected_phase
             or game.round_no != expected_round
         ):
-            await query.answer("Игра уже изменилась или подтверждение истекло. Откройте актуальную доску.", show_alert=True)
+            await query.answer("Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.", show_alert=True)
             return
         if action == "rok" and game.kind != "spy":
             await query.answer("Раскрытие доступно только в игре «Шпион».", show_alert=True)
