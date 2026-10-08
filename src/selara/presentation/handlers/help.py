@@ -283,35 +283,36 @@ def _models_help_text(settings: Settings) -> str:
     )
 
 
-def _help_callback_data(*, section: str, owner_user_id: int | None) -> str:
-    if owner_user_id is None:
-        return f"help:{section}"
-    return f"help:{section}:u{owner_user_id}"
+def _help_callback_data(*, section: str) -> str:
+    # Help is public: the card is not tied to whoever opened it, so no owner suffix.
+    return f"help:{section}"
 
 
-def _parse_help_callback_data(data: str | None) -> tuple[str, int | None]:
+def _parse_help_callback_data(data: str | None) -> str:
+    """Section key from a help callback.
+
+    Buttons sent before help became public carry a `:u<owner_id>` suffix; it is
+    stripped and ignored so those old buttons keep working for everyone.
+    """
     if not data or not data.startswith("help:"):
-        return "home", None
+        return "home"
 
     payload = data[5:]
     if not payload:
-        return "home", None
+        return "home"
 
-    owner_user_id: int | None = None
-    section = payload
     possible_owner_split = payload.rsplit(":u", maxsplit=1)
     if len(possible_owner_split) == 2 and possible_owner_split[1].isdigit():
-        section = possible_owner_split[0]
-        owner_user_id = int(possible_owner_split[1])
+        payload = possible_owner_split[0]
 
-    return (section or "home"), owner_user_id
+    return payload or "home"
 
 
-def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> InlineKeyboardMarkup:
+def _build_help_keyboard(*, section: str | None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if section is None:
         for key, title in _HELP_SECTIONS_ORDER:
-            builder.button(text=title, callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id))
+            builder.button(text=title, callback_data=_help_callback_data(section=key))
         builder.adjust(2, 2, 2, 2, 2, 1)
         return builder.as_markup()
 
@@ -319,9 +320,9 @@ def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> I
         for key, title in _HELP_GAMES_ORDER:
             builder.button(
                 text=title,
-                callback_data=_help_callback_data(section=f"game_{key}", owner_user_id=owner_user_id),
+                callback_data=_help_callback_data(section=f"game_{key}"),
             )
-        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
+        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home"))
         builder.adjust(2)
         return builder.as_markup()
 
@@ -331,10 +332,10 @@ def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> I
             marker = " •" if key == current_game_key else ""
             builder.button(
                 text=f"{title}{marker}",
-                callback_data=_help_callback_data(section=f"game_{key}", owner_user_id=owner_user_id),
+                callback_data=_help_callback_data(section=f"game_{key}"),
             )
-        builder.button(text="🎮 К играм", callback_data=_help_callback_data(section="games", owner_user_id=owner_user_id))
-        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
+        builder.button(text="🎮 К играм", callback_data=_help_callback_data(section="games"))
+        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home"))
         builder.adjust(2)
         return builder.as_markup()
 
@@ -342,9 +343,9 @@ def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> I
         marker = " •" if key == section else ""
         builder.button(
             text=f"{title}{marker}",
-            callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id),
+            callback_data=_help_callback_data(section=key),
         )
-    builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
+    builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home"))
     builder.adjust(2, 2, 2, 2, 2, 2)
     return builder.as_markup()
 
@@ -378,15 +379,14 @@ def _section_help_text(settings: Settings, section: str) -> str:
     return f"<b>{settings.bot_name}</b>\n\n{body}"
 
 
-def _resolve_help_payload(settings: Settings, section: str | None, owner_user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
+def _resolve_help_payload(settings: Settings, section: str | None) -> tuple[str, InlineKeyboardMarkup]:
     if section in (None, "", "home"):
-        return _main_help_text(settings), _build_help_keyboard(section=None, owner_user_id=owner_user_id)
-    return _section_help_text(settings, section), _build_help_keyboard(section=section, owner_user_id=owner_user_id)
+        return _main_help_text(settings), _build_help_keyboard(section=None)
+    return _section_help_text(settings, section), _build_help_keyboard(section=section)
 
 
 async def send_help(message: Message, settings: Settings) -> None:
-    owner_user_id = message.from_user.id if message.from_user else None
-    text, keyboard = _resolve_help_payload(settings, section=None, owner_user_id=owner_user_id)
+    text, keyboard = _resolve_help_payload(settings, section=None)
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
@@ -404,19 +404,8 @@ async def help_callback(query: CallbackQuery, settings: Settings) -> None:
             pass
         return
 
-    section, owner_user_id = _parse_help_callback_data(query.data)
-    if owner_user_id is not None and query.from_user is not None and query.from_user.id != owner_user_id:
-        try:
-            await query.answer("Это меню помощи другого пользователя. Откройте своё: /help", show_alert=True)
-        except TelegramBadRequest:
-            pass
-        return
-
-    effective_owner_user_id = owner_user_id
-    if effective_owner_user_id is None and query.from_user is not None:
-        effective_owner_user_id = query.from_user.id
-
-    text, keyboard = _resolve_help_payload(settings, section=section, owner_user_id=effective_owner_user_id)
+    section = _parse_help_callback_data(query.data)
+    text, keyboard = _resolve_help_payload(settings, section=section)
     try:
         await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except TelegramBadRequest as exc:

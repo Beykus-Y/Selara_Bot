@@ -1,3 +1,9 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from aiogram.exceptions import TelegramBadRequest
+
 from selara.core.config import Settings
 from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.commands.command_catalog import GAME_RULES_RU
@@ -9,6 +15,7 @@ from selara.presentation.handlers.help import (
     _parse_help_callback_data,
     _policy_limit,
     _resolve_help_payload,
+    help_callback,
 )
 
 
@@ -32,7 +39,7 @@ def test_help_section_payload_contains_section_title() -> None:
 
 
 def test_help_keyboard_home_button_exists_for_section() -> None:
-    keyboard = _build_help_keyboard(section="games", owner_user_id=None)
+    keyboard = _build_help_keyboard(section="games")
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
     assert "help:home" in callbacks
 
@@ -44,33 +51,40 @@ def test_help_unknown_section_falls_back_to_main_text() -> None:
 
 
 def test_help_games_section_shows_game_picker() -> None:
-    text, keyboard = _resolve_help_payload(_settings(), section="games", owner_user_id=77)
+    text, keyboard = _resolve_help_payload(_settings(), section="games")
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
     assert "Выберите конкретную игру" in text
-    assert "help:game_mafia:u77" in callbacks
-    assert "help:game_spy:u77" in callbacks
-    assert "help:game_bunker:u77" in callbacks
+    assert "help:game_mafia" in callbacks
+    assert "help:game_spy" in callbacks
+    assert "help:game_bunker" in callbacks
 
 
 def test_help_game_payload_contains_rules() -> None:
-    text, keyboard = _resolve_help_payload(_settings(), section="game_quiz", owner_user_id=10)
+    text, keyboard = _resolve_help_payload(_settings(), section="game_quiz")
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
     assert "Викторина" in text
     assert "Правила" in text
-    assert "help:games:u10" in callbacks
-    assert "help:home:u10" in callbacks
+    assert "help:games" in callbacks
+    assert "help:home" in callbacks
 
 
-def test_help_callback_parser_extracts_owner() -> None:
-    section, owner_id = _parse_help_callback_data("help:game_mafia:u123")
-    assert section == "game_mafia"
-    assert owner_id == 123
+def test_help_callback_parser_reads_plain_section() -> None:
+    assert _parse_help_callback_data("help:game_mafia") == "game_mafia"
+    assert _parse_help_callback_data("help:economy") == "economy"
 
 
-def test_help_callback_parser_works_for_legacy_format() -> None:
-    section, owner_id = _parse_help_callback_data("help:economy")
-    assert section == "economy"
-    assert owner_id is None
+def test_help_callback_parser_ignores_legacy_owner_suffix() -> None:
+    # Buttons sent before help became public still carry `:u<owner_id>`;
+    # they must resolve to the same section for every user.
+    assert _parse_help_callback_data("help:game_mafia:u123") == "game_mafia"
+    assert _parse_help_callback_data("help:economy:u5") == "economy"
+
+
+def test_help_callback_parser_falls_back_to_home() -> None:
+    assert _parse_help_callback_data(None) == "home"
+    assert _parse_help_callback_data("pm:home") == "home"
+    assert _parse_help_callback_data("help:") == "home"
+    assert _parse_help_callback_data("help::u5") == "home"
 
 
 def test_help_games_menu_covers_every_launchable_game_kind() -> None:
@@ -86,7 +100,7 @@ def test_help_games_menu_covers_every_launchable_game_kind() -> None:
 
 
 def test_help_games_section_keyboard_has_a_button_per_launchable_kind() -> None:
-    keyboard = _build_help_keyboard(section="games", owner_user_id=None)
+    keyboard = _build_help_keyboard(section="games")
     callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
     for kind in GAME_LAUNCHABLE_KINDS:
         assert f"help:game_{kind}" in callbacks
@@ -107,10 +121,10 @@ def test_help_ai_sections_are_reachable_and_fit_a_telegram_message() -> None:
     keys = {key for key, _title in _HELP_SECTIONS_ORDER}
     assert {"ai", "ai_plus", "models"} <= keys
     for key in ("ai", "ai_plus", "models"):
-        text, keyboard = _resolve_help_payload(_settings(), section=key, owner_user_id=5)
+        text, keyboard = _resolve_help_payload(_settings(), section=key)
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
-        assert f"help:{key}:u5" in callbacks
-        assert "help:home:u5" in callbacks
+        assert f"help:{key}" in callbacks
+        assert "help:home" in callbacks
         assert len(text) < 4096
 
 
@@ -147,3 +161,63 @@ def test_help_pets_and_subscription_sections_cover_custom_actions_and_grants() -
     assert "выдана администратором" in plus
     for text in (pets, group, plus):
         assert len(text) < 4096
+
+
+def _callback_query(*, data: str, user_id: int, edit_side_effect: Exception | None = None) -> SimpleNamespace:
+    message = SimpleNamespace(edit_text=AsyncMock(side_effect=edit_side_effect))
+    return SimpleNamespace(
+        data=data,
+        message=message,
+        from_user=SimpleNamespace(id=user_id),
+        answer=AsyncMock(),
+    )
+
+
+async def test_help_section_is_readable_by_a_group_member_who_did_not_open_it() -> None:
+    # /help is public in groups: another participant pressing a card's button
+    # gets the section, not an "other user's menu" refusal.
+    query = _callback_query(data="help:economy:u999", user_id=1)
+
+    await help_callback(query, _settings())
+
+    query.message.edit_text.assert_awaited_once()
+    text = query.message.edit_text.await_args.args[0]
+    assert "Экономика" in text
+    query.answer.assert_awaited_once_with()
+    assert all("другого пользователя" not in str(call) for call in query.answer.await_args_list)
+
+
+async def test_help_new_card_keyboard_carries_no_owner_suffix() -> None:
+    query = _callback_query(data="help:games", user_id=1)
+
+    await help_callback(query, _settings())
+
+    keyboard = query.message.edit_text.await_args.kwargs["reply_markup"]
+    callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+    assert "help:game_mafia" in callbacks
+    assert all(":u" not in callback for callback in callbacks)
+
+
+async def test_help_callback_treats_not_modified_as_success() -> None:
+    error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message is not modified")
+    query = _callback_query(data="help:economy", user_id=1, edit_side_effect=error)
+
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once_with()
+
+
+async def test_help_callback_reraises_other_edit_errors() -> None:
+    error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message to edit not found")
+    query = _callback_query(data="help:economy", user_id=1, edit_side_effect=error)
+
+    with pytest.raises(TelegramBadRequest, match="message to edit not found"):
+        await help_callback(query, _settings())
+
+
+async def test_help_callback_without_message_only_acknowledges() -> None:
+    query = SimpleNamespace(data="help:economy", message=None, from_user=SimpleNamespace(id=1), answer=AsyncMock())
+
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once_with()
