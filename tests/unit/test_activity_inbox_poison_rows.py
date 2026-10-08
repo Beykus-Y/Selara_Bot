@@ -229,6 +229,42 @@ async def test_a_database_error_in_the_flush_never_parks_valid_rows(monkeypatch)
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["42703", "42P01", "0A000"])
+async def test_a_query_that_does_not_match_the_schema_never_parks_valid_rows(monkeypatch, sqlstate: str) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    enqueue = _batcher(session_factory)
+    for message_id in range(1, 4):
+        await enqueue.enqueue_message(**_message(chat_id=7601, user_id=761, message_id=message_id))
+
+    original = SqlAlchemyActivityRepository.flush_activity_batch
+
+    async def _schema_mismatch(self, events):
+        raise ProgrammingError("SELECT missing_column FROM users", {}, _DriverError(sqlstate))
+
+    # A migration or a rollback leaves the code's query and the schema out of step until the schema is fixed.
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", _schema_mismatch)
+
+    # The attempt limit is three. A schema mismatch is the database's failure, so the rows stay queued each time.
+    for _ in range(5):
+        await _flusher_run(session_factory)
+        assert await _inbox_attempts(session_factory) == [0, 0, 0]
+    assert await _count(session_factory, ActivityEventDeadLetterModel) == 0
+
+    # Once the schema matches the code again, the next flush applies every row.
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", original)
+    await _flusher_run(session_factory)
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    assert await _count(session_factory, ActivityEventDeadLetterModel) == 0
+    assert await _count(session_factory, MessageArchiveModel) == 3
+    assert await _message_count(session_factory, chat_id=7601, user_id=761) == 3
+    await engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("error", "transient"),
     [
@@ -241,12 +277,14 @@ async def test_a_database_error_in_the_flush_never_parks_valid_rows(monkeypatch)
         (PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached"), True),
         (IntegrityError("INSERT message_archive", {}, _DriverError("23505")), False),
         (DataError("INSERT message_archive", {}, _DriverError("22001")), False),
-        (ProgrammingError("SELECT user_stats", {}, _DriverError("42703")), False),
+        (ProgrammingError("SELECT user_stats", {}, _DriverError("42703")), True),
+        (ProgrammingError("SELECT activity_event_inbox", {}, _DriverError("42P01")), True),
+        (ProgrammingError("SELECT user_stats", {}, _DriverError("0A000")), True),
         (ValueError("this message can never be applied"), False),
         (KeyError("chat_id"), False),
     ],
 )
-def test_only_database_outages_and_contention_are_transient(error: BaseException, transient: bool) -> None:
+def test_database_failures_not_caused_by_the_row_are_transient(error: BaseException, transient: bool) -> None:
     assert _is_transient_database_error(error) is transient
 
 
