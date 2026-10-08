@@ -4317,18 +4317,24 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     parts = query.data.split(":")
-    if len(parts) not in {3, 6}:
+    if len(parts) not in {3, 5, 6}:
         await query.answer("Некорректные параметры", show_alert=False)
         return
 
     _, action, game_id = parts[:3]
     confirmation = parts[3:] if len(parts) == 6 else None
+    versioned_advance = len(parts) == 5 and action == "adv"
+    if len(parts) == 5 and not versioned_advance:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
     if confirmation is not None and action not in {"sok", "rok", "back"}:
         await query.answer("Некорректные параметры", show_alert=False)
         return
     if confirmation is None and action in {"sok", "rok", "back"}:
         await query.answer("Подтверждение устарело. Откройте управление игрой заново.", show_alert=True)
         return
+    if versioned_advance:
+        action = "advance"
     if action == "new":
         await query.answer()
         return
@@ -4341,6 +4347,17 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
     if query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
+
+    if versioned_advance:
+        expected_phase, expected_round_raw = parts[3:]
+        if (
+            not expected_round_raw.isdecimal()
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != int(expected_round_raw)
+        ):
+            await query.answer("Фаза игры изменилась. Откройте свежие кнопки ведущего.", show_alert=True)
+            return
 
     actor_id = query.from_user.id
     actor = UserSnapshot(
@@ -4469,7 +4486,14 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
     if action == "lrules":
         if game.status != "lobby":
-            await query.answer("Правила доступны до старта игры — используйте кнопку «Моя роль»/доску игры.", show_alert=True)
+            # Rules are read-only during play; never overwrite a live board.
+            await bot.send_message(
+                chat_id=game.chat_id,
+                text=_render_game_rules_text(game.kind),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            await query.answer("Правила отправлены отдельно — игра продолжается.", show_alert=False)
             return
         try:
             await bot.edit_message_text(
@@ -4490,7 +4514,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer()
         return
 
-    if action in {"cancel", "advance", "reveal", "sok", "rok", "back"}:
+    if action in {"cancel", "advance", "reveal", "manage", "sok", "rok", "back"}:
         allowed = await _actor_can_manage_games(
             activity_repo,
             chat_id=game.chat_id,
@@ -4502,6 +4526,28 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if not allowed:
             await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
             return
+
+    if action == "manage" or (action == "advance" and not versioned_advance):
+        if game.status != "started":
+            await query.answer("Эта партия не активна. Найдите актуальную доску.", show_alert=True)
+            return
+        controls = _build_game_manager_controls(game)
+        if controls is None:
+            await query.answer("Для этого этапа нет управления.", show_alert=False)
+            return
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text=(
+                f"<b>⚙️ Ведущему: {escape(GAME_DEFINITIONS[game.kind].title)}</b>\n"
+                f"<b>Этап:</b> {escape(_phase_title(game))}\n"
+                "Только пользователи с правом управления играми могут менять этап или завершать партию."
+            ),
+            parse_mode="HTML",
+            reply_markup=controls,
+            disable_notification=True,
+        )
+        await query.answer("Кнопки управления открыты отдельно.", show_alert=False)
+        return
 
     if action == "start":
         can_start = await _actor_can_start_game(
