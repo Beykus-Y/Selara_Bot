@@ -76,6 +76,7 @@ from selara.presentation.handlers import personal_memory
 from selara.presentation.handlers.premium import personal_offer_available
 from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
+from selara.presentation.navigation.contract import BACK_LABEL, HOME_LABEL
 
 log = logging.getLogger(__name__)
 
@@ -368,7 +369,7 @@ def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> 
     builder.button(text="🧠 Память", callback_data=_cb("cat", "memory", rev))
     builder.button(text=f"🤖 {model_label}", callback_data=_cb("models", rev))
     builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.button(text="🏠 Главное", callback_data="pm:h")
+    builder.button(text=HOME_LABEL, callback_data="pm:h")
     builder.adjust(2, 2, 2)
     return builder.as_markup()
 
@@ -512,7 +513,7 @@ def _category_screen(
         )
         sizes = (1,)
     builder.button(
-        text="Назад", callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
+        text=BACK_LABEL, callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
     )
     builder.adjust(*sizes, 1)
     return text, builder.as_markup()
@@ -551,7 +552,7 @@ async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, 
             "Сейчас каждый запрос считается как один из суточного лимита, и ответы даёт базовая модель. "
             "Выбор моделей станет доступен после включения AI Limits."
         )
-    builder.button(text="Назад", callback_data=_cb("home"))
+    builder.button(text=BACK_LABEL, callback_data=_cb("home"))
     builder.adjust(1)
     return "\n".join(lines).rstrip(), builder.as_markup()
 
@@ -563,7 +564,7 @@ def _presets_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         builder.button(text=marker + title, callback_data=_cb("preset", key, stored.revision))
     marker = "✅ " if stored.profile.character_preset == CUSTOM_PRESET_KEY else ""
     builder.button(text=marker + "Свой вариант", callback_data=_cb("in", "custom", stored.revision))
-    builder.button(text="Назад", callback_data=_cb("home"))
+    builder.button(text=BACK_LABEL, callback_data=_cb("home"))
     builder.adjust(1)
     return builder.as_markup()
 
