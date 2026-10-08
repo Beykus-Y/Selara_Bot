@@ -2127,6 +2127,7 @@ class GameStore:
         expected_round: int,
         winner_text: str,
         expected_status: str = "started",
+        expected_quiz_question_index: int | None = None,
     ) -> tuple[GroupGame | None, str]:
         """Commit a confirmed stop only if the same active phase still exists.
 
@@ -2141,6 +2142,11 @@ class GameStore:
                 game.status != expected_status
                 or game.phase != expected_phase
                 or game.round_no != expected_round
+                or (
+                    game.kind == "quiz"
+                    and expected_quiz_question_index is not None
+                    and game.quiz_current_question_index != expected_quiz_question_index
+                )
             ):
                 return game, "stale"
             async with self._registry_lock:
