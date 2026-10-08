@@ -859,17 +859,26 @@
     setPending(panel, true);
 
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "X-Requested-With": "fetch"
-        },
-        body: payload
-      });
-
-      const data = await response.json().catch(() => null);
+      const headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-Requested-With": "fetch"
+      };
+      let response = await fetch(endpoint, { method: "POST", headers, body: payload });
+      let data = await response.json().catch(() => null);
+      if (data?.confirmation_required) {
+        // Server has not stopped the game. A separate, single-use token must
+        // be explicitly confirmed by the SAME signed-in game master.
+        const token = data.confirmation_callback_data;
+        if (!token || !window.confirm(data.message || "Завершить партию?")) {
+          showToast("Партия не изменена.", "ok");
+          return;
+        }
+        const confirmedPayload = new URLSearchParams(payload);
+        confirmedPayload.set("callback_data", token);
+        response = await fetch(endpoint, { method: "POST", headers, body: confirmedPayload });
+        data = await response.json().catch(() => null);
+      }
       const message = data?.message || (response.ok ? "Действие выполнено." : "Не удалось выполнить действие.");
       showToast(message, data?.ok === false || !response.ok ? "error" : "ok");
 
