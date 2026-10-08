@@ -106,13 +106,17 @@ def _profile() -> dict:
 
 
 def _chat_overview() -> dict:
+    # Page endpoints wrap their payload in "page"; the leaderboard endpoint is flat (see getMiniAppPage / getMiniAppData).
     return {
-        "ok": True, "chat_id": -1001, "chat_title": "Selara Hub", "hero_subtitle": "Тестовый чат",
-        "metrics": [{"label": "Активность", "value": "42", "note": "за неделю", "tone": "good"}],
-        "summary": {"participants_count": 12, "total_messages": 42, "last_activity_at": "10 мин назад"},
-        "daily_activity": [{"date": "2026-10-08", "label": "Чт", "messages": 42}],
-        "hero_of_day": None, "richest_of_day": None, "dashboard_panels": [], "leaderboards": [],
-        "desktop_url": "/app",
+        "ok": True,
+        "page": {
+            "chat_id": -1001, "chat_title": "Selara Hub", "hero_subtitle": "Тестовый чат",
+            "metrics": [{"label": "Активность", "value": "42", "note": "за неделю", "tone": "good"}],
+            "summary": {"participants_count": 12, "total_messages": 42, "last_activity_at": "10 мин назад"},
+            "daily_activity": [{"date": "2026-10-08", "label": "Чт", "messages": 42}],
+            "hero_of_day": None, "richest_of_day": None, "dashboard_panels": [], "leaderboards": [],
+            "desktop_url": "/app",
+        },
     }
 
 
