@@ -3927,6 +3927,19 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if action in {"cancel", "advance", "reveal"} and not can_manage_games:
                 return False, "Недостаточно прав для управления игрой."
 
+            if action == "cancel" and game.status == "lobby":
+                if not can_manage_games:
+                    return False, "Недостаточно прав для отмены лобби."
+                finished_game, result = await GAME_STORE.finish_if_current(
+                    game_id=game.game_id,
+                    expected_status="lobby", expected_phase="lobby",
+                    expected_round=game.round_no,
+                    winner_text="Лобби отменено ведущим.",
+                )
+                if result != "finished" or finished_game is None:
+                    return False, "Лобби уже изменилось или закрыто."
+                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+                return True, "Лобби отменено."
             if action in {"cancel", "reveal"}:
                 return False, "Подтвердите действие в актуальной панели игры."
 
