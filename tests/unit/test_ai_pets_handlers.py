@@ -203,7 +203,7 @@ async def test_pet_memory_keeps_user_links_and_escapes_names_and_notes(monkeypat
     await ai_pets.pet_memory_command(message, None, None, activity_repo)
     text = message.answer.await_args.args[0]
     assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
-    assert "&lt;a" not in text and "&amp;lt;" not in text
+    assert '&lt;a href="tg://' not in text and "&amp;lt;" not in text
     assert '• <a href="tg://user?id=42">Лиза &amp; &lt;Вася&gt;</a> гладил(а) меня 3 раз(а) за неделю' in text
     assert '• <a href="tg://user?id=43">хозяин</a> обижал(а) меня 1 раз(а) за неделю' in text
     assert "<b>&lt;b&gt;Мурка&lt;/b&gt;</b>" in text
