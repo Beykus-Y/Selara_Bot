@@ -376,7 +376,7 @@ async def test_unusable_edit_date_skips_the_archive_without_failing_the_handler(
 
     assert result == "handled"
     batcher.enqueue_message.assert_not_awaited()
-    assert "Unusable message timestamp in 'edit_date' of type 'str'" in caplog.text
+    assert "Unusable message timestamp in 'edit_date' of type str" in caplog.text
     assert "2026-10-07T09:31:00Z" not in caplog.text
 
 
@@ -398,7 +398,7 @@ async def test_unusable_message_date_is_counted_at_the_current_time(caplog: pyte
     assert kwargs["count_as_activity"] is True
     assert kwargs["snapshot_kind"] is None
     assert before <= kwargs["event_at"] <= datetime.now(timezone.utc)
-    assert "Unusable message timestamp in 'date' of type 'str'" in caplog.text
+    assert "Unusable message timestamp in 'date' of type str" in caplog.text
 
 
 @pytest.mark.asyncio
