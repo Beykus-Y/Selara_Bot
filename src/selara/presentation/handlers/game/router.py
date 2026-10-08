@@ -4880,6 +4880,19 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
         expected_round = int(expected_round_raw)
         issued_at = int(issued_raw)
+        # Dismissing a confirmation is always harmless, even if its phase
+        # has ended or the time window expired.
+        if action == "back":
+            try:
+                await bot.edit_message_text(
+                    chat_id=game.chat_id,
+                    message_id=query.message.message_id,
+                    text="Подтверждение отменено. Основная доска игры не изменена.",
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+            await query.answer("Отменено", show_alert=False)
+            return
         now = time()
         if (
             now - issued_at > 180 or now < issued_at - 30
@@ -4888,14 +4901,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             or game.round_no != expected_round
         ):
             await query.answer("Игра уже изменилась или подтверждение истекло. Откройте актуальную доску.", show_alert=True)
-            return
-        if action == "back":
-            await bot.edit_message_text(
-                chat_id=game.chat_id,
-                message_id=query.message.message_id,
-                text="Подтверждение отменено. Игра продолжается — используйте основную доску.",
-            )
-            await query.answer("Отменено", show_alert=False)
             return
         if action == "rok" and game.kind != "spy":
             await query.answer("Раскрытие доступно только в игре «Шпион».", show_alert=True)
@@ -4918,6 +4923,16 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer("Игра уже изменилась или завершена. Повторное действие не выполнено.", show_alert=True)
             return
         _cancel_phase_timer(game.game_id)
+        # A successful confirmation must not leave actionable stop/reveal
+        # buttons behind in the group. Failure to edit cannot undo finish.
+        try:
+            await bot.edit_message_text(
+                chat_id=game.chat_id,
+                message_id=query.message.message_id,
+                text="✅ Роли раскрыты, партия завершена." if action == "rok" else "✅ Партия завершена ведущим.",
+            )
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
         if previous_quiz_feed_id is not None:
             try:
                 await bot.delete_message(chat_id=game.chat_id, message_id=previous_quiz_feed_id)
