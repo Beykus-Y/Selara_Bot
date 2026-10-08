@@ -9,6 +9,8 @@ from __future__ import annotations
 
 BACK_LABEL = "⬅️ Назад"
 HOME_LABEL = "🏠 Главное"
+# Inside the feature catalog "home" means the list of areas, not the bot's main panel.
+SECTIONS_LABEL = "🏠 Разделы"
 CANCEL_LABEL = "❌ Отмена"
 
 # Telegram rejects callback_data longer than 64 bytes (counted in UTF-8).
