@@ -5181,10 +5181,6 @@ async def dice_roll_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     player_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
     note = (
         f"<b>Последний бросок:</b> {_mention(query.from_user.id, player_label)} -> "
@@ -5957,10 +5953,6 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
     if game is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     target_label = game.players.get(target_user_id, f"user:{target_user_id}")
     voter_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
 
