@@ -369,3 +369,67 @@ async def test_interesting_fact_network_error_is_not_retried_while_outcome_is_un
     bot.send_message.assert_awaited_once()
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_stale_claim_outcome_does_not_overwrite_newer_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100905, chat_type="group", title="Facts")
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+    await _seed_fact_chat(session_factory, chat, now)
+
+    scheduler = InterestingFactsScheduler(
+        bot=SimpleNamespace(send_message=AsyncMock()),
+        session_factory=session_factory,
+        catalog=_write_facts(tmp_path, ["Тестовый факт", "Другой факт"]),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    # Worker A claims a slot and then stalls inside Telegram past the lease.
+    stale_claim = await scheduler._claim_next_fact(
+        chat=chat,
+        facts=scheduler.get_facts(),
+        now=now,
+        has_active_game=False,
+    )
+    assert stale_claim is not None
+
+    # Worker B abandons the expired claim and records a newer successful delivery.
+    newer_at = now + timedelta(hours=4)
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.abandon_expired_interesting_fact_claims(chat_id=chat.telegram_chat_id, now=newer_at)
+        await repo.upsert_chat_interesting_fact_state(
+            chat=chat,
+            last_sent_at=newer_at,
+            last_fact_id="fact_newer",
+            used_fact_ids=["fact_newer"],
+        )
+        await session.commit()
+
+    # Worker A's Telegram call finally returns. Its late outcome must not roll the state back.
+    await scheduler._finish_claim(stale_claim, status="sent", telegram_message_id=501)
+
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        state = await repo.get_chat_interesting_fact_state(chat_id=chat.telegram_chat_id)
+        assert state is not None
+        assert state.last_sent_at == newer_at
+        assert state.last_fact_id == "fact_newer"
+        assert state.used_fact_ids == ("fact_newer",)
+        claims = (await session.execute(select(ChatInterestingFactDeliveryModel))).scalars().all()
+        assert [(item.id, item.status, item.telegram_message_id) for item in claims] == [
+            (stale_claim.claim_id, "abandoned", None),
+        ]
+
+    await engine.dispose()
