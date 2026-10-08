@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
 import { miniappNavigation, routes } from '@/shared/config/routes'
+import { PanelGlyph } from '@/shared/ui/PanelGlyph'
 
 function resolveShellMeta(pathname: string) {
   if (pathname.startsWith('/chat/')) {
@@ -14,12 +15,12 @@ function resolveShellMeta(pathname: string) {
   }
 }
 
-const tabIcons: Record<string, { icon: string; labelRu: string }> = {
-  [routes.home]: { icon: '⌂', labelRu: 'Главная' },
-  [routes.groups]: { icon: '👥', labelRu: 'Группы' },
-  [routes.games]: { icon: '🎮', labelRu: 'Игры' },
-  [routes.gacha]: { icon: '🎴', labelRu: 'Гача' },
-  [routes.more]: { icon: '⋯', labelRu: 'Ещё' },
+const tabIcons: Record<string, { icon: 'grid' | 'chat' | 'gamepad' | 'spark' | 'dots'; labelRu: string }> = {
+  [routes.home]: { icon: 'grid', labelRu: 'Главная' },
+  [routes.groups]: { icon: 'chat', labelRu: 'Чаты' },
+  [routes.games]: { icon: 'gamepad', labelRu: 'Игры' },
+  [routes.gacha]: { icon: 'spark', labelRu: 'Гача' },
+  [routes.more]: { icon: 'dots', labelRu: 'Профиль' },
 }
 
 type TelegramBackButton = {
@@ -67,9 +68,9 @@ export function MiniAppShell() {
       </main>
 
       {/* Bottom Navigation Tab Bar */}
-      {!isAdminArea && <nav className="tabbar" aria-label="Mini App navigation">
+      {!isAdminArea && <nav className="tabbar" aria-label="Навигация Mini App">
         {miniappNavigation.map((item) => {
-          const tabInfo = tabIcons[item.to] || { icon: '⋯', labelRu: item.label }
+          const tabInfo = tabIcons[item.to] || { icon: 'dots' as const, labelRu: item.label }
           return (
             <NavLink
               key={item.to}
@@ -79,7 +80,7 @@ export function MiniAppShell() {
                 isActive ? 'tab on' : 'tab'
               }
             >
-              <span className="t-ico">{tabInfo.icon}</span>
+              <span className="t-ico"><PanelGlyph kind={tabInfo.icon} /></span>
               <span className="t-lbl">{tabInfo.labelRu}</span>
             </NavLink>
           )

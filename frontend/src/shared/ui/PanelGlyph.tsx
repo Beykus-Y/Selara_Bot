@@ -1,5 +1,8 @@
 type PanelGlyphKind =
   | 'chat'
+  | 'dots'
+  | 'grid'
+  | 'pulse'
   | 'docs'
   | 'gamepad'
   | 'settings'
@@ -13,6 +16,27 @@ type PanelGlyphProps = {
 
 export function PanelGlyph({ kind }: PanelGlyphProps) {
   switch (kind) {
+    case 'grid':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 4h6.5v6.5H4z" />
+          <path d="M13.5 4H20v6.5h-6.5z" />
+          <path d="M4 13.5h6.5V20H4z" />
+          <path d="M13.5 13.5H20V20h-6.5z" />
+        </svg>
+      )
+    case 'pulse':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3.5 12h4l2.2-5 4.1 10 2.2-5h4.5" />
+        </svg>
+      )
+    case 'dots':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M6 12h.01M12 12h.01M18 12h.01" />
+        </svg>
+      )
     case 'chat':
       return (
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">

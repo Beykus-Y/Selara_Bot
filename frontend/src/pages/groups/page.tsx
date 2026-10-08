@@ -1,12 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
 
+import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 import { getMiniAppPage } from '@/shared/miniapp/api'
+import { groupLetter, groupRoleText, isGroupLive, mergeGroups } from '@/shared/miniapp/group-utils'
 import type { MiniAppGroupsPageData } from '@/shared/miniapp/model'
-import { MiniGroupSection } from '@/shared/miniapp/ui'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
+type GroupsTab = 'manage' | 'join'
+
 export function GroupsPage() {
+  const [tab, setTab] = useState<GroupsTab>('manage')
   const groupsQuery = useQuery({
     queryKey: ['miniapp-groups'],
     queryFn: () => getMiniAppPage<MiniAppGroupsPageData>('/miniapp/groups', 'Не удалось загрузить список групп.'),
@@ -14,64 +20,62 @@ export function GroupsPage() {
 
   usePageTitle('Чаты')
 
-  if (groupsQuery.isLoading) {
-    return <LoadingShell eyebrow="Группы" title="Собираю список групп" cards={3} />
+  if (groupsQuery.isLoading || (!groupsQuery.data && !groupsQuery.isError)) {
+    return <LoadingShell eyebrow="Чаты" title="Подгружаю доступные чаты" cards={3} />
   }
 
-  if (groupsQuery.isError) {
-    return <section className="miniapp-empty-card">{groupsQuery.error.message}</section>
-  }
-
-  if (!groupsQuery.data) {
-    return <LoadingShell eyebrow="Группы" title="Подгружаю доступные чаты" cards={3} />
-  }
-
-  const adminGroups = groupsQuery.data.admin_groups || []
-  const activityGroups = groupsQuery.data.activity_groups || []
-
-  // Combine unique groups to count sums
-  const uniqueGroups = new Map()
-  adminGroups.forEach((g) => uniqueGroups.set(g.chat_id, g))
-  activityGroups.forEach((g) => uniqueGroups.set(g.chat_id, g))
-
-  const totalGroups = uniqueGroups.size
-  let totalMessages = 0
-  uniqueGroups.forEach((g) => {
-    totalMessages += g.message_count || 0
-  })
-
-  return (
-    <div className="miniapp-page-stack">
-      <div>
-        <div className="eyebrow">Группы</div>
-        <h1 className="page">Ваши чаты</h1>
-        <div className="page-sub">
-          {totalGroups} групп · {totalMessages.toLocaleString()} сообщений суммарно
+  if (groupsQuery.isError || !groupsQuery.data) {
+    return (
+      <div className="v2">
+        <h1 className="v2-title">Чаты</h1>
+        <div className="v2-error" role="alert">
+          <span>{groupsQuery.error?.message ?? 'Не удалось загрузить чаты.'}</span>
+          <button type="button" onClick={() => void groupsQuery.refetch()}>Повторить</button>
         </div>
       </div>
+    )
+  }
 
-      <MiniGroupSection
-        title="Управляемые"
-        text="Чаты, где у аккаунта есть права на управление ботом."
-        items={adminGroups}
-        emptyText="Пока нет групп с управленческим доступом."
-      />
+  const all = mergeGroups(groupsQuery.data.admin_groups ?? [], groupsQuery.data.activity_groups ?? [])
+  const managed = all.filter((g) => g.is_admin)
+  const joined = all.filter((g) => !g.is_admin)
+  const shown = tab === 'manage' ? managed : joined
+  const totalMessages = all.reduce((sum, g) => sum + (g.message_count || 0), 0)
 
-      <MiniGroupSection
-        title="Активность"
-        text="Текущая активность и видимость групп для пользователя."
-        items={activityGroups}
-        emptyText="После активности в чатах здесь появятся группы."
-      />
-
-      <a
-        className="btn ghost block"
-        style={{ marginTop: '10px' }}
-        href="https://t.me/Selara_Bot?startgroup=true"
-        target="_blank"
-        rel="noreferrer"
-      >
-        ＋ Добавить бота в группу
+  return (
+    <div className="v2">
+      <h1 className="v2-title">Чаты</h1>
+      <p className="v2-sub">
+        {all.length ? `${all.length} чатов · ${totalMessages.toLocaleString('ru-RU')} сообщений` : 'Пока нет чатов'}
+      </p>
+      <div className="v2-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={tab === 'manage'} className={tab === 'manage' ? 'on' : ''} onClick={() => setTab('manage')}>
+          Управляю · {managed.length}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'join'} className={tab === 'join' ? 'on' : ''} onClick={() => setTab('join')}>
+          Участвую · {joined.length}
+        </button>
+      </div>
+      <p className="v2-hint">
+        {tab === 'manage'
+          ? 'Здесь вы настраиваете бота: роли, модерацию, экономику и аудит.'
+          : 'Здесь видна ваша активность и лидерборд. Настройки доступны админам.'}
+      </p>
+      {shown.map((group) => (
+        <Link key={group.chat_id} className="v2-row" style={{ padding: '15px 0' }} to={routes.chat(group.chat_id)}>
+          <span className="v2-ava">{groupLetter(group)}</span>
+          <span className="v2-main">
+            <b>{group.title}</b>
+            <span>{groupRoleText(group)} · {(group.message_count ?? 0).toLocaleString('ru-RU')} сообщений</span>
+          </span>
+          <span className={isGroupLive(group.last_seen_at) ? 'v2-aside v2-aside--live' : 'v2-aside'}>{group.last_seen_at}</span>
+        </Link>
+      ))}
+      {shown.length === 0 ? (
+        <p className="v2-muted">В этом списке пока пусто. Чаты появятся после активности бота.</p>
+      ) : null}
+      <a className="v2-link" href="https://t.me/Selara_Bot?startgroup=true" target="_blank" rel="noreferrer">
+        + Добавить бота в ещё один чат
       </a>
     </div>
   )
