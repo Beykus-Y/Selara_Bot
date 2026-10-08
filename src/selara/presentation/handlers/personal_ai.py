@@ -1085,6 +1085,7 @@ async def _handle_personal_chat(
                 usage_sink=turn_usages,
                 tool_run=tool_run,
                 outcome_sink=reply_outcome,
+                checkpoint=turn_lease.confirm,
             )
         except LlmClientError as exc:
             outcome["error_category"] = exc.usages[-1].error_category if exc.usages else "provider_error"
@@ -1098,6 +1099,17 @@ async def _handle_personal_chat(
                 )
             await thinking.edit_text("⚠️ Не удалось получить ответ от AI. Попробуйте позже.")
             return
+        except AiTurnLeaseLostError:
+            # A checkpoint stopped the turn before its next model round or tool call. The rounds that already ran are
+            # charged like a failed provider turn; the error goes on to the handler that tells the user.
+            outcome["error_category"] = "lease_lost"
+            if turn_usages and ail_mode and config.ail_settles_actual_cost and not decision.owner_exempt:
+                await _settle_chat_turn(
+                    access_service, config=config, invocation_id=invocation_id,
+                    usages=turn_usages, user_id=user.id, failed=True,
+                    max_units=reserve_units if tools_active else None,
+                )
+            raise
         except Exception:
             log.exception("personal_ai: LLM request failed before reaching the provider")
             outcome["error_category"] = "accounting_unavailable"

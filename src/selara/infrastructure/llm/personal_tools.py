@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -378,12 +379,15 @@ async def run_tool_dialogue(
     accounting_context=None,
     resolved_model=None,
     usage_sink: list | None = None,
-    on_progress=None,
+    checkpoint: Callable[[], Awaitable[None]] | None = None,
 ) -> ToolTurnResult:
     """Rounds of model calls with tools; the last round (or a spent budget) offers none and says so.
 
     ``usage_sink`` receives the usages of every successful round, so the caller prices the whole turn. A provider
     error propagates as ``LlmClientError`` with that round's usages; earlier rounds are already in the sink.
+
+    ``checkpoint`` is awaited before each model round and before each tool call. It may raise to stop the turn, and then
+    nothing after it runs: no further provider call and no tool, such as ``send_artifact``, that cannot be taken back.
     """
     sink = usage_sink if usage_sink is not None else []
     wind_down = False
@@ -401,8 +405,9 @@ async def run_tool_dialogue(
             if not notice_added:
                 messages.append({"role": "user", "content": LAST_ROUND_NOTICE})
                 notice_added = True
-        if on_progress is not None:
-            await on_progress(round_index)
+        if checkpoint is not None:
+            # Fence the round: a turn that lost its lease must not start another provider call.
+            await checkpoint()
         kwargs: dict[str, Any] = {"max_tokens": run.max_tokens()}
         if accounting_context is not None:
             kwargs["accounting_context"] = accounting_context
@@ -437,6 +442,9 @@ async def run_tool_dialogue(
                 except ValueError:
                     outcome = _err(tool_call.id, tool_call.function.name, "Аргументы должны быть JSON-объектом.")
                 else:
+                    if checkpoint is not None:
+                        # Fence each call: send_artifact reaches the chat and cannot be taken back once it is sent.
+                        await checkpoint()
                     outcome = await run.execute(
                         ToolCall(name=tool_call.function.name, arguments=arguments, call_id=tool_call.id), allowed
                     )

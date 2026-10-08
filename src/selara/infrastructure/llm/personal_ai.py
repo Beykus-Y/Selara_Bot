@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 
 from selara.application.ai_character import CharacterProfile, HistoryMessage, build_personal_messages
 from selara.application.personal_memory import (
@@ -72,6 +73,7 @@ async def generate_reply(
     usage_sink: list | None = None,
     tool_run: PersonalToolRun | None = None,
     outcome_sink: dict | None = None,
+    checkpoint: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """Ask the model for one reply.
 
@@ -80,6 +82,8 @@ async def generate_reply(
     ``artifact_sent``. A private chat can never act on groups either way.
 
     ``usage_sink`` receives the provider usages of this chat turn only (what AIL settlement prices).
+
+    ``checkpoint`` is awaited before each model round and each tool call, so a turn that lost its lease stops there.
     """
     summary, recent = await load_history(repo, user_id=user_id, thread=profile.thread)
     memories: list[str] = []
@@ -103,6 +107,7 @@ async def generate_reply(
             accounting_context=accounting_context,
             resolved_model=resolved_model,
             usage_sink=usage_sink,
+            checkpoint=checkpoint,
         )
         if outcome_sink is not None:
             outcome_sink["web_tainted"] = turn.web_tainted
@@ -115,6 +120,9 @@ async def generate_reply(
     if resolved_model is not None:
         # AIL mode: the model already priced by the quota reservation; never re-resolved here.
         kwargs["resolved_model"] = resolved_model
+    if checkpoint is not None:
+        # The one completion is a model round too: a turn that lost its lease must not start it.
+        await checkpoint()
     result = await llm_client.chat_simple(messages, **kwargs)
     if usage_sink is not None:
         usage_sink.extend(getattr(result, "usages", ()) or ())
