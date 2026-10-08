@@ -158,7 +158,7 @@ def test_home_keyboard_has_miniapp_and_desktop_buttons_when_web_is_on():
     assert _find(markup, "📱 Mini App").web_app == WebAppInfo(url="https://selara.example/miniapp/")
     assert _find(markup, "🖥 ПК-панель").url == "https://selara.example/login"
     assert _find(markup, "🚀 Как начать").url == "https://selara.example/app/docs/getting-started"
-    assert _find(markup, "📖 Документация").url == "https://selara.example/app/user"
+    assert _find(markup, "📖 Документация").url == "https://selara.example/app/docs/user"
 
 
 def test_home_keyboard_omits_web_buttons_when_web_is_off():
@@ -190,15 +190,6 @@ def test_every_home_callback_fits_the_telegram_limit():
     assert all(len(data.encode("utf-8")) <= 64 for data in callbacks)
 
 
-def _home_keyboard_call_sites() -> list[ast.Call]:
-    tree = ast.parse(_PRIVATE_PANEL_SOURCE.read_text(encoding="utf-8"))
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_build_home_keyboard"
-    ]
-
-
 def test_home_keyboard_is_built_only_by_the_shared_home_renderer():
     # Regression guard: the home screen used to be rebuilt in seven places with
     # slightly different keyword sets, so a new call site could silently drop a
@@ -207,10 +198,18 @@ def test_home_keyboard_is_built_only_by_the_shared_home_renderer():
     renderer = next(
         node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_render_home_screen"
     )
-    inside_renderer = {id(call) for call in ast.walk(renderer) if isinstance(call, ast.Call)}
-    call_sites = _home_keyboard_call_sites()
+    # Compare by source position: both lists come from the same tree, but positions read clearly in a failure.
+    call_sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_build_home_keyboard"
+    ]
+    inside_renderer = {
+        (node.lineno, node.col_offset) for node in ast.walk(renderer) if isinstance(node, ast.Call)
+    }
     assert len(call_sites) == 1, "_build_home_keyboard must have exactly one call site"
-    assert id(call_sites[0]) in inside_renderer, "that call site must live in _render_home_screen"
+    site = (call_sites[0].lineno, call_sites[0].col_offset)
+    assert site in inside_renderer, "that call site must live in _render_home_screen"
 
 
 @pytest.mark.asyncio
