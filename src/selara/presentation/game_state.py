@@ -2271,11 +2271,14 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         target_user_id: int,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, SpyVoteResolution | None, int | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, None, "Эта кнопка из другого чата"
             if game.kind != "spy":
                 return game, None, None, "Это не игра «Шпион»"
             if game.status != "started" or game.phase != "freeplay":
@@ -2655,11 +2658,14 @@ class GameStore:
         *,
         game_id: str,
         user_id: int,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, DiceRollResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if game.kind != "dice":
                 return game, None, "Это не игра «Дуэль кубиков»"
             if game.status != "started" or game.phase != "freeplay":
@@ -2704,11 +2710,15 @@ class GameStore:
         game_id: str,
         user_id: int,
         option_index: int,
+        expected_chat_id: int | None = None,
+        expected_question_index: int | None = None,
     ) -> tuple[GroupGame | None, QuizAnswerResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if game.kind != "quiz":
                 return game, None, "Это не викторина"
             if game.status != "started" or game.phase != "freeplay":
@@ -2716,6 +2726,11 @@ class GameStore:
             if user_id not in game.players:
                 return game, None, "Вы не участник этой викторины"
 
+            if (
+                expected_question_index is not None
+                and game.quiz_current_question_index != expected_question_index
+            ):
+                return game, None, "Этот вопрос уже закрыт. Используйте актуальную доску."
             question = self._current_quiz_question(game)
             if question is None:
                 return game, None, "Вопрос недоступен"
