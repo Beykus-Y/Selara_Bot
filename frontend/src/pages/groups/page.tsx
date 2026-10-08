@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 import { getMiniAppPage } from '@/shared/miniapp/api'
-import { groupLetter, groupRoleText, isGroupLive, mergeGroups } from '@/shared/miniapp/group-utils'
+import { groupLetter, groupRoleText, mergeGroups } from '@/shared/miniapp/group-utils'
 import type { MiniAppGroupsPageData } from '@/shared/miniapp/model'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
@@ -70,7 +70,7 @@ export function GroupsPage() {
             <b>{group.title}</b>
             <span>{groupRoleText(group)} · {(group.message_count ?? 0).toLocaleString('ru-RU')} сообщений</span>
           </span>
-          <span className={isGroupLive(group.last_seen_at) ? 'v2-aside v2-aside--live' : 'v2-aside'}>{group.last_seen_at}</span>
+          <span className="v2-aside">{group.last_seen_at}</span>
         </Link>
       ))}
       {shown.length === 0 ? (

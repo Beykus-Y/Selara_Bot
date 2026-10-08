@@ -11,10 +11,6 @@ export function groupLetter(group: MiniAppGroup) {
   return first ? first.toUpperCase() : '?'
 }
 
-export function isGroupLive(lastSeen: string) {
-  return /минут|секунд|онлайн|online|сейчас/i.test(lastSeen)
-}
-
 export function mergeGroups(...lists: MiniAppGroup[][]) {
   const map = new Map<number, MiniAppGroup>()
   lists.flat().forEach((group) => map.set(group.chat_id, group))

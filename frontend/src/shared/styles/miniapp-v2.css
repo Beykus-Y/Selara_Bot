@@ -64,7 +64,6 @@ body.miniapp-mode .v2-main { flex: 1; min-width: 0; }
 body.miniapp-mode .v2-main b { display: block; font: 700 14.5px var(--font-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 body.miniapp-mode .v2-main span { display: block; font-size: 12px; color: var(--text-3); margin-top: 3px; }
 body.miniapp-mode .v2-aside { font-size: 11.5px; color: var(--text-3); flex: none; white-space: nowrap; }
-body.miniapp-mode .v2-aside--live { color: oklch(0.84 0.14 150); }
 body.miniapp-mode .v2-tabs { display: flex; gap: 22px; margin-top: 20px; border-bottom: 1px solid var(--line); }
 body.miniapp-mode .v2-tabs button { background: none; border: 0; padding: 0 0 12px; font: 700 14px var(--font-body); color: var(--text-3); cursor: pointer; }
 body.miniapp-mode .v2-tabs button.on { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }

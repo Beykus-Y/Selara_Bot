@@ -105,6 +105,31 @@ def _profile() -> dict:
     }
 
 
+def _chat_overview() -> dict:
+    return {
+        "ok": True, "chat_id": -1001, "chat_title": "Selara Hub", "hero_subtitle": "Тестовый чат",
+        "metrics": [{"label": "Активность", "value": "42", "note": "за неделю", "tone": "good"}],
+        "summary": {"participants_count": 12, "total_messages": 42, "last_activity_at": "10 мин назад"},
+        "daily_activity": [{"date": "2026-10-08", "label": "Чт", "messages": 42}],
+        "hero_of_day": None, "richest_of_day": None, "dashboard_panels": [], "leaderboards": [],
+        "desktop_url": "/app",
+    }
+
+
+def _leaderboard() -> dict:
+    rows = [
+        {
+            "position": position, "user_id": position, "name": f"Участник {position}", "username": "",
+            "activity": 40 - position, "karma": 1, "hybrid_score": 10, "last_seen_at": "10 мин назад", "is_me": False,
+        }
+        for position in range(1, 13)
+    ]
+    return {
+        "ok": True, "mode": "mix", "query": "", "page": 1, "page_size": 12, "total_rows": len(rows),
+        "total_pages": 1, "my_rank": None, "truncated": False, "rows": rows,
+    }
+
+
 class FakeBackend:
     def __init__(self, home: dict | None = None, groups: dict | None = None, collection: dict | None = None) -> None:
         self.home = home
@@ -125,6 +150,10 @@ class FakeBackend:
             return await self._json(route, self.collection)
         if path.endswith("/miniapp/gacha/profile"):
             return await self._json(route, _profile())
+        if path.endswith("/miniapp/chat/-1001/leaderboard"):
+            return await self._json(route, _leaderboard())
+        if path.endswith("/miniapp/chat/-1001"):
+            return await self._json(route, _chat_overview())
         return await self._json(route, {"ok": False, "message": "Unexpected API call."}, 404)
 
     @staticmethod
@@ -194,6 +223,12 @@ async def _run_admin(browser) -> None:
 
     await page.get_by_role("link", name="Лидерборд").click()
     await expect(page).to_have_url(f"{PREVIEW_URL}/chat/-1001#leaderboard", timeout=10000)
+    # The URL alone does not prove the scroll: wait until the ranking section is rendered and near the top of the viewport.
+    await page.wait_for_function(
+        "() => { const el = document.getElementById('leaderboard'); return Boolean(el) && el.getBoundingClientRect().top < 120 }",
+        timeout=10000,
+    )
+    assert not errors, errors
     await context.close()
 
 
