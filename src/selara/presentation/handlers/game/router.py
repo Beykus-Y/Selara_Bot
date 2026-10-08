@@ -87,7 +87,7 @@ _ZLOBCARDS_VOTE_SECONDS = 75
 _GAME_CONFIRM_TTL_SECONDS = 120
 # Ephemeral, single-use confirmation cards. After a restart they safely expire.
 # token -> (game_id, chat_id, user_id, action, phase, round_no, expiry).
-_GAME_CONFIRM_REQUESTS: dict[str, tuple[str, int, int, str, str, int, float]] = {}
+_GAME_CONFIRM_REQUESTS: dict[str, tuple[str, int, int, str, str, int, float, int | None]] = {}
 
 
 def _is_stale_callback_query_error(exc: TelegramBadRequest) -> bool:
@@ -1990,6 +1990,14 @@ def _add_stepper_row(
     lobby_row_sizes.append(3)
 
 
+def _advance_phase_guard(game: GroupGame) -> str:
+    """A repeated quiz phase still needs a new token for each question."""
+    if game.kind == "quiz":
+        index = game.quiz_current_question_index
+        return f"{game.phase}.{index if index is not None else 'none'}"
+    return game.phase
+
+
 def _build_game_admin_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
     """Admin-only surface issued by /gamecontrol (never on the shared board)."""
     if game.status != "started":
@@ -2005,23 +2013,23 @@ def _build_game_admin_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
             advance_text = "⚖️ Подвести голоса"
         elif game.phase == "day_execution_confirm":
             advance_text = "☠️ Закрыть казнь"
-        builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "quiz" and game.phase == "freeplay":
-        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "category_pick":
-        builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "bredovukha" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "zlobcards" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "zlobcards" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "bunker" and game.phase == "bunker_reveal":
-        builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
     if game.kind == "bunker" and game.phase == "bunker_vote":
-        builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}:{_advance_phase_guard(game)}:{game.round_no}")
 
     if game.kind == "spy" and game.phase == "freeplay":
         builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
@@ -4351,7 +4359,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
     if phase_guard is not None and (
         game.status != "started"
-        or (game.phase, game.round_no) != phase_guard
+        or (_advance_phase_guard(game), game.round_no) != phase_guard
     ):
         await query.answer("Этап уже изменился. Откройте /gamecontrol заново.", show_alert=True)
         return
@@ -4854,6 +4862,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             _GAME_CONFIRM_REQUESTS[token] = (
                 game.game_id, game.chat_id, actor_id, action,
                 game.phase, game.round_no, now + _GAME_CONFIRM_TTL_SECONDS,
+                game.quiz_current_question_index if game.kind == "quiz" else None,
             )
             label = "раскрытие ролей" if action == "reveal" else "завершение партии"
             builder = InlineKeyboardBuilder()
@@ -4907,7 +4916,7 @@ async def game_confirm_callback(
         _GAME_CONFIRM_REQUESTS.pop(token, None)
         await query.answer("Подтверждение устарело. Откройте /gamecontrol.", show_alert=True)
         return
-    _, chat_id, actor_id, action, phase, round_no, _ = request
+    _, chat_id, actor_id, action, phase, round_no, _, quiz_question_index = request
     if query.message.chat.id != chat_id or query.from_user.id != actor_id:
         await query.answer("Это подтверждение другого ведущего или чата.", show_alert=True)
         return
@@ -4939,6 +4948,7 @@ async def game_confirm_callback(
         return
     finished_game, status = await GAME_STORE.finish_if_current(
         game_id=game_id, expected_phase=phase, expected_round=round_no,
+        expected_quiz_question_index=quiz_question_index,
         winner_text=(
             "Игра завершена по решению ведущего." if action == "reveal"
             else "Игра остановлена ведущим."
