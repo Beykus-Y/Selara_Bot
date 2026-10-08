@@ -658,13 +658,13 @@ def _build_quiz_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 18 else f"{option_text[:15]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gquiz:{game.game_id}:{option_index}",
+            callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:{option_index}",
         )
 
     answered_count = len({user_id for user_id in game.quiz_answers if user_id in game.players})
     builder.button(
         text=f"🗳 {answered_count}/{len(game.players)}",
-        callback_data=f"gquiz:{game.game_id}:noop",
+        callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -684,8 +684,9 @@ def _build_spy_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         builder.button(text=f"🚨 {text}{count_text}", callback_data=f"gspy:{game.game_id}:{user_id}")
 
     voted_count = len(game.spy_votes)
+    builder.button(text="👤 Мой голос", callback_data=f"gspy:{game.game_id}:mine")
     builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gspy:{game.game_id}:noop")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -952,6 +953,7 @@ def _render_spy_vote_status(game: GroupGame) -> str:
         lines.append(f"<b>Доска подозрений:</b> {_render_vote_leaders(game, vote_counts, limit=4)}")
     else:
         lines.append("<b>Главный подозреваемый:</b> пока нет.")
+    lines.append("<i>Нажмите на подозреваемого, чтобы отдать или изменить голос; «Мой голос» покажет ваш выбор лично вам.</i>")
 
     _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.spy_votes, label="Ещё без голоса")
 
@@ -1084,7 +1086,11 @@ def _render_dice_progress(game: GroupGame) -> str:
             game.dice_scores.items(),
             key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
         )
-        lines.append("<b>Текущие броски:</b>")
+        lines.append("<b>Итоговые броски:</b>" if game.status == "finished" else "<b>Текущие броски:</b>")
+        best = ranking[0][1]
+        leaders = [game.players.get(uid, f"user:{uid}") for uid, score in ranking if score == best]
+        if game.status == "started":
+            lines.append("<b>Пока лидирует:</b> " + escape(", ".join(leaders)) + f" ({best})")
         for idx, (user_id, score) in enumerate(ranking, start=1):
             lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
 
@@ -1870,16 +1876,19 @@ def _render_game_text(
         lines.append("")
         lines.append(_render_roles_reveal(game))
 
-    if game.kind == "dice" and game.status == "started":
-        lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
-        lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» ниже.")
+    if game.kind == "dice" and game.status in {"started", "finished"}:
+        if game.status == "started":
+            lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
+            lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» один раз; повторный бросок недоступен.")
+        else:
+            lines.append("<b>Сейчас:</b> все броски завершены. Ниже итоговая таблица.")
         lines.append("")
         lines.append(_render_dice_progress(game))
 
     if game.kind == "quiz" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append("<b>Сейчас:</b> идёт вопрос, все отвечают одновременно.")
-        lines.append("<b>Что делать:</b> выбирайте ответ кнопками под этим сообщением.")
+        lines.append("<b>Что делать:</b> выберите букву ответа кнопкой ниже. Полный текст вариантов — под вопросом; пока вопрос открыт, выбор можно изменить.")
         question_block = _render_quiz_question(game)
         if question_block:
             lines.append("")
@@ -1888,6 +1897,10 @@ def _render_game_text(
         if score_block:
             lines.append("")
             lines.append(score_block)
+
+    if game.kind == "quiz" and game.status == "finished":
+        lines.append("<b>Сейчас:</b> викторина завершена. Итоговые очки:")
+        lines.append(_render_quiz_scoreboard(game))
 
     if game.kind == "bredovukha" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.bred_rounds}")
