@@ -28,6 +28,7 @@ from selara.presentation.commands.access import parse_command_rank_phrase, resol
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.formatters import format_last_seen
 from selara.presentation.handlers.economy import _dashboard_text
+from selara.presentation.navigation.contract import safe_callback
 from selara.presentation.handlers.settings_common import (
     CFG_BOOL_KEYS,
     CFG_ENUM_VALUES,
@@ -294,7 +295,7 @@ def _build_groups_keyboard(*, route_prefix: str, groups: list[UserChatOverview],
 
 def _build_admin_group_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="⚙️ Настройки", callback_data=encode_pm_callback("as", chat_id, 0))
+    builder.button(text="⚙️ Управление группой", callback_data=safe_callback("pms", "h", str(chat_id)))
     builder.button(text="🔐 Ранги команд", callback_data=encode_pm_callback("ar", chat_id))
     builder.button(text="🧩 Роли", callback_data=encode_pm_callback("rl", chat_id))
     builder.button(text="⬅️ К группам", callback_data=encode_pm_callback("al", 0))
