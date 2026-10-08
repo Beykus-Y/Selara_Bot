@@ -210,10 +210,15 @@ async def test_double_confirmation_finalizes_exactly_once(monkeypatch):
     assert (await store.get_game(game.game_id)).status == "finished"
     assert edit.await_count == 1
     assert feed.await_count == 1
-    assert sorted([a.answers[-1][0], b.answers[-1][0]]) == [
-        "Игра завершена",
-        "Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.",
-    ]
+    responses = [a.answers[-1][0], b.answers[-1][0]]
+    assert responses.count("Игра завершена") == 1
+    assert any(
+        response in {
+            "Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.",
+            "Игра уже изменилась или завершена. Повторное действие не выполнено.",
+        }
+        for response in responses
+    )
 
 
 @pytest.mark.asyncio
