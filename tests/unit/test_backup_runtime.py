@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from selara.core.config import Settings
 from selara.infrastructure import backup, backup_encryption
 from selara.infrastructure.backup import BackupFile
 
@@ -32,6 +33,13 @@ def test_seconds_until_next_backup_targets_next_local_midnight() -> None:
 def test_backup_chunk_size_stays_below_hosted_telegram_document_limit() -> None:
     assert backup.BACKUP_CHUNK_SIZE_BYTES == 45 * 1024 * 1024
     assert backup.BACKUP_CHUNK_SIZE_BYTES < 50_000_000
+
+
+def test_pg_dump_timeout_is_its_own_setting_with_a_long_default() -> None:
+    field = Settings.model_fields["backup_pg_dump_timeout_seconds"]
+
+    assert field.default == 1800.0
+    assert field.validation_alias == "BACKUP_PG_DUMP_TIMEOUT_SECONDS"
 
 
 def _install_dump_verifier(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -380,6 +388,7 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "backup_pg_restore_path": "pg_restore",
         "backup_timeout_seconds": 30.0,
+        "backup_pg_dump_timeout_seconds": 1800.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -491,7 +500,7 @@ async def _cancel_daily_backup_during_pg_dump(
         backup_encryption_public_key=_PUBLIC_KEY,
         backup_pg_dump_path="pg_dump",
         backup_restore_drill_enabled=False,
-        backup_timeout_seconds=30.0,
+        backup_pg_dump_timeout_seconds=30.0,
         database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
     )
     job = asyncio.create_task(backup.send_daily_backup(bot=SimpleNamespace(), settings=settings))
@@ -542,7 +551,7 @@ async def test_pg_dump_that_ignores_terminate_is_killed_after_a_bounded_wait(
 
 
 @pytest.mark.asyncio
-async def test_pg_dump_that_outlives_the_backup_timeout_is_terminated_and_reaped(
+async def test_pg_dump_that_outlives_its_timeout_is_terminated_and_reaped(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -556,7 +565,7 @@ async def test_pg_dump_that_outlives_the_backup_timeout_is_terminated_and_reaped
     settings = _make_settings(
         database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
         backup_pg_dump_path="pg_dump",
-        backup_timeout_seconds=0.05,
+        backup_pg_dump_timeout_seconds=0.05,
     )
 
     # A dump that never finishes must fail the job instead of holding it forever.

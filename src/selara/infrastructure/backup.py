@@ -640,8 +640,9 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
             f"Backup command '{settings.backup_pg_dump_path}' is not available in the main bot runtime."
         ) from exc
 
-    # A dump stalled on a lock or a dead connection must not hold the job, or the manual slot, forever.
-    timeout_seconds = settings.backup_timeout_seconds
+    # A stalled dump must not hold the job, or the manual slot, forever. The lease is renewed
+    # separately, so this bound can be generous.
+    timeout_seconds = settings.backup_pg_dump_timeout_seconds
     try:
         async with asyncio.timeout(timeout_seconds):
             _stdout, stderr = await process.communicate()

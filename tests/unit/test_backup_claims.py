@@ -477,7 +477,7 @@ def _backup_settings(**overrides) -> SimpleNamespace:
         "backup_encryption_public_key": _PUBLIC_KEY,
         "backup_pg_dump_path": "pg_dump",
         "backup_restore_drill_enabled": False,
-        "backup_timeout_seconds": 300.0,
+        "backup_pg_dump_timeout_seconds": 1800.0,
         "database_url": "postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
     }
     values.update(overrides)
@@ -663,7 +663,7 @@ async def test_manual_backup_whose_pg_dump_hangs_is_failed_and_frees_the_slot(mo
     try:
         await backup.start_manual_backup(
             bot=bot,
-            settings=_backup_settings(backup_timeout_seconds=0.05),
+            settings=_backup_settings(backup_pg_dump_timeout_seconds=0.05),
             session_factory=session_factory,
         )
         await asyncio.wait_for(asyncio.gather(*list(backup._manual_backup_tasks.values())), timeout=5)
@@ -691,7 +691,7 @@ async def test_lost_lease_terminates_a_hung_pg_dump_and_records_nothing(monkeypa
         await asyncio.wait_for(
             backup.run_scheduled_daily_backup(
                 bot=SimpleNamespace(),
-                settings=_backup_settings(backup_timeout_seconds=30.0),
+                settings=_backup_settings(backup_pg_dump_timeout_seconds=30.0),
                 session_factory=session_factory,
                 slot_key=SLOT,
             ),
