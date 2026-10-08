@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -44,9 +45,9 @@ async def _claim(session_factory, owner: str, at: datetime) -> bool:
     )
 
 
-async def _load(session_factory) -> BackupJobClaimModel:
+async def _load(session_factory, slot_key: str = SLOT) -> BackupJobClaimModel:
     async with session_factory() as session:
-        row = await session.get(BackupJobClaimModel, SLOT)
+        row = await session.get(BackupJobClaimModel, slot_key)
         assert row is not None
         return row
 
@@ -446,5 +447,259 @@ async def test_losing_instance_takes_over_when_the_owner_lease_expires(monkeypat
         row = await _load(session_factory)
         assert row.status == BACKUP_SLOT_COMPLETED
         assert row.owner_token != "crashed-owner"
+    finally:
+        await engine.dispose()
+
+
+def _fast_lease(monkeypatch: pytest.MonkeyPatch, *, lease_seconds: float, renew_seconds: float, retry_seconds: float) -> None:
+    monkeypatch.setattr(backup, "_BACKUP_LEASE_SECONDS", lease_seconds)
+    monkeypatch.setattr(backup, "_BACKUP_LEASE_RENEW_SECONDS", renew_seconds)
+    monkeypatch.setattr(backup, "_BACKUP_LEASE_RETRY_SECONDS", retry_seconds)
+
+
+def _slow_backup(outcomes: list[str]):
+    """A backup that runs for a long time unless it is cancelled, and records which happened."""
+
+    async def slow_send_daily_backup(*, bot, settings) -> None:
+        try:
+            await asyncio.sleep(30)
+            outcomes.append("sent")
+        except asyncio.CancelledError:
+            outcomes.append("cancelled")
+            raise
+
+    return slow_send_daily_backup
+
+
+def _backup_settings(**overrides) -> SimpleNamespace:
+    values = {
+        "admin_user_id": 42,
+        "backup_encryption_public_key": _PUBLIC_KEY,
+        "backup_pg_dump_path": "pg_dump",
+        "backup_restore_drill_enabled": False,
+        "backup_pg_dump_timeout_seconds": 1800.0,
+        "database_url": "postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _HangingPgDump:
+    """A pg_dump stand-in that never finishes on its own; it stops only when terminated or killed."""
+
+    def __init__(self) -> None:
+        self._exited = asyncio.Event()
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self.reaped = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await self._exited.wait()
+        return b"", b""
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._exit(-15)
+
+    def kill(self) -> None:
+        self.killed = True
+        self._exit(-9)
+
+    def _exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exited.set()
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        self.reaped = True
+        assert self.returncode is not None
+        return self.returncode
+
+
+def _hang_pg_dump(monkeypatch: pytest.MonkeyPatch) -> _HangingPgDump:
+    child = _HangingPgDump()
+
+    async def fake_exec(*command, **kwargs):
+        return child
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    return child
+
+
+@pytest.mark.asyncio
+async def test_renewals_failing_past_the_deadline_stop_the_run_even_if_the_database_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine, session_factory = await _session_factory()
+    outcomes: list[str] = []
+    database_back_at = monotonic() + 1.0
+
+    async def flaky_renew(**kwargs) -> bool:
+        if monotonic() < database_back_at:
+            raise RuntimeError("database is unavailable")
+        return True
+
+    monkeypatch.setattr(backup, "send_daily_backup", _slow_backup(outcomes))
+    monkeypatch.setattr(backup, "renew_backup_slot_lease", flaky_renew)
+    _fast_lease(monkeypatch, lease_seconds=0.2, renew_seconds=0.01, retry_seconds=0.01)
+    try:
+        await asyncio.wait_for(
+            backup.run_scheduled_daily_backup(
+                bot=SimpleNamespace(),
+                settings=SimpleNamespace(),
+                session_factory=session_factory,
+                slot_key=SLOT,
+            ),
+            timeout=5,
+        )
+
+        # The deadline passed while renewals kept failing. A database that comes back later must not
+        # let this run continue beside a backup that another instance may now start.
+        assert outcomes == ["cancelled"]
+        assert (await _load(session_factory)).status == BACKUP_SLOT_RUNNING
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_hung_renewal_stops_the_run_at_the_lease_deadline(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+    outcomes: list[str] = []
+
+    async def hanging_renew(**kwargs) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(backup, "send_daily_backup", _slow_backup(outcomes))
+    monkeypatch.setattr(backup, "renew_backup_slot_lease", hanging_renew)
+    _fast_lease(monkeypatch, lease_seconds=0.2, renew_seconds=0.01, retry_seconds=0.01)
+    try:
+        await asyncio.wait_for(
+            backup.run_scheduled_daily_backup(
+                bot=SimpleNamespace(),
+                settings=SimpleNamespace(),
+                session_factory=session_factory,
+                slot_key=SLOT,
+            ),
+            timeout=5,
+        )
+
+        assert outcomes == ["cancelled"]
+        assert (await _load(session_factory)).status == BACKUP_SLOT_RUNNING
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_renewal_that_recovers_before_the_deadline_lets_the_run_finish(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+    sent: list[str] = []
+    renew_calls = 0
+
+    async def send_after_renewals(*, bot, settings) -> None:
+        # Outlives the first lease, so the run finishes only if later renewals keep extending it.
+        await asyncio.sleep(1.0)
+        sent.append("sent")
+
+    async def briefly_failing_renew(**kwargs) -> bool:
+        nonlocal renew_calls
+        renew_calls += 1
+        if renew_calls == 1:
+            raise RuntimeError("database is unavailable")
+        return True
+
+    monkeypatch.setattr(backup, "send_daily_backup", send_after_renewals)
+    monkeypatch.setattr(backup, "renew_backup_slot_lease", briefly_failing_renew)
+    _fast_lease(monkeypatch, lease_seconds=0.5, renew_seconds=0.05, retry_seconds=0.05)
+    try:
+        await asyncio.wait_for(
+            backup.run_scheduled_daily_backup(
+                bot=SimpleNamespace(),
+                settings=SimpleNamespace(),
+                session_factory=session_factory,
+                slot_key=SLOT,
+            ),
+            timeout=5,
+        )
+
+        assert sent == ["sent"]
+        assert (await _load(session_factory)).status == BACKUP_SLOT_COMPLETED
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_backup_stops_when_its_lease_cannot_be_renewed_in_time(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+    outcomes: list[str] = []
+
+    async def failing_renew(**kwargs) -> bool:
+        raise RuntimeError("database is unavailable")
+
+    monkeypatch.setattr(backup, "send_daily_backup", _slow_backup(outcomes))
+    monkeypatch.setattr(backup, "renew_backup_slot_lease", failing_renew)
+    _fast_lease(monkeypatch, lease_seconds=0.2, renew_seconds=0.01, retry_seconds=0.01)
+    try:
+        await backup.start_manual_backup(
+            bot=_RecordingBot(),
+            settings=_backup_settings(),
+            session_factory=session_factory,
+        )
+        await asyncio.wait_for(asyncio.gather(*list(backup._manual_backup_tasks.values())), timeout=5)
+
+        assert outcomes == ["cancelled"]
+        # The stopped run records no outcome, so the slot is left for whoever holds it next.
+        assert (await _load(session_factory, MANUAL_BACKUP_SLOT_KEY)).status == BACKUP_SLOT_RUNNING
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_backup_whose_pg_dump_hangs_is_failed_and_frees_the_slot(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+    child = _hang_pg_dump(monkeypatch)
+    bot = _RecordingBot()
+    try:
+        await backup.start_manual_backup(
+            bot=bot,
+            settings=_backup_settings(backup_pg_dump_timeout_seconds=0.05),
+            session_factory=session_factory,
+        )
+        await asyncio.wait_for(asyncio.gather(*list(backup._manual_backup_tasks.values())), timeout=5)
+
+        assert child.terminated and child.reaped and not child.killed
+        status = await backup.read_manual_backup_status(session_factory=session_factory)
+        assert status["status"] == "failed"
+        assert "timed out after 0.05s" in (status["error"] or "")
+        assert len(bot.messages) == 1 and "timed out after 0.05s" in bot.messages[0]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_terminates_a_hung_pg_dump_and_records_nothing(monkeypatch: pytest.MonkeyPatch):
+    engine, session_factory = await _session_factory()
+    child = _hang_pg_dump(monkeypatch)
+
+    async def failing_renew(**kwargs) -> bool:
+        raise RuntimeError("database is unavailable")
+
+    monkeypatch.setattr(backup, "renew_backup_slot_lease", failing_renew)
+    _fast_lease(monkeypatch, lease_seconds=0.2, renew_seconds=0.01, retry_seconds=0.01)
+    try:
+        await asyncio.wait_for(
+            backup.run_scheduled_daily_backup(
+                bot=SimpleNamespace(),
+                settings=_backup_settings(backup_pg_dump_timeout_seconds=30.0),
+                session_factory=session_factory,
+                slot_key=SLOT,
+            ),
+            timeout=5,
+        )
+
+        # pg_dump must be stopped and reaped, not left running against the database.
+        assert child.terminated and child.reaped
+        assert (await _load(session_factory)).status == BACKUP_SLOT_RUNNING
     finally:
         await engine.dispose()

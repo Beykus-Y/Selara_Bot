@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     gacha_service_token: str = Field(default="", validation_alias="GACHA_SERVICE_TOKEN")
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
+    backup_pg_dump_timeout_seconds: float = Field(default=1800.0, validation_alias="BACKUP_PG_DUMP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")
     backup_pg_restore_path: str = Field(default="pg_restore", validation_alias="BACKUP_PG_RESTORE_PATH")
     # Restore drill: each dump is restored into a scratch database on the bot's PostgreSQL server before it is encrypted.

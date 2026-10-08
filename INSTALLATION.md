@@ -148,12 +148,17 @@ Telegram проверяет каждый дамп: PostgreSQL custom-форма�
 
 Для этого `pg_restore` должен быть доступен в `PATH` runtime-контейнера:
 Docker-образ ставит пакет `postgresql-client`; при запуске без Docker его нужно
-установить отдельно (`apt install postgresql-client` или аналог). Проверка
-`pg_restore` ограничена `BACKUP_TIMEOUT_SECONDS` (по умолчанию 300): по
-истечении таймаута дочерний процесс убивается, backup завершается ошибкой.
+установить отдельно (`apt install postgresql-client` или аналог). Проверка `pg_restore` и загрузка дампа gacha ограничены `BACKUP_TIMEOUT_SECONDS`
+(по умолчанию 300): по истечении таймаута backup завершается ошибкой, а дочерний
+процесс `pg_restore` останавливается. `pg_dump` основной БД ограничен отдельно,
+`BACKUP_PG_DUMP_TIMEOUT_SECONDS` (по умолчанию 1800), потому что сжатый дамп большой
+базы может идти дольше 300 секунд. Если дамп не укладывается в свой срок, увеличьте
+это значение. Lease backup продлевается во время дампа, поэтому длинный дамп не
+приводит к потере блокировки.
 
 ```env
 BACKUP_TIMEOUT_SECONDS=300
+BACKUP_PG_DUMP_TIMEOUT_SECONDS=1800
 BACKUP_PG_DUMP_PATH=pg_dump
 BACKUP_PG_RESTORE_PATH=pg_restore
 BACKUP_ENCRYPTION_PUBLIC_KEY=<публичный ключ из keygen>
