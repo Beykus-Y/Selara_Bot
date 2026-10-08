@@ -179,6 +179,46 @@ async def test_a_database_outage_never_parks_inbox_rows(monkeypatch) -> None:
     await engine.dispose()
 
 
+class _DriverError(Exception):
+    """A driver error with a PostgreSQL SQLSTATE, the attribute SQLAlchemy copies onto its translated errors."""
+
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(f"SQLSTATE {sqlstate}")
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.asyncio
+async def test_a_database_error_in_the_flush_never_parks_valid_rows(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    enqueue = _batcher(session_factory)
+    for message_id in range(1, 4):
+        await enqueue.enqueue_message(**_message(chat_id=7501, user_id=751, message_id=message_id))
+
+    original = SqlAlchemyActivityRepository.flush_activity_batch
+
+    async def _deadlocked(self, events):
+        raise OperationalError("UPDATE user_stats", {}, _DriverError("40P01"))
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", _deadlocked)
+
+    # The attempt limit is three. A deadlocked flush is the database's failure, so it leaves the rows queued.
+    for _ in range(3):
+        await _flusher_run(session_factory)
+        assert await _inbox_attempts(session_factory) == [0, 0, 0]
+    assert await _count(session_factory, ActivityEventDeadLetterModel) == 0
+
+    monkeypatch.setattr(SqlAlchemyActivityRepository, "flush_activity_batch", original)
+    await _flusher_run(session_factory)
+    assert await _count(session_factory, ActivityEventInboxModel) == 0
+    assert await _count(session_factory, MessageArchiveModel) == 3
+    assert await _message_count(session_factory, chat_id=7501, user_id=751) == 3
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_a_row_that_cannot_be_decoded_is_parked_without_holding_back_good_rows() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
