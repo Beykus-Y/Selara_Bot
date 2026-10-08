@@ -95,8 +95,20 @@ class FakeQuery:
 
 
 class FakeActivityRepo:
+    def __init__(self, *, can_manage_games: bool = True) -> None:
+        self.can_manage_games = can_manage_games
+
     async def get_chat_display_name(self, *, chat_id: int, user_id: int):
         return None
+
+    async def get_effective_role_definition(self, *, chat_id: int, user_id: int):
+        if not self.can_manage_games:
+            return None
+        from selara.domain.entities import ChatRoleDefinition
+        return ChatRoleDefinition(
+            chat_id=chat_id, role_code="game_master", title_ru="Game Master",
+            rank=50, permissions=("manage_games",), is_system=False,
+        )
 
 
 def _chat_settings():
