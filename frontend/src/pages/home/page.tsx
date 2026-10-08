@@ -9,14 +9,6 @@ import type { MiniAppHomePageData } from '@/shared/miniapp/model'
 import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
-function parseXp(value: string) {
-  const match = value.replace(/\s/g, '').match(/(\d+)\/(\d+)/)
-  if (!match) return null
-  const current = parseInt(match[1], 10)
-  const total = parseInt(match[2], 10)
-  return total > 0 ? { current, total } : null
-}
-
 export function HomePage() {
   const { viewer } = useMiniApp()
   const homeQuery = useQuery({
@@ -49,14 +41,6 @@ export function HomePage() {
   const isNew = chats.length === 0
   const isAdmin = adminGroups.length > 0
 
-  const metrics = data.metrics ?? []
-  const find = (re: RegExp) => metrics.find((m) => re.test(m.label))
-  const level = find(/уровень|level/i)
-  const xp = find(/опыт|xp/i)
-  const balance = find(/баланс|очки|points|pts/i)
-  const streak = find(/серия|streak|дней/i)
-  const xpParsed = xp ? parseXp(xp.value) : null
-  const xpPercent = xpParsed ? Math.min(100, Math.round((xpParsed.current / xpParsed.total) * 100)) : 0
   const firstName = viewer.display_name.split(' ')[0]
 
   if (isNew) {
@@ -101,31 +85,10 @@ export function HomePage() {
         </Link>
       ))}
 
-      {level || xp || balance || streak ? (
-        <>
-          <div className="v2-sec"><span>Ваш прогресс</span></div>
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: 'var(--text-2)' }}>
-              <span>Уровень {level?.value ?? '1'}</span>
-              <span>{xp?.value ?? ''}</span>
-            </div>
-            <div className="v2-progress"><i style={{ width: `${xpPercent}%` }} /></div>
-            <div className="v2-stats">
-              {balance ? <span><b>{balance.value}</b> pts</span> : null}
-              {streak ? <span><b>{streak.value}</b> дней подряд</span> : null}
-            </div>
-          </div>
-        </>
-      ) : null}
-
       {isAdmin && manageChat ? (
         <>
           <div className="v2-sec"><span>Управление</span></div>
-          <Link className="v2-row" style={{ marginTop: 6 }} to={routes.chatTab(manageChat.chat_id, 'settings')}>
-            <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Настройки группы</b></span>
-            <span className="v2-aside">{manageChat.title} ›</span>
-          </Link>
-          <Link className="v2-row" to={routes.audit(manageChat.chat_id)}>
+          <Link className="v2-row" style={{ marginTop: 6 }} to={routes.audit(manageChat.chat_id)}>
             <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Аудит действий</b></span>
             <span className="v2-aside">{manageChat.title} ›</span>
           </Link>

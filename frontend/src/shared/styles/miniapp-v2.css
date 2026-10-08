@@ -8,7 +8,7 @@ body.miniapp-mode {
   --line-strong: rgba(255, 255, 255, .12);
   --text: #f2f0f7;
   --text-2: #9a96ab;
-  --text-3: #6b6780;
+  --text-3: #8a85a3;
   --accent: oklch(0.76 0.14 295);
   --accent-text: oklch(0.82 0.12 295);
   --violet: var(--accent);

@@ -12,7 +12,8 @@ import { LoadingShell } from '@/shared/ui/LoadingShell'
 type GroupsTab = 'manage' | 'join'
 
 export function GroupsPage() {
-  const [tab, setTab] = useState<GroupsTab>('manage')
+  // null until data loads: the default tab depends on whether the viewer manages any chat.
+  const [selectedTab, setTab] = useState<GroupsTab | null>(null)
   const groupsQuery = useQuery({
     queryKey: ['miniapp-groups'],
     queryFn: () => getMiniAppPage<MiniAppGroupsPageData>('/miniapp/groups', 'Не удалось загрузить список групп.'),
@@ -39,6 +40,7 @@ export function GroupsPage() {
   const all = mergeGroups(groupsQuery.data.admin_groups ?? [], groupsQuery.data.activity_groups ?? [])
   const managed = all.filter((g) => g.is_admin)
   const joined = all.filter((g) => !g.is_admin)
+  const tab: GroupsTab = selectedTab ?? (managed.length > 0 ? 'manage' : 'join')
   const shown = tab === 'manage' ? managed : joined
   const totalMessages = all.reduce((sum, g) => sum + (g.message_count || 0), 0)
 
@@ -58,8 +60,8 @@ export function GroupsPage() {
       </div>
       <p className="v2-hint">
         {tab === 'manage'
-          ? 'Здесь вы настраиваете бота: роли, модерацию, экономику и аудит.'
-          : 'Здесь видна ваша активность и лидерборд. Настройки доступны админам.'}
+          ? 'Здесь чаты, где вы админ: лидерборд, экономика и аудит.'
+          : 'Здесь видна ваша активность и лидерборд.'}
       </p>
       {shown.map((group) => (
         <Link key={group.chat_id} className="v2-row" style={{ padding: '15px 0' }} to={routes.chat(group.chat_id)}>
