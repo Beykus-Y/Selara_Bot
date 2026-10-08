@@ -61,7 +61,8 @@ CARDS: tuple[FeatureCard, ...] = (
         contexts=("group",),
         audience="members",
         limits=(
-            "Доступно, только если в этом чате есть родитель.",
+            "/escapefamily — только если у вас есть родитель в этом чате.",
+            "/escapepet — только если вы чей-то питомец в этом чате.",
             "Действие подтверждается кнопкой и необратимо.",
         ),
     ),
@@ -91,14 +92,14 @@ CARDS: tuple[FeatureCard, ...] = (
     ),
     FeatureCard(
         spec_key="social_quote_card",
-        contexts=("group",),
-        audience="members",
+        contexts=("private", "group"),
+        audience="all",
         limits=("Нужен reply на сообщение, которое нужно процитировать.",),
     ),
     FeatureCard(
         spec_key="social_personas",
         contexts=("group",),
-        audience="members",
+        audience="admins",
         limits=(
             "Работает, только если в чате включена настройка образов; иначе бот сообщит об этом.",
             "Образ подменяет только отображаемое имя в ответах бота.",
