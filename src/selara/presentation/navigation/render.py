@@ -30,8 +30,23 @@ def _code(text: str) -> str:
     return f"<code>{escape(text)}</code>"
 
 
+def _how(spec: CommandSpec) -> list[str]:
+    """What the user types: slash syntax, else natural-language triggers, else examples.
+
+    Natural-language features (for example clans or gacha) have no slash syntax at all.
+    """
+    if spec.syntax:
+        return list(spec.syntax)
+    if spec.natural_triggers:
+        return [f"«{trigger}»" for trigger in spec.natural_triggers]
+    return list(spec.examples)
+
+
 def command_line(spec: CommandSpec) -> str:
-    return f"• {_code(spec.syntax[0])} — {escape(spec.title_ru)}"
+    how = _how(spec)
+    if not how:
+        return f"• {escape(spec.title_ru)}"
+    return f"• {_code(how[0])} — {escape(spec.title_ru)}"
 
 
 def card_text(card: FeatureCard) -> str:
@@ -40,9 +55,11 @@ def card_text(card: FeatureCard) -> str:
         f"<b>{escape(spec.title_ru)}</b>",
         escape(spec.description_ru),
         "Где: " + ", ".join(CONTEXT_LABELS[context] for context in card.contexts),
-        "Как: " + ", ".join(_code(syntax) for syntax in spec.syntax),
-        "Кому: " + AUDIENCE_LABELS[card.audience],
     ]
+    how = _how(spec)
+    if how:
+        lines.append("Как: " + ", ".join(_code(entry) for entry in how))
+    lines.append("Кому: " + AUDIENCE_LABELS[card.audience])
     if card.limits:
         lines.append("Ограничения: " + "; ".join(escape(limit) for limit in card.limits))
     if card.related_nodes:

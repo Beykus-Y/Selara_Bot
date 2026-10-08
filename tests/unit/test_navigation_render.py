@@ -2,7 +2,10 @@ from html import escape
 
 import pytest
 
-from selara.presentation.commands.command_catalog import get_command_spec
+from selara.presentation.commands.command_catalog import (
+    COMMAND_CATALOG,
+    get_command_spec,
+)
 from selara.presentation.navigation.cards.model import FeatureCard
 from selara.presentation.navigation.render import card_text, command_line, feature_block
 
@@ -55,3 +58,18 @@ def test_feature_block_is_none_without_commands() -> None:
 @pytest.mark.parametrize("spec_key", ["economy_farm", "pets_core"])
 def test_command_line_is_one_line(spec_key: str) -> None:
     assert "\n" not in command_line(get_command_spec(spec_key))
+
+
+@pytest.mark.parametrize("spec", COMMAND_CATALOG, ids=lambda spec: spec.key)
+def test_every_catalog_spec_renders_a_line_and_a_card_without_syntax(spec) -> None:
+    # Natural-language specs (clans, gacha) have no slash syntax; rendering must not index into it.
+    line = command_line(spec)
+    assert line.startswith("•") and escape(spec.title_ru) in line
+    card = FeatureCard(spec_key=spec.key, contexts=("private",), audience="all")
+    assert escape(spec.title_ru) in card_text(card)
+
+
+def test_natural_language_spec_shows_its_trigger_when_it_has_no_syntax() -> None:
+    spec = get_command_spec("clans_core")
+    assert not spec.syntax
+    assert "«клан»" in command_line(spec)
