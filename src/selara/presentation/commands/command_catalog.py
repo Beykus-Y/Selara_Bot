@@ -723,6 +723,64 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         natural_triggers=("объява", "рег", "анрег"),
         notes=("объява требует ранг команды, назначаемый /setrank.",),
     ),
+    CommandSpec(
+        key="clans_core",
+        category="clans",
+        dispatch_kind="natural_language",
+        syntax=(),
+        title_ru="Кланы",
+        description_ru=(
+            "Клан — объединение участников с общим списком. Создаётся, вступает и покидается "
+            "обычными фразами; создатель может удалить клан."
+        ),
+        natural_triggers=(
+            "клан",
+            "кланы",
+            "создать клан <название>",
+            "вступить в клан <название или id>",
+            "выйти из клана",
+            "удалить клан",
+        ),
+        notes=("Создатель не может выйти из клана — только удалить его.",),
+    ),
+    CommandSpec(
+        key="ai_personal",
+        category="ai",
+        dispatch_kind="both",
+        syntax=("/ai", "/ai_reset"),
+        title_ru="Личный AI",
+        description_ru=(
+            "Личный AI открывается через /ai: характер, модель, память и лимиты настраиваются там же. "
+            "В личке обычное сообщение без / тоже уходит личному AI."
+        ),
+        notes=(
+            "/ai_reset работает только в личных сообщениях с ботом.",
+        ),
+    ),
+    CommandSpec(
+        key="subscriptions_selara",
+        category="subscriptions",
+        dispatch_kind="slash",
+        syntax=("/premium", "/terms", "/paysupport"),
+        title_ru="Подписки Personal и Chat AI",
+        description_ru=(
+            "/premium открывает выбор подписки: Personal привязан к пользователю, Chat AI — к выбранному чату. "
+            "/terms показывает условия, /paysupport — помощь по оплате."
+        ),
+        notes=("Цены и условия показываются внутри /premium и здесь не дублируются.",),
+    ),
+    CommandSpec(
+        key="admin_autocfg",
+        category="admin",
+        dispatch_kind="slash",
+        syntax=("/autocfg", "/autocfgcancel"),
+        title_ru="Настройка группы через ИИ",
+        description_ru=(
+            "/autocfg в личке с ботом помогает настроить группу через диалог с ИИ; "
+            "/autocfgcancel отменяет текущую настройку."
+        ),
+        notes=("В группе /autocfg отвечает подсказкой открыть личку с ботом.",),
+    ),
 )
 
 
