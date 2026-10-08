@@ -2546,6 +2546,11 @@ async def _build_gacha_info_view(
             f"🆓 Бесплатная крутка: «{_GACHA_FREE_PULL_COMMANDS['genshin']}» или «{_GACHA_FREE_PULL_COMMANDS['hsr']}» "
             "в чате, раз в кулдаун баннера. Если он ещё идёт, бот напишет, сколько ждать."
         ),
+        (
+            "🎴 Коллекция: «моя гача генш» или «моя гача хср». Редкость: "
+            "⬜ обычная, 🟦 редкая, 🟪 эпическая, 🟨 легендарная, 🟥 мифическая."
+        ),
+        "📖 Справка по гаче: /help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR.",
     ]
     if coin_balance is not None:
         sections.append(f"🪙 Монеты бота: <b>{_format_gacha_number(coin_balance)}</b>")
