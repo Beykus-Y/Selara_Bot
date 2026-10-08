@@ -153,7 +153,7 @@ def test_renderer_exit_during_app_start_does_not_promote(tmp_path):
     assert json.loads((tmp_path / "current.json").read_text()) == old
 
 
-@pytest.mark.parametrize("failure", [None, "public-not-ready", "wrong-frontend"])
+@pytest.mark.parametrize("failure", [None, "public-not-ready", "wrong-frontend", "game-store-degraded"])
 def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, monkeypatch, failure):
     import urllib.request
 
@@ -166,9 +166,11 @@ def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, m
         if url.endswith("/miniapp/"):
             body = b"old build" if failure == "wrong-frontend" else b'<html><div id="root"></div></html>\n'
         else:
+            # Mirrors /readyz: game_store_redis is informational and always reported.
             body = json.dumps({"status": "ok", "checks": {
                 "database": True, "redis": True,
                 "polling": not (failure == "public-not-ready" and "example.com" in url),
+                "game_store_redis": "degraded" if failure == "game-store-degraded" else "connected",
             }}).encode()
         return type("Response", (), {"read": lambda self: body})()
 
@@ -184,7 +186,7 @@ def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, m
                 raise subprocess.CalledProcessError(1, args) from error
         return result
 
-    if failure:
+    if failure in {"public-not-ready", "wrong-frontend"}:
         with pytest.raises(subprocess.CalledProcessError):
             release.deploy_release(manifest(), tmp_path, runner=probe_runner, sleeper=lambda _: None)
         assert not (tmp_path / "current.json").exists()

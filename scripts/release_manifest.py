@@ -120,7 +120,7 @@ def deploy_release(manifest: dict, state_dir: Path, *, runner=docker, sleeper=ti
         "urllib.request.urlopen(f'http://127.0.0.1:{port}/readyz', timeout=5).read(); "
         "base = os.environ['WEB_BASE_URL'].rstrip('/'); "
         "ready = json.loads(urllib.request.urlopen(base + '/miniapp/readyz', timeout=5).read()); "
-        "assert ready['status'] == 'ok' and set(ready['checks']) == {'database', 'redis', 'polling'} and all(ready['checks'].values()); "
+        "assert ready['status'] == 'ok' and all(ready['checks'][key] for key in ('database', 'redis', 'polling')); "
         "page = urllib.request.urlopen(base + '/miniapp/', timeout=5).read(); "
         f"assert hashlib.sha256(page).hexdigest() == '{index_hash}', 'Public frontend build mismatch'"
     )
