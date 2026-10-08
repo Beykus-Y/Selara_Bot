@@ -1792,8 +1792,7 @@ def _render_game_text(
     if game.phase == "lobby":
         lines.append(f"<i>{escape(definition.short_description)}</i>")
     lines.append(f"<b>Этап:</b> {escape(_phase_title(game))}")
-    if game.status != "started":
-        lines.append(f"<b>Игроков:</b> {players_count}")
+    lines.append(f"<b>Игроков:</b> {players_count}")
 
     if game.phase == "lobby":
         owner_label = game.players.get(game.owner_user_id, f"user:{game.owner_user_id}")
@@ -1955,11 +1954,6 @@ def _render_game_text(
             lines.append(f"<i>Внимание: в части категорий допущены повторы ({escape(labels)}).</i>")
         lines.append("")
         lines.append(_render_bunker_public_profiles(game))
-
-    if game.status == "started":
-        lines.append("")
-        lines.append("<i>Ведущему: /gamecontrol — управление этапом и завершение игры.</i>")
-        lines.append(f"<i>Участников: {players_count}</i>")
 
     if game.winner_text:
         lines.append("")
