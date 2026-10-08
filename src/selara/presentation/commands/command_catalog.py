@@ -771,7 +771,7 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         key="admin_autocfg",
-        category="admin",
+        category="ai",
         dispatch_kind="slash",
         syntax=("/autocfg", "/autocfgcancel"),
         title_ru="Настройка группы через ИИ",
