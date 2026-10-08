@@ -74,7 +74,11 @@ from selara.presentation.feature_access_messages import (
 )
 from selara.presentation.handlers import personal_memory
 from selara.presentation.handlers.premium import personal_offer_available
-from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
+from selara.presentation.handlers.private_panel import (
+    _get_pending_admin_input,
+    _get_pending_cfg_input,
+    _reset_home_pending,
+)
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
 from selara.presentation.navigation.contract import BACK_LABEL, HOME_LABEL
 
@@ -648,6 +652,8 @@ async def ai_settings_callback(
     action, args = (parts[1] if len(parts) > 1 else ""), parts[2:]
     repo = PersonalAiRepository(db_session)
     user_id = query.from_user.id
+    # Opening any Personal AI button abandons a waiting private-panel prompt from /start.
+    _reset_home_pending(user_id)
     deps = _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
 
     if action == "close":
