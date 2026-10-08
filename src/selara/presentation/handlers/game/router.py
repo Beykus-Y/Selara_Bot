@@ -2040,7 +2040,6 @@ def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None
 
     builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
 
-
     builder.adjust(1)
     return builder.as_markup()
 
@@ -4930,11 +4929,11 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             include_reveal=(action == "rok" or finished_game.kind in {"spy", "mafia"}),
         )
         if action == "rok":
-            event_text = "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\\n" + _render_roles_reveal(finished_game)
+            event_text = "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game)
         else:
             event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
             if finished_game.kind in {"spy", "mafia"}:
-                event_text += "\\n" + _render_roles_reveal(finished_game)
+                event_text += "\n" + _render_roles_reveal(finished_game)
         await _send_game_feed_event(bot, finished_game, text=event_text)
         await query.answer("Роли раскрыты" if action == "rok" else "Игра завершена", show_alert=False)
         return
