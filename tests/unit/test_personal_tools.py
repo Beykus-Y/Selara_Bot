@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from selara.application.ai_character.group import LAST_ROUND_NOTICE
+from selara.infrastructure.db.ai_turn_leases import AiTurnLeaseLostError
 from selara.infrastructure.http.web_search.models import PageContent, SearchResultItem
 from selara.infrastructure.llm import personal_tools
 from selara.infrastructure.llm.artifact_tools import ArtifactRequestContext
@@ -286,6 +287,70 @@ async def test_a_sent_artifact_ends_the_turn_with_the_caption_as_the_answer(monk
     llm = ScriptedLlm(_response(tool_calls=[_tool_call("send_artifact", artifact_id="mine", caption="Вот таблица")]))
     turn = await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=run)
     assert turn.artifact_sent and turn.text == "Вот таблица" and len(llm.calls) == 1
+
+
+class _Lease:
+    """Stands in for AiTurnLease: ``confirm`` passes until its ``lose_at``-th call, then the key is gone."""
+
+    def __init__(self, *, lose_at: int) -> None:
+        self.lose_at = lose_at
+        self.checks = 0
+
+    async def confirm(self) -> None:
+        self.checks += 1
+        if self.checks >= self.lose_at:
+            raise AiTurnLeaseLostError("personal_ai:1")
+
+
+async def test_the_lease_is_checked_before_each_round_and_each_tool_call():
+    events: list[str] = []
+
+    async def checkpoint() -> None:
+        events.append("check")
+
+    class RecordingLlm(ScriptedLlm):
+        async def chat_with_tools(self, messages, tools, **kwargs):
+            events.append("round")
+            return await super().chat_with_tools(messages, tools, **kwargs)
+
+    llm = RecordingLlm(
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Готово"),
+    )
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(web=False, artifacts=True),
+        checkpoint=checkpoint,
+    )
+    assert turn.text == "Готово"
+    assert events == ["check", "round", "check", "check", "round"]
+
+
+async def test_a_lost_lease_starts_no_provider_round_after_the_failed_check():
+    llm = ScriptedLlm(_response(tool_calls=[_tool_call("read_skill", name="artifacts")]), _response(content="Готово"))
+    lease = _Lease(lose_at=3)  # checks: before round 1, before its tool call (pass), before round 2 (lost)
+
+    with pytest.raises(AiTurnLeaseLostError):
+        await run_tool_dialogue(
+            llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(web=False, artifacts=True),
+            checkpoint=lease.confirm,
+        )
+    assert len(llm.calls) == 1
+
+
+async def test_a_lost_lease_stops_send_artifact_before_it_reaches_the_chat(monkeypatch):
+    run = _run(web=False, artifacts=True)
+    run.artifact_context.created_artifacts.append("mine")
+    delivered = AsyncMock(return_value=ToolResult("c1", "send_artifact", "{}", "ok"))
+    monkeypatch.setattr(personal_tools, "execute_tool", delivered)
+    llm = ScriptedLlm(_response(tool_calls=[_tool_call("send_artifact", artifact_id="mine", caption="Вот")]))
+    lease = _Lease(lose_at=2)  # passes before round 1, lost before the send
+
+    with pytest.raises(AiTurnLeaseLostError):
+        await run_tool_dialogue(
+            llm_client=llm, messages=[{"role": "system", "content": "s"}], run=run, checkpoint=lease.confirm,
+        )
+    assert delivered.await_count == 0
+    assert run.artifact_context.sent_artifacts == []
 
 
 async def test_a_tainted_caption_loses_foreign_links_and_gains_the_sources_line(monkeypatch):
