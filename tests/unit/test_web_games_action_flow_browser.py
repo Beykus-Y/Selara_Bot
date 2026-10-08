@@ -327,3 +327,84 @@ async def test_finish_game_button_submits_a_cancel_callback(monkeypatch) -> None
             await browser.close()
 
     assert captured.get("callback_data", "").startswith("game:cancel:"), captured
+
+
+
+@pytest.mark.asyncio
+async def test_web_game_stop_is_two_step_one_time_and_keeps_public_board(monkeypatch) -> None:
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок", bot_role="game_master")],
+    )
+    store = GameStore()
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        game = await _create_started_dice_game(
+            store, owner_user_id=77, chat_id=-1001, chat_title="Клуб настолок",
+        )
+        html = (await client.get("/app/games")).text
+        assert "🎲 Бросить" in html
+        assert "🛑 Завершить" in html
+        headers = {"Accept": "application/json"}
+        first = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": f"game:cancel:{game.game_id}"},
+        )
+        assert first.status_code == 200
+        challenge = first.json()
+        assert challenge["confirmation_required"] is True
+        assert challenge["confirmation_callback_data"].startswith(f"gwebconfirm:{game.game_id}:")
+        assert (await store.get_game(game.game_id)).status == "started"
+
+        # Revoked permission invalidates a previously issued confirmation.
+        state.manageable_groups = []
+        rejected = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": challenge["confirmation_callback_data"]},
+        )
+        assert rejected.status_code == 403
+        assert (await store.get_game(game.game_id)).status == "started"
+        state.manageable_groups = [_overview(-1001, "Клуб настолок", bot_role="game_master")]
+        confirmed = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": challenge["confirmation_callback_data"]},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["ok"] is True
+        assert (await store.get_game(game.game_id)).status == "finished"
+        repeated = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": challenge["confirmation_callback_data"]},
+        )
+        assert repeated.status_code in {403, 404}
+
+
+@pytest.mark.asyncio
+async def test_web_game_confirmation_rejects_changed_round_and_legacy_advance(monkeypatch) -> None:
+    state = WebRepoState(
+        settings=_settings(),
+        user=UserSnapshot(telegram_user_id=77, username="gm", first_name="Game", last_name="Master", is_bot=False),
+        manageable_groups=[_overview(-1001, "Клуб настолок", bot_role="game_master")],
+    )
+    store = GameStore()
+    async with _web_client(monkeypatch, state, store=store) as (client, store):
+        game = await _create_started_dice_game(
+            store, owner_user_id=77, chat_id=-1001, chat_title="Клуб настолок",
+        )
+        headers = {"Accept": "application/json"}
+        old_advance = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": f"game:advance:{game.game_id}"},
+        )
+        assert old_advance.status_code >= 400
+        first = await client.post(
+            "/app/games/action", headers=headers,
+            data={"callback_data": f"game:cancel:{game.game_id}"},
+        )
+        token = first.json()["confirmation_callback_data"]
+        game.round_no += 1  # Simulate another phase/round before user confirms.
+        stale = await client.post(
+            "/app/games/action", headers=headers, data={"callback_data": token},
+        )
+        assert stale.status_code == 409
+        assert (await store.get_game(game.game_id)).status == "started"
