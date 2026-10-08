@@ -20,8 +20,11 @@ def test_number_is_not_a_valid_game_kind() -> None:
 
 
 def test_number_is_not_in_the_help_games_list() -> None:
-    help_module = importlib.import_module("selara.presentation.handlers.help")
-    kinds = {kind for kind, _ in help_module._HELP_GAMES_ORDER}
+    # /help's game screens are the game_<kind> nodes of the navigation tree.
+    from selara.presentation.navigation.tree import NAV_NODES
+
+    kinds = {node.key.removeprefix("game_") for node in NAV_NODES if node.key.startswith("game_")}
+    assert kinds, "the help tree has no game screens"
     assert "number" not in kinds
 
 
