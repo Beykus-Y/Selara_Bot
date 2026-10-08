@@ -1190,6 +1190,7 @@ class GroupGame:
     quiz_feed_message_id: int | None = None
     winner_text: str | None = None
     economy_rewards_granted: bool = False
+    rematch_game_id: str | None = None  # persisted: old rematch buttons cannot open another lobby
 
 
 # Games a single GameStore call mutates. ``RuntimeGameStore`` sets it around each
@@ -1331,8 +1332,18 @@ class GameStore:
         whoami_category: str | None = None,
         zlob_category: str | None = None,
         actions_18_enabled: bool = True,
+        rematch_from_game_id: str | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._registry_lock:
+            source_game = None
+            if rematch_from_game_id is not None:
+                source_game = self._by_id.get(rematch_from_game_id)
+                if source_game is None or source_game.chat_id != chat_id or source_game.status != "finished":
+                    return None, "Исходная игра больше не доступна для реванша."
+                if source_game.rematch_game_id is not None:
+                    return None, "Реванш этой игры уже был создан."
+                if source_game.kind != kind:
+                    return None, "Нельзя изменить тип игры при реванше."
             active_id = self._active_by_chat.get(chat_id)
             if active_id:
                 active_game = self._by_id.get(active_id)
@@ -1383,6 +1394,17 @@ class GameStore:
             if kind == "bunker":
                 game.bunker_seats = self._default_bunker_seats(players_count=len(game.players))
                 game.bunker_seats_tuned = False
+            if source_game is not None:
+                # Copy settings atomically with the lobby creation. This prevents
+                # a second rematch click from observing a half-configured lobby.
+                game.bred_rounds = source_game.bred_rounds
+                game.zlob_rounds = source_game.zlob_rounds
+                game.zlob_target_score = source_game.zlob_target_score
+                if kind == "bunker" and source_game.bunker_seats_tuned:
+                    game.bunker_seats = source_game.bunker_seats
+                    game.bunker_seats_tuned = True
+                source_game.rematch_game_id = game_id
+                _note_touched_game(source_game.game_id)
             self._by_id[game_id] = game
             self._active_by_chat[chat_id] = game_id
             _note_touched_game(game_id)
@@ -2096,6 +2118,40 @@ class GameStore:
             async with self._registry_lock:
                 self._forget_active_locked(game)
             return game
+
+    async def finish_if_current(
+        self,
+        *,
+        game_id: str,
+        expected_phase: str,
+        expected_round: int,
+        winner_text: str,
+    ) -> tuple[GroupGame | None, str]:
+        """Commit a confirmed stop only if the same active phase still exists.
+
+        The check and mutation share the per-game lock, including when a timer
+        or another callback is advancing the phase concurrently.
+        """
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None:
+                return None, "missing"
+            if (
+                game.status != "started"
+                or game.phase != expected_phase
+                or game.round_no != expected_round
+            ):
+                return game, "stale"
+            async with self._registry_lock:
+                if self._active_by_chat.get(game.chat_id) != game_id:
+                    return game, "stale"
+                game.status = "finished"
+                game.phase = "finished"
+                game.winner_text = winner_text
+                game.execution_confirm_message_id = None
+                game.quiz_feed_message_id = None
+                self._forget_active_locked(game)
+            return game, "finished"
 
     async def get_role(self, *, game_id: str, user_id: int) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
