@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+from time import time
 from html import escape
 from typing import Any
 
@@ -1982,6 +1983,23 @@ def _add_stepper_row(
     builder.button(text=value_text, callback_data=f"gcfg:{game_id}:{key}_noop")
     builder.button(text=f"➕ {control_label}", callback_data=f"gcfg:{game_id}:{key}_inc")
     lobby_row_sizes.append(3)
+
+
+def _build_lifecycle_confirmation_keyboard(
+    *, game: GroupGame, action: str, issued_at: int,
+) -> InlineKeyboardMarkup:
+    # The game board stays intact; phase and round are verified at commit.
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Подтвердить завершение" if action == "stop" else "🔎 Подтвердить раскрытие",
+        callback_data=f"game:{'sok' if action == 'stop' else 'rok'}:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.button(
+        text="← Назад к игре",
+        callback_data=f"game:back:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboardMarkup | None:
@@ -4276,11 +4294,18 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) not in {3, 6}:
         await query.answer("Некорректные параметры", show_alert=False)
         return
 
-    _, action, game_id = parts
+    _, action, game_id = parts[:3]
+    confirmation = parts[3:] if len(parts) == 6 else None
+    if confirmation is not None and action not in {"sok", "rok", "back"}:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+    if confirmation is None and action in {"sok", "rok", "back"}:
+        await query.answer("Подтверждение устарело. Откройте управление игрой заново.", show_alert=True)
+        return
     if action == "new":
         await query.answer()
         return
@@ -4442,7 +4467,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer()
         return
 
-    if action in {"cancel", "advance", "reveal"}:
+    if action in {"cancel", "advance", "reveal", "sok", "rok", "back"}:
         allowed = await _actor_can_manage_games(
             activity_repo,
             chat_id=game.chat_id,
