@@ -4,7 +4,13 @@ from collections.abc import Coroutine
 from typing import Any
 
 from aiogram import Bot
-from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 
 from selara.application.achievements import get_achievement_catalog_from_settings
 from selara.core.bot_runtime import mark_bot_polling_started, mark_bot_polling_stopped, refresh_bot_polling_heartbeat
@@ -43,21 +49,39 @@ from selara.presentation.payment_safe_dispatcher import PaymentSafeDispatcher
 logger = logging.getLogger(__name__)
 
 
-def build_bot_commands() -> list[BotCommand]:
+def build_bot_commands_private() -> list[BotCommand]:
+    """Slash-menu for private chats with the bot: entry points for the user's own features."""
     return [
-        BotCommand(command="help", description="Справка"),
-        BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
-        BotCommand(command="autocfg", description="Настроить группу с ИИ в личке"),
-        BotCommand(command="ai", description="Моя Selara: настройки личного AI-чата (ЛС)"),
-        BotCommand(command="ai_reset", description="Очистить историю личного AI-чата (ЛС)"),
-        BotCommand(command="memory", description="Что помнит обо мне личный AI (ЛС)"),
-        BotCommand(command="forget_all", description="Удалить все личные данные AI (ЛС)"),
-        BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"),
+        BotCommand(command="start", description="Главное меню Selara"),
+        BotCommand(command="help", description="Справка и возможности"),
+        BotCommand(command="ai", description="Моя Selara: настройки личного AI-чата"),
+        BotCommand(command="memory", description="Что помнит обо мне личный AI"),
+        BotCommand(command="ai_reset", description="Очистить историю личного AI-чата"),
+        BotCommand(command="forget_all", description="Удалить все личные данные AI"),
         BotCommand(command="premium", description="Selara AI: для чата и для себя"),
+        BotCommand(command="autocfg", description="Настроить группу с ИИ"),
+        BotCommand(command="role", description="Показать мою роль в игре"),
+        BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
+        BotCommand(command="terms", description="Условия использования"),
+    ]
+
+
+def build_bot_commands_group(*, summary_enabled: bool) -> list[BotCommand]:
+    """Slash-menu for group chats: commands that make sense inside a chat.
+
+    /summary is only registered when the LLM client is configured, so it is listed only then.
+    """
+    commands = [
+        BotCommand(command="help", description="Справка"),
+        BotCommand(command="game", description="Выбрать и запустить игру в чате"),
         BotCommand(command="top", description="Интерактивный топ (гибрид/актив/карма)"),
         BotCommand(command="active", description="Топ по активности"),
-        BotCommand(command="game", description="Выбрать и запустить игру в чате"),
-        BotCommand(command="role", description="Показать мою роль в игре (ЛС)"),
+        BotCommand(command="premium", description="Selara AI: для чата и для себя"),
+        BotCommand(command="feedback", description="Предложение или сообщение о проблеме"),
+    ]
+    if summary_enabled:
+        commands.append(BotCommand(command="summary", description="Итоги дня чата (бета, для админов)"))
+    commands += [
         BotCommand(command="relation", description="Статус отношений и брака"),
         BotCommand(command="pair", description="Предложить отношения (пара)"),
         BotCommand(command="marry", description="Сделать предложение брака"),
@@ -72,6 +96,24 @@ def build_bot_commands() -> list[BotCommand]:
         BotCommand(command="surprise", description="Сюрприз (только для пары)"),
         BotCommand(command="vow", description="Семейная клятва (только для брака)"),
     ]
+    return commands
+
+
+async def sync_bot_commands(bot: Bot, *, summary_enabled: bool) -> None:
+    """Publish separate slash-menus for private chats and groups.
+
+    Each scope is set independently: a failure in one is logged and does not stop
+    startup or the other scope. Telegram clients may cache the menu for a while.
+    """
+    scoped_commands = (
+        (BotCommandScopeAllPrivateChats(), build_bot_commands_private()),
+        (BotCommandScopeAllGroupChats(), build_bot_commands_group(summary_enabled=summary_enabled)),
+    )
+    for scope, commands in scoped_commands:
+        try:
+            await bot.set_my_commands(commands, scope=scope)
+        except Exception:
+            logger.exception("Could not set bot command menu for scope %s", scope.type)
 
 
 def _build_stt_client(settings) -> SttClient | None:
@@ -169,7 +211,7 @@ async def _run_bot(settings, session_factory) -> None:
     dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
 
     await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
-    await bot.set_my_commands(build_bot_commands())
+    await sync_bot_commands(bot, summary_enabled=llm_client is not None)
     if settings.web_enabled:
         miniapp_url = f"{settings.resolved_web_base_url}/miniapp/"
         try:
