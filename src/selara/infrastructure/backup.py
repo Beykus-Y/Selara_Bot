@@ -65,6 +65,8 @@ BACKUP_CHUNK_SIZE_BYTES = 45 * 1024 * 1024
 # owner dies, its lease expires and a later claim may take the slot over.
 _BACKUP_LEASE_SECONDS = 15 * 60
 _BACKUP_LEASE_RENEW_SECONDS = _BACKUP_LEASE_SECONDS / 3
+# After a failed renewal, retry this often until the lease deadline.
+_BACKUP_LEASE_RETRY_SECONDS = 30.0
 
 # Serialize dump verification: overlapping backup jobs (the nightly scheduler
 # and an admin-triggered request) must not run parallel pg_restore children.
@@ -183,6 +185,7 @@ async def run_scheduled_daily_backup(
     """
     owner_token = uuid4().hex
     while True:
+        claim_started = monotonic()
         claimed = await try_claim_backup_slot(
             session_factory=session_factory,
             slot_key=slot_key,
@@ -205,6 +208,7 @@ async def run_scheduled_daily_backup(
             session_factory=session_factory,
             slot_key=slot_key,
             owner_token=owner_token,
+            lease_started_at=claim_started,
             on_lost=lambda: _abort_lost_backup(job, lease_lost),
         ),
         name="daily-backup-lease",
@@ -248,26 +252,73 @@ async def _keep_backup_lease_alive(
     session_factory: async_sessionmaker[AsyncSession],
     slot_key: str,
     owner_token: str,
+    lease_started_at: float,
     on_lost: Callable[[], None],
 ) -> None:
+    """Renew the slot lease until the run ends; stop the run if it cannot be renewed by its deadline.
+
+    The database lease expires _BACKUP_LEASE_SECONDS after the last renewal, and another
+    instance may take the slot from then on. The deadline counts from when the claim or the
+    last renewal started, so it is never later than that expiry. A run that kept going past
+    it could overlap with a backup the other instance starts, so it is stopped instead.
+    """
+    deadline = lease_started_at + _BACKUP_LEASE_SECONDS
+    delay = _BACKUP_LEASE_RENEW_SECONDS
     while True:
-        await asyncio.sleep(_BACKUP_LEASE_RENEW_SECONDS)
-        try:
-            renewed = await renew_backup_slot_lease(
+        # Never sleep past the deadline, so the run stops on time instead of at the next renewal.
+        await asyncio.sleep(max(0.0, min(delay, deadline - monotonic())))
+        attempt_started = monotonic()
+        renewed = await _renew_backup_lease_before(
+            session_factory=session_factory,
+            slot_key=slot_key,
+            owner_token=owner_token,
+            deadline=deadline,
+        )
+        if renewed is False:
+            logger.error("Daily backup lease was lost; stopping this run", extra={"slot_key": slot_key})
+            on_lost()
+            return
+        if renewed:
+            deadline = attempt_started + _BACKUP_LEASE_SECONDS
+            delay = _BACKUP_LEASE_RENEW_SECONDS
+            continue
+        if monotonic() >= deadline:
+            logger.error(
+                "Daily backup lease could not be renewed before its deadline; stopping this run",
+                extra={"slot_key": slot_key},
+            )
+            on_lost()
+            return
+        delay = _BACKUP_LEASE_RETRY_SECONDS
+
+
+async def _renew_backup_lease_before(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    slot_key: str,
+    owner_token: str,
+    deadline: float,
+) -> bool | None:
+    """Renew the lease unless the deadline passes first.
+
+    Returns True when renewed, False when the slot now belongs to another owner, and None when
+    the renewal failed or did not finish before the deadline.
+    """
+    if monotonic() >= deadline:
+        return None
+    try:
+        async with asyncio.timeout(deadline - monotonic()):
+            return await renew_backup_slot_lease(
                 session_factory=session_factory,
                 slot_key=slot_key,
                 owner_token=owner_token,
                 lease_seconds=_BACKUP_LEASE_SECONDS,
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Could not renew daily backup lease", extra={"slot_key": slot_key})
-            continue
-        if not renewed:
-            logger.error("Daily backup lease was lost; stopping this run", extra={"slot_key": slot_key})
-            on_lost()
-            return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Could not renew daily backup lease", extra={"slot_key": slot_key})
+        return None
 
 
 async def _stop_task(task: asyncio.Task[None]) -> None:
@@ -295,6 +346,7 @@ async def start_manual_backup(
     _resolve_backup_recipient(settings)
 
     job_id = uuid4().hex
+    claim_started = monotonic()
     claimed = await try_claim_manual_backup(
         session_factory=session_factory,
         owner_token=job_id,
@@ -309,6 +361,7 @@ async def start_manual_backup(
             settings=settings,
             session_factory=session_factory,
             job_id=job_id,
+            lease_started_at=claim_started,
         ),
         name="manual-backup-job",
     )
@@ -323,6 +376,7 @@ async def _run_manual_backup(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     job_id: str,
+    lease_started_at: float,
 ) -> None:
     lease_lost = asyncio.Event()
     job = asyncio.create_task(send_daily_backup(bot=bot, settings=settings), name="manual-backup-dump")
@@ -331,6 +385,7 @@ async def _run_manual_backup(
             session_factory=session_factory,
             slot_key=MANUAL_BACKUP_SLOT_KEY,
             owner_token=job_id,
+            lease_started_at=lease_started_at,
             on_lost=lambda: _abort_lost_backup(job, lease_lost),
         ),
         name="manual-backup-lease",
@@ -537,7 +592,7 @@ def _bot_database_url(settings: Settings) -> URL:
 
 
 async def _stop_pg_dump_process(process: asyncio.subprocess.Process) -> None:
-    """Stop a pg_dump child whose backup job was cancelled, and reap it before the temp directory is removed.
+    """Stop a pg_dump child whose backup job was cancelled or timed out, and reap it before the temp directory is removed.
 
     The child is asked to exit with SIGTERM and given a bounded time to do so; one that ignores it is killed.
     """
@@ -585,8 +640,16 @@ async def _create_bot_database_dump(*, settings: Settings, temp_dir: Path) -> Ba
             f"Backup command '{settings.backup_pg_dump_path}' is not available in the main bot runtime."
         ) from exc
 
+    # A dump stalled on a lock or a dead connection must not hold the job, or the manual slot, forever.
+    timeout_seconds = settings.backup_timeout_seconds
     try:
-        _stdout, stderr = await process.communicate()
+        async with asyncio.timeout(timeout_seconds):
+            _stdout, stderr = await process.communicate()
+    except TimeoutError as exc:
+        await _stop_pg_dump_process(process)
+        raise BackupJobError(
+            f"pg_dump for main bot database timed out after {timeout_seconds:g}s and was terminated."
+        ) from exc
     except asyncio.CancelledError:
         # Shutdown and a lost backup lease both cancel this job; pg_dump must not keep running after it.
         await _stop_pg_dump_process(process)

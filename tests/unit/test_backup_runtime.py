@@ -491,6 +491,7 @@ async def _cancel_daily_backup_during_pg_dump(
         backup_encryption_public_key=_PUBLIC_KEY,
         backup_pg_dump_path="pg_dump",
         backup_restore_drill_enabled=False,
+        backup_timeout_seconds=30.0,
         database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
     )
     job = asyncio.create_task(backup.send_daily_backup(bot=SimpleNamespace(), settings=settings))
@@ -538,6 +539,36 @@ async def test_pg_dump_that_ignores_terminate_is_killed_after_a_bounded_wait(
     assert child.reaped
     assert child.temp_dir_present_at_reap
     assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_pg_dump_that_outlives_the_backup_timeout_is_terminated_and_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    child = _PgDumpChild(temp_dir=tmp_path)
+
+    async def fake_exec(*command: str, **kwargs: Any) -> _PgDumpChild:
+        _ = command, kwargs
+        return child
+
+    monkeypatch.setattr(backup.asyncio, "create_subprocess_exec", fake_exec)
+    settings = _make_settings(
+        database_url="postgresql+asyncpg://selara:s3cret@db.internal:5432/selara",
+        backup_pg_dump_path="pg_dump",
+        backup_timeout_seconds=0.05,
+    )
+
+    # A dump that never finishes must fail the job instead of holding it forever.
+    with pytest.raises(backup.BackupJobError, match="timed out after 0.05s"):
+        await asyncio.wait_for(
+            backup._create_bot_database_dump(settings=settings, temp_dir=tmp_path),
+            timeout=5,
+        )
+
+    assert child.terminated
+    assert not child.killed
+    assert child.reaped
 
 
 @pytest.mark.asyncio
