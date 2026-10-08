@@ -49,6 +49,7 @@ from selara.presentation.auth import (
     resolve_owner_admin_exemption,
     resolve_owner_private_exemption,
 )
+from selara.presentation.navigation.contract import CANCEL_LABEL, HOME_LABEL
 logger = logging.getLogger(__name__)
 router = Router(name="premium")
 
@@ -278,7 +279,7 @@ def _purchase_keyboard(*, chat_id: int, price_stars: int) -> InlineKeyboardMarku
         callback_data=f"premium:accept:{chat_id}",
     )
     builder.button(text="Условия покупки", callback_data=f"premium:terms:{chat_id}")
-    builder.button(text="Отмена", callback_data="premium:cancel")
+    builder.button(text=CANCEL_LABEL, callback_data="premium:cancel")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -291,7 +292,7 @@ def _personal_purchase_keyboard(*, price_stars: int, terms_version: str) -> Inli
         callback_data=f"premium:self_accept:{terms_version}",
     )
     builder.button(text="Условия покупки", callback_data="premium:terms_self")
-    builder.button(text="Отмена", callback_data="premium:cancel")
+    builder.button(text=CANCEL_LABEL, callback_data="premium:cancel")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -384,7 +385,7 @@ def _product_choice_keyboard(*, group_available: bool) -> InlineKeyboardMarkup:
     if group_available:
         builder.button(text="Для группы", callback_data="premium:group")
     builder.button(text="Для себя", callback_data="premium:self")
-    builder.button(text="🏠 Главное", callback_data="pm:h")
+    builder.button(text=HOME_LABEL, callback_data="pm:h")
     builder.adjust(1)
     return builder.as_markup()
 

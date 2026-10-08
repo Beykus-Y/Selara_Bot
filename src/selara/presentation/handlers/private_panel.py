@@ -32,7 +32,13 @@ from selara.presentation.formatters import format_last_seen
 from selara.presentation.handlers.economy import _dashboard_text
 from selara.presentation.handlers.help import send_help
 from selara.presentation.handlers.premium import build_premium_entry
-from selara.presentation.navigation.contract import safe_callback
+from selara.presentation.navigation.contract import (
+    CANCEL_LABEL,
+    HOME_LABEL,
+    REFUSAL_NO_RIGHTS,
+    REFUSAL_PRIVATE_ONLY,
+    safe_callback,
+)
 from selara.presentation.handlers.settings_common import (
     CFG_BOOL_KEYS,
     CFG_ENUM_VALUES,
@@ -312,7 +318,7 @@ def _build_groups_keyboard(*, route_prefix: str, groups: list[UserChatOverview],
     if has_prev or has_next:
         builder.adjust(1, 2)
 
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -323,7 +329,7 @@ def _build_admin_group_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder.button(text="🔐 Ранги команд", callback_data=encode_pm_callback("ar", chat_id))
     builder.button(text="🧩 Роли", callback_data=encode_pm_callback("rl", chat_id))
     builder.button(text="⬅️ К группам", callback_data=encode_pm_callback("al", 0))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -351,7 +357,7 @@ def _build_settings_keys_keyboard(*, chat_id: int, page: int) -> InlineKeyboardM
         builder.adjust(1, 2)
 
     builder.button(text="⬅️ К группе", callback_data=encode_pm_callback("ag", chat_id))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -381,7 +387,7 @@ def _build_setting_editor_keyboard(*, chat_id: int, key: str, key_idx: int, curr
 
     builder.button(text="↩️ default", callback_data=encode_pm_callback("av", chat_id, key_idx, "d"))
     builder.button(text="⬅️ К настройкам", callback_data=encode_pm_callback("as", chat_id, key_idx // _CFG_PAGE_SIZE))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -391,7 +397,7 @@ def _build_user_group_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder.button(text="🔄 Обновить", callback_data=encode_pm_callback("ur", chat_id))
     builder.button(text="💰 Экономика local", callback_data=encode_pm_callback("ue", chat_id))
     builder.button(text="⬅️ К группам", callback_data=encode_pm_callback("ul", 0))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -660,7 +666,7 @@ def _build_command_ranks_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⌨️ Ввести правило", callback_data=encode_pm_callback("ari", chat_id))
     builder.button(text="⬅️ К группе", callback_data=encode_pm_callback("ag", chat_id))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -669,7 +675,7 @@ def _build_roles_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⌨️ Ввести команду", callback_data=encode_pm_callback("rli", chat_id))
     builder.button(text="⬅️ К группе", callback_data=encode_pm_callback("ag", chat_id))
-    builder.button(text="🏠 Главное меню", callback_data=encode_pm_callback("h"))
+    builder.button(text=HOME_LABEL, callback_data=encode_pm_callback("h"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -931,7 +937,7 @@ async def private_panel_callback(
         await query.answer()
         return
     if query.message is None or query.message.chat.type != "private":
-        await query.answer("Доступно только в ЛС", show_alert=True)
+        await query.answer(REFUSAL_PRIVATE_ONLY, show_alert=True)
         return
 
     decoded = decode_pm_callback(query.data)
@@ -939,9 +945,10 @@ async def private_panel_callback(
         await query.answer("Некорректная кнопка", show_alert=False)
         return
     route, args = decoded
+    # Every panel button abandons a waiting text prompt; the prompt buttons below set a new one if needed.
+    _reset_home_pending(query.from_user.id)
 
     if route == "h":
-        _reset_home_pending(query.from_user.id)
         text, markup = await _render_home_screen(activity_repo=activity_repo, user=query.from_user, settings=settings)
         await _edit_or_answer(query, text, markup)
         return
@@ -996,7 +1003,7 @@ async def private_panel_callback(
         can_manage_ranks = await _ensure_manage_command_access(activity_repo, user=query.from_user, chat_id=chat_id)
         can_manage_roles = await _ensure_manage_role_templates(activity_repo, user=query.from_user, chat_id=chat_id)
         if not (can_manage_settings or can_manage_ranks or can_manage_roles):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         role_title = None
         if selected.bot_role:
@@ -1015,7 +1022,7 @@ async def private_panel_callback(
             await query.answer("Некорректный чат", show_alert=True)
             return
         if not await _ensure_manage_command_access(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         text = await _render_command_ranks_text(activity_repo, chat_id=chat_id)
         await _edit_or_answer(query, text, _build_command_ranks_keyboard(chat_id))
@@ -1027,11 +1034,11 @@ async def private_panel_callback(
             await query.answer("Некорректный чат", show_alert=True)
             return
         if not await _ensure_manage_command_access(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         _set_pending_admin_input(user_id=query.from_user.id, chat_id=chat_id, mode="command_rank")
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="❌ Отмена ввода", callback_data=encode_pm_callback("arc", chat_id))
+        keyboard.button(text=CANCEL_LABEL, callback_data=encode_pm_callback("arc", chat_id))
         keyboard.button(text="⬅️ К рангам", callback_data=encode_pm_callback("ar", chat_id))
         keyboard.adjust(1)
         await _edit_or_answer(
@@ -1068,7 +1075,7 @@ async def private_panel_callback(
             await query.answer("Некорректный чат", show_alert=True)
             return
         if not await _ensure_manage_role_templates(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         await _edit_or_answer(query, await _render_roles_text(activity_repo, chat_id=chat_id), _build_roles_keyboard(chat_id))
         return
@@ -1079,11 +1086,11 @@ async def private_panel_callback(
             await query.answer("Некорректный чат", show_alert=True)
             return
         if not await _ensure_manage_role_templates(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         _set_pending_admin_input(user_id=query.from_user.id, chat_id=chat_id, mode="roles")
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="❌ Отмена ввода", callback_data=encode_pm_callback("rlc", chat_id))
+        keyboard.button(text=CANCEL_LABEL, callback_data=encode_pm_callback("rlc", chat_id))
         keyboard.button(text="⬅️ К ролям", callback_data=encode_pm_callback("rl", chat_id))
         keyboard.adjust(1)
         await _edit_or_answer(
@@ -1120,7 +1127,7 @@ async def private_panel_callback(
             await query.answer("Некорректный чат", show_alert=True)
             return
         if not await _ensure_manage_settings(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         current, defaults = await _load_chat_settings(activity_repo, settings, chat_id=chat_id)
         text = (
@@ -1137,7 +1144,7 @@ async def private_panel_callback(
             await query.answer("Некорректные параметры", show_alert=True)
             return
         if not await _ensure_manage_settings(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         current, _ = await _load_chat_settings(activity_repo, settings, chat_id=chat_id)
         current_map = settings_to_dict(current)
@@ -1163,7 +1170,7 @@ async def private_panel_callback(
             await query.answer("Некорректные параметры", show_alert=True)
             return
         if not await _ensure_manage_settings(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
 
         raw_value = _short_to_value(key, short_value)
@@ -1221,7 +1228,7 @@ async def private_panel_callback(
             await query.answer("Некорректные параметры", show_alert=True)
             return
         if not await _ensure_manage_settings(activity_repo, user=query.from_user, chat_id=chat_id):
-            await query.answer("Недостаточно прав", show_alert=True)
+            await query.answer(REFUSAL_NO_RIGHTS, show_alert=True)
             return
         _set_pending_cfg_input(user_id=query.from_user.id, chat_id=chat_id, key=key)
         text = (
@@ -1232,7 +1239,7 @@ async def private_panel_callback(
             "Для отмены: <code>/cancel</code>."
         )
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="❌ Отмена ввода", callback_data=encode_pm_callback("ac"))
+        keyboard.button(text=CANCEL_LABEL, callback_data=encode_pm_callback("ac"))
         keyboard.button(text="⬅️ К ключу", callback_data=encode_pm_callback("ae", chat_id, _cfg_index(key)))
         keyboard.adjust(1)
         await _edit_or_answer(query, text, keyboard.as_markup())

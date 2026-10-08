@@ -13,6 +13,14 @@ HOME_LABEL = "🏠 Главное"
 SECTIONS_LABEL = "🏠 Разделы"
 CANCEL_LABEL = "❌ Отмена"
 
+# Short access-refusal wording shared by /start and /help, so the same situation reads the same everywhere.
+REFUSAL_PRIVATE_ONLY = "Доступно только в ЛС"
+REFUSAL_GROUP_ONLY = "Команда доступна только в группе."
+REFUSAL_NO_RIGHTS = "Недостаточно прав"
+REFUSAL_DISABLED_BY_ADMIN = "Отключено администратором"
+REFUSAL_NEEDS_PERSONAL = "Нужен Personal"
+REFUSAL_LIMIT_REACHED = "Лимит исчерпан"
+
 # Telegram rejects callback_data longer than 64 bytes (counted in UTF-8).
 MAX_CALLBACK_DATA_BYTES = 64
 CALLBACK_SEPARATOR = ":"
