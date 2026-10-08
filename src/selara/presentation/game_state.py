@@ -2126,6 +2126,7 @@ class GameStore:
         expected_phase: str,
         expected_round: int,
         winner_text: str,
+        expected_status: str = "started",
     ) -> tuple[GroupGame | None, str]:
         """Commit a confirmed stop only if the same active phase still exists.
 
@@ -2137,7 +2138,7 @@ class GameStore:
             if game is None:
                 return None, "missing"
             if (
-                game.status != "started"
+                game.status != expected_status
                 or game.phase != expected_phase
                 or game.round_no != expected_round
             ):
@@ -2149,7 +2150,7 @@ class GameStore:
                 game.phase = "finished"
                 game.winner_text = winner_text
                 game.execution_confirm_message_id = None
-                game.quiz_feed_message_id = None
+                # Keep quiz_feed_message_id for the caller to remove the message.
                 self._forget_active_locked(game)
             return game, "finished"
 
