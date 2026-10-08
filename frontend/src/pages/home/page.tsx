@@ -4,8 +4,9 @@ import { Link } from 'react-router-dom'
 import { routes } from '@/shared/config/routes'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 import { getMiniAppPage } from '@/shared/miniapp/api'
-import { useMiniApp } from '@/shared/miniapp/use-miniapp'
+import { groupLetter, groupRoleText, mergeGroups } from '@/shared/miniapp/group-utils'
 import type { MiniAppHomePageData } from '@/shared/miniapp/model'
+import { useMiniApp } from '@/shared/miniapp/use-miniapp'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
 export function HomePage() {
@@ -17,152 +18,101 @@ export function HomePage() {
 
   usePageTitle('Главная')
 
-  if (homeQuery.isLoading) {
-    return <LoadingShell eyebrow="Главная" title="Собираю личный кабинет" cards={3} />
-  }
-
-  if (homeQuery.isError) {
-    return <section className="miniapp-empty-card">{homeQuery.error.message}</section>
-  }
-
-  if (!homeQuery.data) {
+  if (homeQuery.isLoading || (!homeQuery.data && !homeQuery.isError)) {
     return <LoadingShell eyebrow="Главная" title="Загружаю данные" cards={3} />
   }
 
-  // Extract metrics dynamically
-  const metrics = homeQuery.data.metrics || []
-  const levelMetric = metrics.find((m) => /уровень|level/i.test(m.label))
-  const xpMetric = metrics.find((m) => /опыт|xp/i.test(m.label))
-  const balanceMetric = metrics.find((m) => /баланс|очки|points|pts/i.test(m.label))
-  const streakMetric = metrics.find((m) => /серия|streak|дней/i.test(m.label))
-
-  const levelValue = levelMetric ? levelMetric.value : '1'
-  const xpText = xpMetric ? xpMetric.value : '0 / 100 XP'
-  const balanceValue = balanceMetric ? balanceMetric.value : '0'
-  const streakValue = streakMetric ? streakMetric.value : '0'
-
-  // Calculate XP percentage for progress bar and avatar ring
-  let xpPercent = 0
-  if (xpMetric) {
-    const cleanXpValue = xpMetric.value.replace(/\s/g, '')
-    const match = cleanXpValue.match(/(\d+)\/(\d+)/)
-    if (match) {
-      const current = parseInt(match[1], 10)
-      const total = parseInt(match[2], 10)
-      if (total > 0) {
-        xpPercent = Math.min(100, Math.round((current / total) * 100))
-      }
-    }
+  if (homeQuery.isError || !homeQuery.data) {
+    return (
+      <div className="v2">
+        <h1 className="v2-title">Главная</h1>
+        <div className="v2-error" role="alert">
+          <span>{homeQuery.error?.message ?? 'Не удалось загрузить главный экран.'}</span>
+          <button type="button" onClick={() => void homeQuery.refetch()}>Повторить</button>
+        </div>
+      </div>
+    )
   }
 
-  const strokeOffset = 188.5 - (188.5 * xpPercent) / 100
-  const initials = viewer.initials || viewer.display_name.slice(0, 2)
+  const data = homeQuery.data
+  const adminGroups = data.admin_groups ?? []
+  const chats = mergeGroups(data.recent_groups ?? [], adminGroups)
+  const games = data.recent_games ?? []
+  const isNew = chats.length === 0
+  const isAdmin = adminGroups.length > 0
+
+  const firstName = viewer.display_name.split(' ')[0]
+
+  if (isNew) {
+    return (
+      <div className="v2">
+        <h1 className="v2-title" style={{ marginTop: 26 }}>Selara в вашем чате</h1>
+        <p className="v2-sub" style={{ fontSize: 14, lineHeight: 1.55 }}>
+          Статистика, игры и достижения работают прямо внутри Telegram-группы. Здесь вы увидите свои чаты и партии.
+        </p>
+        <div className="v2-steps">
+          <div className="v2-step"><i>1</i><div><b>Добавьте бота в группу</b><span>Бот начнёт считать активность с этого момента.</span></div></div>
+          <div className="v2-step"><i>2</i><div><b>Начните первую партию</b><span>Напишите /game в группе.</span></div></div>
+          <div className="v2-step"><i>3</i><div><b>Посмотрите команды</b><span>Напишите /help — там весь список.</span></div></div>
+        </div>
+        <a className="v2-btn" href={data.bot_add_url} target="_blank" rel="noreferrer">Добавить бота в группу</a>
+        <p className="v2-muted" style={{ textAlign: 'center', fontSize: 12 }}>Ваши чаты появятся здесь после первой активности.</p>
+      </div>
+    )
+  }
+
+  const manageChat = adminGroups[0]
 
   return (
-    <div className="miniapp-page-stack">
-      {/* Profile Hero Card */}
-      <div className="profile-hero">
-        <div className="profile-top">
-          <div className="avatar-ring">
-            <svg viewBox="0 0 64 64">
-              <circle className="track" cx="32" cy="32" r="30" />
-              <circle
-                className="prog"
-                cx="32"
-                cy="32"
-                r="30"
-                style={{ strokeDashoffset: strokeOffset }}
-              />
-            </svg>
-            <div className="avatar">
-              {viewer.avatar_url ? (
-                <img src={viewer.avatar_url} alt={viewer.display_name} />
-              ) : (
-                initials
-              )}
-            </div>
-            <div className="lvl-badge">{levelValue}</div>
-          </div>
-          <div>
-            <div className="profile-name">{viewer.display_name}</div>
-            <div className="profile-handle">
-              {viewer.username ? `@${viewer.username}` : 'Telegram-аккаунт'}
-            </div>
-          </div>
-        </div>
-
-        <div className="xp-row">
-          <div className="xp-meta">
-            <span>Уровень {levelValue}</span>
-            <span className="mono">{xpText}</span>
-          </div>
-          <div className="bar">
-            <i style={{ width: `${xpPercent}%` }}></i>
-          </div>
-        </div>
-
-        <div className="balance-row">
-          <div className="stat">
-            <div className="k">Баланс</div>
-            <div className="v gold">
-              {balanceValue} <small>pts</small>
-            </div>
-          </div>
-          <div className="stat">
-            <div className="k">Серия дней</div>
-            <div className="v">
-              {streakValue} <small>🔥</small>
-            </div>
-          </div>
-        </div>
+    <div className="v2">
+      <div style={{ marginTop: 22 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-3)' }}>Сегодня</div>
+        <h1 className="v2-title" style={{ marginTop: 6 }}>{firstName}, с возвращением</h1>
       </div>
 
-      {/* Quick Actions */}
-      <h2 className="sec">Быстрые действия</h2>
-      <div className="quick">
-        <Link className="q accent" to={routes.gacha}>
-          <div className="ico">🎰</div>
-          <b>Крутить баннер</b>
-          <span>коллекция и крутки</span>
-        </Link>
-        <Link className="q" to={routes.more}>
-          <div className="ico">🎁</div>
-          <b>Ежедневный бонус</b>
-          <span>доступен в боте</span>
-        </Link>
-        <Link className="q" to={routes.games}>
-          <div className="ico">🎮</div>
-          <b>Игровой центр</b>
-          <span>активные партии</span>
-        </Link>
-        <Link className="q" to={routes.groups}>
-          <div className="ico">🏆</div>
-          <b>Лидерборд</b>
-          <span>активность чатов</span>
-        </Link>
+      <div className="v2-sec">
+        <span>Ваши чаты</span>
+        <Link to={routes.groups}>все</Link>
       </div>
+      {chats.slice(0, 3).map((group) => (
+        <Link key={group.chat_id} className="v2-row" to={routes.chat(group.chat_id)}>
+          <span className="v2-ava v2-ava--sm">{groupLetter(group)}</span>
+          <span className="v2-main">
+            <b>{group.title}</b>
+            <span>{groupRoleText(group)} · {(group.message_count ?? 0).toLocaleString('ru-RU')} сообщений</span>
+          </span>
+          <span className="v2-aside">{group.last_seen_at}</span>
+        </Link>
+      ))}
 
-      {/* Activity Feed */}
-      <h2 className="sec">
-        Лента <Link to={routes.groups}>все чаты</Link>
-      </h2>
-      <div className="card feed" style={{ padding: '6px 14px' }}>
-        {homeQuery.data.recent_games.map((game) => (
-          <Link key={game.game_id} className="row" to={routes.games}>
-            <div className="dot violet">🃏</div>
-            <div className="txt">
-              <b>{game.title}</b>
-              <span>{game.chat_title} · {game.result_text}</span>
-            </div>
-            <div className="when">{game.started_at}</div>
+      {isAdmin && manageChat ? (
+        <>
+          <div className="v2-sec"><span>Управление</span></div>
+          <Link className="v2-row" style={{ marginTop: 6 }} to={routes.audit(manageChat.chat_id)}>
+            <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Аудит действий</b></span>
+            <span className="v2-aside">{manageChat.title} ›</span>
           </Link>
-        ))}
-        {homeQuery.data.recent_games.length === 0 && (
-          <div style={{ padding: '12px 0', color: 'var(--text-3)', fontSize: '13px', textAlign: 'center' }}>
-            История появится после первых завершённых игр.
-          </div>
-        )}
-      </div>
+          <Link className="v2-row" to={`${routes.chat(manageChat.chat_id)}#leaderboard`}>
+            <span className="v2-main"><b style={{ fontWeight: 600, fontSize: 14 }}>Лидерборд</b></span>
+            <span className="v2-aside">{manageChat.title} ›</span>
+          </Link>
+        </>
+      ) : null}
+
+      <div className="v2-sec"><span>Последние партии</span></div>
+      {games.length > 0 ? (
+        games.map((game) => (
+          <Link key={game.game_id} className="v2-row" style={{ padding: '13px 0' }} to={routes.games}>
+            <span className="v2-main">
+              <b style={{ fontWeight: 600, fontSize: 13.5 }}>{game.title}</b>
+              <span>{game.chat_title} · {game.result_text}</span>
+            </span>
+            <span className="v2-aside">{game.started_at}</span>
+          </Link>
+        ))
+      ) : (
+        <p className="v2-muted">Здесь появятся завершённые партии из ваших чатов.</p>
+      )}
     </div>
   )
 }
