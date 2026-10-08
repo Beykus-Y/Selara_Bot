@@ -4356,6 +4356,22 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if game.status != "finished":
             await query.answer("Эта игра ещё не завершена", show_alert=False)
             return
+        # A rematch creates a new game.  Recheck the same permission as /game
+        # on every press, including old keyboards and former lobby owners.
+        allowed = await _actor_can_manage_games(
+            activity_repo,
+            chat_id=game.chat_id,
+            chat_type=query.message.chat.type,
+            chat_title=query.message.chat.title,
+            user=actor,
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            await query.answer("Недостаточно прав для запуска игр в этом чате.", show_alert=True)
+            return
+        if game.kind not in GAME_LAUNCHABLE_KINDS:
+            await query.answer("Эта игра больше недоступна для новых запусков.", show_alert=True)
+            return
 
         owner_label = await _resolve_chat_player_label(
             activity_repo,
