@@ -1435,6 +1435,10 @@ _GACHA_CURRENCY_PURCHASE_AMOUNT = GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT
 _GACHA_COIN_EXCHANGE_RATE = GACHA_CURRENCY_PER_COIN_RATE
 _GACHA_SUBSCRIPTION_CHANNEL = "@SelaraBot_Chanel"
 _GACHA_SUBSCRIPTION_CHANNEL_URL = "https://t.me/SelaraBot_Chanel"
+_GACHA_SUBSCRIPTION_PROMPT_HTML = (
+    f'Для использования гачи нужно подписаться на наш канал: '
+    f'<a href="{_GACHA_SUBSCRIPTION_CHANNEL_URL}">SelaraBot Chanel</a>'
+)
 _GACHA_SUBSCRIPTION_CACHE_TTL = 600
 _gacha_subscription_cache: dict[int, tuple[bool, float]] = {}
 _GACHA_BANNER_LABELS: dict[str, str] = {
@@ -2054,9 +2058,10 @@ def _gacha_currency_label(banner: str) -> str:
 
 
 def _gacha_currency_button_label(banner: str) -> str:
+    coin_price = _GACHA_CURRENCY_PURCHASE_AMOUNT * _GACHA_COIN_EXCHANGE_RATE
     if (banner or "").strip().lower() == "hsr":
-        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита"
-    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов"
+        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита за {coin_price} монет"
+    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов за {coin_price} монет"
 
 
 def _gacha_rank_label(banner: str) -> str:
@@ -2181,8 +2186,7 @@ async def _require_channel_subscription(bot: Bot, message: Message, user_id: int
     if await _is_subscribed_to_channel(bot, user_id):
         return True
     await message.answer(
-        f'Для использования гачи нужно подписаться на наш канал: '
-        f'<a href="{_GACHA_SUBSCRIPTION_CHANNEL_URL}">SelaraBot Chanel</a>',
+        _GACHA_SUBSCRIPTION_PROMPT_HTML,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -2198,6 +2202,13 @@ async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery,
         f"Для гачи нужно подписаться на канал {_GACHA_SUBSCRIPTION_CHANNEL}",
         show_alert=True,
     )
+    # Alerts cannot hold a tappable link, so the subscribe path is posted in the chat as well.
+    if query.message is not None:
+        await query.message.answer(
+            _GACHA_SUBSCRIPTION_PROMPT_HTML,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
     return False
 
 
@@ -2328,13 +2339,18 @@ def _build_gacha_info_markup(
             action="currency",
             use_custom_emojis=use_custom_emojis,
         )
+        # Pull and currency purchase live on separate rows so a tap on one never lands on the other.
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"Крутка • {_gacha_banner_label(banner)}",
+                    text=f"Крутка • {_gacha_banner_label(banner)} ({_GACHA_PAID_PULL_PRICE} валюты)",
                     callback_data=_gacha_buy_callback_data(banner=banner, owner_user_id=owner_user_id),
                     icon_custom_emoji_id=buy_icon_custom_emoji_id,
                 ),
+            ]
+        )
+        rows.append(
+            [
                 InlineKeyboardButton(
                     text=_gacha_currency_button_label(banner),
                     callback_data=_gacha_currency_buy_callback_data(
@@ -2400,6 +2416,12 @@ def _render_gacha_info_section(*, banner: str, response, use_custom_emojis: bool
         response=response,
         use_custom_emojis=use_custom_emojis,
     )
+    balance = response.player.total_primogems
+    if balance < _GACHA_PAID_PULL_PRICE:
+        lines.append(
+            f"💡 Платная крутка: {_GACHA_PAID_PULL_PRICE} валюты, у вас <b>{_format_gacha_number(balance)}</b>. "
+            "Пополнить можно кнопкой ниже."
+        )
     lines.append(f"⏱ Последняя: {_format_gacha_recent_pull(recent)}")
     return "\n".join(lines)
 
@@ -5432,15 +5454,12 @@ async def _gacha_callback_impl(
             animation_wanted = False
             cache_ready = False
 
-        if animation_wanted:
-            if cache_ready:
-                await _try_send_gacha_pull_animation(
-                    query.message, settings, bot, activity_repo, banner=banner, response=response
-                )
-            else:
-                await _safe_callback_answer(
-                    query, "Гача выполняет подготовку анимаций, попробуйте позже.", show_alert=True
-                )
+        # The pull is already charged at this point, so a cold animation cache must not
+        # tell the user to retry; the classic result below is delivered instead.
+        if animation_wanted and cache_ready:
+            await _try_send_gacha_pull_animation(
+                query.message, settings, bot, activity_repo, banner=banner, response=response
+            )
 
         await _deliver_gacha_pull_response(
             query.message,

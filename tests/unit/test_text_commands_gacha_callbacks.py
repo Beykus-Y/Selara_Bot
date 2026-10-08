@@ -23,6 +23,10 @@ class _DummyCallbackMessage:
         self.message_id = 700
         self.edit_text_calls: list[tuple[str, dict[str, object]]] = []
         self.edit_reply_markup_calls: list[dict[str, object]] = []
+        self.answer_calls: list[tuple[str, dict[str, object]]] = []
+
+    async def answer(self, text: str, **kwargs) -> None:
+        self.answer_calls.append((text, kwargs))
 
     async def edit_text(self, text: str, **kwargs) -> None:
         self.edit_text_calls.append((text, kwargs))
@@ -151,7 +155,9 @@ async def test_gacha_buy_callback_sends_animation_when_enabled_and_ready(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_gacha_buy_callback_shows_alert_when_cache_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_when_cache_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
     settings = SimpleNamespace()
     economy_repo = object()
@@ -170,6 +176,8 @@ async def test_gacha_buy_callback_shows_alert_when_cache_not_ready(monkeypatch: 
     monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
     resolve_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
 
     bot = AsyncMock()
     activity_repo = SimpleNamespace(
@@ -182,6 +190,39 @@ async def test_gacha_buy_callback_shows_alert_when_cache_not_ready(monkeypatch: 
     resolve_mock.assert_not_awaited()
     bot.send_animation.assert_not_awaited()
     purchase_mock.assert_awaited_once()  # the real pull result must still go through
+    deliver_mock.assert_awaited_once()
+    # The pull is already charged, so no "try again later" alert may be shown; the callback is answered once.
+    assert query.answers == [(None, False)]
+
+
+@pytest.mark.asyncio
+async def test_gacha_callback_unsubscribed_user_gets_alert_and_tappable_subscribe_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    purchase_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=False))
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query,
+        bot=AsyncMock(),
+        settings=SimpleNamespace(),
+        economy_repo=object(),
+        activity_repo=activity_repo,
+        chat_settings=_CHAT_SETTINGS,
+    )
+
+    purchase_mock.assert_not_awaited()
+    assert query.answers == [("Для гачи нужно подписаться на канал @SelaraBot_Chanel", True)]
+    assert query.message.answer_calls == [
+        (
+            text_commands._GACHA_SUBSCRIPTION_PROMPT_HTML,
+            {"parse_mode": "HTML", "disable_web_page_preview": True},
+        )
+    ]
+    assert 'href="https://t.me/SelaraBot_Chanel"' in text_commands._GACHA_SUBSCRIPTION_PROMPT_HTML
 
 
 @pytest.mark.asyncio
@@ -511,15 +552,49 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
     assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None
-    assert len(markup.inline_keyboard) == 3
-    assert len(markup.inline_keyboard[0]) == 2
+    # Pull and currency purchase are on separate rows, one button per row.
+    assert [len(row) for row in markup.inline_keyboard] == [1, 1, 1, 1, 1]
     assert markup.inline_keyboard[0][0].icon_custom_emoji_id == "event-id"
-    assert markup.inline_keyboard[0][1].icon_custom_emoji_id == "primogem-id"
-    assert markup.inline_keyboard[1][0].icon_custom_emoji_id is None
-    assert markup.inline_keyboard[1][1].icon_custom_emoji_id is None
-    assert len(markup.inline_keyboard[2]) == 1
-    assert "Вкл" in markup.inline_keyboard[2][0].text
-    assert markup.inline_keyboard[2][0].callback_data == "gacha:animtoggle:u1"
+    assert markup.inline_keyboard[0][0].text == "Крутка • Геншин (160 валюты)"
+    assert markup.inline_keyboard[1][0].icon_custom_emoji_id == "primogem-id"
+    assert markup.inline_keyboard[1][0].text == "+160 примогемов за 1600 монет"
+    assert markup.inline_keyboard[2][0].icon_custom_emoji_id is None
+    assert markup.inline_keyboard[3][0].icon_custom_emoji_id is None
+    assert "Вкл" in markup.inline_keyboard[4][0].text
+    assert markup.inline_keyboard[4][0].callback_data == "gacha:animtoggle:u1"
+
+
+def _profile_with_balance(total_primogems: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        player=SimpleNamespace(
+            adventure_rank=1,
+            xp_into_rank=0,
+            xp_for_next_rank=300,
+            total_points=10,
+            total_primogems=total_primogems,
+        ),
+        unique_cards=0,
+        total_copies=0,
+        rarity_counts=[],
+        recent_pulls=[],
+    )
+
+
+def test_gacha_currency_button_shows_cost_in_coins() -> None:
+    assert text_commands._gacha_currency_button_label("genshin") == "+160 примогемов за 1600 монет"
+    assert text_commands._gacha_currency_button_label("hsr") == "+160 нефрита за 1600 монет"
+
+
+def test_gacha_info_section_hints_top_up_when_balance_below_pull_price() -> None:
+    low = text_commands._render_gacha_info_section(
+        banner="genshin", response=_profile_with_balance(50), use_custom_emojis=False
+    )
+    enough = text_commands._render_gacha_info_section(
+        banner="genshin", response=_profile_with_balance(160), use_custom_emojis=False
+    )
+
+    assert "Платная крутка: 160 валюты, у вас <b>50</b>. Пополнить можно кнопкой ниже." in low
+    assert "Платная крутка" not in enough
 
 
 @pytest.mark.asyncio
