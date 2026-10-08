@@ -68,6 +68,10 @@ class _FakeActivityRepo:
         self._admin = list(admin)
         self._activity = list(activity)
         self._fail = fail
+        self.rolled_back = False
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
 
     async def list_user_admin_chats(self, *, user_id: int):
         if self._fail:
@@ -116,7 +120,7 @@ def test_home_text_without_groups_explains_how_to_get_them():
 def test_home_keyboard_starts_with_personal_ai_and_help_catalog():
     markup = _build_home_keyboard(has_admin_groups=False, has_user_groups=False)
     first_two = [row[0].callback_data for row in markup.inline_keyboard[:2]]
-    assert first_two == ["pai:home", "help:home"]
+    assert first_two == ["pai:home", "pm:help"]
 
 
 def test_home_keyboard_has_add_to_group_link_when_username_is_known():
@@ -223,13 +227,13 @@ async def test_render_home_screen_builds_text_and_keyboard_from_repo_state():
 
 @pytest.mark.asyncio
 async def test_home_screen_keeps_feature_buttons_when_group_lookup_fails():
-    text, markup = await _render_home_screen(
-        activity_repo=_FakeActivityRepo(fail=True), user=_user(), settings=_settings()
-    )
+    repo = _FakeActivityRepo(fail=True)
+    text, markup = await _render_home_screen(activity_repo=repo, user=_user(), settings=_settings())
     assert "Пока нет групп" in text
     assert _find(markup, "🤖 Личный AI").callback_data == "pai:home"
-    assert _find(markup, "✨ Возможности").callback_data == "help:home"
+    assert _find(markup, "✨ Возможности").callback_data == "pm:help"
     assert _find(markup, "➕ Добавить в группу").url == _STARTGROUP_URL
+    assert repo.rolled_back, "a failed lookup must roll the session back before the middleware commits"
 
 
 @pytest.mark.asyncio

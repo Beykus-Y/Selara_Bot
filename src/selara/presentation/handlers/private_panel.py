@@ -30,6 +30,7 @@ from selara.presentation.commands.access import parse_command_rank_phrase, resol
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.formatters import format_last_seen
 from selara.presentation.handlers.economy import _dashboard_text
+from selara.presentation.handlers.help import send_help
 from selara.presentation.handlers.premium import build_premium_entry
 from selara.presentation.handlers.settings_common import (
     CFG_BOOL_KEYS,
@@ -251,7 +252,7 @@ def _build_home_keyboard(
     # Features first. Each button opens a screen that has its own back/home buttons.
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="🤖 Личный AI", callback_data="pai:home")],
-        [InlineKeyboardButton(text="✨ Возможности", callback_data="help:home")],
+        [InlineKeyboardButton(text="✨ Возможности", callback_data=encode_pm_callback("help"))],
     ]
     if startgroup_url:
         rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=startgroup_url)])
@@ -416,6 +417,8 @@ async def _load_home_groups(activity_repo, *, user_id: int) -> tuple[list[UserCh
         user_groups = await activity_repo.list_user_activity_chats(user_id=user_id, limit=100)
     except Exception:
         logger.exception("Could not load home groups for user %s", user_id)
+        # A failed statement leaves the request session in a failed transaction; roll it back so the middleware can still commit.
+        await activity_repo.rollback()
         return [], []
     return admin_groups, user_groups
 
@@ -942,6 +945,12 @@ async def private_panel_callback(
         await _edit_or_answer(query, text, markup)
         return
 
+    # Help and subscriptions open as new messages: the home message stays put, so its buttons are still one tap away.
+    if route == "help":
+        await query.answer()
+        await send_help(query.message, settings)
+        return
+
     if route == "sub":
         text, markup = await build_premium_entry(
             settings=settings,
@@ -949,7 +958,8 @@ async def private_panel_callback(
             personal_config=personal_config,
             user_id=query.from_user.id,
         )
-        await _edit_or_answer(query, text, markup)
+        await query.message.answer(text, parse_mode="HTML", reply_markup=markup)
+        await query.answer()
         return
 
     if route == "al":

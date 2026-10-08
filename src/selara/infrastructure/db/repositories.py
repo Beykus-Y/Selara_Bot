@@ -414,6 +414,10 @@ class SqlAlchemyActivityRepository:
         self._session = session
         self._chat_event_sync_cache: dict[int, str | None] = {}
 
+    async def rollback(self) -> None:
+        """Undo a failed statement so the request session can still commit or roll back normally."""
+        await self._session.rollback()
+
     async def lock_resources(self, *resource_keys: str) -> None:
         await _lock_resources(self._session, *resource_keys)
 
