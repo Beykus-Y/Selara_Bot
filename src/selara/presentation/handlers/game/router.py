@@ -4804,45 +4804,116 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer("Сейчас нечего переключать", show_alert=False)
         return
 
+    if action in {"sok", "rok", "back"}:
+        assert confirmation is not None
+        expected_phase, expected_round_raw, issued_raw = confirmation
+        if not expected_round_raw.isdecimal() or not issued_raw.isdecimal():
+            await query.answer("Некорректное подтверждение", show_alert=True)
+            return
+        expected_round = int(expected_round_raw)
+        issued_at = int(issued_raw)
+        now = time()
+        if (
+            now - issued_at > 180 or now < issued_at - 30
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != expected_round
+        ):
+            await query.answer("Игра уже изменилась или подтверждение истекло. Откройте актуальную доску.", show_alert=True)
+            return
+        if action == "back":
+            await bot.edit_message_text(
+                chat_id=game.chat_id,
+                message_id=query.message.message_id,
+                text="Подтверждение отменено. Игра продолжается — используйте основную доску.",
+            )
+            await query.answer("Отменено", show_alert=False)
+            return
+        if action == "rok" and game.kind != "spy":
+            await query.answer("Раскрытие доступно только в игре «Шпион».", show_alert=True)
+            return
+
+        # The transition is protected by the GameStore per-game lock. A
+        # concurrent click or phase switch cannot finalize the wrong state.
+        previous_quiz_feed_id = game.quiz_feed_message_id if action == "sok" and game.kind == "quiz" else None
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text=(
+                "Игра завершена по решению ведущего."
+                if action == "rok" else "Игра остановлена ведущим."
+            ),
+            expected_status="started",
+            expected_phase=expected_phase,
+            expected_round_no=expected_round,
+        )
+        if finished_game is None:
+            await query.answer("Игра уже изменилась или завершена. Повторное действие не выполнено.", show_alert=True)
+            return
+        _cancel_phase_timer(game.game_id)
+        if previous_quiz_feed_id is not None:
+            try:
+                await bot.delete_message(chat_id=game.chat_id, message_id=previous_quiz_feed_id)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+
+        await _safe_edit_or_send_game_board(
+            bot, finished_game, chat_settings,
+            include_reveal=(action == "rok" or finished_game.kind in {"spy", "mafia"}),
+        )
+        if action == "rok":
+            event_text = "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\\n" + _render_roles_reveal(finished_game)
+        else:
+            event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
+            if finished_game.kind in {"spy", "mafia"}:
+                event_text += "\\n" + _render_roles_reveal(finished_game)
+        await _send_game_feed_event(bot, finished_game, text=event_text)
+        await query.answer("Роли раскрыты" if action == "rok" else "Игра завершена", show_alert=False)
+        return
+
     if action == "reveal":
         if game.kind != "spy" or game.status != "started":
             await query.answer("Раскрытие доступно для активной игры «Шпион»", show_alert=False)
             return
-
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
-            return
-
-        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-        await _send_game_feed_event(
-            bot,
-            finished_game,
-            text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game),
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text="<b>Раскрыть роли?</b> Это немедленно завершит «Шпиона» и покажет роли всем участникам.",
+            parse_mode="HTML",
+            reply_markup=_build_lifecycle_confirmation_keyboard(
+                game=game, action="reveal", issued_at=int(time()),
+            ),
+            disable_notification=True,
         )
-        await query.answer("Роли раскрыты", show_alert=False)
+        await query.answer("Подтвердите раскрытие в отдельном сообщении.", show_alert=False)
         return
 
     if action == "cancel":
-        _cancel_phase_timer(game.game_id)
-        if game.kind == "quiz":
-            await _sync_quiz_feed_message(bot, game, question_no=None)
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
+        if game.status == "started":
+            await bot.send_message(
+                chat_id=game.chat_id,
+                text="<b>Завершить партию?</b> Текущая игра остановится, а результат будет показан в чате.",
+                parse_mode="HTML",
+                reply_markup=_build_lifecycle_confirmation_keyboard(
+                    game=game, action="stop", issued_at=int(time()),
+                ),
+                disable_notification=True,
+            )
+            await query.answer("Подтвердите завершение в отдельном сообщении.", show_alert=False)
+            return
+        if game.status != "lobby":
+            await query.answer("Игра уже завершена. Ничего не изменено.", show_alert=False)
             return
 
-        await _safe_edit_or_send_game_board(
-            bot,
-            finished_game,
-            chat_settings,
-            include_reveal=(finished_game.kind in {"spy", "mafia"}),
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text="Лобби отменено ведущим.",
+            expected_status="lobby",
+            expected_phase="lobby",
         )
-        event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
-        if finished_game.kind in {"spy", "mafia"}:
-            event_text = f"{event_text}\n{_render_roles_reveal(finished_game)}"
-        await _send_game_feed_event(bot, finished_game, text=event_text)
-        await query.answer("Игра завершена", show_alert=False)
+        if finished_game is None:
+            await query.answer("Лобби уже изменилось. Действие не выполнено.", show_alert=True)
+            return
+        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+        await query.answer("Лобби отменено", show_alert=False)
         return
 
     await query.answer("Неизвестное действие", show_alert=False)
