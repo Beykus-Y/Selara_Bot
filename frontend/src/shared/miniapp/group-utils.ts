@@ -1,7 +1,6 @@
 import type { MiniAppGroup } from '@/shared/miniapp/model'
 
 export function groupRoleText(group: MiniAppGroup) {
-  if (group.badge === 'owner') return 'владелец'
   if (group.is_admin) return 'администратор'
   return 'участник'
 }

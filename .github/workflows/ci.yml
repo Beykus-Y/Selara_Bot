@@ -408,6 +408,9 @@ jobs:
       - name: Test Mini App model configuration in mobile browser
         run: python ../scripts/test_miniapp_admin_models_browser.py
 
+      - name: Test Mini App home and chats screens in mobile browser
+        run: python ../scripts/test_miniapp_home_browser.py
+
   frontend:
     name: frontend
     if: ${{ always() }}

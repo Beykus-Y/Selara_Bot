@@ -149,3 +149,12 @@ body.miniapp-mode .btn.primary, body.miniapp-mode .button--primary { background:
 .miniapp-admin__nav-item small { font-size: 10px; font-weight: 700; }
 .miniapp-admin__nav-icon { display: flex; line-height: 0; }
 .miniapp-admin__nav-icon svg { width: 20px; height: 20px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+body.miniapp-mode .v2-row:focus-visible,
+body.miniapp-mode .v2-tabs button:focus-visible,
+body.miniapp-mode .v2-btn:focus-visible,
+body.miniapp-mode .v2-pill-btn:focus-visible,
+body.miniapp-mode .v2-link:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 3px;
+}

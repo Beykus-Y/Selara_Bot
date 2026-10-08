@@ -75,10 +75,7 @@ export function MorePage() {
       </a>
 
       <div className="v2-sec"><span>Аккаунт</span></div>
-      <div className="v2-row v2-row--nav" style={{ marginTop: 4, cursor: 'default' }}>
-        <span className="v2-label">Язык</span>
-        <span style={{ color: 'var(--text-2)', fontSize: 14 }}>Русский</span>
-      </div>
+      <p className="v2-muted" style={{ margin: '14px 0 0', fontSize: 13 }}>Язык интерфейса: русский</p>
       <button type="button" className="v2-row v2-row--danger" onClick={handleLogout} disabled={isLoggingOut}>
         {isLoggingOut ? 'Выхожу…' : 'Выйти из сессии'}
       </button>
