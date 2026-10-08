@@ -47,9 +47,7 @@ def test_build_home_keyboard_uses_web_app_button_when_available() -> None:
         desktop_url=None,
     )
 
-    row = markup.inline_keyboard[0]
-    assert len(row) == 1
-    button = row[0]
-    assert button.text == "📱 Mini App"
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    button = next(item for item in buttons if item.text == "📱 Mini App")
     assert button.web_app == WebAppInfo(url="https://selarabot.duckdns.org/miniapp/")
     assert button.url is None

@@ -384,8 +384,34 @@ def _product_choice_keyboard(*, group_available: bool) -> InlineKeyboardMarkup:
     if group_available:
         builder.button(text="Для группы", callback_data="premium:group")
     builder.button(text="Для себя", callback_data="premium:self")
+    builder.button(text="🏠 Главное", callback_data="pm:h")
     builder.adjust(1)
     return builder.as_markup()
+
+
+async def build_premium_entry(
+    *, settings: Settings, session_factory, personal_config: PersonalConfigProvider, user_id: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Private-chat entry to Selara subscriptions: product choice, or the group offer when personal is hidden.
+
+    Shared by /premium and the /start panel so both show the same screen.
+    """
+    personal_config_value = await personal_config.get()
+    personal_available = (
+        _available(lambda value: _personal_product_for_settings(value, personal_config_value), settings) is not None
+    )
+    if personal_available:
+        group_available = _available(_product_for_settings, settings) is not None
+        return (
+            "<b>Selara AI</b>\n"
+            "Для группы — AI-функции чата и автоматические итоги дня.\n"
+            "Для себя — Selara Personal: личная подписка на AI в личных сообщениях.\n\n"
+            "Что оформляем?",
+            _product_choice_keyboard(group_available=group_available),
+        )
+
+    # Selara Personal stays hidden until SELARA_PERSONAL_PRICE_STARS is set.
+    return await _group_offer(settings=settings, session_factory=session_factory, user_id=user_id)
 
 
 @router.message(Command("premium"))
@@ -410,24 +436,12 @@ async def premium_command(
     if message.from_user is None:
         return
 
-    personal_config_value = await personal_config.get()
-    personal_available = (
-        _available(lambda value: _personal_product_for_settings(value, personal_config_value), settings) is not None
+    text, markup = await build_premium_entry(
+        settings=settings,
+        session_factory=session_factory,
+        personal_config=personal_config,
+        user_id=message.from_user.id,
     )
-    if personal_available:
-        group_available = _available(_product_for_settings, settings) is not None
-        await message.answer(
-            "<b>Selara AI</b>\n"
-            "Для группы — AI-функции чата и автоматические итоги дня.\n"
-            "Для себя — Selara Personal: личная подписка на AI в личных сообщениях.\n\n"
-            "Что оформляем?",
-            parse_mode="HTML",
-            reply_markup=_product_choice_keyboard(group_available=group_available),
-        )
-        return
-
-    # Selara Personal stays hidden until SELARA_PERSONAL_PRICE_STARS is set.
-    text, markup = await _group_offer(settings=settings, session_factory=session_factory, user_id=message.from_user.id)
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 

@@ -116,6 +116,11 @@ def _set_pending_input(user_id: int, field: str) -> None:
     _pending_inputs[user_id] = _PendingInput(field=field, expires_at=datetime.now(timezone.utc) + _PENDING_TTL)
 
 
+def clear_pending_input(user_id: int) -> None:
+    """Drop a waiting text input so the next message is not read as an answer to it."""
+    _pending_inputs.pop(user_id, None)
+
+
 # --- filters -----------------------------------------------------------------
 
 
@@ -363,7 +368,8 @@ def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> 
     builder.button(text="🧠 Память", callback_data=_cb("cat", "memory", rev))
     builder.button(text=f"🤖 {model_label}", callback_data=_cb("models", rev))
     builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 1)
+    builder.button(text="🏠 Главное", callback_data="pm:h")
+    builder.adjust(2, 2, 2)
     return builder.as_markup()
 
 

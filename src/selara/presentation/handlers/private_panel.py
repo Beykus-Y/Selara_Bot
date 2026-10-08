@@ -3,15 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
+import logging
 import re
 import shlex
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, Filter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, WebAppInfo
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from selara.application.personal_config import PersonalConfigProvider
 from selara.application.use_cases.economy.catalog import FARM_LEVEL_PLOTS
 from selara.application.use_cases.economy.get_dashboard import execute as get_dashboard
 from selara.application.use_cases.get_last_seen import execute as get_last_seen
@@ -28,6 +30,8 @@ from selara.presentation.commands.access import parse_command_rank_phrase, resol
 from selara.presentation.commands.normalizer import normalize_text_command
 from selara.presentation.formatters import format_last_seen
 from selara.presentation.handlers.economy import _dashboard_text
+from selara.presentation.handlers.help import send_help
+from selara.presentation.handlers.premium import build_premium_entry
 from selara.presentation.navigation.contract import safe_callback
 from selara.presentation.handlers.settings_common import (
     CFG_BOOL_KEYS,
@@ -42,6 +46,7 @@ from selara.presentation.handlers.settings_common import (
 )
 
 router = Router(name="private_panel")
+logger = logging.getLogger(__name__)
 
 _GROUP_PAGE_SIZE = 6
 _CFG_PAGE_SIZE = 8
@@ -239,32 +244,51 @@ def _build_home_keyboard(
     *,
     has_admin_groups: bool,
     has_user_groups: bool,
+    startgroup_url: str | None = None,
     miniapp_url: str | None = None,
     miniapp_webapp_url: str | None = None,
     desktop_url: str | None = None,
     getting_started_url: str | None = None,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    # #Discoverability/Onboarding: "Как начать" is the one maximally obvious
-    # button, always first, when the public getting-started page is
-    # reachable (i.e. the web panel is enabled).
-    if getting_started_url:
-        builder.button(text="🚀 Как начать", url=getting_started_url)
-    if miniapp_webapp_url:
-        builder.button(text="📱 Mini App", web_app=WebAppInfo(url=miniapp_webapp_url))
-    elif miniapp_url:
-        builder.button(text="📱 Mini App", url=miniapp_url)
-    if getting_started_url:
-        builder.button(text="📖 Документация", url=getting_started_url.rsplit("/getting-started", 1)[0] + "/user")
-    if has_admin_groups:
-        builder.button(text="🛠 Админ-панель", callback_data=encode_pm_callback("al", 0))
+    # Features first. Each button opens a screen that has its own back/home buttons.
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🤖 Личный AI", callback_data="pai:home")],
+        [InlineKeyboardButton(text="✨ Возможности", callback_data=encode_pm_callback("help"))],
+    ]
+    if startgroup_url:
+        rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=startgroup_url)])
+    rows.append([InlineKeyboardButton(text="💎 Подписки", callback_data=encode_pm_callback("sub"))])
+
+    group_row: list[InlineKeyboardButton] = []
     if has_user_groups:
-        builder.button(text="👤 Мои группы", callback_data=encode_pm_callback("ul", 0))
+        group_row.append(InlineKeyboardButton(text="👥 Мои группы", callback_data=encode_pm_callback("ul", 0)))
+    if has_admin_groups:
+        group_row.append(InlineKeyboardButton(text="🛠 Управление группами", callback_data=encode_pm_callback("al", 0)))
+    if group_row:
+        rows.append(group_row)
+
+    service_row: list[InlineKeyboardButton] = []
+    if miniapp_webapp_url:
+        service_row.append(InlineKeyboardButton(text="📱 Mini App", web_app=WebAppInfo(url=miniapp_webapp_url)))
+    elif miniapp_url:
+        service_row.append(InlineKeyboardButton(text="📱 Mini App", url=miniapp_url))
     if desktop_url:
-        builder.button(text="🖥 ПК-панель", url=desktop_url)
-    builder.button(text="🔄 Обновить", callback_data=encode_pm_callback("h"))
-    builder.adjust(1)
-    return builder.as_markup()
+        service_row.append(InlineKeyboardButton(text="🖥 ПК-панель", url=desktop_url))
+    if service_row:
+        rows.append(service_row)
+
+    if getting_started_url:
+        rows.append(
+            [
+                InlineKeyboardButton(text="🚀 Как начать", url=getting_started_url),
+                InlineKeyboardButton(
+                    text="📖 Документация",
+                    url=getting_started_url.rsplit("/getting-started", 1)[0] + "/user",
+                ),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=encode_pm_callback("h"))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_groups_keyboard(*, route_prefix: str, groups: list[UserChatOverview], page: int) -> InlineKeyboardMarkup:
@@ -372,58 +396,53 @@ def _build_user_group_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-async def _edit_or_answer(query: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup) -> None:
+async def _edit_or_answer(query: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup | None) -> None:
     if query.message is None:
         await query.answer()
         return
 
     try:
-        await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
     except TelegramBadRequest:
-        await query.message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
+        await query.message.answer(text, parse_mode="HTML", reply_markup=reply_markup, disable_web_page_preview=True)
     await query.answer()
 
 
-async def _render_home_text(
+async def _load_home_groups(activity_repo, *, user_id: int) -> tuple[list[UserChatOverview], list[UserChatOverview]]:
+    """Admin and activity groups for the home screen.
+
+    A failed lookup must not hide the AI, help and add-to-group buttons, so it degrades to empty lists.
+    """
+    try:
+        admin_groups = await activity_repo.list_user_admin_chats(user_id=user_id)
+        user_groups = await activity_repo.list_user_activity_chats(user_id=user_id, limit=100)
+    except Exception:
+        logger.exception("Could not load home groups for user %s", user_id)
+        # A failed statement leaves the request session in a failed transaction; roll it back so the middleware can still commit.
+        await activity_repo.rollback()
+        return [], []
+    return admin_groups, user_groups
+
+
+def _render_home_text(
     *,
     user,
     admin_groups: list[UserChatOverview],
     user_groups: list[UserChatOverview],
-    getting_started_url: str | None = None,
 ) -> str:
     display_name = escape(_user_label_from_telegram_user(user))
-    # #Discoverability/Onboarding: the first thing a new user sees must be a
-    # short, plain-language intro -- not a technical panel. Kept deliberately
-    # short (this is not the place for documentation); group counts and the
-    # "это ЛС-панель" line stay, just visually below the intro instead of
-    # being the headline. The "Как начать" line only appears when the button
-    # it refers to actually exists (web panel enabled) -- otherwise it would
-    # point a user at a button that isn't there.
     lines = [
         f"<b>💜 Привет, {display_name}! Это Selara</b>",
         "",
-        "Бот для групповых чатов: игры, статистика, экономика, отношения, гача "
-        "и другие развлечения.",
-    ]
-    if getting_started_url:
-        lines.append(
-            "Если ты здесь впервые — открой короткую инструкцию «🚀 Как начать» ниже. "
-            "За минуту будет понятно, как пользоваться ботом."
-        )
-    lines.extend([
+        "Бот для групповых чатов: игры, гача, экономика, отношения, питомцы и AI.",
+        "Выберите раздел ниже. Все команды и подробности — в «✨ Возможности».",
         "",
-        "Это ЛС-панель Selara.",
-        f"<b>Группы, где у вас админ-права бота:</b> <code>{len(admin_groups)}</code>",
-        f"<b>Группы из вашей активности:</b> <code>{len(user_groups)}</code>",
-    ])
-    if not admin_groups and not user_groups:
-        lines.extend(
-            [
-                "",
-                "<i>Пока нет данных.</i>",
-                "Добавьте бота в группу, отправьте сообщения в группе и/или получите админ-права внутри бота.",
-            ]
-        )
+    ]
+    if admin_groups or user_groups:
+        lines.append(f"<b>Группы из вашей активности:</b> <code>{len(user_groups)}</code>")
+        lines.append(f"<b>Группы, где у вас админ-права бота:</b> <code>{len(admin_groups)}</code>")
+    else:
+        lines.append("Пока нет групп. Добавьте Selara в чат, и здесь появятся ваши группы.")
     return "\n".join(lines)
 
 
@@ -454,57 +473,55 @@ def _build_getting_started_url(settings: Settings) -> str | None:
     return f"{settings.resolved_web_base_url}/app/docs/getting-started"
 
 
-def _append_web_panel_info(text: str, *, miniapp_url: str | None, desktop_url: str | None) -> str:
-    if not miniapp_url and not desktop_url:
-        return text
-    lines = [text, ""]
-    if miniapp_url:
-        lines.extend(
-            [
-                f'📱 <b>Mini App:</b> <a href="{escape(miniapp_url)}">открыть бота в Telegram</a>',
-                "Это основной вход с телефона: откройте бота и нажмите кнопку Mini App в меню или в сообщении.",
-            ]
-        )
-    if desktop_url:
-        lines.extend(
-            [
-                f'🖥 <b>ПК-панель:</b> <a href="{escape(desktop_url)}">открыть</a>',
-                "Для входа на ПК получите одноразовый код командой <code>/login</code> в этом чате.",
-            ]
-        )
-    return "\n".join(lines)
+def _build_startgroup_url(settings: Settings) -> str | None:
+    bot_username = (settings.bot_username or "").strip().lstrip("@")
+    if not bot_username:
+        return None
+    return f"https://t.me/{bot_username}?startgroup=true"
+
+
+def _reset_home_pending(user_id: int) -> None:
+    """Going home abandons any waiting text input, so the next message is not read as its answer."""
+    _clear_pending_cfg_input(user_id)
+    _clear_pending_admin_input(user_id)
+    # Imported here because personal_ai imports this module at load time.
+    from selara.presentation.handlers.personal_ai import clear_pending_input as clear_personal_ai_input
+
+    clear_personal_ai_input(user_id)
+
+
+async def _render_home_screen(
+    *,
+    activity_repo,
+    user,
+    settings: Settings,
+    notice: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Home text and keyboard. Every route that shows home goes through here, so the buttons never drift apart.
+
+    `notice` replaces the home text, for "cancelled" and "no groups" screens that keep the home buttons.
+    """
+    admin_groups, user_groups = await _load_home_groups(activity_repo, user_id=user.id)
+    text = notice or _render_home_text(user=user, admin_groups=admin_groups, user_groups=user_groups)
+    markup = _build_home_keyboard(
+        has_admin_groups=bool(admin_groups),
+        has_user_groups=bool(user_groups),
+        startgroup_url=_build_startgroup_url(settings),
+        miniapp_url=_build_miniapp_url(settings),
+        miniapp_webapp_url=_build_miniapp_webapp_url(settings),
+        desktop_url=_build_web_panel_url(settings),
+        getting_started_url=_build_getting_started_url(settings),
+    )
+    return text, markup
 
 
 async def send_private_start_panel(message: Message, activity_repo, economy_repo, settings: Settings) -> None:
     if message.chat.type != "private" or message.from_user is None:
         return
 
-    admin_groups = await activity_repo.list_user_admin_chats(user_id=message.from_user.id)
-    user_groups = await activity_repo.list_user_activity_chats(user_id=message.from_user.id, limit=100)
-    getting_started_url = _build_getting_started_url(settings)
-    text = await _render_home_text(
-        user=message.from_user,
-        admin_groups=admin_groups,
-        user_groups=user_groups,
-        getting_started_url=getting_started_url,
-    )
-    miniapp_url = _build_miniapp_url(settings)
-    miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-    desktop_url = _build_web_panel_url(settings)
-    text = _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url)
-
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=_build_home_keyboard(
-            has_admin_groups=bool(admin_groups),
-            has_user_groups=bool(user_groups),
-            miniapp_url=miniapp_url,
-            miniapp_webapp_url=miniapp_webapp_url,
-            desktop_url=desktop_url,
-            getting_started_url=getting_started_url,
-        ),
-    )
+    _reset_home_pending(message.from_user.id)
+    text, markup = await _render_home_screen(activity_repo=activity_repo, user=message.from_user, settings=settings)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
 
 
 @router.message(Command("login"))
@@ -902,7 +919,14 @@ async def _render_user_group_text(
 
 
 @router.callback_query(F.data.startswith("pm:"))
-async def private_panel_callback(query: CallbackQuery, activity_repo, economy_repo, settings: Settings) -> None:
+async def private_panel_callback(
+    query: CallbackQuery,
+    activity_repo,
+    economy_repo,
+    settings: Settings,
+    session_factory,
+    personal_config: PersonalConfigProvider,
+) -> None:
     if query.from_user is None:
         await query.answer()
         return
@@ -917,52 +941,39 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
     route, args = decoded
 
     if route == "h":
-        admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-        user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-        getting_started_url = _build_getting_started_url(settings)
-        text = await _render_home_text(
-            user=query.from_user,
-            admin_groups=admin_groups,
-            user_groups=user_groups,
-            getting_started_url=getting_started_url,
+        _reset_home_pending(query.from_user.id)
+        text, markup = await _render_home_screen(activity_repo=activity_repo, user=query.from_user, settings=settings)
+        await _edit_or_answer(query, text, markup)
+        return
+
+    # Help and subscriptions open as new messages: the home message stays put, so its buttons are still one tap away.
+    if route == "help":
+        await query.answer()
+        await send_help(query.message, settings)
+        return
+
+    if route == "sub":
+        text, markup = await build_premium_entry(
+            settings=settings,
+            session_factory=session_factory,
+            personal_config=personal_config,
+            user_id=query.from_user.id,
         )
-        miniapp_url = _build_miniapp_url(settings)
-        miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-        desktop_url = _build_web_panel_url(settings)
-        await _edit_or_answer(
-            query,
-            _append_web_panel_info(text, miniapp_url=miniapp_url, desktop_url=desktop_url),
-            _build_home_keyboard(
-                has_admin_groups=bool(admin_groups),
-                has_user_groups=bool(user_groups),
-                miniapp_url=miniapp_url,
-                miniapp_webapp_url=miniapp_webapp_url,
-                desktop_url=desktop_url,
-                getting_started_url=getting_started_url,
-            ),
-        )
+        await query.message.answer(text, parse_mode="HTML", reply_markup=markup)
+        await query.answer()
         return
 
     if route == "al":
         page = max(0, _safe_int(args[0] if args else "0") or 0)
         groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
         if not groups:
-            user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            miniapp_url = _build_miniapp_url(settings)
-            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-            desktop_url = _build_web_panel_url(settings)
-            await _edit_or_answer(
-                query,
-                "Нет групп, где у вас есть админ-права бота.",
-                _build_home_keyboard(
-                    has_admin_groups=False,
-                    has_user_groups=bool(user_groups),
-                    miniapp_url=miniapp_url,
-                    miniapp_webapp_url=miniapp_webapp_url,
-                    desktop_url=desktop_url,
-                    getting_started_url=_build_getting_started_url(settings),
-                ),
+            text, markup = await _render_home_screen(
+                activity_repo=activity_repo,
+                user=query.from_user,
+                settings=settings,
+                notice="Нет групп, где у вас есть админ-права бота."
             )
+            await _edit_or_answer(query, text, markup)
             return
         await _edit_or_answer(
             query,
@@ -1040,23 +1051,13 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         _clear_pending_admin_input(query.from_user.id)
         chat_id = _safe_int(args[0] if args else None)
         if chat_id is None:
-            admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-            user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            miniapp_url = _build_miniapp_url(settings)
-            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-            desktop_url = _build_web_panel_url(settings)
-            await _edit_or_answer(
-                query,
-                "Ввод отменён.",
-                _build_home_keyboard(
-                    has_admin_groups=bool(admin_groups),
-                    has_user_groups=bool(user_groups),
-                    miniapp_url=miniapp_url,
-                    miniapp_webapp_url=miniapp_webapp_url,
-                    desktop_url=desktop_url,
-                    getting_started_url=_build_getting_started_url(settings),
-                ),
+            text, markup = await _render_home_screen(
+                activity_repo=activity_repo,
+                user=query.from_user,
+                settings=settings,
+                notice="Ввод отменён."
             )
+            await _edit_or_answer(query, text, markup)
             return
         await _edit_or_answer(query, await _render_command_ranks_text(activity_repo, chat_id=chat_id), _build_command_ranks_keyboard(chat_id))
         return
@@ -1101,23 +1102,13 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
         _clear_pending_admin_input(query.from_user.id)
         chat_id = _safe_int(args[0] if args else None)
         if chat_id is None:
-            admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-            user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-            miniapp_url = _build_miniapp_url(settings)
-            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-            desktop_url = _build_web_panel_url(settings)
-            await _edit_or_answer(
-                query,
-                "Ввод отменён.",
-                _build_home_keyboard(
-                    has_admin_groups=bool(admin_groups),
-                    has_user_groups=bool(user_groups),
-                    miniapp_url=miniapp_url,
-                    miniapp_webapp_url=miniapp_webapp_url,
-                    desktop_url=desktop_url,
-                    getting_started_url=_build_getting_started_url(settings),
-                ),
+            text, markup = await _render_home_screen(
+                activity_repo=activity_repo,
+                user=query.from_user,
+                settings=settings,
+                notice="Ввод отменён."
             )
+            await _edit_or_answer(query, text, markup)
             return
         await _edit_or_answer(query, await _render_roles_text(activity_repo, chat_id=chat_id), _build_roles_keyboard(chat_id))
         return
@@ -1249,45 +1240,26 @@ async def private_panel_callback(query: CallbackQuery, activity_repo, economy_re
 
     if route == "ac":
         _clear_pending_cfg_input(query.from_user.id)
-        admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-        user_groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
-        miniapp_url = _build_miniapp_url(settings)
-        miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-        desktop_url = _build_web_panel_url(settings)
-        await _edit_or_answer(
-            query,
-            "Ввод значения отменён.",
-            _build_home_keyboard(
-                has_admin_groups=bool(admin_groups),
-                has_user_groups=bool(user_groups),
-                miniapp_url=miniapp_url,
-                miniapp_webapp_url=miniapp_webapp_url,
-                desktop_url=desktop_url,
-                getting_started_url=_build_getting_started_url(settings),
-            ),
+        text, markup = await _render_home_screen(
+            activity_repo=activity_repo,
+            user=query.from_user,
+            settings=settings,
+            notice="Ввод значения отменён."
         )
+        await _edit_or_answer(query, text, markup)
         return
 
     if route == "ul":
         page = max(0, _safe_int(args[0] if args else "0") or 0)
         groups = await activity_repo.list_user_activity_chats(user_id=query.from_user.id, limit=100)
         if not groups:
-            admin_groups = await activity_repo.list_user_admin_chats(user_id=query.from_user.id)
-            miniapp_url = _build_miniapp_url(settings)
-            miniapp_webapp_url = _build_miniapp_webapp_url(settings)
-            desktop_url = _build_web_panel_url(settings)
-            await _edit_or_answer(
-                query,
-                "Нет групп в истории активности. Напишите что-нибудь в группе с ботом.",
-                _build_home_keyboard(
-                    has_admin_groups=bool(admin_groups),
-                    has_user_groups=False,
-                    miniapp_url=miniapp_url,
-                    miniapp_webapp_url=miniapp_webapp_url,
-                    desktop_url=desktop_url,
-                    getting_started_url=_build_getting_started_url(settings),
-                ),
+            text, markup = await _render_home_screen(
+                activity_repo=activity_repo,
+                user=query.from_user,
+                settings=settings,
+                notice="Нет групп в истории активности. Напишите что-нибудь в группе с ботом."
             )
+            await _edit_or_answer(query, text, markup)
             return
         await _edit_or_answer(
             query,

@@ -635,7 +635,7 @@ async def test_premium_offers_group_or_self_when_personal_price_is_configured(mo
         personal_config=StaticPersonalConfigProvider(config_from_settings(settings)),
     )
 
-    assert _buttons(message.answer.await_args.kwargs["reply_markup"]) == ["premium:group", "premium:self"]
+    assert _buttons(message.answer.await_args.kwargs["reply_markup"]) == ["premium:group", "premium:self", "pm:h"]
 
 
 @pytest.mark.asyncio
