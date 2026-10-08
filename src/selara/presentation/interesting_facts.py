@@ -285,6 +285,11 @@ class InterestingFactsScheduler:
                     extra={"chat_id": chat.telegram_chat_id, "abandoned_count": abandoned},
                 )
 
+            # One slot in flight per chat: a newer claim must not start while an older one may still deliver.
+            if await repo.has_open_interesting_fact_claim(chat_id=chat.telegram_chat_id):
+                await session.commit()
+                return None
+
             settings = await repo.get_chat_settings(chat_id=chat.telegram_chat_id)
             if settings is None or not settings.interesting_facts_enabled:
                 await session.commit()

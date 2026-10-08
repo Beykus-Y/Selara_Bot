@@ -433,3 +433,57 @@ async def test_interesting_fact_stale_claim_outcome_does_not_overwrite_newer_sta
         ]
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interesting_fact_second_claim_waits_while_first_claim_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    chat = ChatSnapshot(telegram_chat_id=-100906, chat_type="group", title="Facts")
+    human = UserSnapshot(telegram_user_id=1, username="human", first_name="Human", last_name=None, is_bot=False)
+    now = datetime(2026, 3, 19, 12, 0, tzinfo=timezone.utc)
+    short_interval = replace(_fact_settings(), interesting_facts_interval_minutes=1)
+    async with session_factory() as session:
+        repo = SqlAlchemyActivityRepository(session)
+        await repo.upsert_chat_settings(chat=chat, values=settings_to_dict(short_interval))
+        await repo.upsert_activity(chat=chat, user=human, event_at=now - timedelta(hours=5))
+        await session.commit()
+
+    scheduler = InterestingFactsScheduler(
+        bot=SimpleNamespace(send_message=AsyncMock()),
+        session_factory=session_factory,
+        catalog=_write_facts(tmp_path, ["Тестовый факт", "Другой факт"]),
+    )
+    monkeypatch.setattr(
+        "selara.presentation.interesting_facts.GAME_STORE.get_active_game_for_chat",
+        AsyncMock(return_value=None),
+    )
+
+    first = await scheduler._claim_next_fact(
+        chat=chat,
+        facts=scheduler.get_facts(),
+        now=now,
+        has_active_game=False,
+    )
+    assert first is not None
+
+    # The interval has elapsed, but the first claim is still in flight within its 5 minute lease.
+    second = await scheduler._claim_next_fact(
+        chat=chat,
+        facts=scheduler.get_facts(),
+        now=now + timedelta(minutes=2),
+        has_active_game=False,
+    )
+    assert second is None
+
+    async with session_factory() as session:
+        claims = (await session.execute(select(ChatInterestingFactDeliveryModel))).scalars().all()
+        assert [(item.id, item.status) for item in claims] == [(first.claim_id, "claimed")]
+
+    await engine.dispose()
