@@ -121,7 +121,7 @@ NAV_NODES: tuple[NavNode, ...] = (
     NavNode(
         key="admin",
         title="🛡 Администраторам",
-        summary="Роли, модерация и настройка группы. Нужны права администратора в чате.",
+        summary="Роли, модерация и настройка группы. Каждая функция требует своего права Selara; часть справки доступна всем.",
         parent=ROOT_KEY,
         children=("roles", "moderation"),
         spec_keys=(
