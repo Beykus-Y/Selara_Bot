@@ -2002,6 +2002,49 @@ def _build_lifecycle_confirmation_keyboard(
     return builder.as_markup()
 
 
+def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
+    """Separate phase controls from participants' shared action keyboard."""
+    if game.status != "started":
+        return None
+    builder = InlineKeyboardBuilder()
+    if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
+        advance_text = "⏭ Следующая фаза"
+        if game.phase == "night":
+            advance_text = "🌅 Завершить ночь"
+        elif game.phase == "day_discussion":
+            advance_text = "🗳 Открыть голосование"
+        elif game.phase == "day_vote":
+            advance_text = "⚖️ Подвести голоса"
+        elif game.phase == "day_execution_confirm":
+            advance_text = "☠️ Закрыть казнь"
+        builder.button(text=advance_text, callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "quiz" and game.phase == "freeplay":
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "category_pick":
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bredovukha" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "zlobcards" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "zlobcards" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+    if game.kind == "bunker" and game.phase == "bunker_vote":
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+
+    if game.kind == "spy" and game.phase == "freeplay":
+        builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
+
+    builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
+
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboardMarkup | None:
     builder = InlineKeyboardBuilder()
 
@@ -2070,41 +2113,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
         return builder.as_markup()
 
     elif game.status == "started":
-        if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
-            advance_text = "⏭ Следующая фаза"
-            if game.phase == "night":
-                advance_text = "🌅 Завершить ночь"
-            elif game.phase == "day_discussion":
-                advance_text = "🗳 Открыть голосование"
-            elif game.phase == "day_vote":
-                advance_text = "⚖️ Подвести голоса"
-            elif game.phase == "day_execution_confirm":
-                advance_text = "☠️ Закрыть казнь"
-            builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "quiz" and game.phase == "freeplay":
-            builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "category_pick":
-            builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_reveal":
-            builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_vote":
-            builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "dice" and game.phase == "freeplay":
             builder.button(text="🎲 Бросить", callback_data=f"gdice:{game.game_id}:roll")
-
         if game.kind == "spy" and game.phase == "freeplay":
             builder.button(text="📍 Сводка голосов", callback_data=f"gspy:{game.game_id}:noop")
-            builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
-
-        builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
 
     elif game.status == "finished":
         builder.button(text="🔁 Ещё раз", callback_data=f"game:rematch:{game.game_id}")
@@ -2165,6 +2177,17 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             for button in row:
                 builder.add(button)
 
+    if game.status == "started":
+        # All primary actions (votes, answers, private links) precede this
+        # separate footer. Admin actions are reached via a checked surface.
+        footer = InlineKeyboardBuilder()
+        footer.button(text="❓ Как играть", callback_data=f"game:lrules:{game.game_id}")
+        footer.button(text="⚙️ Ведущему", callback_data=f"game:manage:{game.game_id}")
+        footer.adjust(2)
+        builder.adjust(2)
+        return InlineKeyboardMarkup(
+            inline_keyboard=[*builder.as_markup().inline_keyboard, *footer.as_markup().inline_keyboard],
+        )
     if not builder.buttons:
         return None
 
