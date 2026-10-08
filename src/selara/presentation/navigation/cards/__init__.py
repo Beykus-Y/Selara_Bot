@@ -16,7 +16,11 @@ from selara.presentation.navigation.cards import (
     social,
     subscriptions,
 )
-from selara.presentation.navigation.cards.model import CARD_AUDIENCES, CARD_CONTEXTS, FeatureCard
+from selara.presentation.navigation.cards.model import (
+    CARD_AUDIENCES,
+    CARD_CONTEXTS,
+    FeatureCard,
+)
 
 FEATURE_CARDS: tuple[FeatureCard, ...] = (
     *games.CARDS,
