@@ -3700,7 +3700,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
         if len(parts) == 5 and parts[:2] == ["game", "advance"] and parts[4].isdigit():
-            if game.status != "started" or (game.phase, game.round_no) != (parts[3], int(parts[4])):
+            if game.status != "started" or (game_router_module._advance_phase_guard(game), game.round_no) != (parts[3], int(parts[4])):
                 return False, "Этап игры уже изменился. Обновите экран управления."
         elif len(parts) != 3:
             return False, "Некорректные параметры игрового действия."
@@ -6051,6 +6051,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     game.game_id, game.chat_id, user.telegram_user_id, action,
                     game.phase, game.round_no,
                     now + game_router_module._GAME_CONFIRM_TTL_SECONDS,
+                    game.quiz_current_question_index if game.kind == "quiz" else None,
                 )
                 await session.commit()
                 message = (
@@ -6088,11 +6089,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
                 # Pop BEFORE the first await: concurrent confirms cannot both win.
                 game_router_module._GAME_CONFIRM_REQUESTS.pop(parts[2], None)
-                _, _, _, confirm_action, expected_phase, expected_round, _ = request_info
+                _, _, _, confirm_action, expected_phase, expected_round, _, expected_quiz_index = request_info
                 finished_game, status = await GAME_STORE.finish_if_current(
                     game_id=game.game_id,
                     expected_phase=expected_phase,
                     expected_round=expected_round,
+                    expected_quiz_question_index=expected_quiz_index,
                     winner_text=(
                         "Игра завершена по решению ведущего."
                         if confirm_action == "reveal" else "Игра остановлена ведущим."
