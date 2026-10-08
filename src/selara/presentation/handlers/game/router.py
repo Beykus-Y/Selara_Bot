@@ -2001,41 +2001,38 @@ def _build_game_admin_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
     if game.status != "started":
         return None
     builder = InlineKeyboardBuilder()
-        if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
-            advance_text = "⏭ Следующая фаза"
-            if game.phase == "night":
-                advance_text = "🌅 Завершить ночь"
-            elif game.phase == "day_discussion":
-                advance_text = "🗳 Открыть голосование"
-            elif game.phase == "day_vote":
-                advance_text = "⚖️ Подвести голоса"
-            elif game.phase == "day_execution_confirm":
-                advance_text = "☠️ Закрыть казнь"
-            builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "quiz" and game.phase == "freeplay":
-            builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "category_pick":
-            builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_reveal":
-            builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_vote":
-            builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "dice" and game.phase == "freeplay":
-            builder.button(text="🎲 Бросить", callback_data=f"gdice:{game.game_id}:roll")
+    if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
+        advance_text = "⏭ Следующая фаза"
+        if game.phase == "night":
+            advance_text = "🌅 Завершить ночь"
+        elif game.phase == "day_discussion":
+            advance_text = "🗳 Открыть голосование"
+        elif game.phase == "day_vote":
+            advance_text = "⚖️ Подвести голоса"
+        elif game.phase == "day_execution_confirm":
+            advance_text = "☠️ Закрыть казнь"
+        builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "quiz" and game.phase == "freeplay":
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "bredovukha" and game.phase == "category_pick":
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "bredovukha" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "bredovukha" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "zlobcards" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "zlobcards" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
+    if game.kind == "bunker" and game.phase == "bunker_vote":
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
 
-        if game.kind == "spy" and game.phase == "freeplay":
-            builder.button(text="📍 Сводка голосов", callback_data=f"gspy:{game.game_id}:noop")
-            builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
+    if game.kind == "spy" and game.phase == "freeplay":
+        builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
 
-        builder.button(text="🛑 Завершить партию", callback_data=f"game:cancel:{game.game_id}")
+    builder.button(text="🛑 Завершить партию", callback_data=f"game:cancel:{game.game_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -2108,9 +2105,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
         return builder.as_markup()
 
     elif game.status == "started":
-        # Common board: only genuine player actions and recovery links.
-        # Moderator actions live in /gamecontrol, as this keyboard is public.
-        pass
+        # Genuine participant actions are appended after the status-specific
+        # phase controls; administrative phase transitions stay off this board.
+        if game.kind == "dice" and game.phase == "freeplay":
+            builder.button(text="🎲 Бросить", callback_data=f"gdice:{game.game_id}:roll")
 
     elif game.status == "finished":
         builder.button(text="🔁 Ещё раз", callback_data=f"game:rematch:{game.game_id}")
@@ -4319,7 +4317,7 @@ async def game_control_command(message: Message, activity_repo) -> None:
         await message.answer("Недостаточно прав для управления игрой.")
         return
     await message.answer(
-        f"⚙ Управление: {GAME_DEFINITIONS[game.kind].title} — {_phase_title(game)}.\\n"
+        f"⚙ Управление: {GAME_DEFINITIONS[game.kind].title} — {_phase_title(game)}.\n"
         "Действия ниже влияют на партию. Остановка и раскрытие требуют подтверждения.",
         reply_markup=_build_game_admin_controls(game),
     )
@@ -4464,7 +4462,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await bot.send_message(
                 chat_id=game.chat_id,
                 text=_render_game_rules_text(game.kind)
-                + "\\n\\n<i>Это справка; активная доска игры остаётся без изменений.</i>",
+                + "\n\n<i>Это справка; активная доска игры остаётся без изменений.</i>",
                 parse_mode="HTML",
                 disable_notification=True,
             )
@@ -4859,8 +4857,8 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             builder.adjust(1)
             await bot.send_message(
                 chat_id=game.chat_id,
-                text=f"⚠️ Подтвердите {label}: {GAME_DEFINITIONS[game.kind].title}.\\n"
-                "После подтверждения текущая партия закончится; для скрытых ролей будет опубликовано раскрытие.\\n"
+                text=f"⚠️ Подтвердите {label}: {GAME_DEFINITIONS[game.kind].title}.\n"
+                "После подтверждения текущая партия закончится; для скрытых ролей будет опубликовано раскрытие.\n"
                 "Подтверждение действительно 2 минуты и только для запросившего ведущего.",
                 reply_markup=builder.as_markup(),
                 disable_notification=True,
@@ -4953,7 +4951,7 @@ async def game_confirm_callback(
         if action == "reveal" else "<b>Ведущий:</b> Игра остановлена ведущим."
     )
     if finished_game.kind in {"spy", "mafia"}:
-        event_text += "\\n" + _render_roles_reveal(finished_game)
+        event_text += "\n" + _render_roles_reveal(finished_game)
     await _send_game_feed_event(bot, finished_game, text=event_text)
     try:
         await bot.edit_message_reply_markup(
