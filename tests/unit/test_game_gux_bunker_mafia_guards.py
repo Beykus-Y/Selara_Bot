@@ -142,3 +142,41 @@ async def test_legacy_bunker_and_mafia_callbacks_are_rejected_without_mutation()
             ) else {}),
         )
         assert q.alerts and "устарел" in q.alerts[-1].lower()
+
+@pytest.mark.asyncio
+async def test_stale_mafia_timers_cannot_change_even_same_round_phase() -> None:
+    from datetime import datetime, timezone
+
+    old_stamp = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    for phase, method_name in (
+        ("night", "mafia_resolve_night"),
+        ("day_discussion", "mafia_open_day_vote"),
+        ("day_vote", "mafia_resolve_day_vote"),
+        ("day_execution_confirm", "mafia_resolve_execution_confirm"),
+    ):
+        game = active("mafia", phase, round_no=9)
+        game.phase_started_at = datetime.now(timezone.utc)
+        store = put(game)
+        method = getattr(store, method_name)
+        outcome = await method(
+            game_id=game.game_id, expected_round_no=9, expected_phase_started_at=old_stamp,
+        )
+        assert outcome[-1] == "Таймер предыдущей фазы не применён"
+        assert game.phase == phase, method_name
+
+        outcome = await method(
+            game_id=game.game_id, expected_round_no=8,
+            expected_phase_started_at=game.phase_started_at,
+        )
+        assert outcome[-1] == "Таймер предыдущего раунда не применён"
+        assert game.phase == phase, method_name
+
+
+def test_bunker_eliminated_player_cannot_get_reveal_or_vote_keyboard() -> None:
+    game = active("bunker", "bunker_vote")
+    game.alive_player_ids = {1, 2}
+    assert ui._build_private_bunker_vote_keyboard(game, actor_user_id=3) is None
+    # Full private card is still allowed for a participant, but no actions.
+    game.phase = "bunker_reveal"
+    game.bunker_current_actor_user_id = 1
+    assert ui._build_private_bunker_reveal_keyboard(game, actor_user_id=3) is None
