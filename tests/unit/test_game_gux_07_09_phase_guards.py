@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +18,7 @@ def make(kind, phase, round_no=2):
         game_id="g7abc", kind=kind, chat_id=-100, chat_title="Group",
         owner_user_id=1, players={1: "Alice", 2: "Bob", 3: "Cara"},
         status="started", phase=phase, round_no=round_no,
+        phase_started_at=datetime.now(timezone.utc),
     )
 
 
