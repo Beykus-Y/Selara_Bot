@@ -92,8 +92,10 @@ async def generate_reply(
         chosen = select_memories_for_prompt(await repo.memory_items(user_id=user_id), user_text)
         memories = [item.content for item in chosen]
         await repo.touch_memories(user_id=user_id, memory_ids=used_memory_ids(chosen, user_text))
+    offered_tools = tuple(sorted(tool_run.allowed_names())) if tool_run is not None and tool_run.active else ()
     messages = build_personal_messages(
-        profile=profile, summary=summary, recent=recent, user_text=user_text, memories=memories
+        profile=profile, summary=summary, recent=recent, user_text=user_text, memories=memories,
+        available_tools=offered_tools,
     )
     # Everything the model needs is in memory: end the read transaction so no pooled connection
     # stays "idle in transaction" for the whole (slow) provider call.

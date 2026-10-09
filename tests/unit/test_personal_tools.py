@@ -424,3 +424,53 @@ async def test_only_one_page_can_be_opened_after_a_search():
     first = await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/msk"}, "2"), allowed)
     second = await run.execute(ToolCall("fetch_page", {"url": "https://weather.example/msk"}, "3"), allowed)
     assert first.success and not second.success
+
+
+# --- false promises about tool calls -----------------------------------------------------------
+
+
+async def test_unexecuted_read_skill_promise_gets_one_real_retry():
+    llm = ScriptedLlm(
+        _response(content="Сейчас вызову read_skill, чтобы сделать красивую инфографику."),
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Инструкция прочитана, но изображение пока не создано."),
+    )
+    run = _run(web=False, artifacts=True)
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}], run=run
+    )
+    assert len(llm.calls) == 3
+    assert any(m["role"] == "tool" for m in llm.calls[2]["messages"])
+    assert "artifacts" in run.skills_read
+    assert turn.text == "Инструкция прочитана, но изображение пока не создано."
+
+
+async def test_repeated_tool_promise_is_not_sent_or_retried_forever():
+    llm = ScriptedLlm(
+        _response(content="Сейчас вызову read_skill."),
+        _response(content="Сейчас вызову read_skill."),
+    )
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(web=False, artifacts=True)
+    )
+    assert len(llm.calls) == 2
+    assert turn.text == personal_tools._UNFULFILLED_TOOL_NOTICE
+
+
+async def test_unpriced_or_exhausted_budget_does_not_retry_a_textual_tool_promise():
+    llm = ScriptedLlm(_response(content="Сейчас вызову read_skill.", cost=None))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}],
+        run=_run(web=False, artifacts=True, budget=Decimal("0.01")),
+    )
+    assert len(llm.calls) == 1
+    assert turn.text == personal_tools._UNFULFILLED_TOOL_NOTICE
+
+
+async def test_tool_explanation_is_not_mistaken_for_an_unexecuted_promise():
+    llm = ScriptedLlm(_response(content="Для графики используется read_skill, затем create_artifact."))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}], run=_run(web=False, artifacts=True)
+    )
+    assert len(llm.calls) == 1
+    assert turn.text.startswith("Для графики используется")
