@@ -2477,7 +2477,7 @@ class GameStore:
         game_id: str,
         responder_user_id: int,
         answer_code: Literal["yes", "no", "unknown", "irrelevant"],
-        expected_history_size: int | None = None,
+        expected_question_version: int | None = None,
         expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, WhoamiAnswerResolution | None, str | None]:
         async with self._lock_game(game_id):
@@ -2486,7 +2486,10 @@ class GameStore:
                 return None, None, "Игра не найдена"
             if expected_chat_id is not None and game.chat_id != expected_chat_id:
                 return game, None, "Эта кнопка из другого чата"
-            if expected_history_size is not None and len(game.whoami_history) != expected_history_size:
+            if (
+                expected_question_version is not None
+                and int(game.phase_started_at.timestamp() * 1_000_000) != expected_question_version
+            ):
                 return game, None, "Это старый вопрос. Откройте актуальную доску."
             if game.kind != "whoami":
                 return game, None, "Это не игра «Кто я»"
