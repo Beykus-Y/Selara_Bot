@@ -9,7 +9,7 @@ included in wheels, rather than referencing an unpackaged checkout directory.
 for up to three 800px-wide pages at 2x density. It checks returned PNGs before
 persisting a UUID, source, images, creator, chat, forum topic and seven-day expiry.
 Creation has no Telegram side effect. Source edits produce a new immutable ID;
-`get_artifact` provides the original HTML/CSS for known IDs in the same chat/topic.
+`get_artifact` provides the original HTML/CSS for known IDs in the same chat/topic.\nPersonal AI also offers this tool without an ID for the user's last confirmed photo in\ntheir own private chat. It never reads drafts, other owners' content, expired,\nweb-tainted or text-only artifacts. Each edit creates a new immutable ID.
 A request has at most three creation attempts. A chat retains at most 30 live
 artifacts; expired rows are purged on subsequent creation.
 
