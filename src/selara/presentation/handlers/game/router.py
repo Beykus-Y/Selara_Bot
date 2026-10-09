@@ -690,6 +690,16 @@ def _build_spy_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
     return builder.as_markup()
 
 
+def _whoami_question_token(game: GroupGame) -> int:
+    # Some restored/legacy fixtures have no phase-start timestamp. New live
+    # questions always have one, providing a monotonic-enough unique token
+    # even after the visible history reaches its trimming limit.
+    return (
+        int(game.phase_started_at.timestamp() * 1_000_000)
+        if game.phase_started_at is not None else 0
+    )
+
+
 def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
     if game.kind != "whoami" or game.status != "started" or game.phase != "whoami_answer":
         return None
@@ -697,10 +707,11 @@ def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         return None
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:yes")
-    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:no")
-    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:unknown")
-    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:irrelevant")
+    revision = _whoami_question_token(game)
+    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:{revision}:yes")
+    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:{revision}:no")
+    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:{revision}:unknown")
+    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:{revision}:irrelevant")
     builder.adjust(2, 2)
     return builder.as_markup()
 
@@ -716,11 +727,11 @@ def _build_bred_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gbred:{game.game_id}:{option_index}",
+            callback_data=f"gbred:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -736,7 +747,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         text = category if len(category) <= 22 else f"{category[:19]}..."
         builder.button(
             text=f"📚 {text}",
-            callback_data=f"gbredcat:{game.game_id}:{option_index}",
+            callback_data=f"gbredcat:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     selector_label = "-"
@@ -744,7 +755,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         selector_label = game.players.get(game.bred_current_selector_user_id, f"user:{game.bred_current_selector_user_id}")
     builder.button(
         text=f"🎯 Ход: {selector_label[:16]}",
-        callback_data=f"gbredcat:{game.game_id}:noop",
+        callback_data=f"gbredcat:{game.game_id}:{game.round_no}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -761,11 +772,11 @@ def _build_zlob_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gzlobv:{game.game_id}:{option_index}",
+            callback_data=f"gzlobv:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -787,20 +798,18 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
             label = card_text if len(card_text) <= 24 else f"{card_text[:21]}..."
             builder.button(
                 text=f"🃏 {label}",
-                callback_data=f"gzlobp:{game.game_id}:{card_index}",
+                callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{card_index}",
             )
     else:
         for first in range(len(hand)):
             for second in range(first + 1, len(hand)):
-                first_text = hand[first]
-                second_text = hand[second]
-                merged = f"{first_text} + {second_text}"
-                label = merged if len(merged) <= 24 else f"{merged[:21]}..."
+                # Numbered choices map to full-length card text in the
+                # private hand, avoiding two truncated labels looking equal.
                 builder.button(
-                    text=f"🃏 {label}",
-                    callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
+                    text=f"🃏 {first + 1} + {second + 1}",
+                    callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{first}-{second}",
                 )
-    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:noop")
+    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:{game.round_no}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -1006,11 +1015,18 @@ def _should_handle_whoami_group_text(active_game: GroupGame | None, *, user_id: 
     return bool(text.strip())
 
 
-def _should_handle_bred_private_answer(game: GroupGame | None, *, text: str) -> bool:
+def _should_handle_bred_private_answer(
+    game: GroupGame | None, *, text: str, replied_prompt: str | None = None,
+) -> bool:
     normalized = text.strip()
-    if not normalized or normalized.startswith("/"):
+    if not normalized or normalized.startswith("/") or game is None:
         return False
-    return game is not None
+    if replied_prompt is not None:
+        # Replies to Personal AI and other bot messages must not be mistaken
+        # for a free-text bluff. Only the current tagged Bred prompt qualifies.
+        return f"Контекст блефа: {game.game_id}/{game.round_no}" in replied_prompt
+    # Preserve the established one-message DM submission flow.
+    return True
 
 
 def _render_whoami_history(game: GroupGame, *, limit: int = 6) -> str:
@@ -1053,10 +1069,10 @@ def _render_whoami_status(game: GroupGame) -> str:
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> ход текущего игрока.")
-        lines.append("<b>Что делать:</b> задайте вопрос сообщением в чат или сделайте догадку.")
+        lines.append("<b>Что делать:</b> задайте вопрос с «?» или сделайте догадку обычным сообщением в группу (без команды).")
         lines.append(
-            "<i>Вопрос — любое сообщение с «?». Догадка — например: "
-            "«Я думаю, что я [ответ]», «моя догадка: [ответ]» или «кажется, я [ответ]».</i>"
+            "<i>Вопрос: «Я человек?» (знак ? обязателен). Догадка: "
+            "«Я думаю, что я Шерлок Холмс» или «моя догадка: Шерлок Холмс».</i>"
         )
         lines.append(
             "<i>Если игрок разгадал себя, он выходит из круга вопросов, "
@@ -1066,6 +1082,9 @@ def _render_whoami_status(game: GroupGame) -> str:
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<b>Сейчас:</b> ждём ответ стола.")
         lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».")
+
+    if game.phase == "whoami_answer":
+        lines.append("<i>Да — игрок задаёт следующий вопрос; нет / не знаю / неважно — ход переходит дальше.</i>")
 
     lines.append("")
     lines.append(_render_whoami_history(game))
@@ -1503,7 +1522,7 @@ def _render_bred_question(game: GroupGame) -> str:
             f"<b>Категорию выбирает:</b> {escape(selector_label)}",
         ]
         if game.bred_category_options:
-            lines.append("<i>Кнопки ниже сразу откроют тему раунда.</i>")
+            lines.append("<i>Тему выбирает назначенный игрок; после выбора остальные отправляют ложные ответы в ЛС.</i>")
         return "\n".join(lines)
 
     if not game.bred_question_prompt:
@@ -1523,6 +1542,8 @@ def _render_bred_question(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.bred_lies
         ]
+        lines.append("<b>Где отвечать:</b> отправьте ЛОЖЬ обычным сообщением в ЛС боту. Правду выбираем позже.")
+        lines.append("<i>В группе ответы не раскрываются до голосования.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже ответили:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
         if waiting_user_ids:
@@ -1543,7 +1564,12 @@ def _render_bred_question(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до конца этапа.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ, а не наиболее смешную ложь. "
+                     "Ответы пока анонимны; выбор можно изменить до подсчёта.</i>")
+        if game.bred_options:
+            lines.append("<b>Варианты полностью (кнопки ниже соответствуют буквам):</b>")
+            for idx, option in enumerate(game.bred_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1592,7 +1618,12 @@ def _render_zlob_round_status(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до закрытия раунда.</i>")
+        lines.append("<i>Голосуйте за лучший анонимный ответ, кроме собственного. "
+                     "Выбор можно поменять до закрытия раунда; авторы будут раскрыты после подсчёта.</i>")
+        if game.zlob_options:
+            lines.append("<b>Все варианты (буквы соответствуют кнопкам):</b>")
+            for idx, option in enumerate(game.zlob_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1910,7 +1941,7 @@ def _render_game_text(
             lines.append("<b>Что делать:</b> выбранный игрок жмёт тему кнопками ниже.")
         elif game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор ответов в ЛС.")
-            lines.append("<b>Что делать:</b> придумайте правдоподобную ложь и сдайте её боту в ЛС или на сайте.")
+            lines.append("<b>Что делать:</b> придумайте ЛОЖЬ для пропущенного слова или факта и отправьте её боту личным сообщением (1–120 символов).")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за самый правдоподобный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за тот, что кажется настоящим.")
@@ -1928,7 +1959,7 @@ def _render_game_text(
         lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
         if game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор карт в ЛС.")
-            lines.append("<b>Что делать:</b> выберите карту(ы) из руки в ЛС или на сайте.")
+            lines.append(f"<b>Что делать:</b> откройте ЛС: чёрная карта задаёт {max(1, int(game.zlob_black_slots))} пропуск(а), заполните их белыми картами из руки.")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за лучший анонимный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за лучший вариант.")
@@ -2404,15 +2435,19 @@ def _render_bred_private_status_text(game: GroupGame) -> str:
         f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
         f"<b>Раунд:</b> {game.round_no}/{game.bred_rounds}",
         f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
+        f"<b>Контекст блефа:</b> <code>{escape(game.game_id)}/{game.round_no}</code>",
     ]
     if game.phase == "private_answers" and game.bred_question_prompt:
         lines.append("<b>Факт с пропуском:</b>")
         lines.append(escape(game.bred_question_prompt))
-        lines.append("<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>")
+        lines.append("<b>Ваше действие:</b> отправьте сюда ОДНУ придуманную ложь обычным сообщением, без команды и без «/».")
+        lines.append("<i>Ваш ответ можно заменить до начала голосования; другие игроки его пока не видят.</i>")
+        if len(game.players) > 0:
+            lines.append(f"<b>Уже сдали:</b> {len(game.bred_lies)}/{len(game.players)}")
     elif game.phase == "category_pick":
         lines.append("<i>Ждём, пока выбранный игрок выберет тему раунда в группе.</i>")
     elif game.phase == "public_vote":
-        lines.append("<i>Идёт голосование в группе за самый правдоподобный вариант.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ среди анонимных вариантов в групповой доске. Новую ложь в ЛС уже не принимаем.</i>")
     else:
         lines.append("<i>Сейчас нет действия, требующего вашего ответа в ЛС.</i>")
     return "\n".join(lines)
@@ -2477,16 +2512,17 @@ def _render_private_zlob_status_text(game: GroupGame, *, actor_user_id: int) -> 
             lines.append(f"{index}. {escape(card)}")
 
     if game.phase == "private_answers":
+        lines.append(f"<b>Нужно белых карт:</b> {max(1, int(game.zlob_black_slots))}. Полный текст карт указан выше; кнопки могут быть сокращены.")
         submission = game.zlob_submissions.get(actor_user_id)
         lines.append("")
         if submission:
             lines.append(f"<i>Вы уже выбрали: {escape(' + '.join(submission))}</i>")
             lines.append("<i>Можно выбрать другой вариант до конца этапа.</i>")
         else:
-            lines.append("<i>Выберите карточку(и) кнопками ниже.</i>")
+            lines.append("<i>Выберите одну или две карты согласно числу пропусков чёрной карточки. Для пар смотрите номера карт выше.</i>")
     elif game.phase == "public_vote":
         lines.append("")
-        lines.append("<i>Идёт голосование в группе. На свою карточку голосовать нельзя.</i>")
+        lines.append("<i>Карты сданы. В группе выберите чужую анонимную комбинацию; на свою голосовать нельзя.</i>")
     return "\n".join(lines)
 
 
@@ -2625,7 +2661,7 @@ def _render_whoami_private_view(game: GroupGame, *, actor_user_id: int) -> str:
     else:
         lines.append(
             "<i>Если сейчас ваш ход: вопрос — сообщение с «?» в группу. "
-            "Догадка — например: «Я думаю, что я [ответ]».</i>"
+            "Догадка — например: «Я думаю, что я Шрек».</i>"
         )
     return "\n".join(lines)
 
@@ -5219,11 +5255,25 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Тема прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор категории", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "category_pick" or current_game.round_no != expected_round:
+        await query.answer("Выбор темы завершён. Откройте /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, selector_user_id, options = await GAME_STORE.bred_get_category_snapshot(game_id=game_id)
         if game is None:
@@ -5267,6 +5317,8 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         actor_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5304,11 +5356,25 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Старое голосование. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, voted_count, total_players, vote_tally = await GAME_STORE.bred_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5358,6 +5424,8 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5404,11 +5472,27 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это старая рука. Откройте /role для актуальных карт.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор карточек", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or (
+        query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != current_game.chat_id
+    ):
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "private_answers" or current_game.round_no != expected_round:
+        await query.answer("Эта рука уже неактуальна. Откройте /role.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5467,6 +5551,8 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         game_id=game_id,
         user_id=query.from_user.id,
         card_indexes=selected_indexes,
+        expected_round_no=expected_round,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5524,11 +5610,25 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Голосование прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5579,6 +5679,8 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5834,11 +5936,15 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Этот вопрос устарел. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, answer_code = parts
+    _, game_id, revision_raw, answer_code = parts
+    expected_question_version = int(revision_raw)
     if answer_code not in {"yes", "no", "unknown", "irrelevant"}:
         await query.answer("Некорректный ответ", show_alert=False)
         return
@@ -5846,6 +5952,9 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
     current_game = await GAME_STORE.get_game(game_id)
     if current_game is None:
         await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
         return
     await _refresh_game_player_label(
         activity_repo,
@@ -5861,6 +5970,8 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         responder_user_id=query.from_user.id,
         answer_code=answer_code,  # type: ignore[arg-type]
+        expected_question_version=expected_question_version,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -6337,7 +6448,19 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
         raise SkipHandler()
 
     game = await GAME_STORE.get_latest_bred_submission_game_for_user(user_id=message.from_user.id)
-    if not _should_handle_bred_private_answer(game, text=text):
+    replied = getattr(message, "reply_to_message", None)
+    replied_prompt = (
+        (getattr(replied, "text", None) or getattr(replied, "caption", None) or "")
+        if replied is not None else None
+    )
+    if (
+        game is not None and replied_prompt is not None
+        and "Контекст блефа:" in replied_prompt
+        and f"Контекст блефа: {game.game_id}/{game.round_no}" not in replied_prompt
+    ):
+        await message.answer("Это старый вопрос «Бредовухи». Откройте актуальный через /role.")
+        return
+    if not _should_handle_bred_private_answer(game, text=text, replied_prompt=replied_prompt):
         raise SkipHandler()
 
     await _refresh_game_player_label(
@@ -6368,7 +6491,12 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
     else:
         status_text = "Ответ обновлён."
 
-    await message.answer(f"{status_text}\nПрогресс: {result.submitted_count}/{result.total_players}.")
+    await message.answer(
+        f"{status_text} Раунд {updated_game.round_no}/{updated_game.bred_rounds} "
+        f"в чате «{updated_game.chat_title or updated_game.chat_id}».\n"
+        f"Прогресс: {result.submitted_count}/{result.total_players}. "
+        + ("Все сдали — переходите к голосованию в группу." if result.vote_opened else "Ожидаем остальных; ответ можно заменить.")
+    )
 
     if result.vote_opened:
         await _safe_edit_or_send_game_board(

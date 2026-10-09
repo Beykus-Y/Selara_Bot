@@ -2204,11 +2204,17 @@ class GameStore:
         game_id: str,
         actor_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, str | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Тема из предыдущего раунда. Откройте актуальную доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "category_pick":
@@ -2471,11 +2477,23 @@ class GameStore:
         game_id: str,
         responder_user_id: int,
         answer_code: Literal["yes", "no", "unknown", "irrelevant"],
+        expected_question_version: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, WhoamiAnswerResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if (
+                expected_question_version is not None
+                and (
+                    int(game.phase_started_at.timestamp() * 1_000_000)
+                    if game.phase_started_at is not None else 0
+                ) != expected_question_version
+            ):
+                return game, None, "Это старый вопрос. Откройте актуальную доску."
             if game.kind != "whoami":
                 return game, None, "Это не игра «Кто я»"
             if game.status != "started" or game.phase != "whoami_answer":
@@ -2938,11 +2956,17 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, BredVoteResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3161,11 +3185,17 @@ class GameStore:
         game_id: str,
         user_id: int,
         card_indexes: tuple[int, ...],
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, ZlobSubmitResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "private_answers":
@@ -3255,11 +3285,17 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, ZlobVoteResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "public_vote":
