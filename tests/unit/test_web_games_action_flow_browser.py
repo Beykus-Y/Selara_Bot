@@ -312,6 +312,12 @@ async def test_finish_game_button_submits_a_cancel_callback(monkeypatch) -> None
             await page.route("**/app/games/action", handle_action)
             await page.route("**/app/games/live**", handle_live)
 
+            async def approve_destructive_action(dialog):
+                assert dialog.type == "confirm"
+                assert "Завершить партию?" in dialog.message
+                await dialog.accept()
+
+            page.on("dialog", approve_destructive_action)
             await page.goto("http://selara.test/app/games")
             await page.wait_for_timeout(100)
 
@@ -326,4 +332,4 @@ async def test_finish_game_button_submits_a_cancel_callback(monkeypatch) -> None
         finally:
             await browser.close()
 
-    assert captured.get("callback_data", "").startswith("game:cancel:"), captured
+    assert captured.get("callback_data", "").startswith("game:confirm:stop:"), captured
