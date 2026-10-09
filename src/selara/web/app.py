@@ -1627,7 +1627,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
-        if parts[0] in {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"} and len(parts) == 4:
+        if parts[0] in {
+            "gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv",
+            "gbkv", "gmact", "gmvote", "gmconfirm",
+        } and len(parts) == 4:
+            return parts[1]
+        if parts[0] == "gbkr" and len(parts) == 5:
             return parts[1]
         if parts[0] in {
             "gcfg",
@@ -3718,7 +3723,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
         versioned_games = {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"}
-        if len(parts) not in {3, 4} or (len(parts) == 4 and parts[0] not in versioned_games):
+        round_actions = {"gbkv", "gmact", "gmvote", "gmconfirm"}
+        if (
+            len(parts) not in {3, 4, 5}
+            or (len(parts) == 4 and parts[0] not in versioned_games | round_actions)
+            or (len(parts) == 5 and parts[0] != "gbkr")
+        ):
             return False, "Некорректные параметры игрового действия."
 
         prefix = parts[0]
@@ -3732,6 +3742,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 prefix == "gwho" and game_router_module._whoami_question_token(game) != int(parts[2])
             ):
                 return False, "Действие устарело. Обновите текущую партию."
+        if prefix in round_actions | {"gbkr"}:
+            if len(parts) < 4 or not parts[2].isdigit():
+                return False, "Старая игровая кнопка. Обновите страницу."
+            if game.status != "started" or game.round_no != int(parts[2]):
+                return False, "Действие прошлого раунда. Обновите страницу."
+            required_phase = {
+                "gbkr": "bunker_reveal", "gbkv": "bunker_vote",
+                "gmact": "night", "gmvote": "day_vote", "gmconfirm": "day_execution_confirm",
+            }[prefix]
+            if game.phase != required_phase:
+                return False, "Эта фаза завершена. Обновите страницу."
+            if prefix == "gbkr" and (
+                len(parts) != 5 or not parts[3].isdigit()
+                or game.bunker_reveal_cursor != int(parts[3])
+            ):
+                return False, "Ход раскрытия завершён. Обновите страницу."
 
         if prefix == "gcfg":
             if not can_manage_games:
@@ -4465,6 +4491,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 field_key=payload,
+                expected_round_no=int(parts[2]),
+                expected_reveal_cursor=int(parts[3]),
             )
             if error:
                 return False, error
@@ -4493,6 +4521,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4526,6 +4555,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4552,6 +4582,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4585,6 +4616,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 approve=approve,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
