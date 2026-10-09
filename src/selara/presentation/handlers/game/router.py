@@ -2575,7 +2575,13 @@ def _render_private_bunker_status_text(game: GroupGame, *, actor_user_id: int) -
         _render_bunker_full_card(card),
     ]
 
-    if game.phase == "bunker_reveal":
+    if actor_user_id not in game.alive_player_ids:
+        lines.append("")
+        lines.append("<b>Вы выбыли.</b> Характеристики остаются только в вашей личной карточке. Вы можете наблюдать, но не раскрывать новые поля и не голосовать.")
+    elif game.phase == "bunker_reveal":
+        opened = game.bunker_revealed_fields.get(actor_user_id, set())
+        lines.append("")
+        lines.append(f"<b>Раскрыто:</b> {len(opened)}/{len(BUNKER_CARD_FIELDS)} характеристик.")
         if game.bunker_current_actor_user_id == actor_user_id:
             lines.append("")
             lines.append("<i>Ваш ход: выберите характеристику для раскрытия в группе.</i>")
@@ -2584,15 +2590,17 @@ def _render_private_bunker_status_text(game: GroupGame, *, actor_user_id: int) -
             if game.bunker_current_actor_user_id is not None:
                 actor_label = game.players.get(game.bunker_current_actor_user_id, f"user:{game.bunker_current_actor_user_id}")
             lines.append("")
-            lines.append(f"<i>Сейчас раскрывается: {escape(actor_label)}.</i>")
+            lines.append(f"<i>Сейчас раскрывает: {escape(actor_label)}. Дождитесь своего хода: кнопки выбора придут в ЛС.</i>")
     elif game.phase == "bunker_vote":
         voted_count = len({voter for voter in game.bunker_votes if voter in game.alive_player_ids})
         lines.append("")
-        lines.append(f"<i>Идёт голосование. Прогресс: {voted_count}/{len(game.alive_player_ids)}.</i>")
+        lines.append(f"<i>Голосование на выбывание: {voted_count}/{len(game.alive_player_ids)}. Выберите живого игрока; до подсчёта голос можно изменить.</i>")
         current_target = game.bunker_votes.get(actor_user_id)
         if current_target is not None:
             target_label = game.players.get(current_target, f"user:{current_target}")
             lines.append(f"<b>Ваш голос:</b> {escape(target_label)}")
+        else:
+            lines.append("<b>Ваш голос:</b> ещё не отдан.")
     return "\n".join(lines)
 
 
@@ -3079,7 +3087,10 @@ async def _send_role_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
     if game.kind == "mafia":
         lines.append("<i>Идёт мафия. Следите за фазами и анонсами ведущего в групповом чате.</i>")
         if game.phase == "night":
-            lines.append("<i>Сейчас ночь: доступно действие вашей роли.</i>")
+            if _build_private_night_action_keyboard(game, actor_user_id=user_id) is not None:
+                lines.append("<i>Сейчас ночь: ваше действие доступно через кнопки отдельного личного сообщения.</i>")
+            else:
+                lines.append("<i>Сейчас ночь: у вашей роли нет доступного ночного хода. Ожидайте утра.</i>")
         elif game.phase == "day_vote":
             lines.append("<i>Сейчас дневное голосование: бот пришлёт отдельную карточку для голоса в ЛС.</i>")
 
