@@ -821,3 +821,81 @@ async def test_web_game_action_blocked_when_chat_write_locked(monkeypatch) -> No
     assert response.json()["ok"] is False
     assert refreshed is not None
     assert 111 not in refreshed.players
+
+
+
+def test_web_game_confirmation_token_rejects_foreign_actor_expiry_and_stale_phase() -> None:
+    from selara.presentation.game_state import GroupGame
+
+    game = GroupGame(
+        game_id="web-confirm", kind="spy", chat_id=-100, chat_title="test",
+        owner_user_id=5, players={5: "Leader", 6: "Other", 7: "Third"},
+        status="started", phase="freeplay", round_no=3,
+    )
+    secret = _settings().resolved_web_auth_secret
+    token = web_app_module._web_game_confirm_callback(
+        action="reveal", game=game, user_id=5, secret=secret, now=2000,
+    )
+    verify = web_app_module._verify_web_game_confirm_callback
+    assert verify(token, game=game, user_id=5, secret=secret, now=2001) == "reveal"
+    assert verify(token, game=game, user_id=6, secret=secret, now=2001) is None
+    assert verify(token, game=game, user_id=5, secret=secret, now=2121) is None
+    assert verify(token, game=game, user_id=5, secret=secret, now=1999) is None
+    assert verify(token.replace(":reveal:", ":stop:"), game=game, user_id=5, secret=secret, now=2001) is None
+    game.phase = "finished"
+    assert verify(token, game=game, user_id=5, secret=secret, now=2001) is None
+
+
+@pytest.mark.asyncio
+async def test_started_game_web_cancel_requires_signed_second_step_and_is_one_shot(monkeypatch) -> None:
+    settings = _settings()
+    user_id, chat_id = 771, -6611
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=user_id, username="host", first_name="Host", last_name=None, is_bot=False),
+        manageable_groups=[_overview(chat_id, "Safety Chat", bot_role="game_master")],
+    )
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit, _):
+        game, error = await store.create_lobby(
+            kind="dice", chat_id=chat_id, chat_title="Safety Chat",
+            owner_user_id=user_id, owner_label="Host", reveal_eliminated_role=True,
+        )
+        assert error is None and game is not None
+        await store.join(game_id=game.game_id, user_id=772, user_label="Guest")
+        started, error = await store.start(game_id=game.game_id)
+        assert error is None and started is not None
+        assert started.status == "started"
+
+        legacy = await client.post(
+            "/api/miniapp/games/action",
+            data={"callback_data": f"game:cancel:{game.game_id}"},
+            headers={"accept": "application/json"},
+        )
+        assert legacy.status_code == 400
+        assert started.status == "started"
+        token = web_app_module._web_game_confirm_callback(
+            action="stop", game=started, user_id=user_id,
+            secret=settings.resolved_web_auth_secret,
+        )
+        forged = token[:-1] + ("0" if token[-1] != "0" else "1")
+        bad = await client.post(
+            "/api/miniapp/games/action",
+            data={"callback_data": forged}, headers={"accept": "application/json"},
+        )
+        assert bad.status_code == 400
+        assert started.status == "started"
+
+        good = await client.post(
+            "/api/miniapp/games/action",
+            data={"callback_data": token}, headers={"accept": "application/json"},
+        )
+        assert good.status_code == 200
+        assert good.json()["ok"] is True
+        assert started.status == "finished"
+        duplicate = await client.post(
+            "/api/miniapp/games/action",
+            data={"callback_data": token}, headers={"accept": "application/json"},
+        )
+        assert duplicate.status_code == 400
+        assert started.status == "finished"
+        safe_edit.assert_awaited()
