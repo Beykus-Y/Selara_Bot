@@ -4493,6 +4493,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 field_key=payload,
                 expected_round_no=int(parts[2]),
                 expected_reveal_cursor=int(parts[3]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4522,6 +4523,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 voter_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
                 expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
