@@ -896,6 +896,9 @@ async def test_started_game_web_cancel_requires_signed_second_step_and_is_one_sh
             "/api/miniapp/games/action",
             data={"callback_data": token}, headers={"accept": "application/json"},
         )
-        assert duplicate.status_code == 400
+        # Once finalized the party leaves the active games list; the route
+        # may return 404 before callback dispatch. Neither 404 nor 400
+        # allows the old signed confirmation to execute twice.
+        assert duplicate.status_code in {400, 404}
         assert started.status == "finished"
         safe_edit.assert_awaited()
