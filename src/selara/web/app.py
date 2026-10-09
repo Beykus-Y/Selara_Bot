@@ -654,6 +654,49 @@ async def _build_achievement_sections(
 _ADMIN_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "app/admin/api/")
 
 
+_WEB_GAME_CONFIRM_TTL_SECONDS = 120
+
+
+def _web_game_confirm_callback(
+    *, action: str, game: GroupGame, user_id: int, secret: str,
+    now: int | None = None,
+) -> str:
+    """Create an expiring, actor-bound stop/reveal token for the active phase."""
+    if action not in {"stop", "reveal"} or game.status != "started":
+        raise ValueError("Cannot confirm this game action")
+    issued = int(datetime.now(timezone.utc).timestamp()) if now is None else now
+    data = f"{action}:{game.game_id}:{game.status}:{game.phase}:{game.round_no}:{issued}:{user_id}"
+    signature = hmac.new(secret.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
+    return (
+        f"game:confirm:{action}:{game.game_id}:{game.status}:"
+        f"{game.phase}:{game.round_no}:{issued}:{signature}"
+    )
+
+
+def _verify_web_game_confirm_callback(
+    callback_data: str, *, game: GroupGame, user_id: int, secret: str,
+    now: int | None = None,
+) -> str | None:
+    """Verify signed confirmation; GameStore separately enforces atomic state."""
+    parts = callback_data.split(":")
+    if len(parts) != 9 or parts[:2] != ["game", "confirm"]:
+        return None
+    _, _, action, gid, status, phase, raw_round, raw_issued, signature = parts
+    if action not in {"stop", "reveal"} or gid != game.game_id or status != "started":
+        return None
+    if not raw_round.isdigit() or not raw_issued.isdigit():
+        return None
+    issued = int(raw_issued)
+    current = int(datetime.now(timezone.utc).timestamp()) if now is None else now
+    if issued > current or current - issued > _WEB_GAME_CONFIRM_TTL_SECONDS:
+        return None
+    if game.status != status or game.phase != phase or game.round_no != int(raw_round):
+        return None
+    data = f"{action}:{gid}:{status}:{phase}:{raw_round}:{issued}:{user_id}"
+    expected = hmac.new(secret.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
+    return action if hmac.compare_digest(expected, signature) else None
+
+
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     template_environment = create_template_environment(
