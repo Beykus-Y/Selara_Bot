@@ -71,6 +71,30 @@ _TOOL_PROMISE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+
+def _has_unfulfilled_tool_promise(text: str) -> bool:
+    """Distinguish a real tool-use promise from a refusal or quoted example."""
+    for match in _TOOL_PROMISE_RE.finditer(text):
+        prefix = text[:match.start()]
+        # A quoted hypothetical is not the assistant promising a tool call.
+        if any(prefix.count(open_quote) > prefix.count(close_quote)
+               and text.find(close_quote, match.end()) != -1
+               for open_quote, close_quote in (("«", "»"), ("“", "”"))):
+            continue
+        if any(prefix.count(quote) % 2 and text.find(quote, match.end()) != -1
+               for quote in ('"', "`")):
+            continue
+        # "Не вызову read_skill" is an explicit refusal, not an undertaking.
+        context = text[max(0, match.start() - 20):match.end()]
+        if re.search(
+            r"\b(?:не|никогда)\s+(?:буду\s+)?(?:вызову|запущу|прочитаю)\b",
+            context, re.IGNORECASE,
+        ):
+            continue
+        return True
+    return False
+
+
 TOOLS_PROMPT = (
     "Тебе доступны инструменты, которые пользователь включил сам. Вызывай их только когда без них не обойтись; "
     "обычные реплики и то, что ты знаешь наверняка, отвечай сразу. "
@@ -534,7 +558,7 @@ async def run_tool_dialogue(
                 and not run.artifact_context.sent_artifacts
             )
             svg_instead_of_image = visual_requested and "<svg" in text.casefold()
-            if _TOOL_PROMISE_RE.search(text) or unsent_claim or pending_delivery or svg_instead_of_image:
+            if _has_unfulfilled_tool_promise(text) or unsent_claim or pending_delivery or svg_instead_of_image:
                 # Do not mistake textual SVG, an unsent draft, or a false success for delivery.
                 # One bounded corrective round is allowed while tools
                 # are still offered and the priced budget has room; never invent a successful tool action.
