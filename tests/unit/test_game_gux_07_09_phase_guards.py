@@ -161,3 +161,19 @@ def test_anonymous_bred_and_zlob_options_are_fully_readable_and_escaped():
     text = ui._render_zlob_round_status(zlob)
     assert "Все варианты" in text and "&lt;A&gt;" in text
     assert "Alice" not in text and "Bob" not in text
+
+
+@pytest.mark.asyncio
+async def test_bred_category_picker_does_not_reuse_previous_round_button(monkeypatch):
+    game = make("bredovukha", "category_pick", round_no=5)
+    game.bred_current_selector_user_id = 2
+    game.bred_category_options = ("История", "Наука")
+    store = store_for(monkeypatch, game)
+    markup = ui._build_bred_category_buttons(game)
+    assert "gbredcat:g7abc:5:0" in callbacks(markup)
+    _, category, error = await store.bred_choose_category(
+        game_id=game.game_id, actor_user_id=2, option_index=0,
+        expected_round_no=4, expected_chat_id=-100,
+    )
+    assert category is None and "предыдущего раунда" in error
+    assert game.phase == "category_pick" and not game.bred_current_category
