@@ -27,3 +27,26 @@ def test_every_card_renders_where_who_and_limits() -> None:
         assert "Кому: " in text, card.spec_key
         if card.limits:
             assert "Ограничения: " in text, card.spec_key
+
+
+def test_group_ai_summary_and_troubleshooting_are_reachable_from_help_root() -> None:
+    from selara.presentation.commands.command_catalog import get_command_spec
+    from selara.presentation.navigation.tree import get_nav_node, path_to_root
+
+    ai = get_nav_node("ai")
+    group_ai = get_nav_node("ai_group")
+    summaries = get_nav_node("ai_summary")
+    trouble = get_nav_node("troubleshooting")
+    assert "ai_group_questions" in group_ai.spec_keys
+    assert "ai_daily_summary" in summaries.spec_keys
+    assert "ai_summary" in ai.children
+    assert trouble.parent == "root"
+    for key in ("ai_group", "ai_summary", "troubleshooting"):
+        assert path_to_root(key)[-1].key == "root"
+    assert get_command_spec("ai_group_questions").natural_triggers == (
+        "? вопрос", "?? вопрос", "?reset",
+    )
+    assert get_command_spec("ai_daily_summary").syntax == ("/summary",)
+    assert all(card.spec_key in {spec.key for spec in __import__(
+        "selara.presentation.commands.command_catalog", fromlist=["COMMAND_CATALOG"]
+    ).COMMAND_CATALOG} for card in FEATURE_CARDS)
