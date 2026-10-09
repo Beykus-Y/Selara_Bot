@@ -180,3 +180,43 @@ def test_bunker_eliminated_player_cannot_get_reveal_or_vote_keyboard() -> None:
     game.phase = "bunker_reveal"
     game.bunker_current_actor_user_id = 1
     assert ui._build_private_bunker_reveal_keyboard(game, actor_user_id=3) is None
+
+@pytest.mark.asyncio
+async def test_mafia_day_vote_forwarded_to_other_chat_does_not_mutate(monkeypatch) -> None:
+    game = active("mafia", "day_vote")
+    store = put(game)
+    monkeypatch.setattr(ui, "GAME_STORE", store)
+    q = FakeQuery("gmvote:g1011:3:2", chat_type="supergroup", chat_id=-999)
+    await ui.mafia_day_vote_callback(
+        q, bot=SimpleNamespace(), chat_settings=SimpleNamespace(),
+        economy_repo=SimpleNamespace(),
+    )
+    assert q.alerts and "другого чата" in q.alerts[-1]
+    assert game.day_votes == {}
+
+
+def test_bunker_6_8_12_player_boards_hide_unrevealed_characteristics() -> None:
+    from selara.presentation.game_state import BunkerCard
+
+    for count in (6, 8, 12):
+        game = active("bunker", "bunker_reveal")
+        game.players = {uid: f"Player{uid}" for uid in range(1, count + 1)}
+        game.alive_player_ids = set(game.players)
+        game.bunker_cards = {
+            uid: BunkerCard(
+                profession=f"PublicProfession{uid}", age=f"HiddenAge{uid}",
+                gender=f"HiddenGender{uid}", health_condition=f"HiddenHealth{uid}",
+                skill=f"HiddenSkill{uid}", hobby=f"HiddenHobby{uid}",
+                phobia=f"HiddenPhobia{uid}", trait=f"HiddenTrait{uid}",
+                item=f"HiddenItem{uid}",
+            )
+            for uid in game.players
+        }
+        game.bunker_revealed_fields = {1: {"profession"}}
+        board = ui._render_bunker_public_profiles(game)
+        assert "PublicProfession1" in board
+        assert "HiddenAge1" not in board
+        assert "HiddenItem1" not in board
+        assert "PublicProfession2" not in board
+        assert all(f"HiddenHealth{uid}" not in board for uid in game.players)
+        assert len(board) < 4096  # initial reveal stays inside Telegram limit
