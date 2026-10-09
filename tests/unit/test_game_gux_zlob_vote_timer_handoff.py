@@ -15,19 +15,26 @@ router = importlib.import_module("selara.presentation.handlers.game.router")
 async def test_last_private_submission_hands_timer_to_public_vote(monkeypatch, opened: bool) -> None:
     game = SimpleNamespace(
         game_id="zlob-early", chat_id=-100, status="started",
-        phase="public_vote" if opened else "private_answers",
+        phase="private_answers",
         round_no=2, zlob_submissions={2: ("Card",)},
     )
-    store = SimpleNamespace(
-        get_game=AsyncMock(return_value=game),
-        zlob_submit_cards=AsyncMock(return_value=(
+    async def submit(**kwargs):
+        # Mimic GameStore's transition while keeping the pre-click snapshot
+        # in private_answers for the handler's stale-phase validation.
+        if opened:
+            game.phase = "public_vote"
+        return (
             game,
             SimpleNamespace(
                 vote_opened=opened, submitted_count=2, total_players=3,
                 previous_submission=None,
             ),
             None,
-        )),
+        )
+
+    store = SimpleNamespace(
+        get_game=AsyncMock(return_value=game),
+        zlob_submit_cards=AsyncMock(side_effect=submit),
     )
     query = SimpleNamespace(
         data="gzlobp:zlob-early:2:0",
