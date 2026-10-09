@@ -910,6 +910,8 @@ async def test_gacha_buy_callback_business_refusal_is_alert_only(monkeypatch: py
     )
     deliver_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
     alert = AsyncMock()
     monkeypatch.setattr(text_commands, "notify_operational_error", alert)
@@ -923,6 +925,7 @@ async def test_gacha_buy_callback_business_refusal_is_alert_only(monkeypatch: py
     assert query.answers == [("Недостаточно валюты для крутки.", True)]
     alert.assert_not_awaited()
     deliver_mock.assert_not_awaited()
+    build_info_mock.assert_not_awaited()
     assert query.message.edit_text_calls == []
 
 
@@ -933,14 +936,19 @@ async def test_gacha_callback_disabled_chat_never_charges(monkeypatch: pytest.Mo
     query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
     purchase_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
-    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    subscription_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", subscription_mock)
     disabled_settings = SimpleNamespace(economy_mode="global", gacha_enabled=False)
-    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+    exempt_mock = AsyncMock(return_value=False)
+    activity_repo = SimpleNamespace(is_subscription_exempt=exempt_mock)
 
     await text_commands.gacha_callback(
         query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
         activity_repo=activity_repo, chat_settings=disabled_settings,
     )
 
+    # The enabled check runs before the subscription check, so neither is reached.
     purchase_mock.assert_not_awaited()
+    exempt_mock.assert_not_awaited()
+    subscription_mock.assert_not_awaited()
     assert query.answers == [(None, False)]
