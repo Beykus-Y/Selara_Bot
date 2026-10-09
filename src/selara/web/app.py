@@ -1627,7 +1627,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
-        if parts[0] in {"gquiz", "gwho", "gbred", "gzlobp", "gzlobv"} and len(parts) == 4:
+        if parts[0] in {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"} and len(parts) == 4:
             return parts[1]
         if parts[0] in {
             "gcfg",
@@ -3717,7 +3717,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         economy_repo: SqlAlchemyEconomyRepository,
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
-        versioned_games = {"gquiz", "gwho", "gbred", "gzlobp", "gzlobv"}
+        versioned_games = {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"}
         if len(parts) not in {3, 4} or (len(parts) == 4 and parts[0] not in versioned_games):
             return False, "Некорректные параметры игрового действия."
 
@@ -4407,6 +4407,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
