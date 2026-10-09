@@ -2411,11 +2411,14 @@ def _render_bred_private_status_text(game: GroupGame) -> str:
     if game.phase == "private_answers" and game.bred_question_prompt:
         lines.append("<b>Факт с пропуском:</b>")
         lines.append(escape(game.bred_question_prompt))
-        lines.append("<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>")
+        lines.append("<b>Ваше действие:</b> отправьте сюда ОДНУ придуманную ложь обычным сообщением, без команды и без «/».")
+        lines.append("<i>Ваш ответ можно заменить до начала голосования; другие игроки его пока не видят.</i>")
+        if len(game.players) > 0:
+            lines.append(f"<b>Уже сдали:</b> {len(game.bred_lies)}/{len(game.players)}")
     elif game.phase == "category_pick":
         lines.append("<i>Ждём, пока выбранный игрок выберет тему раунда в группе.</i>")
     elif game.phase == "public_vote":
-        lines.append("<i>Идёт голосование в группе за самый правдоподобный вариант.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ среди анонимных вариантов в групповой доске. Новую ложь в ЛС уже не принимаем.</i>")
     else:
         lines.append("<i>Сейчас нет действия, требующего вашего ответа в ЛС.</i>")
     return "\n".join(lines)
@@ -6372,7 +6375,12 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
     else:
         status_text = "Ответ обновлён."
 
-    await message.answer(f"{status_text}\nПрогресс: {result.submitted_count}/{result.total_players}.")
+    await message.answer(
+        f"{status_text} Раунд {updated_game.round_no}/{updated_game.bred_rounds} "
+        f"в чате «{updated_game.chat_title or updated_game.chat_id}».\n"
+        f"Прогресс: {result.submitted_count}/{result.total_players}. "
+        + ("Все сдали — переходите к голосованию в группу." if result.vote_opened else "Ожидаем остальных; ответ можно заменить.")
+    )
 
     if result.vote_opened:
         await _safe_edit_or_send_game_board(
