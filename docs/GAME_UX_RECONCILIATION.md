@@ -31,5 +31,5 @@ No item is marked done without a merged PR or an existing test.
 - The per-game phase matrix in GUX-00 is not filled. It is a documentation gap, not a behaviour gap.
 - Not every game has an end-to-end test. Coverage per game is listed in `GAME_UX_TEST_COVERAGE.md`.
 - Multi-worker state ownership for GameStore is tracked in #65 and #67.
-- Mafia and Bunker timers after a restart are covered by the restored-timer tests in #201, but were not exercised against a live Redis.
+- Mafia timers after a restart are covered by the restored-timer tests in #201, but were not exercised against a live Redis. Bunker has no timer code on dev, so there is nothing to restore.
 - Release: dev is ahead of main. Nothing is released until an explicit dev-to-main request.
