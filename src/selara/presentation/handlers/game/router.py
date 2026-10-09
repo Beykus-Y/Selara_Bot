@@ -5617,7 +5617,10 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
                 raise
 
     if result.vote_opened:
-        _cancel_phase_timer(game.game_id)
+        # A final early submission transitions the phase inside GameStore.
+        # Replace the private-answer timer with a voting timer; simply
+        # cancelling here previously left public_vote open indefinitely.
+        _schedule_phase_timer(bot, game, chat_settings)
         await _safe_edit_or_send_game_board(
             bot,
             game,
