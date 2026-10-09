@@ -2488,7 +2488,10 @@ class GameStore:
                 return game, None, "Эта кнопка из другого чата"
             if (
                 expected_question_version is not None
-                and int(game.phase_started_at.timestamp() * 1_000_000) != expected_question_version
+                and (
+                    int(game.phase_started_at.timestamp() * 1_000_000)
+                    if game.phase_started_at is not None else 0
+                ) != expected_question_version
             ):
                 return game, None, "Это старый вопрос. Откройте актуальную доску."
             if game.kind != "whoami":
