@@ -6,9 +6,9 @@ day vote -> execution confirmation -> resolution. Asserts only the public
 contract: the phase sequence, that the confirmed candidate leaves the alive set,
 and that the game either advanced to a new night or finished.
 
-Six players, not four: with four, role assignment always deals one Mafia and three
-Civilians, so the first execution always ends the game and the next-night branch
-could never run. With six, an execution of a civilian leaves a live game.
+Six players, not four: at four, the game ends on the first execution and the
+next-night branch can never run. At six, the final assertion accepts either outcome:
+a Mafia win by parity, or a live game that moves to the next night.
 """
 from __future__ import annotations
 
