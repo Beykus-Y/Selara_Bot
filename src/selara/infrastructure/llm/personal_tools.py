@@ -53,6 +53,8 @@ _FALLBACK_NOTICE = "Не удалось получить ответ с помо�
 _UNSENT_ARTIFACT_NOTICE = (
     "Отправка изображения в Telegram не подтверждена. Текст или UUID не являются картинкой."
 )
+_VISUAL_REQUEST_RE = re.compile(r"\\b(?:нарисуй|картинк\\w*|иллюстрац\\w*|артефакт\\w*|инфографик\\w*)\\b", re.I)
+_EXPLICIT_CODE_RE = re.compile(r"\\b(?:код|исходник|пример\\s+svg)\\b", re.I)
 _ARTIFACT_CLAIM_RE = re.compile(
     r"\b(?:артефакт|картинк[аиу]|изображени[ея])\b.{0,100}\b(?:создан|готов[ао]?|отправлен[ао]?)\b"
     r"|\b(?:создал[аи]?|отправил[аи]?)\b.{0,100}\b(?:артефакт|картинк[ауи]|изображени[ея])\b",
@@ -483,6 +485,13 @@ async def run_tool_dialogue(
     wind_down = False
     notice_added = False
     promise_retry_used = False
+    original_user_text = next(
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    visual_requested = (
+        run.artifacts_enabled and bool(_VISUAL_REQUEST_RE.search(original_user_text))
+        and not bool(_EXPLICIT_CODE_RE.search(original_user_text))
+    )
     for round_index in range(run.total_rounds):
         is_last = wind_down or round_index == run.total_rounds - 1
         if is_last and not notice_added:
@@ -520,8 +529,13 @@ async def run_tool_dialogue(
                 and bool(_ARTIFACT_CLAIM_RE.search(text))
                 and not bool(re.search(r"\bне\s+(?:был[ао]?\s+)?(?:создан|готов|отправлен)", text, re.I))
             )
-            if _TOOL_PROMISE_RE.search(text) or unsent_claim:
-                # A textual promise or unverified delivery claim is not a tool call.
+            pending_delivery = bool(
+                run.artifact_context and run.artifact_context.created_artifacts
+                and not run.artifact_context.sent_artifacts
+            )
+            svg_instead_of_image = visual_requested and "<svg" in text.casefold()
+            if _TOOL_PROMISE_RE.search(text) or unsent_claim or pending_delivery or svg_instead_of_image:
+                # Do not mistake textual SVG, an unsent draft, or a false success for delivery.
                 # One bounded corrective round is allowed while tools
                 # are still offered and the priced budget has room; never invent a successful tool action.
                 spent, fully_priced = _spent_usd(sink)
@@ -536,10 +550,10 @@ async def run_tool_dialogue(
                     promise_retry_used = True
                     log.warning("personal tools: correcting unexecuted action, round=%s", round_index + 1)
                     messages.append({"role": "assistant", "content": text})
-                    if unsent_claim:
+                    if unsent_claim or pending_delivery or svg_instead_of_image:
                         created = run.artifact_context.created_artifacts if run.artifact_context else []
                         correction = (
-                            "Ты заявила об артефакте, но сервер не подтвердил отправку фото. " +
+                            "Пользователь просил изображение, но сервер не подтвердил отправку фото. " +
                             (f"Созданный ID: {created[-1]}. Вызови send_artifact с ним. " if created
                              else "Артефакт не создан: прочти навык и создай его через tools. ") +
                             "Не выдавай текстовый UUID за результат доставки. Если tools недоступны, честно сообщи это."
@@ -553,7 +567,7 @@ async def run_tool_dialogue(
                     messages.append({"role": "user", "content": correction})
                     continue
                 log.warning("personal tools: refusing unverified tool claim, round=%s", round_index + 1)
-                text = _UNSENT_ARTIFACT_NOTICE if unsent_claim else _UNFULFILLED_TOOL_NOTICE
+                text = _UNSENT_ARTIFACT_NOTICE if (unsent_claim or pending_delivery or svg_instead_of_image) else _UNFULFILLED_TOOL_NOTICE
             if is_last and not text:
                 text = _FALLBACK_NOTICE
             if run.web_used:
