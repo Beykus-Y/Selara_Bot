@@ -75,6 +75,16 @@ export function GamesPage() {
         await gamesQuery.refetch()
       }}
       onGameAction={async (payload) => {
+        const action = String(payload.callback_data ?? '')
+        if (action.startsWith('game:confirm:')) {
+          const reveal = action.startsWith('game:confirm:reveal:')
+          const approved = window.confirm(
+            reveal
+              ? 'Раскрыть роли? Партия «Шпион» завершится, а тайные роли увидят все игроки.'
+              : 'Завершить текущую партию? Все игровые действия будут остановлены.'
+          )
+          if (!approved) return
+        }
         setFeedbackMessage(null)
         await gameActionMutation.mutateAsync(payload)
       }}
