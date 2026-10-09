@@ -591,7 +591,7 @@ def _build_mafia_day_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | Non
         label = game.players.get(user_id, f"user:{user_id}")
         count_text = f" · {vote_counts.get(user_id, 0)}" if vote_counts.get(user_id, 0) > 0 else ""
         text = label if len(label) <= 15 else f"{label[:12]}..."
-        builder.button(text=f"🗳 {text}{count_text}", callback_data=f"gmvote:{game.game_id}:{user_id}")
+        builder.button(text=f"🗳 {text}{count_text}", callback_data=f"gmvote:{game.game_id}:{game.round_no}:{user_id}")
 
     builder.adjust(2)
     return builder.as_markup()
@@ -614,7 +614,7 @@ def _build_private_day_vote_keyboard(game: GroupGame, *, actor_user_id: int) -> 
         label = game.players.get(user_id, f"user:{user_id}")
         text = label if len(label) <= 24 else f"{label[:21]}..."
         icon = "✅" if current_target_user_id == user_id else "🗳"
-        builder.button(text=f"{icon} {text}", callback_data=f"gmvote:{game.game_id}:{user_id}")
+        builder.button(text=f"{icon} {text}", callback_data=f"gmvote:{game.game_id}:{game.round_no}:{user_id}")
 
     builder.adjust(1)
     return builder.as_markup()
@@ -627,9 +627,9 @@ def _build_mafia_execution_confirm_buttons(game: GroupGame) -> InlineKeyboardMar
     voted_count, alive_count, yes_count, no_count = _count_alive_execution_confirm_votes(game)
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"✅ Да ({yes_count})", callback_data=f"gmconfirm:{game.game_id}:yes")
-    builder.button(text=f"❌ Нет ({no_count})", callback_data=f"gmconfirm:{game.game_id}:no")
-    builder.button(text=f"🗳 {voted_count}/{alive_count}", callback_data=f"gmconfirm:{game.game_id}:noop")
+    builder.button(text=f"✅ Да ({yes_count})", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:yes")
+    builder.button(text=f"❌ Нет ({no_count})", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:no")
+    builder.button(text=f"🗳 {voted_count}/{alive_count}", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 1)
     return builder.as_markup()
 
@@ -833,8 +833,8 @@ def _build_private_bunker_reveal_keyboard(game: GroupGame, *, actor_user_id: int
     builder = InlineKeyboardBuilder()
     for field_key in hidden_fields:
         text = _bunker_field_label(field_key)
-        builder.button(text=f"🃏 {text}", callback_data=f"gbkr:{game.game_id}:{field_key}")
-    builder.button(text="🔄 Обновить", callback_data=f"gbkr:{game.game_id}:noop")
+        builder.button(text=f"🃏 {text}", callback_data=f"gbkr:{game.game_id}:{game.round_no}:{game.bunker_reveal_cursor}:{field_key}")
+    builder.button(text="🔄 Обновить", callback_data=f"gbkr:{game.game_id}:{game.round_no}:{game.bunker_reveal_cursor}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -855,8 +855,8 @@ def _build_private_bunker_vote_keyboard(game: GroupGame, *, actor_user_id: int) 
         label = game.players.get(user_id, f"user:{user_id}")
         short_label = label if len(label) <= 24 else f"{label[:21]}..."
         icon = "✅" if current_target == user_id else "🗳"
-        builder.button(text=f"{icon} {short_label}", callback_data=f"gbkv:{game.game_id}:{user_id}")
-    builder.button(text="🔄 Обновить", callback_data=f"gbkv:{game.game_id}:noop")
+        builder.button(text=f"{icon} {short_label}", callback_data=f"gbkv:{game.game_id}:{game.round_no}:{user_id}")
+    builder.button(text="🔄 Обновить", callback_data=f"gbkv:{game.game_id}:{game.round_no}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -874,7 +874,7 @@ def _build_private_night_action_keyboard(game: GroupGame, *, actor_user_id: int)
     for user_id in targets:
         label = game.players.get(user_id, f"user:{user_id}")
         text = label if len(label) <= 24 else f"{label[:21]}..."
-        builder.button(text=f"🎯 {text}", callback_data=f"gmact:{game.game_id}:{user_id}")
+        builder.button(text=f"🎯 {text}", callback_data=f"gmact:{game.game_id}:{game.round_no}:{user_id}")
     columns = 1
     if len(targets) >= 4:
         columns = 2
