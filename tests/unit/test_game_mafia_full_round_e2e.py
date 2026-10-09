@@ -62,9 +62,14 @@ async def test_full_mafia_round_from_night_to_next_phase() -> None:
     round_before = game.round_no
 
     await _finish_night(store, game.game_id)
-    night_done, _, error = await store.mafia_resolve_night(game_id=game.game_id)
-    assert error is None and night_done is not None
+    alive_before_night = set(game.alive_player_ids)
+    night_done, night, error = await store.mafia_resolve_night(game_id=game.game_id)
+    assert error is None and night_done is not None and night is not None
     assert night_done.phase == "day_discussion"
+    # The resolution must apply exactly what it reports: a kill removes that player, and a
+    # doctor's save (possible when the Doctor picked the same target) removes nobody.
+    removed = alive_before_night - set(night_done.alive_player_ids)
+    assert removed == ({night.killed_user_id} if night.killed_user_id is not None else set())
 
     day_vote, error = await store.mafia_open_day_vote(game_id=game.game_id)
     assert error is None and day_vote is not None
@@ -94,6 +99,8 @@ async def test_full_mafia_round_from_night_to_next_phase() -> None:
             game_id=game.game_id, voter_user_id=voter, approve=True
         )
         assert error is None
+    _, ready, error = await store.mafia_is_execution_confirm_ready(game_id=game.game_id)
+    assert error is None and ready is True
 
     final_game, confirm, error = await store.mafia_resolve_execution_confirm(game_id=game.game_id)
     assert error is None and confirm is not None and final_game is not None

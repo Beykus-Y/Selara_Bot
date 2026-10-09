@@ -62,7 +62,8 @@ def test_reveal_keyboard_offers_each_hidden_field_once_on_its_own_row() -> None:
     values = [row[0] for row in rows]
     assert len(set(values)) == len(values)
     assert all(len(value.encode("utf-8")) <= 64 for value in values)
-    assert values[-1] == "gbkr:g1:2:4:noop"
+    # Exact callbacks: one per field key, in card order, then the refresh button.
+    assert values == [f"gbkr:g1:2:4:{field_key}" for field_key in BUNKER_CARD_FIELDS] + ["gbkr:g1:2:4:noop"]
 
 
 def test_reveal_keyboard_drops_already_revealed_fields() -> None:
@@ -72,9 +73,8 @@ def test_reveal_keyboard_drops_already_revealed_fields() -> None:
     markup = game_router._build_private_bunker_reveal_keyboard(game, actor_user_id=1)
 
     rows = _rows(markup)
-    assert len(rows) == (len(BUNKER_CARD_FIELDS) - 3) + 1
-    for field_key in BUNKER_CARD_FIELDS[:3]:
-        assert all(f":{field_key}" not in row[0] for row in rows)
+    remaining = BUNKER_CARD_FIELDS[3:]
+    assert [row[0] for row in rows] == [f"gbkr:g1:2:4:{field_key}" for field_key in remaining] + ["gbkr:g1:2:4:noop"]
 
 
 @pytest.mark.parametrize("player_count", [6, 8, 12])
