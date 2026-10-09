@@ -1005,11 +1005,18 @@ def _should_handle_whoami_group_text(active_game: GroupGame | None, *, user_id: 
     return bool(text.strip())
 
 
-def _should_handle_bred_private_answer(game: GroupGame | None, *, text: str) -> bool:
+def _should_handle_bred_private_answer(
+    game: GroupGame | None, *, text: str, replied_prompt: str | None = None,
+) -> bool:
     normalized = text.strip()
-    if not normalized or normalized.startswith("/"):
+    if not normalized or normalized.startswith("/") or game is None:
         return False
-    return game is not None
+    if replied_prompt is not None:
+        # Replies to Personal AI and other bot messages must not be mistaken
+        # for a free-text bluff. Only the current tagged Bred prompt qualifies.
+        return f"Контекст блефа: {game.game_id}/{game.round_no}" in replied_prompt
+    # Preserve the established one-message DM submission flow.
+    return True
 
 
 def _render_whoami_history(game: GroupGame, *, limit: int = 6) -> str:
@@ -2418,6 +2425,7 @@ def _render_bred_private_status_text(game: GroupGame) -> str:
         f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
         f"<b>Раунд:</b> {game.round_no}/{game.bred_rounds}",
         f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
+        f"<b>Контекст блефа:</b> <code>{escape(game.game_id)}/{game.round_no}</code>",
     ]
     if game.phase == "private_answers" and game.bred_question_prompt:
         lines.append("<b>Факт с пропуском:</b>")
@@ -6414,7 +6422,19 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
         raise SkipHandler()
 
     game = await GAME_STORE.get_latest_bred_submission_game_for_user(user_id=message.from_user.id)
-    if not _should_handle_bred_private_answer(game, text=text):
+    replied = getattr(message, "reply_to_message", None)
+    replied_prompt = (
+        (getattr(replied, "text", None) or getattr(replied, "caption", None) or "")
+        if replied is not None else None
+    )
+    if (
+        game is not None and replied_prompt is not None
+        and "Контекст блефа:" in replied_prompt
+        and f"Контекст блефа: {game.game_id}/{game.round_no}" not in replied_prompt
+    ):
+        await message.answer("Это старый вопрос «Бредовухи». Откройте актуальный через /role.")
+        return
+    if not _should_handle_bred_private_answer(game, text=text, replied_prompt=replied_prompt):
         raise SkipHandler()
 
     await _refresh_game_player_label(
