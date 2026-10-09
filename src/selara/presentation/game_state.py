@@ -3513,11 +3513,14 @@ class GameStore:
         field_key: str,
         expected_round_no: int | None = None,
         expected_reveal_cursor: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if expected_round_no is not None and game.round_no != expected_round_no:
                 return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
             if expected_reveal_cursor is not None and game.bunker_reveal_cursor != expected_reveal_cursor:
@@ -3617,11 +3620,14 @@ class GameStore:
         voter_user_id: int,
         target_user_id: int,
         expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, int | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if expected_round_no is not None and game.round_no != expected_round_no:
                 return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
             if game.kind != "bunker":
