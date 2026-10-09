@@ -690,6 +690,16 @@ def _build_spy_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
     return builder.as_markup()
 
 
+def _whoami_question_token(game: GroupGame) -> int:
+    # Some restored/legacy fixtures have no phase-start timestamp. New live
+    # questions always have one, providing a monotonic-enough unique token
+    # even after the visible history reaches its trimming limit.
+    return (
+        int(game.phase_started_at.timestamp() * 1_000_000)
+        if game.phase_started_at is not None else 0
+    )
+
+
 def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
     if game.kind != "whoami" or game.status != "started" or game.phase != "whoami_answer":
         return None
@@ -697,7 +707,7 @@ def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         return None
 
     builder = InlineKeyboardBuilder()
-    revision = int(game.phase_started_at.timestamp() * 1_000_000)
+    revision = _whoami_question_token(game)
     builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:{revision}:yes")
     builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:{revision}:no")
     builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:{revision}:unknown")
