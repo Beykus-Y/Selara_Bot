@@ -1670,6 +1670,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
+        if parts[0] == "game" and len(parts) == 9 and parts[1] == "confirm":
+            return parts[3]
         if parts[0] in {
             "gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv",
             "gbkv", "gmact", "gmvote", "gmconfirm",
@@ -3423,6 +3425,21 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             "variant": "primary",
                         }
                     manage_buttons.append(button)
+            if can_manage_games and game.status == "started":
+                # A browser click must open an explicit confirmation before
+                # submitting a signed token. Never expose raw destructive
+                # callbacks for running games.
+                for button in manage_buttons:
+                    action = (
+                        "stop" if button.get("callback_data") == f"game:cancel:{game.game_id}"
+                        else "reveal" if button.get("callback_data") == f"game:reveal:{game.game_id}"
+                        else None
+                    )
+                    if action is not None:
+                        button["callback_data"] = _web_game_confirm_callback(
+                            action=action, game=game, user_id=user.telegram_user_id,
+                            secret=settings.resolved_web_auth_secret,
+                        )
             if game.kind == "spy":
                 manage_buttons = [
                     button
@@ -3767,7 +3784,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         parts = callback_data.split(":")
         versioned_games = {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"}
         round_actions = {"gbkv", "gmact", "gmvote", "gmconfirm"}
-        if (
+        is_web_confirmation = (
+            len(parts) == 9 and parts[:2] == ["game", "confirm"]
+        )
+        if not is_web_confirmation and (
             len(parts) not in {3, 4, 5}
             or (len(parts) == 4 and parts[0] not in versioned_games | round_actions)
             or (len(parts) == 5 and parts[0] != "gbkr")
@@ -4016,38 +4036,66 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return True, success_message
                 return True, success_message
 
-            if action in {"cancel", "advance", "reveal"} and not can_manage_games:
+            if action in {"cancel", "advance", "reveal", "confirm"} and not can_manage_games:
                 return False, "Недостаточно прав для управления игрой."
 
-            if action == "cancel":
-                game_router_module._cancel_phase_timer(game.game_id)
-                if game.kind == "quiz":
-                    await game_router_module._sync_quiz_feed_message(bot, game, question_no=None)
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(
-                    bot,
-                    finished_game,
-                    chat_settings,
-                    include_reveal=(finished_game.kind in {"spy", "mafia"}),
+            if action == "confirm":
+                confirmed = _verify_web_game_confirm_callback(
+                    callback_data, game=game, user_id=user.telegram_user_id,
+                    secret=settings.resolved_web_auth_secret,
                 )
-                await game_router_module._send_game_feed_event(bot, finished_game, text="<b>Ведущий:</b> Игра остановлена ведущим.")
-                return True, "Игра завершена."
+                if confirmed is None:
+                    return False, "Подтверждение устарело или недействительно. Обновите страницу."
+                if confirmed == "reveal" and game.kind != "spy":
+                    return False, "Раскрывать роли можно только в игре «Шпион»."
+
+                winner_text = (
+                    "Игра остановлена ведущим." if confirmed == "stop"
+                    else "Игра завершена по решению ведущего."
+                )
+                finished_game = await GAME_STORE.finish(
+                    game_id=game.game_id,
+                    winner_text=winner_text,
+                    expected_status="started",
+                    expected_phase=game.phase,
+                    expected_round_no=game.round_no,
+                )
+                if finished_game is None:
+                    return False, "Партия уже изменилась. Действие не выполнено."
+                game_router_module._cancel_phase_timer(finished_game.game_id)
+                if finished_game.kind == "quiz":
+                    await game_router_module._sync_quiz_feed_message(bot, finished_game, question_no=None)
+                await game_router_module._safe_edit_or_send_game_board(
+                    bot, finished_game, chat_settings,
+                    include_reveal=(confirmed == "reveal" or finished_game.kind in {"spy", "mafia"}),
+                )
+                await game_router_module._send_game_feed_event(
+                    bot, finished_game,
+                    text=(
+                        "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты."
+                        if confirmed == "reveal" else "<b>Ведущий:</b> Игра остановлена ведущим."
+                    ),
+                )
+                return True, "Роли раскрыты." if confirmed == "reveal" else "Игра завершена."
+
+            if action == "cancel":
+                if game.status != "lobby":
+                    return False, "Для остановки активной игры требуется подтверждение с актуальной страницы."
+                # A disposable lobby is the one-step exception, as in Telegram.
+                finished_game = await GAME_STORE.finish(
+                    game_id=game.game_id,
+                    winner_text="Лобби отменено ведущим.",
+                    expected_status="lobby",
+                    expected_phase="lobby",
+                )
+                if finished_game is None:
+                    return False, "Лобби уже изменилось. Ничего не изменено."
+                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+                return True, "Лобби отменено."
 
             if action == "reveal":
-                if game.kind != "spy" or game.status != "started":
-                    return False, "Раскрытие доступно только в активной игре «Шпион»."
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-                await game_router_module._send_game_feed_event(
-                    bot,
-                    finished_game,
-                    text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.",
-                )
-                return True, "Роли раскрыты."
+                # Legacy 3-part Mini App callbacks must never bypass confirmation.
+                return False, "Раскрытие ролей требует подтверждения с актуальной страницы."
 
             if action == "advance":
                 if game.status != "started":
