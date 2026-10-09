@@ -5,6 +5,10 @@ lobby -> start -> every night action -> night resolution -> day discussion ->
 day vote -> execution confirmation -> resolution. Asserts only the public
 contract: the phase sequence, that the confirmed candidate leaves the alive set,
 and that the game either advanced to a new night or finished.
+
+Six players, not four: with four, role assignment always deals one Mafia and three
+Civilians, so the first execution always ends the game and the next-night branch
+could never run. With six, an execution of a civilian leaves a live game.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ async def _started_mafia(store: GameStore):
         reveal_eliminated_role=True,
     )
     assert error is None and game is not None
-    for user_id in (2, 3, 4):
+    for user_id in (2, 3, 4, 5, 6):
         joined, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
         assert joined is not None and status == "joined"
     started, start_error = await store.start(game_id=game.game_id)

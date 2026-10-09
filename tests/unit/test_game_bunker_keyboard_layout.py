@@ -3,7 +3,7 @@
 Replaces the manual Telegram layout check for these keyboards with asserts on
 button count, row shape, callback size and uniqueness. Real iOS/Android
 rendering is not automated and is documented as such in
-docs/GAME_UX_BASELINE.md.
+docs/GAME_UX_TEST_COVERAGE.md.
 """
 from __future__ import annotations
 
@@ -49,9 +49,10 @@ def test_bunker_has_nine_characteristics() -> None:
     assert len(BUNKER_CARD_FIELDS) == 9
 
 
-@pytest.mark.parametrize("player_count", [6, 8, 12])
-def test_reveal_keyboard_offers_each_hidden_field_once_on_its_own_row(player_count: int) -> None:
-    game = _bunker_game(player_count, phase="bunker_reveal")
+def test_reveal_keyboard_offers_each_hidden_field_once_on_its_own_row() -> None:
+    # The reveal keyboard only shows the acting player's own card, so it does not depend on
+    # the table size; the player count matters for the vote keyboard below.
+    game = _bunker_game(6, phase="bunker_reveal")
 
     markup = game_router._build_private_bunker_reveal_keyboard(game, actor_user_id=1)
 
@@ -64,9 +65,8 @@ def test_reveal_keyboard_offers_each_hidden_field_once_on_its_own_row(player_cou
     assert values[-1] == "gbkr:g1:2:4:noop"
 
 
-@pytest.mark.parametrize("player_count", [6, 8, 12])
-def test_reveal_keyboard_drops_already_revealed_fields(player_count: int) -> None:
-    game = _bunker_game(player_count, phase="bunker_reveal")
+def test_reveal_keyboard_drops_already_revealed_fields() -> None:
+    game = _bunker_game(6, phase="bunker_reveal")
     game.bunker_revealed_fields = {1: set(BUNKER_CARD_FIELDS[:3])}
 
     markup = game_router._build_private_bunker_reveal_keyboard(game, actor_user_id=1)

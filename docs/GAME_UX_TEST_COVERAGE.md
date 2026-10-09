@@ -10,7 +10,7 @@ pinned by unit tests that run in CI.
 |---|---|---|
 | Bunker private reveal keyboard at 6/8/12 players | `tests/unit/test_game_bunker_keyboard_layout.py` | nine hidden fields plus refresh, one button per row, unique callbacks, each callback ≤ 64 bytes UTF-8, revealed fields removed |
 | Bunker private vote keyboard at 6/8/12 players | same | every other alive player once, self excluded, labels truncated to 24 characters, current choice marked |
-| Mafia full round through GameStore | `tests/unit/test_game_mafia_full_round_e2e.py` | lobby → start → all night actions → night resolution → day vote → execution confirmation → next night or finish |
+| Mafia full round through GameStore (6 players) | `tests/unit/test_game_mafia_full_round_e2e.py` | lobby → start → all night actions → night resolution → day vote → execution confirmation → next night, or finish if the executed player was the last Mafia |
 | Bunker/Mafia stale callbacks and timers | `tests/unit/test_game_gux_bunker_mafia_guards.py` (from #201) | old round/turn/phase callbacks do not mutate state |
 | Gacha purchase/sale/currency callbacks | `tests/unit/test_text_commands_gacha_callbacks.py` | owner check, in-flight duplicates, refusals, timeouts, disabled chat |
 
