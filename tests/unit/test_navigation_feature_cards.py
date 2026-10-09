@@ -30,7 +30,7 @@ def test_every_card_renders_where_who_and_limits() -> None:
 
 
 def test_group_ai_summary_and_troubleshooting_are_reachable_from_help_root() -> None:
-    from selara.presentation.commands.command_catalog import get_command_spec
+    from selara.presentation.commands.command_catalog import COMMAND_CATALOG, get_command_spec
     from selara.presentation.navigation.tree import get_nav_node, path_to_root
 
     ai = get_nav_node("ai")
@@ -47,6 +47,5 @@ def test_group_ai_summary_and_troubleshooting_are_reachable_from_help_root() -> 
         "? вопрос", "?? вопрос", "?reset",
     )
     assert get_command_spec("ai_daily_summary").syntax == ("/summary",)
-    assert all(card.spec_key in {spec.key for spec in __import__(
-        "selara.presentation.commands.command_catalog", fromlist=["COMMAND_CATALOG"]
-    ).COMMAND_CATALOG} for card in FEATURE_CARDS)
+    catalog_keys = {spec.key for spec in COMMAND_CATALOG}
+    assert all(card.spec_key in catalog_keys for card in FEATURE_CARDS)
