@@ -1627,6 +1627,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
+        if parts[0] == "gquiz" and len(parts) == 4:
+            return parts[1]
         if parts[0] in {
             "gcfg",
             "gquiz",
@@ -3715,11 +3717,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         economy_repo: SqlAlchemyEconomyRepository,
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
-        if len(parts) != 3:
+        if len(parts) not in {3, 4} or (len(parts) == 4 and parts[0] != "gquiz"):
             return False, "Некорректные параметры игрового действия."
 
         prefix = parts[0]
-        payload = parts[2]
+        payload = parts[-1]
 
         if prefix == "gcfg":
             if not can_manage_games:
@@ -4144,6 +4146,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return True, f"Бросок принят: {result.roll_value}"
 
         if prefix == "gquiz":
+            if len(parts) != 4 or not parts[2].isdigit():
+                return False, "Устаревшая кнопка викторины. Обновите страницу."
             if not payload.isdigit():
                 return False, "Некорректный вариант ответа."
             option_index = int(payload)
@@ -4151,6 +4155,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_chat_id=game.chat_id,
+                expected_question_index=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4179,6 +4185,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return True, "Ответ принят."
 
         if prefix == "gspy":
+            if payload == "mine":
+                if user.telegram_user_id not in game.players or game.status != "started":
+                    return False, "Вы не участник активной игры."
+                choice = game.spy_votes.get(user.telegram_user_id)
+                return (
+                    True,
+                    "Вы ещё не голосовали."
+                    if choice is None else f"Ваш голос: {game.players.get(choice, f'user:{choice}')}.",
+                )
             if not payload.isdigit():
                 return False, "Некорректная цель голосования."
             target_user_id = int(payload)

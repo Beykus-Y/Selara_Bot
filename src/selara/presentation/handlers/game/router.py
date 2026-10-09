@@ -658,13 +658,13 @@ def _build_quiz_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 18 else f"{option_text[:15]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gquiz:{game.game_id}:{option_index}",
+            callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:{option_index}",
         )
 
     answered_count = len({user_id for user_id in game.quiz_answers if user_id in game.players})
     builder.button(
         text=f"🗳 {answered_count}/{len(game.players)}",
-        callback_data=f"gquiz:{game.game_id}:noop",
+        callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -684,8 +684,9 @@ def _build_spy_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         builder.button(text=f"🚨 {text}{count_text}", callback_data=f"gspy:{game.game_id}:{user_id}")
 
     voted_count = len(game.spy_votes)
+    builder.button(text="👤 Мой голос", callback_data=f"gspy:{game.game_id}:mine")
     builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gspy:{game.game_id}:noop")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -952,6 +953,7 @@ def _render_spy_vote_status(game: GroupGame) -> str:
         lines.append(f"<b>Доска подозрений:</b> {_render_vote_leaders(game, vote_counts, limit=4)}")
     else:
         lines.append("<b>Главный подозреваемый:</b> пока нет.")
+    lines.append("<i>Нажмите на подозреваемого, чтобы отдать или изменить голос; «Мой голос» покажет ваш выбор лично вам.</i>")
 
     _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.spy_votes, label="Ещё без голоса")
 
@@ -1084,7 +1086,11 @@ def _render_dice_progress(game: GroupGame) -> str:
             game.dice_scores.items(),
             key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
         )
-        lines.append("<b>Текущие броски:</b>")
+        lines.append("<b>Итоговые броски:</b>" if game.status == "finished" else "<b>Текущие броски:</b>")
+        best = ranking[0][1]
+        leaders = [game.players.get(uid, f"user:{uid}") for uid, score in ranking if score == best]
+        if game.status == "started":
+            lines.append("<b>Пока лидирует:</b> " + escape(", ".join(leaders)) + f" ({best})")
         for idx, (user_id, score) in enumerate(ranking, start=1):
             lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
 
@@ -1870,16 +1876,19 @@ def _render_game_text(
         lines.append("")
         lines.append(_render_roles_reveal(game))
 
-    if game.kind == "dice" and game.status == "started":
-        lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
-        lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» ниже.")
+    if game.kind == "dice" and game.status in {"started", "finished"}:
+        if game.status == "started":
+            lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
+            lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» один раз; повторный бросок недоступен.")
+        else:
+            lines.append("<b>Сейчас:</b> все броски завершены. Ниже итоговая таблица.")
         lines.append("")
         lines.append(_render_dice_progress(game))
 
     if game.kind == "quiz" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append("<b>Сейчас:</b> идёт вопрос, все отвечают одновременно.")
-        lines.append("<b>Что делать:</b> выбирайте ответ кнопками под этим сообщением.")
+        lines.append("<b>Что делать:</b> выберите букву ответа кнопкой ниже. Полный текст вариантов — под вопросом; пока вопрос открыт, выбор можно изменить.")
         question_block = _render_quiz_question(game)
         if question_block:
             lines.append("")
@@ -1888,6 +1897,10 @@ def _render_game_text(
         if score_block:
             lines.append("")
             lines.append(score_block)
+
+    if game.kind == "quiz" and game.status == "finished":
+        lines.append("<b>Сейчас:</b> викторина завершена. Итоговые очки:")
+        lines.append(_render_quiz_scoreboard(game))
 
     if game.kind == "bredovukha" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.bred_rounds}")
@@ -5042,11 +5055,31 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        # Old non-versioned keyboards could submit an answer to a *different*
+        # question after the board changed. Do not guess the round.
+        await query.answer("Кнопка устарела. Откройте текущую доску через /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, question_raw, payload = parts
+    question_index = int(question_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if (
+        current_game.kind != "quiz" or current_game.status != "started"
+        or current_game.quiz_current_question_index != question_index
+    ):
+        await query.answer("Вопрос уже закрыт. Найдите актуальную доску через /gameboard.", show_alert=True)
+        return
+
     if payload == "noop":
         snapshot_game, answered_count, total_players = await GAME_STORE.quiz_get_answer_snapshot(game_id=game_id)
         if snapshot_game is None:
@@ -5070,6 +5103,8 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         game_id=game_id,
         user_id=query.from_user.id,
         option_index=option_index,
+        expected_chat_id=query.message.chat.id,
+        expected_question_index=question_index,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5128,17 +5163,24 @@ async def dice_roll_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         await query.answer("Неизвестное действие", show_alert=False)
         return
 
-    game, result, error = await GAME_STORE.dice_register_roll(game_id=game_id, user_id=query.from_user.id)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+
+    game, result, error = await GAME_STORE.dice_register_roll(
+        game_id=game_id, user_id=query.from_user.id,
+        expected_chat_id=query.message.chat.id,
+    )
     if error:
         await query.answer(error, show_alert=True)
         return
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     player_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
     note = (
         f"<b>Последний бросок:</b> {_mention(query.from_user.id, player_label)} -> "
@@ -5851,6 +5893,29 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         return
 
     _, game_id, payload = parts
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if payload == "mine":
+        if current_game.status != "started" or current_game.kind != "spy":
+            await query.answer("Партия уже завершена. Откройте актуальную доску.", show_alert=True)
+            return
+        if query.from_user.id not in current_game.players:
+            await query.answer("Вы не участвуете в этой игре.", show_alert=True)
+            return
+        target = current_game.spy_votes.get(query.from_user.id)
+        if target is None:
+            await query.answer("Вы ещё не голосовали. Выберите подозреваемого.", show_alert=True)
+        else:
+            await query.answer(
+                f"Ваш голос: {current_game.players.get(target, f'user:{target}')}. Пока игра идёт, выбор можно изменить.",
+                show_alert=True,
+            )
+        return
     if payload == "noop":
         game, voted_count, total_players, leader_user_id, leader_votes = await GAME_STORE.spy_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5880,6 +5945,7 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5887,10 +5953,6 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
     if game is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     target_label = game.players.get(target_user_id, f"user:{target_user_id}")
     voter_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
 
