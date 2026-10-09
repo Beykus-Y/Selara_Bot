@@ -5733,11 +5733,26 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Эта карточка устарела. Откройте /role.", show_alert=True)
+        return
+    if len(parts) != 5 or not parts[2].isdigit() or not parts[3].isdigit():
         await query.answer("Некорректное раскрытие", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, cursor_raw, payload = parts
+    expected_round, expected_cursor = int(round_raw), int(cursor_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Раскрывайте поля только в личке.", show_alert=True)
+        return
+    if (current_game.status != "started" or current_game.phase != "bunker_reveal"
+            or current_game.round_no != expected_round or current_game.bunker_reveal_cursor != expected_cursor):
+        await query.answer("Ход уже завершён. Откройте /role.", show_alert=True)
+        return
     if payload == "noop":
         game, current_index, total_in_round, current_actor_user_id = await GAME_STORE.bunker_get_reveal_snapshot(game_id=game_id)
         if game is None:
@@ -5772,6 +5787,8 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         actor_user_id=query.from_user.id,
         field_key=payload,
+        expected_round_no=expected_round,
+        expected_reveal_cursor=expected_cursor,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5832,11 +5849,15 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
     if payload == "noop":
         game, voted_count, total_alive, leader_user_id, leader_votes = await GAME_STORE.bunker_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5875,6 +5896,7 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -6127,11 +6149,18 @@ async def mafia_night_action_callback(query: CallbackQuery, bot: Bot, chat_setti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /role.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное действие", show_alert=False)
         return
 
-    _, game_id, target_raw = parts
+    _, game_id, round_raw, target_raw = parts
+    expected_round = int(round_raw)
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Ночные действия только в ЛС.", show_alert=True)
+        return
     if not target_raw.isdigit():
         await query.answer("Некорректная цель", show_alert=False)
         return
@@ -6141,6 +6170,7 @@ async def mafia_night_action_callback(query: CallbackQuery, bot: Bot, chat_setti
         game_id=game_id,
         actor_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -6191,11 +6221,15 @@ async def mafia_day_vote_callback(query: CallbackQuery, bot: Bot, chat_settings:
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, target_raw = parts
+    _, game_id, round_raw, target_raw = parts
+    expected_round = int(round_raw)
     if not target_raw.isdigit():
         await query.answer("Некорректная цель", show_alert=False)
         return
@@ -6205,6 +6239,7 @@ async def mafia_day_vote_callback(query: CallbackQuery, bot: Bot, chat_settings:
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -6278,11 +6313,25 @@ async def mafia_execution_confirm_callback(query: CallbackQuery, bot: Bot, chat_
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Подтверждение устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное подтверждение", show_alert=False)
         return
 
-    _, game_id, decision_raw = parts
+    _, game_id, round_raw, decision_raw = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Подтверждайте казнь в исходной группе.", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "day_execution_confirm" or current_game.round_no != expected_round:
+        await query.answer("Голосование завершено. Откройте /gameboard.", show_alert=True)
+        return
     if decision_raw == "noop":
         snapshot_game, voted_count, alive_count, yes_count, no_count = await GAME_STORE.mafia_get_execution_confirm_snapshot(game_id=game_id)
         if snapshot_game is None:
@@ -6307,6 +6356,7 @@ async def mafia_execution_confirm_callback(query: CallbackQuery, bot: Bot, chat_
         game_id=game_id,
         voter_user_id=query.from_user.id,
         approve=approve,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
