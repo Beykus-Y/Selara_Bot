@@ -1542,7 +1542,7 @@ def _render_bred_question(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.bred_lies
         ]
-        lines.append("<b>Где отвечать:</b> отправьте свой ложный ответ обычным сообщением в ЛС боту. Правду выбираем позже.")
+        lines.append("<b>Где отвечать:</b> отправьте ЛОЖЬ обычным сообщением в ЛС боту. Правду выбираем позже.")
         lines.append("<i>В группе ответы не раскрываются до голосования.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже ответили:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
