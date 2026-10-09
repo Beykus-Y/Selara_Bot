@@ -53,13 +53,14 @@ async def test_whoami_old_question_cannot_answer_next_question_or_other_chat(mon
     for rev, chat, needle in [(1, -100, "старый вопрос"), (0, -777, "другого чата")]:
         _, result, error = await store.whoami_answer_question(
             game_id=game.game_id, responder_user_id=2, answer_code="no",
-            expected_history_size=rev, expected_chat_id=chat,
+            expected_question_version=rev, expected_chat_id=chat,
         )
         assert result is None and needle in error
     assert game.whoami_pending_question_text == "Я герой?"
+    expected_version = int(game.phase_started_at.timestamp() * 1_000_000)
     _, result, error = await store.whoami_answer_question(
         game_id=game.game_id, responder_user_id=2, answer_code="no",
-        expected_history_size=0, expected_chat_id=-100,
+        expected_question_version=expected_version, expected_chat_id=-100,
     )
     assert error is None and result is not None
     assert len(game.whoami_history) == 1
@@ -70,8 +71,9 @@ def test_whoami_action_revision_follows_question_history():
     game.whoami_current_actor_user_id = 1
     game.whoami_pending_question_text = "Я живой?"
     markup = ui._build_whoami_answer_buttons(game)
-    assert "gwho:g7abc:0:yes" in callbacks(markup)
-    assert "gwho:g7abc:0:unknown" in callbacks(markup)
+    revision = int(game.phase_started_at.timestamp() * 1_000_000)
+    assert f"gwho:g7abc:{revision}:yes" in callbacks(markup)
+    assert f"gwho:g7abc:{revision}:unknown" in callbacks(markup)
 
 
 @pytest.mark.asyncio
