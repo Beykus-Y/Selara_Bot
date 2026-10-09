@@ -1069,7 +1069,7 @@ def _render_whoami_status(game: GroupGame) -> str:
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> ход текущего игрока.")
-        lines.append("<b>Что делать:</b> напишите в эту группу обычное сообщение, без команды.")
+        lines.append("<b>Что делать:</b> задайте вопрос с «?» или сделайте догадку обычным сообщением в группу (без команды).")
         lines.append(
             "<i>Вопрос: «Я человек?» (знак ? обязателен). Догадка: "
             "«Я думаю, что я Шерлок Холмс» или «моя догадка: Шерлок Холмс».</i>"
@@ -1081,7 +1081,7 @@ def _render_whoami_status(game: GroupGame) -> str:
     elif game.phase == "whoami_answer":
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<b>Сейчас:</b> ждём ответ стола.")
-        lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой ниже.")
+        lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».")
 
     if game.phase == "whoami_answer":
         lines.append("<i>Да — игрок задаёт следующий вопрос; нет / не знаю / неважно — ход переходит дальше.</i>")
