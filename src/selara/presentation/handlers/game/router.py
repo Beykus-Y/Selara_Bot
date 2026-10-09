@@ -794,10 +794,8 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
             for second in range(first + 1, len(hand)):
                 first_text = hand[first]
                 second_text = hand[second]
-                merged = f"{first_text} + {second_text}"
-                label = merged if len(merged) <= 24 else f"{merged[:21]}..."
                 builder.button(
-                    text=f"🃏 {label}",
+                    text=f"🃏 {first + 1} + {second + 1}",
                     callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
                 )
     builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:noop")
@@ -1053,10 +1051,10 @@ def _render_whoami_status(game: GroupGame) -> str:
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> ход текущего игрока.")
-        lines.append("<b>Что делать:</b> задайте вопрос сообщением в чат или сделайте догадку.")
+        lines.append("<b>Что делать:</b> напишите в эту группу обычное сообщение, без команды.")
         lines.append(
-            "<i>Вопрос — любое сообщение с «?». Догадка — например: "
-            "«Я думаю, что я [ответ]», «моя догадка: [ответ]» или «кажется, я [ответ]».</i>"
+            "<i>Вопрос: «Я человек?» (знак ? обязателен). Догадка: "
+            "«Я думаю, что я Шерлок Холмс» или «моя догадка: Шерлок Холмс».</i>"
         )
         lines.append(
             "<i>Если игрок разгадал себя, он выходит из круга вопросов, "
@@ -1065,7 +1063,10 @@ def _render_whoami_status(game: GroupGame) -> str:
     elif game.phase == "whoami_answer":
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<b>Сейчас:</b> ждём ответ стола.")
-        lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».")
+        lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой ниже.")
+
+    if game.phase == "whoami_answer":
+        lines.append("<i>Да — игрок задаёт следующий вопрос; нет / не знаю / неважно — ход переходит дальше.</i>")
 
     lines.append("")
     lines.append(_render_whoami_history(game))
@@ -1503,7 +1504,7 @@ def _render_bred_question(game: GroupGame) -> str:
             f"<b>Категорию выбирает:</b> {escape(selector_label)}",
         ]
         if game.bred_category_options:
-            lines.append("<i>Кнопки ниже сразу откроют тему раунда.</i>")
+            lines.append("<i>Тему выбирает назначенный игрок; после выбора остальные отправляют ложные ответы в ЛС.</i>")
         return "\n".join(lines)
 
     if not game.bred_question_prompt:
@@ -1523,6 +1524,8 @@ def _render_bred_question(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.bred_lies
         ]
+        lines.append("<b>Действие:</b> придумайте ЛОЖЬ к пропуску и отправьте её обычным текстом в ЛС боту. Правду выбираем позже.")
+        lines.append("<i>В группе ответы не раскрываются до голосования.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже ответили:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
         if waiting_user_ids:
@@ -1543,7 +1546,7 @@ def _render_bred_question(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до конца этапа.</i>")
+        lines.append("<i>Теперь угадываем ПРАВДУ кнопками ниже, не сочиняем новую ложь. Выбор можно изменить до закрытия голосования.</i>")
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -2477,16 +2480,17 @@ def _render_private_zlob_status_text(game: GroupGame, *, actor_user_id: int) -> 
             lines.append(f"{index}. {escape(card)}")
 
     if game.phase == "private_answers":
+        lines.append(f"<b>Нужно белых карт:</b> {max(1, int(game.zlob_black_slots))}. Полный текст карт указан выше; кнопки могут быть сокращены.")
         submission = game.zlob_submissions.get(actor_user_id)
         lines.append("")
         if submission:
             lines.append(f"<i>Вы уже выбрали: {escape(' + '.join(submission))}</i>")
             lines.append("<i>Можно выбрать другой вариант до конца этапа.</i>")
         else:
-            lines.append("<i>Выберите карточку(и) кнопками ниже.</i>")
+            lines.append("<i>Выберите одну или две карты согласно числу пропусков чёрной карточки. Для пар смотрите номера карт выше.</i>")
     elif game.phase == "public_vote":
         lines.append("")
-        lines.append("<i>Идёт голосование в группе. На свою карточку голосовать нельзя.</i>")
+        lines.append("<i>Карты сданы. В группе выберите чужую анонимную комбинацию; на свою голосовать нельзя.</i>")
     return "\n".join(lines)
 
 
