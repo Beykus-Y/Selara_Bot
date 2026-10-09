@@ -737,7 +737,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         text = category if len(category) <= 22 else f"{category[:19]}..."
         builder.button(
             text=f"📚 {text}",
-            callback_data=f"gbredcat:{game.game_id}:{option_index}",
+            callback_data=f"gbredcat:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     selector_label = "-"
@@ -745,7 +745,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         selector_label = game.players.get(game.bred_current_selector_user_id, f"user:{game.bred_current_selector_user_id}")
     builder.button(
         text=f"🎯 Ход: {selector_label[:16]}",
-        callback_data=f"gbredcat:{game.game_id}:noop",
+        callback_data=f"gbredcat:{game.game_id}:{game.round_no}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -5245,11 +5245,25 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Тема прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор категории", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "category_pick" or current_game.round_no != expected_round:
+        await query.answer("Выбор темы завершён. Откройте /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, selector_user_id, options = await GAME_STORE.bred_get_category_snapshot(game_id=game_id)
         if game is None:
@@ -5293,6 +5307,8 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         actor_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
