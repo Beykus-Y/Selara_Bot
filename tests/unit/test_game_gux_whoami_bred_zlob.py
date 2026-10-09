@@ -85,8 +85,8 @@ def test_zlob_private_hand_shows_full_long_cards_and_needed_slots():
     markup = ui._build_private_zlob_submit_keyboard(g, actor_user_id=1)
     assert markup is not None
     buttons = [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
-    assert ("🃏 1 + 2", "gzlobp:g7:1:1:0-1") in buttons
-    assert ("🃏 1 + 3", "gzlobp:g7:1:1:0-2") in buttons
+    assert ("🃏 1 + 2", "gzlobp:g7:1:0-1") in buttons
+    assert ("🃏 1 + 3", "gzlobp:g7:1:0-2") in buttons
     assert all(len(cb.encode()) <= 64 for _, cb in buttons)
 
 
@@ -100,7 +100,7 @@ def test_zlob_single_slot_preserves_single_card_submission():
     markup = ui._build_private_zlob_submit_keyboard(g, actor_user_id=1)
     assert markup is not None
     callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert "gzlobp:g7:1:1:0" in callbacks
+    assert "gzlobp:g7:1:0" in callbacks
     assert "gzlobp:g7:1:1" in callbacks
     assert all(":0-1" not in cb for cb in callbacks)
 
