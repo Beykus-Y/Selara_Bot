@@ -122,4 +122,4 @@ def test_zlob_vote_stage_does_not_expose_card_owners():
     )
     text = ui._render_zlob_round_status(g)
     assert "Прогресс:</b> 1/3" in text
-    assert "Alice" not in text and "Bob" not in text
+    assert "Funny One" not in text and "Funny Two" not in text  # candidates appear only in vote choices
