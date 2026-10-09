@@ -40,7 +40,7 @@ def test_group_ai_summary_and_troubleshooting_are_reachable_from_help_root() -> 
     assert "ai_group_questions" in group_ai.spec_keys
     assert "ai_daily_summary" in summaries.spec_keys
     assert "ai_summary" in ai.children
-    assert trouble.parent == "root"
+    assert trouble.parent == "subscriptions"
     for key in ("ai_group", "ai_summary", "troubleshooting"):
         assert path_to_root(key)[-1].key == "root"
     assert get_command_spec("ai_group_questions").natural_triggers == (
