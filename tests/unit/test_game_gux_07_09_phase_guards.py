@@ -164,7 +164,9 @@ def test_anonymous_bred_and_zlob_options_are_fully_readable_and_escaped():
     zlob.zlob_option_owner_user_ids = (1, 2)
     text = ui._render_zlob_round_status(zlob)
     assert "Все варианты" in text and "&lt;A&gt;" in text
-    assert "Alice" not in text and "Bob" not in text
+    # The waiting-voters list may name players; the anonymous answer list must not link them to cards.
+    option_section = text.split("<b>Все варианты")[1].split("<b>Прогресс:")[0]
+    assert "Alice" not in option_section and "Bob" not in option_section
 
 
 @pytest.mark.asyncio
