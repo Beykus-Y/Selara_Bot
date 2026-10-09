@@ -2204,11 +2204,17 @@ class GameStore:
         game_id: str,
         actor_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, str | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Тема из предыдущего раунда. Откройте актуальную доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "category_pick":
