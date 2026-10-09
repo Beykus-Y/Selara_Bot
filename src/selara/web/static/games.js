@@ -855,6 +855,16 @@
 
     const panel = form.closest("[data-game-panel], [data-create-game-panel], .panel");
     const payload = new URLSearchParams(new FormData(form));
+    const callback = payload.get("callback_data") || "";
+    if (callback.startsWith("game:confirm:")) {
+      const reveal = callback.startsWith("game:confirm:reveal:");
+      const approved = window.confirm(
+        reveal
+          ? "Раскрыть роли? Игра «Шпион» завершится, тайные роли станут известны участникам."
+          : "Завершить партию? Текущая игра остановится без возможности продолжить."
+      );
+      if (!approved) return;
+    }
     const endpoint = form.getAttribute("action") || window.location.pathname;
     setPending(panel, true);
 
