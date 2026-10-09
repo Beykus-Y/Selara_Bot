@@ -697,10 +697,11 @@ def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         return None
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:yes")
-    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:no")
-    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:unknown")
-    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:irrelevant")
+    revision = len(game.whoami_history)
+    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:{revision}:yes")
+    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:{revision}:no")
+    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:{revision}:unknown")
+    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:{revision}:irrelevant")
     builder.adjust(2, 2)
     return builder.as_markup()
 
@@ -716,11 +717,11 @@ def _build_bred_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gbred:{game.game_id}:{option_index}",
+            callback_data=f"gbred:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -761,11 +762,11 @@ def _build_zlob_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gzlobv:{game.game_id}:{option_index}",
+            callback_data=f"gzlobv:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -787,7 +788,7 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
             label = card_text if len(card_text) <= 24 else f"{card_text[:21]}..."
             builder.button(
                 text=f"🃏 {label}",
-                callback_data=f"gzlobp:{game.game_id}:{card_index}",
+                callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{card_index}",
             )
     else:
         for first in range(len(hand)):
@@ -796,9 +797,9 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
                 # private hand, avoiding two truncated labels looking equal.
                 builder.button(
                     text=f"🃏 {first + 1} + {second + 1}",
-                    callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
+                    callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{first}-{second}",
                 )
-    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:noop")
+    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:{game.round_no}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -1546,7 +1547,12 @@ def _render_bred_question(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Теперь угадываем ПРАВДУ кнопками ниже, не сочиняем новую ложь. Выбор можно изменить до закрытия голосования.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ, а не наиболее смешную ложь. "
+                     "Ответы пока анонимны; выбор можно изменить до подсчёта.</i>")
+        if game.bred_options:
+            lines.append("<b>Варианты полностью (кнопки ниже соответствуют буквам):</b>")
+            for idx, option in enumerate(game.bred_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1595,7 +1601,12 @@ def _render_zlob_round_status(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до закрытия раунда.</i>")
+        lines.append("<i>Голосуйте за лучший анонимный ответ, кроме собственного. "
+                     "Выбор можно поменять до закрытия раунда; авторы будут раскрыты после подсчёта.</i>")
+        if game.zlob_options:
+            lines.append("<b>Все варианты (буквы соответствуют кнопкам):</b>")
+            for idx, option in enumerate(game.zlob_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1913,7 +1924,7 @@ def _render_game_text(
             lines.append("<b>Что делать:</b> выбранный игрок жмёт тему кнопками ниже.")
         elif game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор ответов в ЛС.")
-            lines.append("<b>Что делать:</b> придумайте правдоподобную ложь и сдайте её боту в ЛС или на сайте.")
+            lines.append("<b>Что делать:</b> придумайте ЛОЖЬ для пропущенного слова или факта и отправьте её боту личным сообщением (1–120 символов).")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за самый правдоподобный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за тот, что кажется настоящим.")
@@ -1931,7 +1942,7 @@ def _render_game_text(
         lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
         if game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор карт в ЛС.")
-            lines.append("<b>Что делать:</b> выберите карту(ы) из руки в ЛС или на сайте.")
+            lines.append(f"<b>Что делать:</b> откройте ЛС: чёрная карта задаёт {max(1, int(game.zlob_black_slots))} пропуск(а), заполните их белыми картами из руки.")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за лучший анонимный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за лучший вариант.")
@@ -2632,7 +2643,7 @@ def _render_whoami_private_view(game: GroupGame, *, actor_user_id: int) -> str:
     else:
         lines.append(
             "<i>Если сейчас ваш ход: вопрос — сообщение с «?» в группу. "
-            "Догадка — например: «Я думаю, что я [ответ]».</i>"
+            "Догадка — например: «Я думаю, что я Шрек».</i>"
         )
     return "\n".join(lines)
 
