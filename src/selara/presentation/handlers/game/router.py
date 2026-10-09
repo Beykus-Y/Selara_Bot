@@ -792,8 +792,8 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
     else:
         for first in range(len(hand)):
             for second in range(first + 1, len(hand)):
-                first_text = hand[first]
-                second_text = hand[second]
+                # Numbered choices map to full-length card text in the
+                # private hand, avoiding two truncated labels looking equal.
                 builder.button(
                     text=f"🃏 {first + 1} + {second + 1}",
                     callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
