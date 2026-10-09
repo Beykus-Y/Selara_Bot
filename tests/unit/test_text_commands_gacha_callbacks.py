@@ -837,3 +837,118 @@ async def test_run_gacha_message_edit_serializes_edits_for_same_message() -> Non
     await asyncio.gather(first_task, second_task)
 
     assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_gacha_currency_callback_insufficient_coins_alerts_and_keeps_info_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GUX-13: a refused exchange (not enough coins) must explain the shortfall in an alert
+    and leave the info message untouched, so no half-updated balance is shown."""
+    query = _DummyQuery(data="gacha:currency:hsr:160:u1", user_id=1)
+    buy_currency_mock = AsyncMock(
+        side_effect=GachaUseCaseError("Недостаточно монет. Нужно 1600, у вас 20.")
+    )
+    build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
+    monkeypatch.setattr(text_commands, "buy_gacha_currency_with_coins", buy_currency_mock)
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    assert query.answers == [("Недостаточно монет. Нужно 1600, у вас 20.", True)]
+    assert query.message.edit_text_calls == []
+    build_info_mock.assert_not_awaited()
+    alert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gacha_buy_callback_timeout_alerts_operator_and_skips_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GUX-13: a timed-out paid pull is reported to the operator and the user gets an alert;
+    no result is delivered and the info message is not re-rendered as if the pull succeeded."""
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    timeout = GachaUseCaseError("service timed out", is_timeout=True)
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", AsyncMock(side_effect=timeout))
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    alert.assert_awaited_once()
+    assert query.answers == [("service timed out", True)]
+    deliver_mock.assert_not_awaited()
+    build_info_mock.assert_not_awaited()
+    assert query.message.edit_text_calls == []
+
+
+@pytest.mark.asyncio
+async def test_gacha_buy_callback_business_refusal_is_alert_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GUX-13: a business refusal (for example, not enough currency) is shown to the user as an
+    alert and is not reported as an operational incident."""
+    query = _DummyQuery(data="gacha:buy:hsr:u1", user_id=1)
+    monkeypatch.setattr(
+        text_commands,
+        "purchase_gacha_pull",
+        AsyncMock(side_effect=GachaUseCaseError("Недостаточно валюты для крутки.")),
+    )
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    build_info_mock = AsyncMock(return_value=("<b>Гача инфо</b>", None))
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", build_info_mock)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
+    alert = AsyncMock()
+    monkeypatch.setattr(text_commands, "notify_operational_error", alert)
+    activity_repo = SimpleNamespace(is_subscription_exempt=AsyncMock(return_value=False))
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS,
+    )
+
+    assert query.answers == [("Недостаточно валюты для крутки.", True)]
+    alert.assert_not_awaited()
+    deliver_mock.assert_not_awaited()
+    build_info_mock.assert_not_awaited()
+    assert query.message.edit_text_calls == []
+
+
+@pytest.mark.asyncio
+async def test_gacha_callback_disabled_chat_never_charges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GUX-13: a stale purchase button in a chat where gacha was switched off must not reach
+    the gacha service at all."""
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    purchase_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_mock)
+    subscription_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", subscription_mock)
+    disabled_settings = SimpleNamespace(economy_mode="global", gacha_enabled=False)
+    exempt_mock = AsyncMock(return_value=False)
+    activity_repo = SimpleNamespace(is_subscription_exempt=exempt_mock)
+
+    await text_commands.gacha_callback(
+        query, bot=AsyncMock(), settings=SimpleNamespace(), economy_repo=object(),
+        activity_repo=activity_repo, chat_settings=disabled_settings,
+    )
+
+    # The enabled check runs before the subscription check, so neither is reached.
+    purchase_mock.assert_not_awaited()
+    exempt_mock.assert_not_awaited()
+    subscription_mock.assert_not_awaited()
+    assert query.answers == [(None, False)]
