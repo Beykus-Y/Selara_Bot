@@ -544,3 +544,43 @@ async def test_fake_artifact_created_claim_is_not_presented_as_success_without_t
     )
     assert turn.text == personal_tools._UNSENT_ARTIFACT_NOTICE
     assert len(llm.calls) == 1
+
+
+async def test_svg_code_dump_for_picture_request_is_corrected():
+    llm = ScriptedLlm(
+        _response(content='Вот SVG:\\n<svg width="300" height="300"><circle r="40"/></svg>'),
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Фото пока не отправлено."),
+    )
+    run = _run(web=False, artifacts=True)
+    turn = await run_tool_dialogue(
+        llm_client=llm,
+        messages=[{"role": "system", "content": "s"},
+                  {"role": "user", "content": "сделай картинку попугая через SVG"}],
+        run=run,
+    )
+    assert len(llm.calls) == 3
+    assert "artifacts" in run.skills_read
+    assert "<svg" not in turn.text
+
+
+async def test_explicit_svg_code_request_is_not_forced_into_artifact():
+    llm = ScriptedLlm(_response(content='<svg><circle r="40"/></svg>'))
+    run = _run(web=False, artifacts=True)
+    turn = await run_tool_dialogue(
+        llm_client=llm,
+        messages=[{"role": "user", "content": "покажи исходник код SVG для картинки"}],
+        run=run,
+    )
+    assert len(llm.calls) == 1
+    assert "<svg>" in turn.text
+
+
+async def test_created_but_not_sent_artifact_is_not_reported_as_success():
+    run = _run(web=False, artifacts=True, budget=Decimal("0.01"))
+    run.artifact_context.created_artifacts.append("saved-but-unsent")
+    llm = ScriptedLlm(_response(content="Понятно.", cost=None))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "user", "content": "нарисуй картинку"}], run=run
+    )
+    assert turn.text == personal_tools._UNSENT_ARTIFACT_NOTICE
