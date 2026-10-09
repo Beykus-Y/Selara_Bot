@@ -81,9 +81,9 @@ def test_nothing_is_offered_when_every_flag_is_off():
 
 def test_offered_tools_follow_the_flags():
     assert run_allowed(web=True) == {"web_search", "fetch_page", "read_skill"}
-    assert run_allowed(artifacts=True, web=False) == {"create_artifact", "send_artifact", "read_skill"}
+    assert run_allowed(artifacts=True, web=False) == {"get_artifact", "create_artifact", "send_artifact", "read_skill"}
     assert run_allowed(web=True, artifacts=True) == {
-        "web_search", "fetch_page", "read_skill", "create_artifact", "send_artifact"}
+        "web_search", "fetch_page", "read_skill", "get_artifact", "create_artifact", "send_artifact"}
 
 
 def run_allowed(**flags):
@@ -178,7 +178,7 @@ async def test_a_poisoned_page_cannot_start_another_tool_in_a_later_round():
     first = run.allowed_names()
     await run.execute(ToolCall("web_search", {"query": "x"}, "1"), first)
     after = run.allowed_names()
-    assert after == {"fetch_page", "read_skill", "create_artifact", "send_artifact"}
+    assert after == {"fetch_page", "read_skill", "get_artifact", "create_artifact", "send_artifact"}
     for name in ("web_search", "fetch_page", "ban_user", "get_artifact"):
         assert not (await run.execute(ToolCall(name, {"query": "q"}, "2"), after)).success
     skill = next(t for t in run.definitions(after) if t["function"]["name"] == "read_skill")
@@ -474,3 +474,73 @@ async def test_tool_explanation_is_not_mistaken_for_an_unexecuted_promise():
     )
     assert len(llm.calls) == 1
     assert turn.text.startswith("Для графики используется")
+
+
+# --- editing source without vision -------------------------------------------------------------
+
+
+async def test_personal_get_artifact_needs_skill_and_reuses_last_confirmed_source():
+    run = _run(web=False, artifacts=True)
+    allowed = run.allowed_names()
+    schema = next(t for t in run.definitions(allowed) if t["function"]["name"] == "get_artifact")
+    assert schema["function"]["parameters"]["properties"]["artifact_id"]["maxLength"] == 36
+    assert not (await run.execute(ToolCall("get_artifact", {}, "0"), allowed)).success
+
+    await run.execute(ToolCall("read_skill", {"name": "artifacts"}, "1"), allowed)
+    row = SimpleNamespace(
+        id="stored", title="Исходник", creator_id=5, chat_id=5, thread_id=None,
+        delivery={"complete": True, "message_ids": [100]},
+        source={"pages": ["<h1>Привет</h1>"], "css": "h1{color:purple}"},
+    )
+    run.artifact_context.repository.latest_delivered = AsyncMock(return_value=row)
+    result = await run.execute(ToolCall("get_artifact", {}, "2"), allowed)
+    assert result.success
+    assert json.loads(result.result_text)["pages"] == ["<h1>Привет</h1>"]
+    run.artifact_context.repository.latest_delivered.assert_awaited_once_with(
+        chat_id=5, thread_id=None, creator_id=5,
+    )
+    run.artifact_context.repository.get = AsyncMock(return_value=row)
+    assert (await run.execute(ToolCall("get_artifact", {"artifact_id": "stored"}, "3"), allowed)).success
+    row.creator_id = 6
+    assert not (await run.execute(ToolCall("get_artifact", {}, "4"), allowed)).success
+
+
+async def test_personal_get_artifact_rejects_drafts_tainted_content_and_large_sources():
+    run = _run(web=False, artifacts=True)
+    allowed = run.allowed_names()
+    await run.execute(ToolCall("read_skill", {"name": "artifacts"}, "1"), allowed)
+    row = SimpleNamespace(
+        id="stored", title="Исходник", creator_id=5, chat_id=5, thread_id=None,
+        delivery={}, source={"pages": ["<p>Текст</p>"], "css": ""},
+    )
+    run.artifact_context.repository.latest_delivered = AsyncMock(return_value=row)
+    assert not (await run.execute(ToolCall("get_artifact", {}, "2"), allowed)).success
+    row.delivery = {"complete": True, "message_ids": [100]}
+    row.source["web_tainted"] = True
+    assert not (await run.execute(ToolCall("get_artifact", {}, "3"), allowed)).success
+    row.source["web_tainted"] = False
+    row.source["pages"] = ["X" * 24001]
+    assert not (await run.execute(ToolCall("get_artifact", {}, "4"), allowed)).success
+
+
+async def test_fake_artifact_created_claim_triggers_one_correction():
+    llm = ScriptedLlm(
+        _response(content="Артефакт с попугаем создан, ID: 9d45536c-5b01-45f3-98c1-a239b96d43fe."),
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Фото пока не отправлено."),
+    )
+    run = _run(web=False, artifacts=True)
+    turn = await run_tool_dialogue(llm_client=llm, messages=[{"role": "system", "content": "s"}], run=run)
+    assert "artifacts" in run.skills_read
+    assert len(llm.calls) == 3
+    assert turn.text == "Фото пока не отправлено."
+
+
+async def test_fake_artifact_created_claim_is_not_presented_as_success_without_tools():
+    llm = ScriptedLlm(_response(content="Артефакт создан, ID: 9d45536c-5b01-45f3-98c1-a239b96d43fe.", cost=None))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}],
+        run=_run(web=False, artifacts=True, budget=Decimal("0.01")),
+    )
+    assert turn.text == personal_tools._UNSENT_ARTIFACT_NOTICE
+    assert len(llm.calls) == 1
