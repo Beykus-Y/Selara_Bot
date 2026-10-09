@@ -4007,7 +4007,7 @@ class GameStore:
 
             return game, bool(required_checks and all(required_checks)), None
 
-    async def mafia_open_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, str | None]:
+    async def mafia_open_day_vote(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -4017,6 +4017,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_discussion":
                 return game, "Сейчас не обсуждение дня"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, "Таймер предыдущей фазы не применён"
             game.phase = "day_vote"
             game.phase_started_at = datetime.now(timezone.utc)
             game.day_votes.clear()
@@ -4054,7 +4058,7 @@ class GameStore:
             game.day_votes[voter_user_id] = target_user_id
             return game, previous_target_user_id, None
 
-    async def mafia_resolve_night(self, *, game_id: str) -> tuple[GroupGame | None, NightResolution | None, str | None]:
+    async def mafia_resolve_night(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, NightResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -4063,7 +4067,11 @@ class GameStore:
                 return game, None, "Это не мафия"
             if game.status != "started" or game.phase != "night":
                 return game, None, "Сейчас не фаза ночи"
-            alive = set(game.alive_player_ids)
+                if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
+        alive = set(game.alive_player_ids)
             blocked_actors = {
                 target_user_id
                 for actor_user_id, target_user_id in game.escort_blocks.items()
@@ -4612,7 +4620,7 @@ class GameStore:
             )
             return game, resolution, None
 
-    async def mafia_resolve_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
+    async def mafia_resolve_day_vote(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -4622,6 +4630,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_vote":
                 return game, None, "Сейчас не фаза голосования"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
             alive_sorted = sorted(game.alive_player_ids)
             vote_protocol = tuple((voter, game.day_votes.get(voter)) for voter in alive_sorted)
             public_notes: list[str] = []
@@ -4734,6 +4746,8 @@ class GameStore:
         self,
         *,
         game_id: str,
+        expected_round_no: int | None = None,
+        expected_phase_started_at: datetime | None = None,
     ) -> tuple[GroupGame | None, ExecutionConfirmResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -4744,6 +4758,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_execution_confirm":
                 return game, None, "Сейчас не фаза подтверждения"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
             candidate_user_id = game.mafia_execution_candidate_user_id
             alive_sorted = sorted(game.alive_player_ids)
 
