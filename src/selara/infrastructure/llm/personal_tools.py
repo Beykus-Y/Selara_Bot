@@ -50,6 +50,14 @@ ARTIFACT_MAX_TOKENS = 4000
 COST_CAP_SHARE = Decimal("0.7")
 
 _FALLBACK_NOTICE = "Не удалось получить ответ с помощью инструментов. Попробуйте переформулировать запрос."
+_UNSENT_ARTIFACT_NOTICE = (
+    "Отправка изображения в Telegram не подтверждена. Текст или UUID не являются картинкой."
+)
+_ARTIFACT_CLAIM_RE = re.compile(
+    r"\b(?:артефакт|картинк[аиу]|изображени[ея])\b.{0,100}\b(?:создан|готов[ао]?|отправлен[ао]?)\b"
+    r"|\b(?:создал[аи]?|отправил[аи]?)\b.{0,100}\b(?:артефакт|картинк[ауи]|изображени[ея])\b",
+    re.IGNORECASE | re.DOTALL,
+)
 _UNFULFILLED_TOOL_NOTICE = (
     "Инструмент в этом ответе не был вызван. Обещание выполнить вызов было ошибкой; "
     "повторите запрос с указанием нужного результата."
@@ -507,8 +515,14 @@ async def run_tool_dialogue(
             text = (message.content or "").strip()
             if text and getattr(choice, "finish_reason", None) == "length":
                 text += "…"
-            if _TOOL_PROMISE_RE.search(text):
-                # A textual promise is not a tool call. One bounded corrective round is allowed while tools
+            unsent_claim = (
+                run.artifact_context is not None and not run.artifact_context.sent_artifacts
+                and bool(_ARTIFACT_CLAIM_RE.search(text))
+                and not bool(re.search(r"\bне\s+(?:был[ао]?\s+)?(?:создан|готов|отправлен)", text, re.I))
+            )
+            if _TOOL_PROMISE_RE.search(text) or unsent_claim:
+                # A textual promise or unverified delivery claim is not a tool call.
+                # One bounded corrective round is allowed while tools
                 # are still offered and the priced budget has room; never invent a successful tool action.
                 spent, fully_priced = _spent_usd(sink)
                 within_budget = run.cost_budget_usd is None or (
@@ -520,19 +534,26 @@ async def run_tool_dialogue(
                 )
                 if can_retry:
                     promise_retry_used = True
-                    log.warning("personal tools: correcting unexecuted tool promise, round=%s", round_index + 1)
+                    log.warning("personal tools: correcting unexecuted action, round=%s", round_index + 1)
                     messages.append({"role": "assistant", "content": text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
+                    if unsent_claim:
+                        created = run.artifact_context.created_artifacts if run.artifact_context else []
+                        correction = (
+                            "Ты заявила об артефакте, но сервер не подтвердил отправку фото. " +
+                            (f"Созданный ID: {created[-1]}. Вызови send_artifact с ним. " if created
+                             else "Артефакт не создан: прочти навык и создай его через tools. ") +
+                            "Не выдавай текстовый UUID за результат доставки. Если tools недоступны, честно сообщи это."
+                        )
+                    else:
+                        correction = (
                             "Ты написала, что собираешься вызвать инструмент, но tool call не сделала. "
                             "Если нужный инструмент доступен и пользователь уже просил результат, вызови его "
                             "СЕЙЧАС настоящим tool call. Иначе ответь по существу без обещания будущего вызова."
-                        ),
-                    })
+                        )
+                    messages.append({"role": "user", "content": correction})
                     continue
-                log.warning("personal tools: refusing unexecuted tool promise, round=%s", round_index + 1)
-                text = _UNFULFILLED_TOOL_NOTICE
+                log.warning("personal tools: refusing unverified tool claim, round=%s", round_index + 1)
+                text = _UNSENT_ARTIFACT_NOTICE if unsent_claim else _UNFULFILLED_TOOL_NOTICE
             if is_last and not text:
                 text = _FALLBACK_NOTICE
             if run.web_used:
