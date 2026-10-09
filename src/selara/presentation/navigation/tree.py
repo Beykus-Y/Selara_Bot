@@ -254,7 +254,6 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="🧰 Почему не работает?",
         summary="Короткая диагностика команд, прав, лимитов и личных сообщений.",
         parent="subscriptions",
-        spec_keys=("user_feedback",),
     ),
 )
 
