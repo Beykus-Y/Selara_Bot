@@ -5830,6 +5830,7 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         field_key=payload,
         expected_round_no=expected_round,
         expected_reveal_cursor=expected_cursor,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5933,11 +5934,19 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     target_user_id = int(payload)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Голосование «Бункера» доступно только в ЛС.", show_alert=True)
+        return
     game, previous_target_user_id, error = await GAME_STORE.bunker_register_vote(
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
         expected_round_no=expected_round,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
