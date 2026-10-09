@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import random
 import re
@@ -2765,7 +2766,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia night timer", extra={"game_id": game.game_id})
 
@@ -2780,7 +2781,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia day discussion timer", extra={"game_id": game.game_id})
 
@@ -2795,7 +2796,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia vote timer", extra={"game_id": game.game_id})
 
@@ -2810,7 +2811,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia execution confirm timer", extra={"game_id": game.game_id})
 
@@ -2957,7 +2958,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia night timer failed", extra={"game_id": game.game_id})
 
@@ -2967,7 +2968,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia day discussion timer failed", extra={"game_id": game.game_id})
 
@@ -2977,7 +2978,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia day vote timer failed", extra={"game_id": game.game_id})
 
@@ -2987,7 +2988,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia execution confirm timer failed", extra={"game_id": game.game_id})
 
@@ -3190,8 +3191,14 @@ async def _advance_mafia_night(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> None:
-    game, resolution, error = await GAME_STORE.mafia_resolve_night(game_id=game_id)
+    game, resolution, error = await GAME_STORE.mafia_resolve_night(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
     if game is None or resolution is None or error:
         return
 
@@ -3260,8 +3267,14 @@ async def _open_mafia_day_vote(
     chat_settings: ChatSettings,
     *,
     triggered_by_timer: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> None:
-    game, error = await GAME_STORE.mafia_open_day_vote(game_id=game_id)
+    game, error = await GAME_STORE.mafia_open_day_vote(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
     if game is None or error:
         return
 
@@ -3288,8 +3301,14 @@ async def _resolve_mafia_day_vote(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> None:
-    game, resolution, error = await GAME_STORE.mafia_resolve_day_vote(game_id=game_id)
+    game, resolution, error = await GAME_STORE.mafia_resolve_day_vote(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
     if game is None or resolution is None or error:
         return
 
@@ -3368,11 +3387,17 @@ async def _resolve_mafia_execution_confirm(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> None:
     game_before_resolve = await GAME_STORE.get_game(game_id)
     confirm_message_id = game_before_resolve.execution_confirm_message_id if game_before_resolve else None
 
-    game, resolution, error = await GAME_STORE.mafia_resolve_execution_confirm(game_id=game_id)
+    game, resolution, error = await GAME_STORE.mafia_resolve_execution_confirm(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
     if game is None or resolution is None or error:
         return
 
