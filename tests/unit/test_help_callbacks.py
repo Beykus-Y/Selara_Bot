@@ -258,19 +258,44 @@ async def test_callback_without_message_only_acknowledges() -> None:
     query.answer.assert_awaited_once_with()
 
 
-async def test_long_screen_is_sent_as_extra_messages_with_keyboard_on_the_last(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_long_help_section_paginates_by_edit_without_sending_duplicate_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(help_module, "_node_text", lambda settings, node: "\n".join(["строка"] * 1500))
     query = _callback_query(data="nv:economy")
 
     await help_callback(query, _settings())
 
     first_edit = query.message.edit_text.await_args
-    assert first_edit.kwargs["reply_markup"] is None
-    extra = query.message.answer.await_args_list
-    assert len(extra) >= 1
-    assert extra[-1].kwargs["reply_markup"] is not None
-    assert all(call.kwargs["reply_markup"] is None for call in extra[:-1])
-    assert all(len(call.args[0]) <= _TELEGRAM_LIMIT for call in [first_edit, *extra])
+    first_markup = first_edit.kwargs["reply_markup"]
+    next_buttons = [
+        button for row in first_markup.inline_keyboard for button in row
+        if button.callback_data == "nvp:economy:1"
+    ]
+    assert len(next_buttons) == 1
+    assert len(first_edit.args[0]) <= _TELEGRAM_LIMIT
+    query.message.answer.assert_not_awaited()
+
+    # A repeated click on the original menu remains a single edit.
+    await help_callback(query, _settings())
+    query.message.answer.assert_not_awaited()
+
+    # Following "next" opens page 2 on the same message with a working back action.
+    query.data = "nvp:economy:1"
+    await help_callback(query, _settings())
+    page2 = query.message.edit_text.await_args
+    assert len(page2.args[0]) <= _TELEGRAM_LIMIT
+    callbacks = _callbacks(page2.kwargs["reply_markup"])
+    assert "nvp:economy:0" in callbacks
+    assert "nvp:economy:2" in callbacks
+    query.message.answer.assert_not_awaited()
+
+
+async def test_malformed_pagination_callback_falls_back_to_root() -> None:
+    query = _callback_query(data="nvp:no-such-node:999")
+    await help_callback(query, _settings())
+    assert "Возможности Selara" in query.message.edit_text.await_args.args[0]
+    query.message.answer.assert_not_awaited()
 
 
 async def test_send_help_puts_keyboard_on_the_only_message() -> None:
