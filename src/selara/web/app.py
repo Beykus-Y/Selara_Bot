@@ -3729,7 +3729,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if game.status != "started" or (
                 prefix != "gwho" and game.round_no != int(parts[2])
             ) or (
-                prefix == "gwho" and int(game.phase_started_at.timestamp() * 1_000_000) != int(parts[2])
+                prefix == "gwho" and game_router_module._whoami_question_token(game) != int(parts[2])
             ):
                 return False, "Действие устарело. Обновите текущую партию."
 
