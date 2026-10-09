@@ -6,7 +6,7 @@ No item is marked done without a merged PR or an existing test.
 
 | Item | Status | PR / commit | Evidence or reason |
 |---|---|---|---|
-| GUX-00 baseline inventory | partial | #204 → d93ab84 | Doc and contract test that reads the doc. The per-game phase-by-phase matrix required by the baseline DoD is not filled, so GUX-00 stays open (see §Gaps). |
+| GUX-00 baseline inventory | done | #204 → d93ab84, matrix in `GAME_UX_PHASE_MATRIX.md` (merged with this change) | Doc, contract test that reads the doc, and the per-game phase → keyboard → actor → surface → error → transition matrix for all eight games, cited from code. |
 | GUX-01–03 rematch permissions, safe stop, shared board | done | #197 → 136616e | `manage_games` gate on rematch, confirmed stop and Spy reveal, `/gameboard` control panel. |
 | GUX-04–06 Dice, Quiz, Spy | done | #199 → d76a1c0 | Score table, versioned quiz buttons, Spy vote clarity. |
 | GUX-07–09 WhoAmI, Bredovukha, Zlobcards | done | #200 → 6174ec0 | Versioned callbacks, round-scoped votes, numbered hand choices. |
@@ -28,7 +28,7 @@ No item is marked done without a merged PR or an existing test.
 
 ## Gaps and risks
 
-- The per-game phase matrix in GUX-00 is not filled. The baseline doc requires it before GUX-14 and GUX-15 rely on the baseline, so GUX-00 is reported as partial until it is done or the owner accepts it as out of scope.
+- Code divergences found while writing the matrix (`GAME_UX_PHASE_MATRIX.md` §5), not fixed here: Mini App cancel and reveal skip confirmation (D1); the Telegram zlobcards early-submit path schedules no vote timer (D2); the bunker vote path has no chat-id check (D3); the mafia group day-vote board offers targets the handler refuses (D4).
 - Not every game has an end-to-end test. Coverage per game is listed in `GAME_UX_TEST_COVERAGE.md`.
 - Multi-worker ownership of GameStore is guarded by the single-writer lease from #87 and #140, which predates this wave. #65 (reconciliation after Redis outage) and #67 (per-game lock granularity) are separate merged fixes, not ownership work.
 - Timers after a restart: `restore_phase_timers` (`src/selara/presentation/handlers/game/router.py`) restores Mafia and Zlobcards timers. No test on dev calls it directly. #201 adds a stale-timer guard test for Mafia. Nothing was exercised against a live Redis. Bunker has no timer, so there is nothing to restore.

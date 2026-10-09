@@ -50,8 +50,9 @@ The contract test pins this list, so any new phase must update this document in 
 | Auto-timers for Bredovukha, Bunker, Quiz | [owner] deferred; changes phase rules | GAME-FUTURE-B |
 | Splitting `game/router.py` | [owner] deferred to its own RFC | GAME-FUTURE-C |
 
-## 4. Not yet inventoried
+## 4. Per-game phase matrix
 
-This document does not yet hold the full per-game matrix of phase → visible keyboard → actor → chat or DM →
-error → transition for every game. That matrix is the remaining DoD of GUX-00 and must be filled from
-the code before GUX-14 and GUX-15 rely on it. No row here is a guess: items without a source are left out.
+The matrix of phase → visible keyboard → actor → chat or DM → error → transition for all eight games is in
+`docs/GAME_UX_PHASE_MATRIX.md`. It is read from code at `dev` a9bc99d, with file and line citations on every row.
+Its section 5 lists four divergences found while reading (D1–D4) and three observations. They are follow-up
+candidates, not fixed in GUX-00.
