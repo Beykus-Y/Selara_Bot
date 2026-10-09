@@ -697,7 +697,7 @@ def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         return None
 
     builder = InlineKeyboardBuilder()
-    revision = len(game.whoami_history)
+    revision = int(game.phase_started_at.timestamp() * 1_000_000)
     builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:{revision}:yes")
     builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:{revision}:no")
     builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:{revision}:unknown")
@@ -5934,7 +5934,7 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     _, game_id, revision_raw, answer_code = parts
-    expected_history_size = int(revision_raw)
+    expected_question_version = int(revision_raw)
     if answer_code not in {"yes", "no", "unknown", "irrelevant"}:
         await query.answer("Некорректный ответ", show_alert=False)
         return
@@ -5960,7 +5960,7 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         responder_user_id=query.from_user.id,
         answer_code=answer_code,  # type: ignore[arg-type]
-        expected_history_size=expected_history_size,
+        expected_question_version=expected_question_version,
         expected_chat_id=query.message.chat.id,
     )
     if error:
