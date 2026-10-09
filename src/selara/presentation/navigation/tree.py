@@ -30,7 +30,7 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="✨ Возможности Selara",
         summary="Выберите раздел. Внутри каждого раздела — функции и примеры.",
         parent=None,
-        children=("games", "economy", "social", "pets", "ai", "profile", "admin", "subscriptions", "troubleshooting"),
+        children=("games", "economy", "social", "pets", "ai", "profile", "admin", "subscriptions"),
     ),
     NavNode(
         key="games",
@@ -246,13 +246,14 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="💎 Подписки и поддержка",
         summary="Подписки Personal и Chat AI, обратная связь.",
         parent=ROOT_KEY,
+        children=("troubleshooting",),
         spec_keys=("subscriptions_selara", "user_feedback"),
     ),
     NavNode(
         key="troubleshooting",
         title="🧰 Почему не работает?",
         summary="Короткая диагностика команд, прав, лимитов и личных сообщений.",
-        parent=ROOT_KEY,
+        parent="subscriptions",
         spec_keys=("user_feedback",),
     ),
 )
