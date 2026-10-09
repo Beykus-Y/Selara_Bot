@@ -4067,11 +4067,11 @@ class GameStore:
                 return game, None, "Это не мафия"
             if game.status != "started" or game.phase != "night":
                 return game, None, "Сейчас не фаза ночи"
-                if expected_round_no is not None and game.round_no != expected_round_no:
+            if expected_round_no is not None and game.round_no != expected_round_no:
                 return game, None, "Таймер предыдущего раунда не применён"
             if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
                 return game, None, "Таймер предыдущей фазы не применён"
-        alive = set(game.alive_player_ids)
+            alive = set(game.alive_player_ids)
             blocked_actors = {
                 target_user_id
                 for actor_user_id, target_user_id in game.escort_blocks.items()
