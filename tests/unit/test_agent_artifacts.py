@@ -434,3 +434,21 @@ async def test_render_real_svg_with_standard_text_attributes():
         '<rect x="0" y="0" width="400" height="60" fill="#5577cc"/>'
         '<text x="10" y="100" font-size="24" font-family="sans-serif" font-weight="bold">42 сообщения</text></svg>'], '')
     assert result['dimensions'][0]['width'] == 1600
+
+
+async def test_last_confirmed_artifact_is_owner_topic_scoped(context):
+    older = await artifact(context)
+    older.delivery = {"complete": True, "message_ids": [10]}
+    await context.repository.session.commit()
+    draft = await artifact(context)
+    draft.delivery = {}
+    await context.repository.session.commit()
+    found = await context.repository.latest_delivered(chat_id=1, thread_id=7, creator_id=10)
+    assert found.id == older.id
+    for chat_id, thread_id, creator_id in [(2, 7, 10), (1, 8, 10), (1, 7, 11)]:
+        assert await context.repository.latest_delivered(
+            chat_id=chat_id, thread_id=thread_id, creator_id=creator_id,
+        ) is None
+    older.delivery = {"complete": True, "message_ids": [10], "text_only": True}
+    await context.repository.session.commit()
+    assert await context.repository.latest_delivered(chat_id=1, thread_id=7, creator_id=10) is None
