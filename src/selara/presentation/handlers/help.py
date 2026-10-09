@@ -370,6 +370,41 @@ def _node_keyboard(node: NavNode) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _requested_help_page(data: str | None) -> tuple[str, int]:
+    """Parse public per-page callbacks, preserving old help: and nv: links."""
+    if data and data.startswith("nvp:"):
+        payload = data[len("nvp:"):]
+        key, separator, raw_page = payload.rpartition(":")
+        if separator and raw_page.isdigit():
+            try:
+                get_nav_node(key)
+            except KeyError:
+                pass
+            else:
+                return key, int(raw_page)
+        return ROOT_KEY, 0
+    return _resolve_node_key(data), 0
+
+
+def _page_keyboard(key: str, page_index: int, page_count: int) -> InlineKeyboardMarkup:
+    """Keep navigation in a single editable message, including long screens."""
+    keyboard = _node_keyboard(get_nav_node(key))
+    if page_count <= 1:
+        return keyboard
+    row: list[InlineKeyboardButton] = []
+    if page_index:
+        row.append(InlineKeyboardButton(
+            text="◀️ Предыдущая",
+            callback_data=f"nvp:{key}:{page_index - 1}",
+        ))
+    if page_index < page_count - 1:
+        row.append(InlineKeyboardButton(
+            text="Следующая ▶️",
+            callback_data=f"nvp:{key}:{page_index + 1}",
+        ))
+    return InlineKeyboardMarkup(inline_keyboard=[row, *keyboard.inline_keyboard])
+
+
 def _render_screen(settings: Settings, key: str) -> tuple[list[str], InlineKeyboardMarkup]:
     """Pages for a node and its keyboard. Long screens are split; only the last page carries the keyboard."""
     node = get_nav_node(key)
@@ -377,10 +412,11 @@ def _render_screen(settings: Settings, key: str) -> tuple[list[str], InlineKeybo
 
 
 async def send_help(message: Message, settings: Settings) -> None:
-    pages, keyboard = _render_screen(settings, ROOT_KEY)
-    for index, page in enumerate(pages):
-        is_last = index == len(pages) - 1
-        await message.answer(page, parse_mode="HTML", reply_markup=keyboard if is_last else None)
+    pages, _ = _render_screen(settings, ROOT_KEY)
+    await message.answer(
+        pages[0], parse_mode="HTML",
+        reply_markup=_page_keyboard(ROOT_KEY, 0, len(pages)),
+    )
 
 
 @router.message(Command("help"))
@@ -388,7 +424,11 @@ async def help_command(message: Message, settings: Settings) -> None:
     await send_help(message, settings)
 
 
-@router.callback_query(F.data.startswith("help:") | F.data.startswith(f"{NAV_CALLBACK_PREFIX}:"))
+@router.callback_query(
+    F.data.startswith("help:")
+    | F.data.startswith(f"{NAV_CALLBACK_PREFIX}:")
+    | F.data.startswith("nvp:")
+)
 async def help_callback(query: CallbackQuery, settings: Settings) -> None:
     if query.data is None or query.message is None:
         try:
@@ -397,15 +437,17 @@ async def help_callback(query: CallbackQuery, settings: Settings) -> None:
             pass
         return
 
-    pages, keyboard = _render_screen(settings, _resolve_node_key(query.data))
+    key, requested_page = _requested_help_page(query.data)
+    pages, _ = _render_screen(settings, key)
+    page_index = min(requested_page, len(pages) - 1)
     try:
-        await query.message.edit_text(pages[0], parse_mode="HTML", reply_markup=keyboard if len(pages) == 1 else None)
+        await query.message.edit_text(
+            pages[page_index], parse_mode="HTML",
+            reply_markup=_page_keyboard(key, page_index, len(pages)),
+        )
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc).lower():
             raise
-    for index, page in enumerate(pages[1:], start=1):
-        is_last = index == len(pages) - 1
-        await query.message.answer(page, parse_mode="HTML", reply_markup=keyboard if is_last else None)
     try:
         await query.answer()
     except TelegramBadRequest:
