@@ -5322,11 +5322,25 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Старое голосование. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, voted_count, total_players, vote_tally = await GAME_STORE.bred_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5376,6 +5390,8 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5422,11 +5438,27 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это старая рука. Откройте /role для актуальных карт.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор карточек", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or (
+        query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != current_game.chat_id
+    ):
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "private_answers" or current_game.round_no != expected_round:
+        await query.answer("Эта рука уже неактуальна. Откройте /role.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5485,6 +5517,8 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         game_id=game_id,
         user_id=query.from_user.id,
         card_indexes=selected_indexes,
+        expected_round_no=expected_round,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5542,11 +5576,25 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Голосование прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5597,6 +5645,8 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5852,11 +5902,15 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Этот вопрос устарел. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, answer_code = parts
+    _, game_id, revision_raw, answer_code = parts
+    expected_history_size = int(revision_raw)
     if answer_code not in {"yes", "no", "unknown", "irrelevant"}:
         await query.answer("Некорректный ответ", show_alert=False)
         return
@@ -5864,6 +5918,9 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
     current_game = await GAME_STORE.get_game(game_id)
     if current_game is None:
         await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
         return
     await _refresh_game_player_label(
         activity_repo,
@@ -5879,6 +5936,8 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         responder_user_id=query.from_user.id,
         answer_code=answer_code,  # type: ignore[arg-type]
+        expected_history_size=expected_history_size,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
