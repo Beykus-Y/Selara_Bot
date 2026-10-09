@@ -2166,6 +2166,15 @@ def _gacha_economy_mode(*, chat_type: str, chat_settings: ChatSettings) -> str:
     return "global"
 
 
+def _gacha_coin_payment_context(*, economy_mode: str, chat_id: int | None) -> str:
+    """Explain *which* bot coin balance pays for banner currency in this UI."""
+    if chat_id is not None and economy_mode == "local":
+        return "🪙 Покупка валюты списывает монеты <b>этой группы</b> (локальная экономика)."
+    if chat_id is not None:
+        return "🪙 Покупка валюты списывает <b>общий баланс монет</b> (глобальная экономика группы)."
+    return "🪙 Покупка валюты списывает <b>общий баланс монет</b> (личный чат)."
+
+
 def _gacha_economy_chat_id(*, chat_type: str, chat_id: int) -> int | None:
     if chat_type in {"group", "supergroup"}:
         return chat_id
@@ -2552,6 +2561,7 @@ async def _build_gacha_info_view(
         ),
         "📖 Справка по гаче: /help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR.",
     ]
+    sections.append(_gacha_coin_payment_context(economy_mode=economy_mode, chat_id=chat_id))
     if coin_balance is not None:
         sections.append(f"🪙 Монеты бота: <b>{_format_gacha_number(coin_balance)}</b>")
     available_banners: list[str] = []
