@@ -20,7 +20,7 @@ from selara.infrastructure.llm.skill_catalog import load_catalog
 from selara.infrastructure.llm.tools import ToolCall, ToolResult, _err, _ok, register_tool
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html, split_telegram_html
 
-SKILL_VERSION = 4  # the artifacts skill file version (skills/artifacts/SKILL.md)
+SKILL_VERSION = 5  # the artifacts skill file version (skills/artifacts/SKILL.md)
 SKILLS = {"artifacts": "Инфографика, таблицы, графики и схемы как фото в Telegram, дополняющие текст."}
 
 
