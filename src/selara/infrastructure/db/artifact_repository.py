@@ -43,13 +43,17 @@ class ArtifactRepository:
     async def latest_delivered(self, *, chat_id: int, thread_id: int | None,
                                creator_id: int) -> LlmArtifactModel | None:
         """Latest confirmed photo in a specific user's chat and topic, never an unsent draft."""
-        rows = await self.session.scalars(
-            select(LlmArtifactModel).where(
+        # Images are stored as large base64 JSON payloads. Scan only small metadata,
+        # then load the chosen row once; never hydrate up to 30 images into memory.
+        rows = await self.session.execute(
+            select(LlmArtifactModel.id, LlmArtifactModel.delivery).where(
                 LlmArtifactModel.chat_id == chat_id,
                 LlmArtifactModel.thread_id == thread_id,
                 LlmArtifactModel.creator_id == creator_id,
                 LlmArtifactModel.expires_at > datetime.now(timezone.utc),
             ).order_by(LlmArtifactModel.expires_at.desc(), LlmArtifactModel.id.desc()).limit(30)
         )
-        return next((row for row in rows if row.delivery.get("complete")
-                     and not row.delivery.get("text_only") and row.delivery.get("message_ids")), None)
+        for artifact_id, delivery in rows:
+            if delivery.get("complete") and not delivery.get("text_only") and delivery.get("message_ids"):
+                return await self.get(artifact_id=artifact_id, chat_id=chat_id, thread_id=thread_id)
+        return None
