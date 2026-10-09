@@ -3729,7 +3729,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             if game.status != "started" or (
                 prefix != "gwho" and game.round_no != int(parts[2])
             ) or (
-                prefix == "gwho" and len(game.whoami_history) != int(parts[2])
+                prefix == "gwho" and int(game.phase_started_at.timestamp() * 1_000_000) != int(parts[2])
             ):
                 return False, "Действие устарело. Обновите текущую партию."
 
@@ -4261,7 +4261,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 responder_user_id=user.telegram_user_id,
                 answer_code=payload,  # type: ignore[arg-type]
-                expected_history_size=int(parts[2]),
+                expected_question_version=int(parts[2]),
                 expected_chat_id=game.chat_id,
             )
             if error:
