@@ -605,7 +605,12 @@ def _build_private_day_vote_keyboard(game: GroupGame, *, actor_user_id: int) -> 
     if actor_user_id not in game.alive_player_ids:
         return None
 
-    alive_items = sorted(game.alive_player_ids)
+    # Unlike the shared group board, a private keyboard can be personalized.
+    # Never offer targets rejected by the existing server-side voting rules.
+    alive_items = sorted(
+        uid for uid in game.alive_player_ids
+        if uid != actor_user_id and uid != game.day_vote_immune_user_id
+    )
     if not alive_items:
         return None
 
