@@ -599,7 +599,7 @@ async def test_web_bred_category_pick_uses_board_only_and_refreshes_label(monkey
         feed_mock = web_app_module.game_router_module._send_game_feed_event
         response = await client.post(
             "/app/games/action",
-            data={"callback_data": f"gbredcat:{game.game_id}:0"},
+            data={"callback_data": f"gbredcat:{game.game_id}:{game.round_no}:0"},
             headers={"accept": "application/json"},
         )
         updated_game = await store.get_game(game.game_id)
