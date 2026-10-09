@@ -220,3 +220,10 @@ def test_bunker_6_8_12_player_boards_hide_unrevealed_characteristics() -> None:
         assert "PublicProfession2" not in board
         assert all(f"HiddenHealth{uid}" not in board for uid in game.players)
         assert len(board) < 4096  # initial reveal stays inside Telegram limit
+
+def test_mafia_private_day_vote_does_not_offer_self_or_immune_player() -> None:
+    game = active("mafia", "day_vote")
+    game.day_vote_immune_user_id = 3
+    markup = ui._build_private_day_vote_keyboard(game, actor_user_id=1)
+    assert markup is not None
+    assert callbacks(markup) == ["gmvote:g1011:3:2"]
