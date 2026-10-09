@@ -6270,6 +6270,17 @@ async def mafia_day_vote_callback(query: CallbackQuery, bot: Bot, chat_settings:
         await query.answer("Некорректная цель", show_alert=False)
         return
 
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or (
+        query.message.chat.type in {"group", "supergroup"}
+        and query.message.chat.id != current_game.chat_id
+    ):
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+
     target_user_id = int(target_raw)
     game, previous_target_user_id, error = await GAME_STORE.mafia_register_day_vote(
         game_id=game_id,
