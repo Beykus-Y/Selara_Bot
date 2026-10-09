@@ -41,7 +41,7 @@ The contract test pins this list, so any new phase must update this document in 
 | Shared board separates participant actions from manager controls, `/gameboard` | [fixed] | #197 (GUX-03) |
 | Dice, Quiz, Spy UX and versioned quiz buttons | [fixed] | #199 (GUX-04–06) |
 | WhoAmI, Bredovukha, Zlobcards UX and versioned callbacks | [fixed] | #200 (GUX-07–09) |
-| Bunker and Mafia stale-callback guards and timer races | [confirmed] open in dev; fix is in #201 (Draft) | #201 (GUX-10/11) |
+| Bunker and Mafia stale-callback guards and timer races | [fixed] merged into dev after this snapshot, at 1be7ac7 | #201 (GUX-10/11) |
 | Bunker public board redesign | [owner] deliberately not done before iOS/Android screenshots at 6/8/12 players | #194 comment |
 | Gacha purchase and sale UX, subscription prompt, owner checks | [fixed] | #195, #198, GUX-13 tests |
 | Telegram iOS/Android smoke for all eight games | [confirmed] not performed, no device access in the coding environment | GUX-16 |
