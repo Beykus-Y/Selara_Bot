@@ -476,6 +476,29 @@ async def test_tool_explanation_is_not_mistaken_for_an_unexecuted_promise():
     assert turn.text.startswith("Для графики используется")
 
 
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Я не вызову read_skill, потому что это не нужно.",
+        "Я никогда не запущу create_artifact без разрешения.",
+        "Пример плохой реплики: «Сейчас вызову read_skill».",
+        'Не следует писать "Сейчас вызову read_skill" вместо реального вызова.',
+        "Неподходящий пример: `Сейчас вызову send_artifact`.",
+    ],
+)
+async def test_refusals_and_quoted_examples_are_not_unfulfilled_tool_promises(reply: str):
+    llm = ScriptedLlm(_response(content=reply))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "system", "content": "s"}],
+        run=_run(web=False, artifacts=True),
+    )
+    assert len(llm.calls) == 1
+    assert turn.text == reply
+
+
+
+
 # --- editing source without vision -------------------------------------------------------------
 
 
