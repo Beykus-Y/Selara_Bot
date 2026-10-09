@@ -710,7 +710,7 @@ async def test_web_zlob_vote_auto_resolves_round_when_all_votes_received(monkeyp
 
         response = await client.post(
             "/app/games/action",
-            data={"callback_data": f"gzlobv:{started_game.game_id}:1"},
+            data={"callback_data": f"gzlobv:{started_game.game_id}:{started_game.round_no}:1"},
             headers={"accept": "application/json"},
         )
         updated_game = await store.get_game(started_game.game_id)
