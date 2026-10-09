@@ -582,7 +582,14 @@ def _build_mafia_day_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | Non
     if game.kind != "mafia" or game.phase != "day_vote" or game.status != "started":
         return None
 
-    alive_items = _sorted_player_ids(game, game.alive_player_ids)
+    # Shared buttons cannot know which user will click. However a
+    # day-vote-immune player is an invalid target for *everyone*.
+    # Exclude that target, leaving the per-voter self-target check in store.
+    eligible_ids = (
+        uid for uid in game.alive_player_ids
+        if uid != game.day_vote_immune_user_id
+    )
+    alive_items = _sorted_player_ids(game, eligible_ids)
     if not alive_items:
         return None
 
@@ -1872,6 +1879,9 @@ def _render_game_text(
             voted_count = len({voter for voter in game.day_votes if voter in game.alive_player_ids})
             lines.append(f"<b>Сейчас:</b> дневное голосование ({_format_duration(chat_settings.mafia_vote_seconds)}).")
             lines.append("<b>Что делать:</b> выберите кандидата кнопками ниже или в ЛС-карточке.")
+            lines.append("<i>За себя голосовать нельзя; в ЛС показаны только разрешённые лично вам цели.</i>")
+            if game.day_vote_immune_user_id is not None:
+                lines.append("<i>Защищённая цель недоступна для голосования и не показывается кнопкой.</i>")
             lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.alive_player_ids)}")
             lines.append(f"<b>Под ударом:</b> {_render_vote_leaders(game, _mafia_day_vote_counts(game))}")
             _append_waiting_line(lines, game, pool=game.alive_player_ids, answered=game.day_votes)
