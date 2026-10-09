@@ -12,7 +12,7 @@ def game(kind: str, phase: str = "private_answers", **extra) -> GroupGame:
     return GroupGame(
         game_id="g7", kind=kind, chat_id=-100, chat_title="Group",
         owner_user_id=1, players={1: "Alice", 2: "Bob", 3: "Cara"},
-        status="started", phase=phase, **extra,
+        status="started", phase=phase, round_no=1, **extra,
     )
 
 
