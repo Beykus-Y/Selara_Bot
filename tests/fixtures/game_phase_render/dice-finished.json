@@ -1,0 +1,28 @@
+{
+  "text_lines": [
+    "<b>Дуэль кубиков</b>",
+    "<b>Этап:</b> Завершено",
+    "<b>Игроков:</b> 2",
+    "<b>Сейчас:</b> все броски завершены. Ниже итоговая таблица.",
+    "",
+    "<b>Бросили:</b> 2/2",
+    "<b>Итоговые броски:</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>6</code>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — <code>3</code>",
+    "",
+    "<b>Итог:</b> Победа &lt;&amp;&gt;"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🔁 Ещё раз",
+          "callback_data": "game:rematch:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

@@ -1,0 +1,63 @@
+{
+  "text_lines": [
+    "<b>Бункер</b>",
+    "<b>Этап:</b> Бункер: раскрытие",
+    "<b>Игроков:</b> 6",
+    "<b>Раунд:</b> 2",
+    "<b>Катастрофа:</b> Метеорит &lt;&amp;&gt;",
+    "<b>Условия бункера:</b> Воды на год",
+    "<b>Мест в бункере:</b> 3",
+    "<b>Живых:</b> 6",
+    "<b>Сейчас:</b> раскрытие характеристик, ход Аня &lt;&amp;&gt; 🦊.",
+    "<b>Что делать:</b> ждём выбор Аня &lt;&amp;&gt; 🦊 в ЛС; остальные пока не ходят.",
+    "",
+    "<b>Живые (6):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "4. <a href=\"tg://user?id=4\">Игрок 4</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "5. <a href=\"tg://user?id=5\">Игрок 5</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "6. <a href=\"tg://user?id=6\">Игрок 6</a> — 1/9: Профессия: Врач &lt;&amp;&gt;",
+    "",
+    "<b>Выбывшие (0):</b>",
+    "- нет"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🔐 Действие в ЛС",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "⏭ Пропустить ход",
+          "callback_data": "game:adv:fixture:bunker_reveal:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

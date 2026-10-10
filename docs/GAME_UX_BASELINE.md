@@ -56,3 +56,31 @@ The matrix of phase → visible keyboard → actor → chat or DM → error → 
 `docs/GAME_UX_PHASE_MATRIX.md`. It is read from code at `dev` a9bc99d, with file and line citations on every row.
 Its section 5 lists four divergences found while reading (D1–D4) and three observations. They are follow-up
 candidates, not fixed in GUX-00.
+
+## 5. Stable post-change public presentation fixtures
+
+`tests/unit/test_game_phase_render_fixtures.py` pins 32 deterministic samples in
+`tests/fixtures/game_phase_render/`: lobby and finished for each of the eight
+games, plus every game-specific active phase. The inventory test checks all
+eight launchable kinds and all fourteen `GamePhase` values, and rejects missing
+or extra fixture files.
+
+Each JSON file records complete HTML text (as readable lines), public keyboard
+rows, callback payloads and deep links, and the separate manager keyboard.
+Mafia's execution-confirmation feed text and keyboard are pinned separately
+because they are not rendered on the shared board. Samples include partial
+progress, scores, HTML-special characters and Unicode labels. Sentinel private
+values must stay absent from active public boards; callback payloads must fit
+Telegram's 64-byte UTF-8 limit.
+
+These fixtures capture the **current post-change contract**, not the missing
+historical pre-GUX-01 baseline. They do not cover every private role/hand, player
+count, error path, or prove Telegram iOS/Android readability. Existing focused
+private-keyboard and callback tests still apply; GUX-16 real-client screenshots
+and walkthroughs remain required before closing #194.
+
+When an intentional presentation change causes a failure, review the actual
+text/keyboard diff and update only the affected JSON fixture in the same PR.
+The test never rewrites expectations. To regenerate a reviewed sample locally,
+use `render_sample(kind, phase)` from the test module and serialize its result
+with `json.dumps(..., ensure_ascii=False, indent=2)` plus a trailing newline.

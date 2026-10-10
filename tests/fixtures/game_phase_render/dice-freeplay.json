@@ -1,0 +1,47 @@
+{
+  "text_lines": [
+    "<b>Дуэль кубиков</b>",
+    "<b>Этап:</b> Свободная игра",
+    "<b>Игроков:</b> 2",
+    "<b>Сейчас:</b> все бросают кубик, один бросок на игрока.",
+    "<b>Что делать:</b> нажмите «🎲 Бросить» один раз; повторный бросок недоступен.",
+    "",
+    "<b>Бросили:</b> 1/2",
+    "<b>Текущие броски:</b>",
+    "<b>Пока лидирует:</b> Аня &lt;&amp;&gt; 🦊 (6)",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>6</code>",
+    "<b>Ждём бросок:</b> Игрок 2"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🎲 Бросить",
+          "callback_data": "gdice:fixture:roll"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

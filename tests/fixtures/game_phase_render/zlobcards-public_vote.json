@@ -1,0 +1,81 @@
+{
+  "text_lines": [
+    "<b>500 Злобных Карт</b>",
+    "<b>Этап:</b> Голосование",
+    "<b>Игроков:</b> 3",
+    "<b>Раунд:</b> 2/8",
+    "<b>Цель по очкам:</b> 7",
+    "<b>Сейчас:</b> голосование за лучший анонимный вариант.",
+    "<b>Что делать:</b> голосуйте кнопкой за лучший вариант.",
+    "",
+    "<b>Раунд 2/8</b>",
+    "<b>Тема:</b> случайная тема",
+    "<b>Чёрная карточка (1):</b>",
+    "Мой секрет — ____ &lt;&amp;&gt;.",
+    "<i>Голосуйте за лучший анонимный ответ, кроме собственного. Выбор можно поменять до закрытия раунда; авторы будут раскрыты после подсчёта.</i>",
+    "<b>Все варианты (буквы соответствуют кнопкам):</b>",
+    "A. Первый &lt;&amp;&gt;",
+    "B. Второй",
+    "C. Третий",
+    "<b>Прогресс:</b> 1/3 голосов",
+    "<b>Лидер:</b> B (1)",
+    "<b>Ждём:</b> Игрок 2 • Игрок 3",
+    "",
+    "<b>Счёт:</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>2</code>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — <code>1</code>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a> — <code>0</code>"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "A. Первый <&>",
+          "callback_data": "gzlobv:fixture:2:0"
+        },
+        {
+          "text": "B. Второй",
+          "callback_data": "gzlobv:fixture:2:1"
+        }
+      ],
+      [
+        {
+          "text": "C. Третий",
+          "callback_data": "gzlobv:fixture:2:2"
+        },
+        {
+          "text": "🗳 1/3",
+          "callback_data": "gzlobv:fixture:2:noop"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "📣 Закрыть раунд",
+          "callback_data": "game:adv:fixture:public_vote:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

@@ -1,0 +1,72 @@
+{
+  "text_lines": [
+    "<b>Бредовуха</b>",
+    "<b>Этап:</b> Выбор категории",
+    "<b>Игроков:</b> 3",
+    "<b>Раунд:</b> 2/5",
+    "<i>Очки: +2 за правду, +1 за каждого, кто попался на вашу ложь.</i>",
+    "<b>Сейчас:</b> выбор темы раунда.",
+    "<b>Что делать:</b> выбранный игрок жмёт тему кнопками ниже.",
+    "",
+    "<b>Раунд 2/5</b>",
+    "<b>Категорию выбирает:</b> Аня &lt;&amp;&gt; 🦊",
+    "<i>Тему выбирает назначенный игрок; после выбора остальные отправляют ложные ответы в ЛС.</i>",
+    "",
+    "<b>Счёт:</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>2</code>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — <code>1</code>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a> — <code>0</code>"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "📚 Наука",
+          "callback_data": "gbredcat:fixture:2:0"
+        },
+        {
+          "text": "📚 История",
+          "callback_data": "gbredcat:fixture:2:1"
+        }
+      ],
+      [
+        {
+          "text": "📚 Спорт",
+          "callback_data": "gbredcat:fixture:2:2"
+        },
+        {
+          "text": "🎯 Ход: Аня <&> 🦊",
+          "callback_data": "gbredcat:fixture:2:noop"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🎲 Случайная тема",
+          "callback_data": "game:adv:fixture:category_pick:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

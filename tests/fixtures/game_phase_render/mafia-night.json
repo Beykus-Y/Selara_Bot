@@ -1,0 +1,55 @@
+{
+  "text_lines": [
+    "<b>Мини-мафия</b>",
+    "<b>Этап:</b> Ночь",
+    "<b>Игроков:</b> 4",
+    "<b>Раунд:</b> 2",
+    "<b>Сейчас:</b> ночь (1м 30с).",
+    "<b>Что делать:</b> роли с ночным действием ходят в ЛС; остальные ждут рассвета.",
+    "",
+    "<b>В игре (4):</b> Аня &lt;&amp;&gt; 🦊 • Игрок 2 • Игрок 3 • Игрок 4",
+    "<b>Выбыли (0):</b> —"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🕵️ Моя роль",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        },
+        {
+          "text": "🌙 Ночной ход",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🌅 Завершить ночь",
+          "callback_data": "game:adv:fixture:night:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

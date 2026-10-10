@@ -1,0 +1,78 @@
+{
+  "text_lines": [
+    "<b>Мини-мафия</b>",
+    "<b>Этап:</b> День: подтверждение казни",
+    "<b>Игроков:</b> 4",
+    "<b>Раунд:</b> 2",
+    "<b>Сейчас:</b> подтверждение казни (1м).",
+    "<b>Что делать:</b> голосуйте за/против казни кандидата кнопками ниже.",
+    "<b>Кандидат:</b> Игрок 2",
+    "<b>Голоса:</b> ✅ 1 • ❌ 0 • 🗳 1/4",
+    "<b>Ждём:</b> Игрок 2 • Игрок 3 • Игрок 4",
+    "",
+    "<b>В игре (4):</b> Аня &lt;&amp;&gt; 🦊 • Игрок 2 • Игрок 3 • Игрок 4",
+    "<b>Выбыли (0):</b> —"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🕵️ Моя роль",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "☠️ Закрыть казнь",
+          "callback_data": "game:adv:fixture:day_execution_confirm:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": [
+    "<b>Подтверждение казни</b>",
+    "<b>Кандидат:</b> Игрок 2",
+    "<i>Стол решает: казнить или оставить в игре.</i>",
+    "<b>Голоса:</b> ✅ 1 • ❌ 0 • 🗳 1/4"
+  ],
+  "execution_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "✅ Да (1)",
+          "callback_data": "gmconfirm:fixture:2:yes"
+        },
+        {
+          "text": "❌ Нет (0)",
+          "callback_data": "gmconfirm:fixture:2:no"
+        }
+      ],
+      [
+        {
+          "text": "🗳 1/4",
+          "callback_data": "gmconfirm:fixture:2:noop"
+        }
+      ]
+    ]
+  }
+}
