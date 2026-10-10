@@ -1851,6 +1851,19 @@ async def test_scheduled_delivery_reservation_and_twenty_hour_gap_are_atomic() -
             assert token is not None
             await session.commit()
 
+        # Do not pay for a new scheduled generation while the previous date
+        # still owns its live delivery lease (even before status='sent').
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            while_sending = await repo.claim_daily_summary_run(
+                chat=chat, summary_date=(base + timedelta(days=2)).date(),
+                window_from=base, window_to=base + timedelta(days=1),
+                trigger="scheduled", lease_seconds=1800,
+                now=at + timedelta(seconds=1),
+            )
+            assert while_sending is None
+            await session.rollback()
+
         # Distinct summary_date does not bypass the live delivery claim.
         async with session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
