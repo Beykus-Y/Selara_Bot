@@ -346,6 +346,7 @@ async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch
         pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
     await context.repository.session.commit()
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        trigger="scheduled", summary_date=claimed_at.date(), window_to=claimed_at,
         claimed_at=claimed_at, lease_until=datetime.now(timezone.utc) + timedelta(minutes=30),
         generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
         claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
@@ -365,6 +366,7 @@ async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
     from selara.presentation.daily_summary import _send_and_mark
     claimed_at = datetime.now(timezone.utc)
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        trigger="scheduled", summary_date=claimed_at.date(), window_to=claimed_at,
         claimed_at=claimed_at, lease_until=claimed_at + timedelta(minutes=30),
         generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
         claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
