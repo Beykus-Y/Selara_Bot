@@ -1927,3 +1927,71 @@ async def test_scheduled_delivery_reservation_and_twenty_hour_gap_are_atomic() -
             await session.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(monkeypatch) -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(
+            session_factory, message_count=0, min_messages=0, daily_summary_hour=10,
+        )
+        due = datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            session.add(DailySummaryRunModel(
+                chat_id=_CHAT_ID, summary_date=due.date(), trigger="scheduled",
+                window_from=due - timedelta(days=1), window_to=due,
+                status="generated", generated_text="old generated report",
+                claimed_at=due, lease_until=due,
+            ))
+            await session.commit()
+        run_mock = AsyncMock(return_value=SimpleNamespace(sent=False))
+        monkeypatch.setattr(daily_summary_module, "attempt_daily_summary_run", run_mock)
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=_fake_bot(), session_factory=session_factory,
+            llm_client=_FakeLlmClient(), settings=_test_settings(),
+        )
+        # A fresh generated report is still recoverable within the chosen 6h.
+        await scheduler.run_once(now=due + timedelta(hours=5))
+        run_mock.assert_awaited_once()
+        run_mock.reset_mock()
+
+        # Previous generated/send_failed work is no longer published after 6h,
+        # even though it has a valid summary_date and the normal claim exists.
+        assert await scheduler.run_once(now=due + timedelta(hours=7)) == 0
+        run_mock.assert_not_awaited()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_direct_scheduled_delivery_checks_staleness_before_telegram_send() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=0)
+        due = datetime.now(timezone.utc) - timedelta(hours=7)
+        async with session_factory() as session:
+            run = DailySummaryRunModel(
+                chat_id=_CHAT_ID, summary_date=due.date(), trigger="scheduled",
+                window_from=due - timedelta(days=1), window_to=due,
+                status="generated", generated_text="late report must not send",
+                claimed_at=due, lease_until=due,
+            )
+            session.add(run)
+            await session.commit()
+            run_id, claimed_at = run.id, run.claimed_at
+
+        bot = _fake_bot()
+        delivered = await daily_summary_module._send_and_mark(
+            bot=bot, session_factory=session_factory,
+            chat_id=_CHAT_ID, run_id=run_id, claimed_at=claimed_at,
+        )
+        assert delivered is False
+        bot.send_message.assert_not_awaited()
+        async with session_factory() as session:
+            persisted = await session.get(DailySummaryRunModel, run_id)
+            assert persisted.status == "generated"
+    finally:
+        await engine.dispose()
