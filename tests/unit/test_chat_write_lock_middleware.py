@@ -184,8 +184,9 @@ async def test_locked_chat_passes_empty_slash_to_handler(raw: str) -> None:
     handler = AsyncMock(return_value="handled")
     message = _message(raw)
 
-    result = await middleware(handler, message, {"chat_settings": _locked_settings()})
+    data = {"chat_settings": _locked_settings()}
+    result = await middleware(handler, message, data)
 
     assert result == "handled"
-    handler.assert_awaited_once_with(message, {"chat_settings": _locked_settings()})
+    handler.assert_awaited_once_with(message, data)
     message.answer.assert_not_awaited()
