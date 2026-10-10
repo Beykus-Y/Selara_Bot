@@ -163,3 +163,110 @@ async def test_quiz_every_round_correctness_and_stale_question_guards() -> None:
     assert "u1" in (game.winner_text or "")
     _, result, error = await store.quiz_resolve_round(game_id=game.game_id, force=True)
     assert result is None and "активной фазе" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("players", [4, 10])
+async def test_dice_four_and_ten_player_lifecycles(monkeypatch, players: int) -> None:
+    """Every actual participant rolls once; only the final roll ends the game."""
+    store = GameStore()
+    game = await _start_game(store, kind="dice", players=players)
+    rolls = iter([6] + [1] * (players - 1))
+    monkeypatch.setattr("selara.presentation.game_state.random.randint", lambda lo, hi: next(rolls))
+
+    _, rejected, error = await store.dice_register_roll(
+        game_id=game.game_id, user_id=1, expected_chat_id=-200,
+    )
+    assert rejected is None and error == "Эта кнопка из другого чата"
+
+    for user_id in range(1, players + 1):
+        current, result, error = await store.dice_register_roll(
+            game_id=game.game_id, user_id=user_id, expected_chat_id=-100,
+        )
+        assert error is None and current is game and result is not None
+        assert result.rolled_count == user_id
+        assert result.total_players == players
+        assert result.finished is (user_id == players)
+        if user_id < players:
+            _, repeat, error = await store.dice_register_roll(
+                game_id=game.game_id, user_id=user_id,
+            )
+            assert repeat is None and "уже бросили" in error
+            assert game.status == "started"
+
+    assert len(game.dice_scores) == players
+    assert game.status == "finished" and game.phase == "finished"
+    assert "u1" in (game.winner_text or "")
+    _, stale, error = await store.dice_register_roll(
+        game_id=game.game_id, user_id=1,
+    )
+    assert stale is None and "завершена" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("players", [5, 10])
+async def test_spy_five_and_ten_player_majority_resolution(players: int) -> None:
+    """The larger lobbies require an actual majority, not just two votes."""
+    store = GameStore()
+    game = await _start_game(store, kind="spy", players=players)
+    spies = [uid for uid, role in game.roles.items() if role == "Шпион"]
+    assert len(spies) == (1 if players <= 7 else 2)
+    target = spies[0]
+    voters = list(game.players)
+    majority = players // 2 + 1
+
+    _, resolution, _, error = await store.spy_register_vote(
+        game_id=game.game_id, voter_user_id=voters[0],
+        target_user_id=target, expected_chat_id=-200,
+    )
+    assert resolution is None and error == "Эта кнопка из другого чата"
+    assert not game.spy_votes
+
+    for index, voter in enumerate(voters[:majority], start=1):
+        current, resolution, previous, error = await store.spy_register_vote(
+            game_id=game.game_id, voter_user_id=voter,
+            target_user_id=target, expected_chat_id=-100,
+        )
+        assert error is None and current is game and previous is None
+        if index < majority:
+            assert resolution is None and game.phase == "freeplay"
+        else:
+            assert resolution is not None
+            assert resolution.candidate_user_id == target
+            assert resolution.candidate_votes == majority
+            assert resolution.candidate_is_spy is True
+            assert resolution.voted_count == majority
+
+    assert game.status == "finished" and game.phase == "finished"
+    assert "Победа мирных" in (game.winner_text or "")
+    _, stale, _, error = await store.spy_register_vote(
+        game_id=game.game_id, voter_user_id=voters[-1],
+        target_user_id=target,
+    )
+    assert stale is None and "завершена" in error
+
+
+@pytest.mark.asyncio
+async def test_spy_ten_player_split_vote_tie_finishes_only_after_all_votes() -> None:
+    """A 5/5 split never reaches six-vote majority; spy wins on the final tie."""
+    store = GameStore()
+    game = await _start_game(store, kind="spy", players=10)
+    target_a, target_b = list(game.players)[:2]
+    voters = list(game.players)
+
+    for index, voter in enumerate(voters, start=1):
+        target = target_a if index % 2 else target_b
+        current, resolution, previous, error = await store.spy_register_vote(
+            game_id=game.game_id, voter_user_id=voter, target_user_id=target,
+        )
+        assert error is None and current is game and previous is None
+        if index < 10:
+            assert resolution is None and game.phase == "freeplay"
+        else:
+            assert resolution is not None
+            assert resolution.tie is True
+            assert resolution.candidate_user_id is None
+            assert resolution.candidate_votes == 5
+
+    assert game.status == "finished" and game.phase == "finished"
+    assert "Победа шпиона" in (game.winner_text or "")
