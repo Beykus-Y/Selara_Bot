@@ -3026,6 +3026,10 @@ class SqlAlchemyActivityRepository:
                 .with_for_update()
             )
 
+    async def has_recent_scheduled_send(self, *, chat_id: int, now: datetime) -> bool:
+        """Diagnostics hook: was a scheduled digest sent inside the minimum gap?"""
+        return await self._recent_scheduled_send_exists(chat_id=chat_id, now=now)
+
     async def _recent_scheduled_send_exists(self, *, chat_id: int, now: datetime) -> bool:
         cutoff = _coerce_utc_datetime(now) - self._SCHEDULED_MIN_SEND_GAP
         recent = (

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from selara.application.daily_summary.schedule import compute_scheduled_window_to, is_stale_scheduled_window
 
@@ -61,10 +63,79 @@ def test_grace_uses_elapsed_instant_across_fall_back_dst() -> None:
 
 
 def test_grace_requires_aware_datetimes() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="timezone-aware"):
         is_stale_scheduled_window(
             scheduled_at=datetime(2026, 10, 10, 3, 0),
             now=datetime(2026, 10, 10, 4, 0, tzinfo=_TZ),
         )
+
+
+def test_window_to_uses_bot_timezone_day_boundary_for_asia_barnaul() -> None:
+    # 03:00 Barnaul is 20:00 UTC of the previous calendar day; a 10:24 local tick
+    # must plan today's 03:00 Barnaul window, not a UTC-hour-based one.
+    barnaul = ZoneInfo("Asia/Barnaul")
+    now_local = datetime(2026, 10, 10, 10, 24, tzinfo=barnaul)
+    result = compute_scheduled_window_to(hour=3, now_local=now_local)
+    assert result == datetime(2026, 10, 10, 3, 0, tzinfo=barnaul)
+    assert result.astimezone(timezone.utc) == datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome_sent,reason,recent_send,expected_event", [
+    (True, "sent", False, "scheduled_sent"),
+    (False, "not_eligible:not_enough_messages", False, "scheduled_skipped_low_activity"),
+    (False, "claim_lost", True, "scheduled_skipped_recent_send"),
+    (False, "claim_lost", False, "scheduled_claim_lost"),
+    (False, "not_eligible:disabled", False, "scheduled_not_sent"),
+])
+async def test_scheduler_emits_structured_event_for_each_scheduled_outcome(
+    monkeypatch, caplog, outcome_sent, reason, recent_send, expected_event,
+) -> None:
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from selara.presentation import daily_summary as module
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeRepo:
+        def __init__(self, session):
+            self.get_chat_settings = AsyncMock(return_value=SimpleNamespace(
+                daily_summary_enabled=True, daily_summary_hour=3))
+            self.get_daily_summary_run = AsyncMock(return_value=None)
+            self.has_recent_scheduled_send = AsyncMock(return_value=recent_send)
+
+    monkeypatch.setattr(module, "SqlAlchemyActivityRepository", FakeRepo)
+    monkeypatch.setattr(
+        module, "attempt_daily_summary_run",
+        AsyncMock(return_value=module.DailySummaryOutcome(outcome_sent, reason)),
+    )
+
+    barnaul = ZoneInfo("Asia/Barnaul")
+    scheduler = module.DailySummaryScheduler(
+        bot=SimpleNamespace(), session_factory=lambda: Session(), llm_client=SimpleNamespace(),
+        settings=SimpleNamespace(), feature_access_service=SimpleNamespace(),
+    )
+    chat = SimpleNamespace(telegram_chat_id=-100123)
+    # Inside the 90-minute new-run grace after the 03:00 Barnaul plan.
+    now_utc = datetime(2026, 10, 10, 3, 20, tzinfo=barnaul).astimezone(timezone.utc)
+
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        sent = await scheduler._process_chat(chat=chat, now_utc=now_utc, local_tz=barnaul)
+
+    assert sent is outcome_sent
+    names = [r.getMessage() for r in caplog.records if r.name == module.__name__]
+    assert names == ["scheduled_due", expected_event]
+    record = caplog.records[-1]
+    assert record.timezone == "Asia/Barnaul"
+    assert record.hour == 3
+    assert record.summary_date == "2026-10-10"
+    assert record.window_to == "2026-10-09T20:00:00+00:00"
+    assert record.window_from == "2026-10-08T20:00:00+00:00"
+    assert record.trigger == "scheduled"
