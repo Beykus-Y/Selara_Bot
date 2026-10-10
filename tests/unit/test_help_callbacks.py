@@ -285,6 +285,33 @@ async def test_callback_without_message_only_acknowledges() -> None:
     query.answer.assert_awaited_once_with()
 
 
+@pytest.mark.parametrize("data", ["help:home", "nv:games", "nvp:economy:2"])
+async def test_inaccessible_callback_message_shows_fresh_help_instead_of_crashing(data) -> None:
+    # Old Telegram callback message can be an inaccessible object without edit_text.
+    query = SimpleNamespace(
+        data=data, message=SimpleNamespace(message_id=42),
+        from_user=SimpleNamespace(id=2), answer=AsyncMock(),
+    )
+
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once_with(
+        "Сообщение справки устарело. Откройте /help заново.", show_alert=True,
+    )
+
+
+async def test_inaccessible_help_callback_ignores_expired_answer_token() -> None:
+    error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: query is too old")
+    query = SimpleNamespace(
+        data="help:economy", message=SimpleNamespace(message_id=42),
+        from_user=SimpleNamespace(id=2), answer=AsyncMock(side_effect=error),
+    )
+
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once()
+
+
 async def test_long_help_section_paginates_by_edit_without_sending_duplicate_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
