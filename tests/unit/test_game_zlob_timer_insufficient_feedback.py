@@ -43,7 +43,10 @@ async def test_zlob_expired_private_timer_explains_missing_answers_without_side_
     )
 
     assert returned is game and actual_error == error
-    store.zlob_open_vote.assert_awaited_once_with(game_id=game.game_id, force=True)
+    store.zlob_open_vote.assert_awaited_once_with(
+        game_id=game.game_id, force=True,
+        expected_round_no=None, expected_phase_started_at=None,
+    )
     schedule.assert_not_called()
     assert game.phase == "private_answers"
     if should_render:

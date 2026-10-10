@@ -2766,6 +2766,8 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                         chat_settings,
                         force=True,
                         triggered_by_auto=True,
+                        expected_round_no=expected_round_no,
+                        expected_phase_started_at=expected_phase_started_at,
                     )
                     if error is not None:
                         logger.debug("Zlobcards private timer open skipped", extra={"game_id": game.game_id, "error": error})
@@ -2982,7 +2984,11 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                _, error = await _open_zlob_vote_phase(bot, game.game_id, chat_settings, force=True, triggered_by_auto=True)
+                _, error = await _open_zlob_vote_phase(
+                    bot, game.game_id, chat_settings, force=True, triggered_by_auto=True,
+                    expected_round_no=expected_round_no,
+                    expected_phase_started_at=expected_phase_started_at,
+                )
                 if error is not None:
                     logger.debug("Restored zlobcards private timer skipped", extra={"game_id": game.game_id, "error": error})
             except Exception:
@@ -3612,8 +3618,14 @@ async def _open_zlob_vote_phase(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, error = await GAME_STORE.zlob_open_vote(game_id=game_id, force=force)
+    game, error = await GAME_STORE.zlob_open_vote(
+        game_id=game_id, force=force,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
     if game is None:
         return None, "Игра не найдена"
     if error:

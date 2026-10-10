@@ -3259,11 +3259,19 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
+        expected_phase_started_at: datetime | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
+            # Validate timer identity under the same lock as the transition.
+            # A preflight get_game() cannot fence a round changed while waiting.
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Таймер предыдущего раунда"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, "Таймер предыдущей фазы"
             if game.kind != "zlobcards":
                 return game, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "private_answers":
