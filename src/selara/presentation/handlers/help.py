@@ -465,6 +465,16 @@ async def help_callback(query: CallbackQuery, settings: Settings) -> None:
             pass
         return
 
+    # Telegram may return an inaccessible message for an older callback.
+    # Such a message has no edit_text method: avoid an AttributeError and
+    # direct the user to a fresh help screen instead.
+    if not callable(getattr(query.message, "edit_text", None)):
+        try:
+            await query.answer("Сообщение справки устарело. Откройте /help заново.", show_alert=True)
+        except TelegramBadRequest:
+            pass
+        return
+
     key, requested_page = _requested_help_page(query.data)
     pages, _ = _render_screen(settings, key)
     page_index = min(requested_page, len(pages) - 1)
