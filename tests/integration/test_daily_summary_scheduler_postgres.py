@@ -65,6 +65,7 @@ async def _seed_chat(
     message_count: int,
     min_messages: int,
     chat_id: int = _CHAT_ID,
+    daily_summary_hour: int | None = None,
 ) -> None:
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
@@ -80,6 +81,7 @@ async def _seed_chat(
                 "daily_summary_min_messages": min_messages,
                 "daily_summary_style": "neutral",
                 "save_message": True,
+                **({"daily_summary_hour": daily_summary_hour} if daily_summary_hour is not None else {}),
             },
         )
         rows = []
@@ -1257,8 +1259,8 @@ async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_e
     engine, session_factory = await _database()
     try:
         allowed_chat_id = _CHAT_ID + 1
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID, daily_summary_hour=_NOW.hour)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id, daily_summary_hour=_NOW.hour)
         async with session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
             chat_settings = await repo.get_chat_settings(chat_id=_CHAT_ID)
@@ -1635,8 +1637,8 @@ async def test_scheduled_free_chat_owner_check_is_cached_between_ticks() -> None
 async def test_scheduler_takes_a_fresh_clock_per_chat_unless_now_is_pinned(monkeypatch) -> None:
     engine, session_factory = await _database()
     try:
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID + 1)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID, daily_summary_hour=_NOW.hour)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID + 1, daily_summary_hour=_NOW.hour)
         seen: list[datetime] = []
 
         async def fake_attempt(**kwargs):
@@ -1723,5 +1725,48 @@ async def test_failed_owner_lookup_is_not_cached_as_a_denial() -> None:
         bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="administrator"))
         recovered = await attempt_daily_summary_run(now_utc=_NOW + timedelta(minutes=15), **kwargs)
         assert recovered.sent
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduler_skips_stale_new_generation_without_a_claim(monkeypatch) -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(
+            session_factory, message_count=60, min_messages=50,
+            daily_summary_hour=10,
+        )
+        candidate = AsyncMock(return_value=SimpleNamespace(sent=False))
+        monkeypatch.setattr(daily_summary_module, "attempt_daily_summary_run", candidate)
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=_fake_bot(), session_factory=session_factory,
+            llm_client=_FakeLlmClient(), settings=_test_settings(),
+        )
+
+        # Before the planned 10:00 UTC today, yesterday's 10:00 is the
+        # computed window; it is NOT a license to bill an ancient report.
+        early = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=early) == 0
+        candidate.assert_not_awaited()
+
+        # The next ordinary 15-minute tick is in the 90-minute grace.
+        normal = datetime(2026, 10, 10, 10, 30, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=normal) == 0
+        assert candidate.await_count == 1
+        assert candidate.await_args.kwargs["summary_date"] == normal.date()
+        assert candidate.await_args.kwargs["window_to"] == normal.replace(
+            hour=10, minute=0, second=0, microsecond=0,
+        )
+
+        # A first attempt over the grace limit cannot start a new run.
+        too_late = datetime(2026, 10, 10, 11, 31, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=too_late) == 0
+        assert candidate.await_count == 1
+
+        async with session_factory() as session:
+            persisted = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+        assert persisted == []
     finally:
         await engine.dispose()

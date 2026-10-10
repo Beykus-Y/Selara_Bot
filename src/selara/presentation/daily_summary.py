@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
 from selara.application.daily_summary.pipeline import DailySummaryClaimLost, run_daily_summary_pipeline
-from selara.application.daily_summary.schedule import compute_scheduled_window_to
+from selara.application.daily_summary.schedule import compute_scheduled_window_to, is_stale_scheduled_window
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
@@ -870,6 +870,35 @@ class DailySummaryScheduler:
         window_to_local = compute_scheduled_window_to(hour=chat_settings.daily_summary_hour, now_local=now_local)
         window_to = window_to_local.astimezone(timezone.utc)
         summary_date = window_to_local.date()
+
+        # The planning function intentionally returns yesterday before today's
+        # configured hour. A restart/late tick must not interpret that as
+        # permission to start costly *new* LLM generation for yesterday.
+        # Existing nonterminal runs keep their established recovery path.
+        if is_stale_scheduled_window(scheduled_at=window_to, now=now_utc):
+            async with self._session_factory() as session:
+                existing = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
+                    chat_id=chat.telegram_chat_id,
+                    summary_date=summary_date,
+                    trigger="scheduled",
+                )
+            if existing is None or existing.status in {"sent", "failed"}:
+                logger.info(
+                    "scheduled_skipped_stale",
+                    extra={
+                        "chat_id": chat.telegram_chat_id,
+                        "summary_date": summary_date.isoformat(),
+                        "trigger": "scheduled",
+                        "timezone": str(local_tz),
+                        "hour": chat_settings.daily_summary_hour,
+                        "scheduled_at": window_to.isoformat(),
+                        "now": now_utc.isoformat(),
+                        "window_from": (window_to - timedelta(days=1)).isoformat(),
+                        "window_to": window_to.isoformat(),
+                        "reason": "outside_new_run_grace",
+                    },
+                )
+                return False
 
         outcome = await attempt_daily_summary_run(
             bot=self._bot,
