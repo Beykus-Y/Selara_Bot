@@ -242,11 +242,38 @@ async def test_callback_treats_not_modified_as_success() -> None:
     query.answer.assert_awaited_once_with()
 
 
-async def test_callback_reraises_other_edit_errors() -> None:
-    error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message to edit not found")
+@pytest.mark.parametrize("detail", [
+    "Bad Request: message to edit not found",
+    "Bad Request: message can't be edited",
+])
+async def test_stale_help_button_shows_recovery_instead_of_crashing(detail) -> None:
+    error = TelegramBadRequest(method=SimpleNamespace(), message=detail)
     query = _callback_query(data="help:economy", edit_side_effect=error)
 
-    with pytest.raises(TelegramBadRequest, match="message to edit not found"):
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once_with(
+        "Сообщение справки устарело. Откройте /help заново.", show_alert=True,
+    )
+    query.message.answer.assert_not_awaited()
+
+
+async def test_stale_help_callback_handles_expired_answer_token() -> None:
+    edit_error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message to edit not found")
+    answer_error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: query is too old")
+    query = _callback_query(data="help:economy", edit_side_effect=edit_error)
+    query.answer.side_effect = answer_error
+
+    await help_callback(query, _settings())
+
+    query.answer.assert_awaited_once()
+
+
+async def test_callback_reraises_unrelated_edit_errors() -> None:
+    error = TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: chat admin required")
+    query = _callback_query(data="help:economy", edit_side_effect=error)
+
+    with pytest.raises(TelegramBadRequest, match="chat admin required"):
         await help_callback(query, _settings())
 
 
