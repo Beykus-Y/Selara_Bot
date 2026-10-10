@@ -1931,7 +1931,8 @@ async def test_scheduled_delivery_reservation_and_twenty_hour_gap_are_atomic() -
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(monkeypatch) -> None:
+@pytest.mark.parametrize("status", ["claimed", "generating", "generated", "send_failed"])
+async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(monkeypatch, status) -> None:
     engine, session_factory = await _database()
     try:
         await _seed_chat(
@@ -1942,7 +1943,7 @@ async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(mo
             session.add(DailySummaryRunModel(
                 chat_id=_CHAT_ID, summary_date=due.date(), trigger="scheduled",
                 window_from=due - timedelta(days=1), window_to=due,
-                status="generated", generated_text="old generated report",
+                status=status, generated_text="old generated report",
                 claimed_at=due, lease_until=due,
             ))
             await session.commit()
@@ -1993,5 +1994,34 @@ async def test_direct_scheduled_delivery_checks_staleness_before_telegram_send()
         async with session_factory() as session:
             persisted = await session.get(DailySummaryRunModel, run_id)
             assert persisted.status == "generated"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recovery_deadline_uses_original_window_after_schedule_hour_change(monkeypatch) -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=0, daily_summary_hour=15)
+        original_due = datetime(2026, 10, 10, 8, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            session.add(DailySummaryRunModel(
+                chat_id=_CHAT_ID, summary_date=original_due.date(), trigger='scheduled',
+                window_from=original_due-timedelta(days=1), window_to=original_due,
+                status='generated', generated_text='old generated report',
+                claimed_at=original_due, lease_until=original_due,
+            ))
+            await session.commit()
+        run_mock = AsyncMock(return_value=SimpleNamespace(sent=False))
+        monkeypatch.setattr(daily_summary_module, 'attempt_daily_summary_run', run_mock)
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=_fake_bot(), session_factory=session_factory,
+            llm_client=_FakeLlmClient(), settings=_test_settings(),
+        )
+        # The new 15:00 schedule is fresh, but the persisted 08:00 run
+        # must expire at 14:00, rather than acquiring a renewed deadline.
+        assert await scheduler.run_once(now=original_due+timedelta(hours=7)) == 0
+        run_mock.assert_not_awaited()
     finally:
         await engine.dispose()

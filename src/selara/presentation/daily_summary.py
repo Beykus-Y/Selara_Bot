@@ -261,18 +261,29 @@ async def _send_and_mark(
             return False
         if run.claimed_at != claimed_at:
             return None
-        # A provider worker which began on time can still finish very late:
-        # check again immediately before reserving Telegram delivery.
-        if run.trigger == "scheduled" and is_stale_scheduled_window(
-            scheduled_at=run.window_to, now=datetime.now(timezone.utc),
-            grace=_SCHEDULED_DELIVERY_MAX_AGE,
-        ):
-            logger.info("scheduled_skipped_stale_delivery", extra={
-                "chat_id": chat_id, "run_id": run_id,
-                "summary_date": run.summary_date.isoformat(), "trigger": "scheduled",
-                "window_to": run.window_to.isoformat(),
-                "reason": "outside_delivery_recovery_window",
-            })
+        delivery_expired = False
+
+        def delivery_is_expired() -> bool:
+            nonlocal delivery_expired
+            now = datetime.now(timezone.utc)
+            if run.trigger != "scheduled" or not is_stale_scheduled_window(
+                scheduled_at=run.window_to, now=now,
+                grace=_SCHEDULED_DELIVERY_MAX_AGE,
+            ):
+                return False
+            if not delivery_expired:
+                logger.info("scheduled_skipped_stale_delivery", extra={
+                    "chat_id": chat_id, "run_id": run_id,
+                    "summary_date": run.summary_date.isoformat(), "trigger": "scheduled",
+                    "scheduled_at": run.window_to.isoformat(), "now": now.isoformat(),
+                    "window_from": run.window_from.isoformat(),
+                    "window_to": run.window_to.isoformat(),
+                    "reason": "outside_delivery_recovery_window",
+                })
+            delivery_expired = True
+            return True
+
+        if delivery_is_expired():
             return False
 
         delivery_claimed_at = await repo.claim_daily_summary_delivery(
@@ -285,11 +296,14 @@ async def _send_and_mark(
             return None
 
         async def delivery_claim_is_current() -> bool:
-            return await repo.is_daily_summary_delivery_claim_current(
+            current = await repo.is_daily_summary_delivery_claim_current(
                 run_id=run_id,
                 chat_id=chat_id,
                 claimed_at=delivery_claimed_at,
             )
+            # Check the clock after awaited DB work, including artifact locks
+            # and pending-state commits, immediately before each Telegram call.
+            return current and not delivery_is_expired()
 
         try:
             artifact_id = (run.topics_json or {}).get("artifact_id")
@@ -304,11 +318,13 @@ async def _send_and_mark(
                     claim_check=delivery_claim_is_current,
                 )
                 if not result.success:
+                    if delivery_expired:
+                        return False
                     raise RuntimeError(result.result_text)
             else:
                 for chunk in split_telegram_html(run.generated_text):
                     if not await delivery_claim_is_current():
-                        return None
+                        return False if delivery_expired else None
                     await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
         except asyncio.CancelledError:
             raise
@@ -889,42 +905,45 @@ class DailySummaryScheduler:
         # configured hour. A restart/late tick must not interpret that as
         # permission to start costly *new* LLM generation for yesterday.
         # Existing nonterminal runs keep their established recovery path.
-        if is_stale_scheduled_window(scheduled_at=window_to, now=now_utc):
-            async with self._session_factory() as session:
-                existing = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
-                    chat_id=chat.telegram_chat_id,
-                    summary_date=summary_date,
-                    trigger="scheduled",
-                )
-            if existing is not None and existing.status in {"claimed", "generating", "generated", "send_failed"} and is_stale_scheduled_window(
-                scheduled_at=window_to, now=now_utc,
-                grace=_SCHEDULED_DELIVERY_MAX_AGE,
-            ):
-                logger.info("scheduled_skipped_stale_recovery", extra={
+        async with self._session_factory() as session:
+            existing = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
+                chat_id=chat.telegram_chat_id,
+                summary_date=summary_date,
+                trigger="scheduled",
+            )
+        if existing is not None and existing.status in {"claimed", "generating", "generated", "send_failed"} and is_stale_scheduled_window(
+            scheduled_at=existing.window_to, now=now_utc,
+            grace=_SCHEDULED_DELIVERY_MAX_AGE,
+        ):
+            logger.info("scheduled_skipped_stale_recovery", extra={
+                "chat_id": chat.telegram_chat_id,
+                "summary_date": summary_date.isoformat(), "trigger": "scheduled",
+                "status": existing.status,
+                "scheduled_at": existing.window_to.isoformat(), "now": now_utc.isoformat(),
+                "window_from": existing.window_from.isoformat(),
+                "window_to": existing.window_to.isoformat(),
+                "reason": "outside_delivery_recovery_window",
+            })
+            return False
+        if is_stale_scheduled_window(scheduled_at=window_to, now=now_utc) and (
+            existing is None or existing.status in {"sent", "failed"}
+        ):
+            logger.info(
+                "scheduled_skipped_stale",
+                extra={
                     "chat_id": chat.telegram_chat_id,
-                    "summary_date": summary_date.isoformat(), "trigger": "scheduled",
-                    "status": existing.status,
-                    "scheduled_at": window_to.isoformat(), "now": now_utc.isoformat(),
-                    "reason": "outside_delivery_recovery_window",
-                })
-                return False
-            if existing is None or existing.status in {"sent", "failed"}:
-                logger.info(
-                    "scheduled_skipped_stale",
-                    extra={
-                        "chat_id": chat.telegram_chat_id,
-                        "summary_date": summary_date.isoformat(),
-                        "trigger": "scheduled",
-                        "timezone": str(local_tz),
-                        "hour": chat_settings.daily_summary_hour,
-                        "scheduled_at": window_to.isoformat(),
-                        "now": now_utc.isoformat(),
-                        "window_from": (window_to - timedelta(days=1)).isoformat(),
-                        "window_to": window_to.isoformat(),
-                        "reason": "outside_new_run_grace",
-                    },
-                )
-                return False
+                    "summary_date": summary_date.isoformat(),
+                    "trigger": "scheduled",
+                    "timezone": str(local_tz),
+                    "hour": chat_settings.daily_summary_hour,
+                    "scheduled_at": window_to.isoformat(),
+                    "now": now_utc.isoformat(),
+                    "window_from": (window_to - timedelta(days=1)).isoformat(),
+                    "window_to": window_to.isoformat(),
+                    "reason": "outside_new_run_grace",
+                },
+            )
+            return False
 
         outcome = await attempt_daily_summary_run(
             bot=self._bot,
