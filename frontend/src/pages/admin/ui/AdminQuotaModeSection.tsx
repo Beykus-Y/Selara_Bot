@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { ConfirmationRequired, getQuotaMode, saveQuotaMode } from '../api/admin-models'
 import { SectionError, SectionRetry, SectionSkeleton } from './AdminAiParts'
@@ -17,20 +17,21 @@ function parseBudget(value: string): number | null {
 export function AdminQuotaModeSection() {
   const client = useQueryClient()
   const state = useQuery({ queryKey: ['admin-quota-mode'], queryFn: getQuotaMode, staleTime: 15_000 })
-  const [mode, setMode] = useState<'requests' | 'ail'>('requests')
-  const [free, setFree] = useState('')
-  const [paid, setPaid] = useState('')
+  const data = state.data
+  const [mode, setMode] = useState<'requests' | 'ail'>(data?.quota_mode ?? 'requests')
+  const [free, setFree] = useState(data?.free_daily_ail == null ? '' : String(data.free_daily_ail))
+  const [paid, setPaid] = useState(data?.paid_daily_ail == null ? '' : String(data.paid_daily_ail))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
-  const data = state.data
 
-  useEffect(() => {
-    if (!data) return
+  const [previousData, setPreviousData] = useState(data)
+  if (data && data !== previousData) {
+    setPreviousData(data)
     setMode(data.quota_mode)
     setFree(data.free_daily_ail === null ? '' : String(data.free_daily_ail))
     setPaid(data.paid_daily_ail === null ? '' : String(data.paid_daily_ail))
-  }, [data])
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()

@@ -24,7 +24,7 @@ async function request(method, path, body, { form = false } = {}) {
     }
   }
   const response = await fetch(API + path, { method, headers, body: payload, credentials: "same-origin" });
-  let data = null;
+  let data;
   try {
     data = await response.json();
   } catch {
