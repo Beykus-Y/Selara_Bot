@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 900  # 15 minutes -- accuracy to the hour isn't critical (see TODO doc)
 _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" before it can be reclaimed
+_SCHEDULED_DELIVERY_MAX_AGE = timedelta(hours=6)  # bounded retry without next-day reports
 _ACCESS_LOG_KEYS: OrderedDict[tuple[int, date, str], None] = OrderedDict()
 _MAX_ACCESS_LOG_KEYS = 4096
 _OWNER_DENIAL_CACHE_TTL = timedelta(hours=2)  # how long a scheduler remembers "owner is not admin here"
@@ -260,6 +261,19 @@ async def _send_and_mark(
             return False
         if run.claimed_at != claimed_at:
             return None
+        # A provider worker which began on time can still finish very late:
+        # check again immediately before reserving Telegram delivery.
+        if run.trigger == "scheduled" and is_stale_scheduled_window(
+            scheduled_at=run.window_to, now=datetime.now(timezone.utc),
+            grace=_SCHEDULED_DELIVERY_MAX_AGE,
+        ):
+            logger.info("scheduled_skipped_stale_delivery", extra={
+                "chat_id": chat_id, "run_id": run_id,
+                "summary_date": run.summary_date.isoformat(), "trigger": "scheduled",
+                "window_to": run.window_to.isoformat(),
+                "reason": "outside_delivery_recovery_window",
+            })
+            return False
 
         delivery_claimed_at = await repo.claim_daily_summary_delivery(
             run_id=run_id,
@@ -882,6 +896,18 @@ class DailySummaryScheduler:
                     summary_date=summary_date,
                     trigger="scheduled",
                 )
+            if existing is not None and existing.status in {"claimed", "generating", "generated", "send_failed"} and is_stale_scheduled_window(
+                scheduled_at=window_to, now=now_utc,
+                grace=_SCHEDULED_DELIVERY_MAX_AGE,
+            ):
+                logger.info("scheduled_skipped_stale_recovery", extra={
+                    "chat_id": chat.telegram_chat_id,
+                    "summary_date": summary_date.isoformat(), "trigger": "scheduled",
+                    "status": existing.status,
+                    "scheduled_at": window_to.isoformat(), "now": now_utc.isoformat(),
+                    "reason": "outside_delivery_recovery_window",
+                })
+                return False
             if existing is None or existing.status in {"sent", "failed"}:
                 logger.info(
                     "scheduled_skipped_stale",
