@@ -46,3 +46,32 @@ Run each game on the iOS and Android Telegram clients: start, join, play one rou
 - [ ] Quiz (Викторина): iOS [ ] Android [ ]
 - [ ] Bredovukha (Бредовуха): iOS [ ] Android [ ]
 - [ ] Bunker (Бункер), public board at 6, 8 and 12 players: iOS [ ] Android [ ]
+
+
+---
+
+## 10 October 2026 follow-up — current `dev` status
+
+The original table above is a historical snapshot and must not be interpreted
+as the present release gate. Since it was written:
+
+- GUX-09–12, destructive-action confirmation, and Gacha baseline fixes were
+  integrated through #209–#215 (see #194 issue timeline).
+- GUX-14 / help: additional discovery and in-place pagination fixes were merged
+  via #216 and #217; real Telegram UX acceptance remains tracked in #184.
+- **GUX-15 state-machine lifecycles for all eight `GameStore` games now exist:**
+  Mafia (#206), Dice/Spy/Quiz (#219), WhoAmI (#221), Bredovukha (#222),
+  Bunker (#223), Zlobcards (#224). See the up-to-date
+  `docs/GAME_UX_TEST_COVERAGE.md` for the precise sample sizes and limits.
+- **Gacha is independent of `GameStore`** and remains outside that eight-game
+  count. The group Genshin/HSR journey inventory and existing callback tests
+  are recorded in `docs/GAME_UX_GACHA_PHASE_MATRIX.md`, but a complete
+  real-service transaction walkthrough is still not documented as done.
+- **GUX-16 is still OPEN:** no complete real iOS/Android multi-user evidence,
+  before/after screenshots, or Bunker 6/8/12 device sign-off was provided.
+- **Zlobcards idle private phase with fewer than two submissions** still needs
+  an explicit product recovery decision; the early-submit timer fix does not
+  resolve this distinct state.
+
+Do not close the #194 epic or issue a production release based on automated
+coverage alone. `main` has not been updated by this follow-up.
