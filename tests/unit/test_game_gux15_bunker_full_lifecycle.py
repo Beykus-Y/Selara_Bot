@@ -1,4 +1,4 @@
-"""GUX-15: a complete six-player Bunker match through the real GameStore.
+"""GUX-15: complete 6/8/12-player Bunker matches through the real GameStore.
 
 Checks every reveal/vote phase, stale and foreign-chat mutation guards, and
 terminal winners. Separate manual iOS/Android public-board evaluation remains #194.
@@ -11,21 +11,22 @@ from selara.presentation.game_state import BUNKER_CARD_FIELDS, GameStore
 
 
 @pytest.mark.asyncio
-async def test_bunker_six_players_reveal_vote_to_final_seats() -> None:
+@pytest.mark.parametrize(("player_count", "seats"), [(6, 2), (8, 2), (12, 5)])
+async def test_bunker_players_reveal_vote_to_final_seats(player_count: int, seats: int) -> None:
     store = GameStore()
     game, error = await store.create_lobby(
         kind="bunker", chat_id=-100, chat_title="group", owner_user_id=1,
         owner_label="u1", reveal_eliminated_role=True,
     )
     assert error is None and game is not None
-    for uid in range(2, 7):
+    for uid in range(2, player_count + 1):
         _, status = await store.join(game_id=game.game_id, user_id=uid, user_label=f"u{uid}")
         assert status == "joined"
     started, error = await store.start(game_id=game.game_id)
     assert error is None and started is game
     assert game.status == "started" and game.phase == "bunker_reveal"
-    assert len(game.bunker_cards) == 6
-    assert game.bunker_seats == 2
+    assert len(game.bunker_cards) == player_count
+    assert game.bunker_seats == seats
 
     eliminated = []
     while game.status == "started":
@@ -97,7 +98,7 @@ async def test_bunker_six_players_reveal_vote_to_final_seats() -> None:
         assert resolution.eliminated_user_id == target
         assert before - game.alive_player_ids == {target}
         eliminated.append(target)
-        assert len(eliminated) <= 6 - game.bunker_seats
+        assert len(eliminated) <= player_count - game.bunker_seats
 
         if game.status == "started":
             assert game.round_no == current_round + 1
@@ -108,7 +109,7 @@ async def test_bunker_six_players_reveal_vote_to_final_seats() -> None:
             )
             assert stale is None and "предыдущего раунда" in error
 
-    assert len(eliminated) == 4
+    assert len(eliminated) == player_count - game.bunker_seats
     assert len(game.alive_player_ids) == game.bunker_seats
     assert game.phase == "finished"
     assert game.winner_text and "В бункер попали" in game.winner_text
