@@ -945,6 +945,22 @@ class DailySummaryScheduler:
             )
             return False
 
+        # Structured scheduler events: the fields make it clear which timezone,
+        # planned hour and fixed 24h window a scheduled decision was made for.
+        event_fields = {
+            "chat_id": chat.telegram_chat_id,
+            "summary_date": summary_date.isoformat(),
+            "trigger": "scheduled",
+            "timezone": str(local_tz),
+            "hour": chat_settings.daily_summary_hour,
+            "scheduled_at": window_to.isoformat(),
+            "now": now_utc.isoformat(),
+            "window_from": (window_to - timedelta(hours=24)).isoformat(),
+            "window_to": window_to.isoformat(),
+        }
+        if existing is None or existing.status in {"claimed", "generating", "generated", "send_failed"}:
+            logger.info("scheduled_due", extra=event_fields)
+
         outcome = await attempt_daily_summary_run(
             bot=self._bot,
             session_factory=self._session_factory,
@@ -958,6 +974,21 @@ class DailySummaryScheduler:
             feature_access_service=self._feature_access_service,
             owner_denial_cache=self._owner_denial_cache,
         )
+        if outcome.sent:
+            logger.info("scheduled_sent", extra={**event_fields, "reason": outcome.reason})
+        elif outcome.reason == "not_eligible:not_enough_messages":
+            logger.info("scheduled_skipped_low_activity", extra={**event_fields, "reason": outcome.reason})
+        elif outcome.reason == "claim_lost":
+            async with self._session_factory() as session:
+                recent_send = await SqlAlchemyActivityRepository(session).has_recent_scheduled_send(
+                    chat_id=chat.telegram_chat_id, now=now_utc,
+                )
+            logger.info(
+                "scheduled_skipped_recent_send" if recent_send else "scheduled_claim_lost",
+                extra={**event_fields, "reason": outcome.reason},
+            )
+        elif outcome.reason != "already_run_today":
+            logger.info("scheduled_not_sent", extra={**event_fields, "reason": outcome.reason})
         return outcome.sent
 
 
