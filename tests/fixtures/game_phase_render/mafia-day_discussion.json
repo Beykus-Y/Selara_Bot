@@ -1,0 +1,51 @@
+{
+  "text_lines": [
+    "<b>Мини-мафия</b>",
+    "<b>Этап:</b> День: обсуждение",
+    "<b>Игроков:</b> 4",
+    "<b>Раунд:</b> 2",
+    "<b>Сейчас:</b> обсуждение перед голосованием (2м).",
+    "<b>Что делать:</b> сверяйте версии и ищите нестыковки в чате.",
+    "",
+    "<b>В игре (4):</b> Аня &lt;&amp;&gt; 🦊 • Игрок 2 • Игрок 3 • Игрок 4",
+    "<b>Выбыли (0):</b> —"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🕵️ Моя роль",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🗳 Открыть голосование",
+          "callback_data": "game:adv:fixture:day_discussion:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

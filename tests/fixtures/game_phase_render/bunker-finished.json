@@ -1,0 +1,22 @@
+{
+  "text_lines": [
+    "<b>Бункер</b>",
+    "<b>Этап:</b> Завершено",
+    "<b>Игроков:</b> 6",
+    "",
+    "<b>Итог:</b> Победа &lt;&amp;&gt;"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🔁 Ещё раз",
+          "callback_data": "game:rematch:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

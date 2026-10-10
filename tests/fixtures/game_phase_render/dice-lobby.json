@@ -1,0 +1,46 @@
+{
+  "text_lines": [
+    "<b>Дуэль кубиков</b>",
+    "<i>Все кидают кубик, побеждает максимальный результат.</i>",
+    "<b>Этап:</b> Набор игроков",
+    "<b>Игроков:</b> 2",
+    "<b>Создатель лобби:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "",
+    "<b>Лобби (2):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a>"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "➕ Присоединиться",
+          "callback_data": "game:join:fixture"
+        },
+        {
+          "text": "➖ Покинуть",
+          "callback_data": "game:leave:fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        }
+      ],
+      [
+        {
+          "text": "🎬 Старт",
+          "callback_data": "game:start:fixture"
+        },
+        {
+          "text": "🛑 Отменить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

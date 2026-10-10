@@ -1,0 +1,81 @@
+{
+  "text_lines": [
+    "<b>Викторина</b>",
+    "<b>Этап:</b> Вопрос викторины",
+    "<b>Игроков:</b> 2",
+    "<b>Раунд:</b> 2",
+    "<b>Сейчас:</b> идёт вопрос, все отвечают одновременно.",
+    "<b>Что делать:</b> выберите букву ответа кнопкой ниже. Полный текст вариантов — под вопросом; пока вопрос открыт, выбор можно изменить.",
+    "",
+    "<b>Вопрос 1/1</b>",
+    "Сколько будет 2 &lt; 3?",
+    "A. Да &amp; верно",
+    "B. Нет",
+    "C. Не знаю",
+    "D. Другое",
+    "<b>Ответили:</b> 1/2",
+    "<b>Ждём:</b> Игрок 2",
+    "",
+    "<b>Счёт:</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>1</code>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — <code>0</code>"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "A. Да & верно",
+          "callback_data": "gquiz:fixture:0:0"
+        },
+        {
+          "text": "B. Нет",
+          "callback_data": "gquiz:fixture:0:1"
+        }
+      ],
+      [
+        {
+          "text": "C. Не знаю",
+          "callback_data": "gquiz:fixture:0:2"
+        },
+        {
+          "text": "D. Другое",
+          "callback_data": "gquiz:fixture:0:3"
+        }
+      ],
+      [
+        {
+          "text": "🗳 1/2",
+          "callback_data": "gquiz:fixture:0:noop"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "⏭ Закрыть вопрос",
+          "callback_data": "game:adv:fixture:freeplay:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

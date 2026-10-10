@@ -1,0 +1,85 @@
+{
+  "text_lines": [
+    "<b>500 Злобных Карт</b>",
+    "<i>Чёрная карточка, приватный выбор белых карт и анонимное голосование за лучший панч.</i>",
+    "<b>Этап:</b> Набор игроков",
+    "<b>Игроков:</b> 3",
+    "<b>Создатель лобби:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "",
+    "<b>Лобби (3):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a>",
+    "<b>Категория:</b> случайная тема",
+    "<b>Раундов:</b> 8",
+    "<b>Цель по очкам:</b> 7",
+    "<b>Формат:</b> чёрная карточка -> приватный выбор -> анонимное голосование."
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "➕ Присоединиться",
+          "callback_data": "game:join:fixture"
+        },
+        {
+          "text": "➖ Покинуть",
+          "callback_data": "game:leave:fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        }
+      ],
+      [
+        {
+          "text": "😈 Тема: случайная тема",
+          "callback_data": "gcfg:fixture:zlob_cat_next"
+        }
+      ],
+      [
+        {
+          "text": "➖ Раунды",
+          "callback_data": "gcfg:fixture:zlob_rounds_dec"
+        },
+        {
+          "text": "🔢 Раунды: 8",
+          "callback_data": "gcfg:fixture:zlob_rounds_noop"
+        },
+        {
+          "text": "➕ Раунды",
+          "callback_data": "gcfg:fixture:zlob_rounds_inc"
+        }
+      ],
+      [
+        {
+          "text": "➖ Цель",
+          "callback_data": "gcfg:fixture:zlob_target_dec"
+        },
+        {
+          "text": "🏁 Цель: 7",
+          "callback_data": "gcfg:fixture:zlob_target_noop"
+        },
+        {
+          "text": "➕ Цель",
+          "callback_data": "gcfg:fixture:zlob_target_inc"
+        }
+      ],
+      [
+        {
+          "text": "🎬 Старт",
+          "callback_data": "game:start:fixture"
+        },
+        {
+          "text": "🛑 Отменить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

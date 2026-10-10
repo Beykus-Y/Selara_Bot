@@ -1,0 +1,63 @@
+{
+  "text_lines": [
+    "<b>500 Злобных Карт</b>",
+    "<b>Этап:</b> Сбор ответов в ЛС",
+    "<b>Игроков:</b> 3",
+    "<b>Раунд:</b> 2/8",
+    "<b>Цель по очкам:</b> 7",
+    "<b>Сейчас:</b> сбор карт в ЛС.",
+    "<b>Что делать:</b> откройте ЛС: чёрная карта задаёт 1 пропуск(а), заполните их белыми картами из руки.",
+    "",
+    "<b>Раунд 2/8</b>",
+    "<b>Тема:</b> случайная тема",
+    "<b>Чёрная карточка (1):</b>",
+    "Мой секрет — ____ &lt;&amp;&gt;.",
+    "<i>Ответы публикуются анонимно.</i>",
+    "<b>Сдано:</b> 1/3",
+    "<b>Уже сдали:</b> Аня &lt;&amp;&gt; 🦊",
+    "<b>Ждём:</b> Игрок 2 • Игрок 3",
+    "",
+    "<b>Счёт:</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>2</code>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a> — <code>1</code>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a> — <code>0</code>"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🃏 Рука в ЛС",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🗳 Открыть голосование",
+          "callback_data": "game:adv:fixture:private_answers:2"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

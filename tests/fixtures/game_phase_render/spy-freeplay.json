@@ -1,0 +1,86 @@
+{
+  "text_lines": [
+    "<b>Найди шпиона</b>",
+    "<b>Этап:</b> Свободная игра",
+    "<b>Игроков:</b> 3",
+    "<b>Раунд:</b> 2",
+    "<b>Тема:</b> случайная тема",
+    "<b>Сейчас:</b> обсуждение. Мирные знают локацию, шпион — нет.",
+    "<b>Что делать:</b> задавайте вопросы по кругу; если подозреваете шпиона — голосуйте кнопкой ниже.",
+    "",
+    "<b>Прогресс голосования:</b> 1/3",
+    "<b>Порог обвинения:</b> 2 голоса за одного игрока.",
+    "<b>Главный подозреваемый:</b> Игрок 2 (1)",
+    "<b>Доска подозрений:</b> Игрок 2 — 1",
+    "<i>Нажмите на подозреваемого, чтобы отдать или изменить голос; «Мой голос» покажет ваш выбор лично вам.</i>",
+    "<b>Ещё без голоса:</b> Игрок 2 • Игрок 3"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "📍 Сводка голосов",
+          "callback_data": "gspy:fixture:noop"
+        },
+        {
+          "text": "🕵️ Моя роль",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        }
+      ],
+      [
+        {
+          "text": "🚨 Аня <&> 🦊",
+          "callback_data": "gspy:fixture:1"
+        },
+        {
+          "text": "🚨 Игрок 2 · 1",
+          "callback_data": "gspy:fixture:2"
+        }
+      ],
+      [
+        {
+          "text": "🚨 Игрок 3",
+          "callback_data": "gspy:fixture:3"
+        },
+        {
+          "text": "👤 Мой голос",
+          "callback_data": "gspy:fixture:mine"
+        }
+      ],
+      [
+        {
+          "text": "🗳 1/3",
+          "callback_data": "gspy:fixture:noop"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🔎 Раскрыть роли",
+          "callback_data": "game:reveal:fixture"
+        }
+      ],
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

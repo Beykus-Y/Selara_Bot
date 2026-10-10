@@ -1,0 +1,63 @@
+{
+  "text_lines": [
+    "<b>Бредовуха</b>",
+    "<i>Заполняйте пропуск в факте, обманывайте друг друга и угадывайте правду.</i>",
+    "<b>Этап:</b> Набор игроков",
+    "<b>Игроков:</b> 3",
+    "<b>Создатель лобби:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "",
+    "<b>Лобби (3):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a>",
+    "<b>Раундов:</b> 5",
+    "<b>Минимум для старта:</b> 3 (по числу игроков)"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "➕ Присоединиться",
+          "callback_data": "game:join:fixture"
+        },
+        {
+          "text": "➖ Покинуть",
+          "callback_data": "game:leave:fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        }
+      ],
+      [
+        {
+          "text": "➖ Раунды",
+          "callback_data": "gcfg:fixture:bred_rounds_dec"
+        },
+        {
+          "text": "🔢 Раундов: 5",
+          "callback_data": "gcfg:fixture:bred_rounds_noop"
+        },
+        {
+          "text": "➕ Раунды",
+          "callback_data": "gcfg:fixture:bred_rounds_inc"
+        }
+      ],
+      [
+        {
+          "text": "🎬 Старт",
+          "callback_data": "game:start:fixture"
+        },
+        {
+          "text": "🛑 Отменить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}
