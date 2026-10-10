@@ -164,7 +164,7 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="🤖 Искусственный интеллект",
         summary="Личный AI и AI в группе.",
         parent=ROOT_KEY,
-        children=("ai_group", "ai_models"),
+        children=("ai_group", "ai_models", "ai_summary"),
         spec_keys=("ai_personal", "group_character"),
     ),
     NavNode(
@@ -172,12 +172,20 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="💬 AI в группе",
         summary="Вопросы админам, обращение по кличке, питомцы и лимиты чата.",
         parent="ai",
+        spec_keys=("ai_group_questions",),
     ),
     NavNode(
         key="ai_models",
         title="🧠 Модели и лимиты",
         summary="Профили моделей, режимы лимитов и группы.",
         parent="ai",
+    ),
+    NavNode(
+        key="ai_summary",
+        title="📰 Итоги дня",
+        summary="Ручная сводка сообщений и автоматические итоги для группы.",
+        parent="ai",
+        spec_keys=("ai_daily_summary",),
     ),
     NavNode(
         key="profile",
@@ -238,7 +246,14 @@ NAV_NODES: tuple[NavNode, ...] = (
         title="💎 Подписки и поддержка",
         summary="Подписки Personal и Chat AI, обратная связь.",
         parent=ROOT_KEY,
+        children=("troubleshooting",),
         spec_keys=("subscriptions_selara", "user_feedback"),
+    ),
+    NavNode(
+        key="troubleshooting",
+        title="🧰 Почему не работает?",
+        summary="Короткая диагностика команд, прав, лимитов и личных сообщений.",
+        parent="subscriptions",
     ),
 )
 

@@ -326,6 +326,34 @@ def _resolve_node_key(data: str | None) -> str:
 
 def _node_body(settings: Settings, key: str) -> str | None:
     """Hand-written text of a node; nodes without one show only their area summary and command entries."""
+    if key == "troubleshooting":
+        return (
+            "<b>Если команда не отвечает</b>\n"
+            "• Проверьте, где вы пишете: некоторые команды работают только в группе или только в ЛС.\n"
+            "• Для скрытых ролей и карточек сначала откройте ЛС с ботом через /start.\n"
+            "• Если текстовая команда не срабатывает, попробуйте slash-вариант: админ мог выключить "
+            "<code>text_commands_enabled</code> или включить режим алиасов.\n"
+            "• Для действий над человеком часто нужен ответ на его сообщение (reply).\n"
+            "• Управление игрой, настройками и AI-запросы могут требовать отдельного права Selara.\n"
+            "• Для AI проверьте включённую функцию, подписку, дневной/месячный лимит и кулдаун.\n"
+            "• Если проблема остаётся: в личке <code>/feedback проблема: описание</code>. "
+            "Не присылайте пароли и токены."
+        )
+    if key == "ai_summary":
+        limit = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
+        hour, minimum = _summary_defaults()
+        return (
+            "<b>Как получить итоги</b>\n"
+            f"• <code>/summary</code> в группе — ручная сводка, {limit} раз в месяц на чат.\n"
+            "• Нужны право настройки чата и сохранение сообщений "
+            "(<code>save_message true</code>).\n"
+            f"• Минимум сообщений по умолчанию: {minimum}; порог задаёт "
+            "<code>daily_summary_min_messages</code>.\n"
+            "• Автоматические итоги работают только с активным Selara AI для чата; "
+            "<code>daily_summary_enabled</code> включает их, "
+            f"<code>daily_summary_hour</code> по умолчанию {hour} (время бота).\n"
+            "• Настройки доступны администратору через ЛС-панель /start или /settings."
+        )
     if key == "ai_group":
         return _ai_help_text(settings)
     if key == "ai_models":
