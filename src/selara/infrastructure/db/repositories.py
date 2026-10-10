@@ -3011,6 +3011,72 @@ class SqlAlchemyActivityRepository:
             return None
         return self._to_daily_summary_run(row)
 
+    _SCHEDULED_MIN_SEND_GAP = timedelta(hours=20)
+
+    async def _lock_scheduled_summary_chat(self, *, chat_id: int) -> None:
+        """Serialize claims and delivery reservations across summary dates.
+
+        This row lock is transactional, not held during expensive provider/Telegram
+        I/O. The existing chat row is the stable serialization point for workers.
+        """
+        if self._session.bind is not None and self._session.bind.dialect.name == "postgresql":
+            await self._session.execute(
+                select(ChatModel.telegram_chat_id)
+                .where(ChatModel.telegram_chat_id == chat_id)
+                .with_for_update()
+            )
+
+    async def _recent_scheduled_send_exists(self, *, chat_id: int, now: datetime) -> bool:
+        cutoff = _coerce_utc_datetime(now) - self._SCHEDULED_MIN_SEND_GAP
+        recent = (
+            await self._session.execute(
+                select(DailySummaryRunModel.id).where(
+                    DailySummaryRunModel.chat_id == chat_id,
+                    DailySummaryRunModel.trigger == "scheduled",
+                    DailySummaryRunModel.status == "sent",
+                    DailySummaryRunModel.sent_at.is_not(None),
+                    DailySummaryRunModel.sent_at > cutoff,
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        return recent is not None
+
+    async def _other_scheduled_run_active(
+        self, *, chat_id: int, summary_date: date, now: datetime
+    ) -> bool:
+        """Avoid a new billable run during another live generation or send lease."""
+        active = (
+            await self._session.execute(
+                select(DailySummaryRunModel.id).where(
+                    DailySummaryRunModel.chat_id == chat_id,
+                    DailySummaryRunModel.trigger == "scheduled",
+                    DailySummaryRunModel.summary_date != summary_date,
+                    DailySummaryRunModel.status.in_((
+                        "claimed", "generating", "generated", "send_failed",
+                    )),
+                    DailySummaryRunModel.lease_until > _coerce_utc_datetime(now),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        return active is not None
+
+    async def _other_scheduled_delivery_active(
+        self, *, chat_id: int, run_id: int, now: datetime
+    ) -> bool:
+        """A second delivery cannot overlap an already-reserved Telegram send."""
+        active = (
+            await self._session.execute(
+                select(DailySummaryRunModel.id).where(
+                    DailySummaryRunModel.chat_id == chat_id,
+                    DailySummaryRunModel.id != run_id,
+                    DailySummaryRunModel.trigger == "scheduled",
+                    DailySummaryRunModel.status.in_(("generated", "send_failed")),
+                    DailySummaryRunModel.lease_until > _coerce_utc_datetime(now),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        return active is not None
+
     async def claim_daily_summary_run(
         self,
         *,
@@ -3049,6 +3115,21 @@ class SqlAlchemyActivityRepository:
         normalized_window_to = _coerce_utc_datetime(window_to)
 
         dialect = self._session.bind.dialect.name if self._session.bind else "unknown"
+        if trigger == "scheduled":
+            # Protect both the claim and the delivery reservation with the same
+            # per-chat row lock. A read-before-insert without this lock could
+            # allow different summary dates to launch during one scheduler tick.
+            await self._lock_scheduled_summary_chat(chat_id=chat.telegram_chat_id)
+            if await self._recent_scheduled_send_exists(
+                chat_id=chat.telegram_chat_id, now=claimed_at,
+            ):
+                return None
+            if await self._other_scheduled_run_active(
+                chat_id=chat.telegram_chat_id,
+                summary_date=summary_date,
+                now=claimed_at,
+            ):
+                return None
         if dialect == "postgresql":
             stmt = pg_insert(DailySummaryRunModel).values(
                 chat_id=chat.telegram_chat_id,
@@ -3180,6 +3261,22 @@ class SqlAlchemyActivityRepository:
         delivery_claimed_at = _coerce_utc_datetime(now) if now is not None else datetime.now(timezone.utc)
         if delivery_claimed_at <= expected_claimed_at:
             delivery_claimed_at = expected_claimed_at + timedelta(microseconds=1)
+
+        target = await self._session.get(DailySummaryRunModel, run_id)
+        if target is None:
+            return None
+        if target.trigger == "scheduled":
+            await self._lock_scheduled_summary_chat(chat_id=target.chat_id)
+            # Check after acquiring the lock: another date may have committed a
+            # send while this worker was waiting for its own delivery reservation.
+            if await self._recent_scheduled_send_exists(
+                chat_id=target.chat_id, now=delivery_claimed_at,
+            ):
+                return None
+            if await self._other_scheduled_delivery_active(
+                chat_id=target.chat_id, run_id=run_id, now=delivery_claimed_at,
+            ):
+                return None
 
         result = await self._session.execute(
             update(DailySummaryRunModel)

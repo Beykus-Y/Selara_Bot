@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 import random
 import re
@@ -83,6 +83,7 @@ _GAME_WINNER_REWARD_TOTAL_BY_KIND: dict[GameKind, tuple[int, int]] = {
     "whoami": (125, 155),
 }
 _ZLOBCARDS_PRIVATE_SECONDS = 75
+_ZLOBCARDS_RECOVERY_GRACE_SECONDS = 90  # one bounded extra chance for absent submissions
 _ZLOBCARDS_VOTE_SECONDS = 75
 
 
@@ -2702,8 +2703,26 @@ async def _get_bot_username(bot: Bot) -> str:
 
 def _cancel_phase_timer(game_id: str) -> None:
     task = _GAME_PHASE_TASKS.pop(game_id, None)
-    if task is not None and not task.done():
+    # Timers may replace their own task during the bounded private-answer grace.
+    # Cancelling the current task would abort the awaited Telegram board refresh.
+    if task is not None and not task.done() and task is not asyncio.current_task():
         task.cancel()
+
+
+def _zlob_private_grace_remaining(game: GroupGame, *, now: datetime | None = None) -> float:
+    """Remaining one-off recovery grace, derived from the persisted phase start.
+
+    No process-local counter: a restart cannot reset or indefinitely extend the
+    grace window. Only the original round/phase has this deadline.
+    """
+    started = getattr(game, "phase_started_at", None)
+    if started is None or started.tzinfo is None:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    deadline = started + timedelta(
+        seconds=_ZLOBCARDS_PRIVATE_SECONDS + _ZLOBCARDS_RECOVERY_GRACE_SECONDS,
+    )
+    return max(0.0, (deadline - now).total_seconds())
 
 
 def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings) -> None:
@@ -2906,6 +2925,12 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
                     continue
 
                 remaining = max(5.0, full_delay - elapsed)
+                if game.kind == "zlobcards" and game.phase == "private_answers" and elapsed >= full_delay:
+                    # An expired original timer gets only the still-remaining
+                    # bounded grace, not another full private-answer window.
+                    # Once past the deadline, one 5s check refreshes the board
+                    # with manual recovery, with no further automatic re-arm.
+                    remaining = max(5.0, full_delay + _ZLOBCARDS_RECOVERY_GRACE_SECONDS - elapsed)
                 logger.info(
                     "Restoring timer for game %s (kind=%s phase=%s elapsed=%.0fs remaining=%.0fs)",
                     game.game_id,
@@ -3599,9 +3624,14 @@ async def _open_zlob_vote_phase(
             and game.status == "started"
             and game.phase == "private_answers"
         ):
-            # Do not silently leave the expired timer without a useful board.
-            # Changing the >=2 minimum or deciding on automatic retry/cancel
-            # requires the separate recovery policy tracked in #230.
+            # A single, restart-safe extension is anchored to the original
+            # phase start and never reset by retries or crashes. An out-of-grace
+            # game stays actionable for players/manager but never spins timers.
+            remaining = _zlob_private_grace_remaining(game)
+            if remaining > 0:
+                _schedule_phase_timer_with_remaining(
+                    bot, game, chat_settings, max(5.0, remaining),
+                )
             await _safe_edit_or_send_game_board(
                 bot,
                 game,
@@ -3610,7 +3640,8 @@ async def _open_zlob_vote_phase(
                     "<b>⏳ Время сдачи карточек истекло.</b> "
                     "Для голосования нужны минимум два ответа. "
                     "Оставшиеся игроки могут сдать карточки через «Рука в ЛС». "
-                    "Когда ответов будет достаточно, ведущий может нажать "
+                    + ("Есть ещё короткое дополнительное окно для ответов. " if remaining > 0 else "Дополнительное время истекло. ")
+                    + "Когда ответов будет достаточно, ведущий может нажать "
                     "«Ведущему» → «Открыть голосование»; "
                     "если партия больше не нужна, её можно завершить."
                 ),

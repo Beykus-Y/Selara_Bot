@@ -65,6 +65,7 @@ async def _seed_chat(
     message_count: int,
     min_messages: int,
     chat_id: int = _CHAT_ID,
+    daily_summary_hour: int | None = None,
 ) -> None:
     async with session_factory() as session:
         repo = SqlAlchemyActivityRepository(session)
@@ -80,6 +81,7 @@ async def _seed_chat(
                 "daily_summary_min_messages": min_messages,
                 "daily_summary_style": "neutral",
                 "save_message": True,
+                **({"daily_summary_hour": daily_summary_hour} if daily_summary_hour is not None else {}),
             },
         )
         rows = []
@@ -1257,8 +1259,8 @@ async def test_scheduler_fails_closed_per_chat_and_continues_after_entitlement_e
     engine, session_factory = await _database()
     try:
         allowed_chat_id = _CHAT_ID + 1
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID, daily_summary_hour=_NOW.hour)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=allowed_chat_id, daily_summary_hour=_NOW.hour)
         async with session_factory() as session:
             repo = SqlAlchemyActivityRepository(session)
             chat_settings = await repo.get_chat_settings(chat_id=_CHAT_ID)
@@ -1635,8 +1637,8 @@ async def test_scheduled_free_chat_owner_check_is_cached_between_ticks() -> None
 async def test_scheduler_takes_a_fresh_clock_per_chat_unless_now_is_pinned(monkeypatch) -> None:
     engine, session_factory = await _database()
     try:
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID)
-        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID + 1)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID, daily_summary_hour=_NOW.hour)
+        await _seed_chat(session_factory, message_count=60, min_messages=50, chat_id=_CHAT_ID + 1, daily_summary_hour=_NOW.hour)
         seen: list[datetime] = []
 
         async def fake_attempt(**kwargs):
@@ -1723,5 +1725,205 @@ async def test_failed_owner_lookup_is_not_cached_as_a_denial() -> None:
         bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="administrator"))
         recovered = await attempt_daily_summary_run(now_utc=_NOW + timedelta(minutes=15), **kwargs)
         assert recovered.sent
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduler_skips_stale_new_generation_without_a_claim(monkeypatch) -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(
+            session_factory, message_count=60, min_messages=50,
+            daily_summary_hour=10,
+        )
+        candidate = AsyncMock(return_value=SimpleNamespace(sent=False))
+        monkeypatch.setattr(daily_summary_module, "attempt_daily_summary_run", candidate)
+        scheduler = daily_summary_module.DailySummaryScheduler(
+            bot=_fake_bot(), session_factory=session_factory,
+            llm_client=_FakeLlmClient(), settings=_test_settings(),
+        )
+
+        # Before the planned 10:00 UTC today, yesterday's 10:00 is the
+        # computed window; it is NOT a license to bill an ancient report.
+        early = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=early) == 0
+        candidate.assert_not_awaited()
+
+        # The next ordinary 15-minute tick is in the 90-minute grace.
+        normal = datetime(2026, 10, 10, 10, 30, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=normal) == 0
+        assert candidate.await_count == 1
+        assert candidate.await_args.kwargs["summary_date"] == normal.date()
+        assert candidate.await_args.kwargs["window_to"] == normal.replace(
+            hour=10, minute=0, second=0, microsecond=0,
+        )
+
+        # A first attempt over the grace limit cannot start a new run.
+        too_late = datetime(2026, 10, 10, 11, 31, tzinfo=timezone.utc)
+        assert await scheduler.run_once(now=too_late) == 0
+        assert candidate.await_count == 1
+
+        async with session_factory() as session:
+            persisted = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+        assert persisted == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_claims_of_different_dates_are_serialized_per_chat() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=0)
+        start = datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc)
+        chat = ChatSnapshot(
+            telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat",
+        )
+
+        async def claim(day_delta: int):
+            window_to = start + timedelta(days=day_delta)
+            async with session_factory() as session:
+                repo = SqlAlchemyActivityRepository(session)
+                result = await repo.claim_daily_summary_run(
+                    chat=chat,
+                    summary_date=window_to.date(),
+                    window_from=window_to - timedelta(days=1),
+                    window_to=window_to,
+                    trigger="scheduled",
+                    lease_seconds=1800,
+                    now=start,
+                )
+                await session.commit()
+                return result
+
+        # Each worker uses its own database session; only the first may
+        # hold an active scheduled claim, even though dates differ.
+        first, second = await asyncio.gather(claim(0), claim(1))
+        assert (first is None) != (second is None)
+        async with session_factory() as session:
+            runs = (await session.execute(select(DailySummaryRunModel))).scalars().all()
+        assert len(runs) == 1 and runs[0].status == "claimed"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scheduled_delivery_reservation_and_twenty_hour_gap_are_atomic() -> None:
+    engine, session_factory = await _database()
+    try:
+        await _seed_chat(session_factory, message_count=0, min_messages=0)
+        base = datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc)
+        chat = ChatSnapshot(
+            telegram_chat_id=_CHAT_ID, chat_type="supergroup", title="Test Chat",
+        )
+        async with session_factory() as session:
+            old, next_day = [], []
+            for offset in (0, 1):
+                day = base + timedelta(days=offset)
+                run = DailySummaryRunModel(
+                    chat_id=_CHAT_ID, summary_date=day.date(), trigger="scheduled",
+                    window_from=day - timedelta(days=1), window_to=day,
+                    status="generated", generated_text="test summary",
+                    claimed_at=base - timedelta(minutes=1),
+                    lease_until=base - timedelta(seconds=1),
+                )
+                session.add(run)
+                if offset == 0:
+                    old.append(run)
+                else:
+                    next_day.append(run)
+            await session.commit()
+            first_run, other_run = old[0], next_day[0]
+            first_id, other_id = first_run.id, other_run.id
+            first_claimed, other_claimed = first_run.claimed_at, other_run.claimed_at
+
+        at = base + timedelta(minutes=1)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            token = await repo.claim_daily_summary_delivery(
+                run_id=first_id, claimed_at=first_claimed,
+                lease_seconds=1800, now=at,
+            )
+            assert token is not None
+            await session.commit()
+
+        # Do not pay for a new scheduled generation while the previous date
+        # still owns its live delivery lease (even before status='sent').
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            while_sending = await repo.claim_daily_summary_run(
+                chat=chat, summary_date=(base + timedelta(days=2)).date(),
+                window_from=base, window_to=base + timedelta(days=1),
+                trigger="scheduled", lease_seconds=1800,
+                now=at + timedelta(seconds=1),
+            )
+            assert while_sending is None
+            await session.rollback()
+
+        # Distinct summary_date does not bypass the live delivery claim.
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            duplicate = await repo.claim_daily_summary_delivery(
+                run_id=other_id, claimed_at=other_claimed,
+                lease_seconds=1800, now=at + timedelta(seconds=1),
+            )
+            assert duplicate is None
+            await session.rollback()
+
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            assert await repo.mark_daily_summary_run_sent(
+                run_id=first_id, claimed_at=token,
+                sent_at=base + timedelta(minutes=2),
+            )
+            await session.commit()
+
+        # A new date cannot claim a scheduled run only seven hours later,
+        # while an independent manual request remains permitted.
+        seven_hours_later = base + timedelta(hours=7)
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            refused = await repo.claim_daily_summary_run(
+                chat=chat, summary_date=(base + timedelta(days=2)).date(),
+                window_from=base, window_to=base + timedelta(days=1),
+                trigger="scheduled", lease_seconds=1800,
+                now=seven_hours_later,
+            )
+            manual = await repo.claim_daily_summary_run(
+                chat=chat, summary_date=(base + timedelta(days=2)).date(),
+                window_from=base, window_to=base + timedelta(days=1),
+                trigger="manual", lease_seconds=1800,
+                now=seven_hours_later,
+            )
+            assert refused is None and manual is not None
+            await session.commit()
+
+        # Even the older pre-generated run must not be delivered inside 20h.
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            blocked = await repo.claim_daily_summary_delivery(
+                run_id=other_id, claimed_at=other_claimed,
+                lease_seconds=1800, now=seven_hours_later,
+            )
+            assert blocked is None
+            await session.rollback()
+
+        # The last successful scheduled send is old enough after 21 hours,
+        # and a fresh scheduled date can be claimed normally.
+        async with session_factory() as session:
+            repo = SqlAlchemyActivityRepository(session)
+            allowed = await repo.claim_daily_summary_run(
+                chat=chat, summary_date=(base + timedelta(days=3)).date(),
+                window_from=base + timedelta(days=1),
+                window_to=base + timedelta(days=2),
+                trigger="scheduled", lease_seconds=1800,
+                now=base + timedelta(hours=21),
+            )
+            assert allowed is not None
+            await session.commit()
     finally:
         await engine.dispose()
