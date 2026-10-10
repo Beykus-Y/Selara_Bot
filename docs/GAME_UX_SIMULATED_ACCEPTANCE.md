@@ -52,6 +52,25 @@ All paths below are under `tests/unit/`. This set was run together with
 | Local/global coin explanation | `test_gacha_group_payment_context_ux.py` | Actual rendered purchase copy, mocked context |
 | Gacha banner/button/empty-state contracts | `test_game_gux_gacha_baseline.py` | Actual presentation builders, simulated collections |
 
+## Additional Dice/Spy player-count regression coverage
+
+A later #194 follow-up adds five GameStore scenarios in
+`tests/unit/test_game_gux15_dice_spy_quiz_lifecycles.py`, independent of
+the historical 104-test run above:
+
+- Dice with **4 and 10 players**: distinct actual participants join, every
+  roll is recorded once, early repeat/foreign-chat actions fail, the final
+  roll resolves the winner, and old rolls are rejected after completion.
+- Spy with **5 and 10 players**: confirm one/two spies respectively and
+  require an actual majority (3/6 votes) before exposing the winner.
+- Spy with **10 players**, a 5:5 split: no candidate is selected, the
+  game only ends after all ten votes, and the spy wins the tie.
+
+These are deterministic method-level test fixtures, not real Telegram
+interaction, device QA, a comprehensive Spy re-vote matrix or a live
+provider/economy acceptance. The new scenarios are gated by GitHub CI
+separately; they must not be counted in the historical 104-pass result.
+
 ## Limits of the accepted simulation
 
 Real Telegram text wrapping, accessibility, touch accuracy, live multi-account
