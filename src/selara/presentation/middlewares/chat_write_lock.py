@@ -155,7 +155,8 @@ class ChatWriteLockMiddleware(BaseMiddleware):
             return None
         if raw_text.startswith("/"):
             # Извлекаем имя команды (до пробела и до @).
-            command_key = raw_text[1:].split()[0].split("@")[0].lower()
+            tokens = raw_text[1:].split(maxsplit=1)
+            command_key = tokens[0].split("@", maxsplit=1)[0].lower() if tokens else None
         else:
             match = match_builtin_command(raw_text)
             command_key = match.command_key if match is not None else None
