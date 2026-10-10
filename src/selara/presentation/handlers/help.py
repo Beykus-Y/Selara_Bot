@@ -474,7 +474,17 @@ async def help_callback(query: CallbackQuery, settings: Settings) -> None:
             reply_markup=_page_keyboard(key, page_index, len(pages)),
         )
     except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
+        error = str(exc).lower()
+        if "message is not modified" not in error:
+            # Old public help buttons may outlive their editable Telegram
+            # message. Explain the recovery action instead of raising a
+            # global callback error; do not swallow unrelated Telegram faults.
+            if "message to edit not found" in error or "message can't be edited" in error:
+                try:
+                    await query.answer("Сообщение справки устарело. Откройте /help заново.", show_alert=True)
+                except TelegramBadRequest:
+                    pass
+                return
             raise
     try:
         await query.answer()
