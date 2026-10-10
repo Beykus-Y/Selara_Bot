@@ -139,3 +139,111 @@ async def test_scheduler_emits_structured_event_for_each_scheduled_outcome(
     assert record.window_to == "2026-10-09T20:00:00+00:00"
     assert record.window_from == "2026-10-08T20:00:00+00:00"
     assert record.trigger == "scheduled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("minutes_late,attempted", [(89, True), (91, False)])
+async def test_scheduled_recovery_of_persisted_run_is_bounded_to_ninety_minutes(
+    monkeypatch, caplog, minutes_late, attempted,
+) -> None:
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from selara.presentation import daily_summary as module
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    barnaul = ZoneInfo("Asia/Barnaul")
+    planned_local = datetime(2026, 10, 10, 3, 0, tzinfo=barnaul)
+    planned_utc = planned_local.astimezone(timezone.utc)
+    existing = SimpleNamespace(
+        status="generated", window_from=planned_utc - timedelta(days=1), window_to=planned_utc,
+    )
+
+    class FakeRepo:
+        def __init__(self, session):
+            self.get_chat_settings = AsyncMock(return_value=SimpleNamespace(
+                daily_summary_enabled=True, daily_summary_hour=3))
+            # Only the 10-10 digest exists; a later day never looks at it.
+            self.get_daily_summary_run = AsyncMock(
+                side_effect=lambda **kw: existing if kw["summary_date"].isoformat() == "2026-10-10" else None,
+            )
+
+    monkeypatch.setattr(module, "SqlAlchemyActivityRepository", FakeRepo)
+    attempt = AsyncMock(return_value=module.DailySummaryOutcome(False, "not_eligible:disabled"))
+    monkeypatch.setattr(module, "attempt_daily_summary_run", attempt)
+    scheduler = module.DailySummaryScheduler(
+        bot=SimpleNamespace(), session_factory=lambda: Session(), llm_client=SimpleNamespace(),
+        settings=SimpleNamespace(), feature_access_service=SimpleNamespace(),
+    )
+    chat = SimpleNamespace(telegram_chat_id=-100123)
+    now_utc = (planned_local + timedelta(minutes=minutes_late)).astimezone(timezone.utc)
+
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        sent = await scheduler._process_chat(chat=chat, now_utc=now_utc, local_tz=barnaul)
+
+    assert sent is False
+    assert attempt.await_count == int(attempted)
+    skipped = [r for r in caplog.records if r.name == module.__name__
+               and r.getMessage() == "scheduled_skipped_stale_recovery"]
+    if attempted:
+        assert skipped == []
+    else:
+        assert len(skipped) == 1
+        assert skipped[0].reason == "outside_delivery_recovery_window"
+        assert skipped[0].window_to == planned_utc.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_skipped_scheduled_digest_is_not_retried_on_the_next_day(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from selara.presentation import daily_summary as module
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    barnaul = ZoneInfo("Asia/Barnaul")
+    old_window_to = datetime(2026, 10, 10, 3, 0, tzinfo=barnaul).astimezone(timezone.utc)
+    stale = SimpleNamespace(status="generated", window_from=old_window_to - timedelta(days=1), window_to=old_window_to)
+
+    class FakeRepo:
+        def __init__(self, session):
+            self.get_chat_settings = AsyncMock(return_value=SimpleNamespace(
+                daily_summary_enabled=True, daily_summary_hour=3))
+            self.get_daily_summary_run = AsyncMock(
+                side_effect=lambda **kw: stale if kw["summary_date"].isoformat() == "2026-10-10" else None,
+            )
+
+    monkeypatch.setattr(module, "SqlAlchemyActivityRepository", FakeRepo)
+    attempt = AsyncMock(return_value=module.DailySummaryOutcome(False, "not_eligible:disabled"))
+    monkeypatch.setattr(module, "attempt_daily_summary_run", attempt)
+    scheduler = module.DailySummaryScheduler(
+        bot=SimpleNamespace(), session_factory=lambda: Session(), llm_client=SimpleNamespace(),
+        settings=SimpleNamespace(), feature_access_service=SimpleNamespace(),
+    )
+    chat = SimpleNamespace(telegram_chat_id=-100123)
+
+    # Next day, before the 03:00 hour: planning falls back to 10-10 03:00, which is long expired.
+    early_next_day = datetime(2026, 10, 11, 1, 0, tzinfo=barnaul).astimezone(timezone.utc)
+    assert await scheduler._process_chat(chat=chat, now_utc=early_next_day, local_tz=barnaul) is False
+    attempt.assert_not_awaited()
+
+    # Next day's own 03:00 tick starts the 10-11 digest only, never the stale 10-10 one.
+    next_tick = datetime(2026, 10, 11, 3, 20, tzinfo=barnaul).astimezone(timezone.utc)
+    await scheduler._process_chat(chat=chat, now_utc=next_tick, local_tz=barnaul)
+    attempt.assert_awaited_once()
+    kwargs = attempt.await_args.kwargs
+    assert kwargs["summary_date"].isoformat() == "2026-10-11"
+    assert kwargs["window_to"] != old_window_to
