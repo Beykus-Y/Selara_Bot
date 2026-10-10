@@ -234,6 +234,12 @@ async def deliver_artifact(*, call: ToolCall, ctx: ArtifactRequestContext, bot, 
         return True
 
     while True:
+        # The final Telegram send is already confirmed and persisted. Do not
+        # re-check the delivery deadline after completion: the clock may have
+        # crossed it during the final network call, despite successful delivery.
+        # The caller still fences mark_daily_summary_run_sent with the claim.
+        if state.get("complete"):
+            break
         if await claim_is_lost():
             return _err(call.call_id, call.name, "Доставка остановлена: право отправки сводки перешло другому процессу.")
         items = ([("text", value) for value in renderer(caption)] if state.get("text_only")

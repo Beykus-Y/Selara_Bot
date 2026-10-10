@@ -496,3 +496,57 @@ async def test_summary_artifact_deadline_after_pending_commit_clears_pending(con
     repo.mark_daily_summary_run_send_failed.assert_not_awaited()
     assert 'pending' not in row.delivery
     assert not row.delivery.get('complete')
+
+
+async def test_summary_final_photo_can_complete_across_delivery_deadline(context, monkeypatch):
+    """A confirmed final Telegram send remains sent even if its response arrives after the cutoff."""
+    from selara.presentation import daily_summary as module
+
+    due = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
+    clock = [due + timedelta(minutes=90)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    context.thread_id = None
+    row = await context.repository.create(
+        chat_id=1, thread_id=None, creator_id=0, title="Summary",
+        pages=[png()], source={"pages": ["<p>2 эпизода</p>"], "summary_run_id": 42},
+    )
+    await context.repository.session.commit()
+
+    repo = SimpleNamespace(
+        get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(
+            chat_id=1, trigger="scheduled", summary_date=due.date(),
+            window_from=due - timedelta(days=1), window_to=due, claimed_at=due,
+            generated_text="<b>Итоги</b>", topics_json={"artifact_id": row.id},
+        )),
+        claim_daily_summary_delivery=AsyncMock(return_value=due),
+        is_daily_summary_delivery_claim_current=AsyncMock(return_value=True),
+        mark_daily_summary_run_sent=AsyncMock(return_value=True),
+        mark_daily_summary_run_send_failed=AsyncMock(),
+    )
+    monkeypatch.setattr(module, "SqlAlchemyActivityRepository", lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+
+    async def confirmed_photo(**kwargs):
+        clock[0] += timedelta(seconds=1)
+        return SimpleNamespace(message_id=201)
+
+    bot.send_photo.side_effect = confirmed_photo
+
+    assert await module._send_and_mark(
+        bot=bot, session_factory=lambda: context.repository.session,
+        chat_id=1, run_id=42, claimed_at=due,
+    ) is True
+    bot.send_photo.assert_awaited_once()
+    bot.send_message.assert_not_awaited()
+    assert row.delivery["complete"] is True
+    assert row.delivery["message_ids"] == [201]
+    repo.mark_daily_summary_run_sent.assert_awaited_once()
+    repo.mark_daily_summary_run_send_failed.assert_not_awaited()
+    # The clock crossed the cutoff only after the final confirmed send.
+    assert clock[0] > due + timedelta(minutes=90)
