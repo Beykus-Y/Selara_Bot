@@ -62,7 +62,7 @@ async function postData<T>(path: string, payload: Record<string, unknown>, fallb
       ? (error as { response?: { data?: { message?: string; detail?: string } } }).response?.data
       : undefined
     const message = responseMessage?.message ?? responseMessage?.detail
-    throw new Error(typeof message === 'string' ? message : fallback)
+    throw new Error(typeof message === 'string' ? message : fallback, { cause: error })
   }
 }
 

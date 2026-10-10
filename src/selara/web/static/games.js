@@ -720,7 +720,7 @@
         syncLiveFallbackState();
       });
       socket.addEventListener("message", (event) => {
-        let payload = null;
+        let payload;
         try {
           payload = JSON.parse(event.data);
         } catch {
