@@ -6,18 +6,22 @@ day vote -> execution confirmation -> resolution. Asserts only the public
 contract: the phase sequence, that the confirmed candidate leaves the alive set,
 and that the game either advanced to a new night or finished.
 
-Six players, not four: at four, the game ends on the first execution and the
-next-night branch can never run. At six, the final assertion accepts either outcome:
-a Mafia win by parity, or a live game that moves to the next night.
+Samples use four, six and ten players with reproducible role allocation. The
+four-player game may finish on the first execution; larger games can proceed
+to another night. This is a sampled backend simulation, not Telegram transport
+or exhaustive special-role verification.
 """
 from __future__ import annotations
 
+import random
+
 import pytest
 
+from selara.presentation import game_state
 from selara.presentation.game_state import GameStore
 
 
-async def _started_mafia(store: GameStore):
+async def _started_mafia(store: GameStore, player_count: int = 6):
     game, error = await store.create_lobby(
         kind="mafia",
         chat_id=700,
@@ -27,7 +31,7 @@ async def _started_mafia(store: GameStore):
         reveal_eliminated_role=True,
     )
     assert error is None and game is not None
-    for user_id in (2, 3, 4, 5, 6):
+    for user_id in range(2, player_count + 1):
         joined, status = await store.join(game_id=game.game_id, user_id=user_id, user_label=f"u{user_id}")
         assert joined is not None and status == "joined"
     started, start_error = await store.start(game_id=game.game_id)
@@ -56,9 +60,12 @@ async def _finish_night(store: GameStore, game_id: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_mafia_round_from_night_to_next_phase() -> None:
+@pytest.mark.parametrize("player_count", [4, 6, 10])
+async def test_full_mafia_round_from_night_to_next_phase(player_count, monkeypatch) -> None:
+    # Reproducible sampled role allocation, not every possible special-role mix.
+    monkeypatch.setattr(game_state, "random", random.Random(0))
     store = GameStore()
-    game = await _started_mafia(store)
+    game = await _started_mafia(store, player_count)
     round_before = game.round_no
 
     await _finish_night(store, game.game_id)
