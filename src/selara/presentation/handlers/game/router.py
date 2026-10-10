@@ -3592,6 +3592,29 @@ async def _open_zlob_vote_phase(
     if game is None:
         return None, "Игра не найдена"
     if error:
+        if (
+            triggered_by_auto
+            and error == "Нужно минимум два ответа для голосования"
+            and game.kind == "zlobcards"
+            and game.status == "started"
+            and game.phase == "private_answers"
+        ):
+            # Do not silently leave the expired timer without a useful board.
+            # Changing the >=2 minimum or deciding on automatic retry/cancel
+            # requires the separate recovery policy tracked in #230.
+            await _safe_edit_or_send_game_board(
+                bot,
+                game,
+                chat_settings,
+                note=(
+                    "<b>⏳ Время сдачи карточек истекло.</b> "
+                    "Для голосования нужны минимум два ответа. "
+                    "Оставшиеся игроки могут сдать карточки через «Рука в ЛС». "
+                    "Когда ответов будет достаточно, ведущий может нажать "
+                    "«Ведущему» → «Открыть голосование»; "
+                    "если партия больше не нужна, её можно завершить."
+                ),
+            )
         return game, error
 
     await _safe_edit_or_send_game_board(
