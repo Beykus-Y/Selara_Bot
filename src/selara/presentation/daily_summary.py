@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
 from selara.application.daily_summary.pipeline import DailySummaryClaimLost, run_daily_summary_pipeline
-from selara.application.daily_summary.schedule import compute_scheduled_window_to, is_stale_scheduled_window
+from selara.application.daily_summary.schedule import (
+    SCHEDULED_NEW_RUN_GRACE,
+    compute_scheduled_window_to,
+    is_stale_scheduled_window,
+)
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
@@ -41,7 +45,10 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 900  # 15 minutes -- accuracy to the hour isn't critical (see TODO doc)
 _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" before it can be reclaimed
-_SCHEDULED_DELIVERY_MAX_AGE = timedelta(hours=6)  # bounded retry without next-day reports
+# Scheduled delivery (and recovery of persisted generated/send_failed runs) is allowed
+# only within 90 minutes after the planned window_to; later digests are skipped, never
+# sent late or on the next day. Reuses the new-run grace value (same 90 minutes).
+_SCHEDULED_DELIVERY_MAX_AGE = SCHEDULED_NEW_RUN_GRACE
 _ACCESS_LOG_KEYS: OrderedDict[tuple[int, date, str], None] = OrderedDict()
 _MAX_ACCESS_LOG_KEYS = 4096
 _OWNER_DENIAL_CACHE_TTL = timedelta(hours=2)  # how long a scheduler remembers "owner is not admin here"

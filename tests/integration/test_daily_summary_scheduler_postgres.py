@@ -1624,7 +1624,12 @@ async def test_scheduled_free_chat_owner_check_is_cached_between_ticks() -> None
 
         # The cache only remembers denials: once the owner is an admin the chat is served.
         bot.get_chat_member.return_value = SimpleNamespace(status="administrator")
-        promoted = await attempt_daily_summary_run(now_utc=_NOW + timedelta(hours=6), **kwargs)
+        # Delivery is bounded to 90 minutes after window_to, so the promoted attempt
+        # carries a window planned at its own instant; the cache is what is under test.
+        promoted = await attempt_daily_summary_run(
+            now_utc=_NOW + timedelta(hours=6),
+            **{**kwargs, "window_to": _NOW + timedelta(hours=6)},
+        )
         assert promoted.sent
         assert promoted.access_decision.access_tier == AccessTier.OWNER_INTERNAL
         assert _CHAT_ID not in cache
@@ -1932,7 +1937,7 @@ async def test_scheduled_delivery_reservation_and_twenty_hour_gap_are_atomic() -
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["claimed", "generating", "generated", "send_failed"])
-async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(monkeypatch, status) -> None:
+async def test_scheduler_never_retries_scheduled_run_past_ninety_minute_window(monkeypatch, status) -> None:
     engine, session_factory = await _database()
     try:
         await _seed_chat(
@@ -1953,15 +1958,20 @@ async def test_scheduler_never_retries_seven_hour_old_scheduled_generated_run(mo
             bot=_fake_bot(), session_factory=session_factory,
             llm_client=_FakeLlmClient(), settings=_test_settings(),
         )
-        # A fresh generated report is still recoverable within the chosen 6h.
-        await scheduler.run_once(now=due + timedelta(hours=5))
+        # A generated report is still recoverable 89 minutes after its planned window_to.
+        await scheduler.run_once(now=due + timedelta(minutes=89))
         run_mock.assert_awaited_once()
         run_mock.reset_mock()
 
-        # Previous generated/send_failed work is no longer published after 6h,
-        # even though it has a valid summary_date and the normal claim exists.
-        assert await scheduler.run_once(now=due + timedelta(hours=7)) == 0
+        # Past the 90-minute window it is never published, even though it has a valid
+        # summary_date and the normal claim exists.
+        assert await scheduler.run_once(now=due + timedelta(minutes=91)) == 0
         run_mock.assert_not_awaited()
+
+        # The next day's 10:20 tick starts only that day's digest, not the skipped one.
+        await scheduler.run_once(now=due + timedelta(days=1, minutes=20))
+        run_mock.assert_awaited_once()
+        assert run_mock.await_args.kwargs["window_to"] == due + timedelta(days=1)
     finally:
         await engine.dispose()
 
@@ -2020,7 +2030,7 @@ async def test_recovery_deadline_uses_original_window_after_schedule_hour_change
             llm_client=_FakeLlmClient(), settings=_test_settings(),
         )
         # The new 15:00 schedule is fresh, but the persisted 08:00 run
-        # must expire at 14:00, rather than acquiring a renewed deadline.
+        # must expire 90 minutes after 08:00, rather than acquiring a renewed deadline.
         assert await scheduler.run_once(now=original_due+timedelta(hours=7)) == 0
         run_mock.assert_not_awaited()
     finally:
