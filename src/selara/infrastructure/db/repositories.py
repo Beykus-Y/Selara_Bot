@@ -3044,14 +3044,16 @@ class SqlAlchemyActivityRepository:
     async def _other_scheduled_run_active(
         self, *, chat_id: int, summary_date: date, now: datetime
     ) -> bool:
-        """Avoid paying for two different dates while another worker has a lease."""
+        """Avoid a new billable run during another live generation or send lease."""
         active = (
             await self._session.execute(
                 select(DailySummaryRunModel.id).where(
                     DailySummaryRunModel.chat_id == chat_id,
                     DailySummaryRunModel.trigger == "scheduled",
                     DailySummaryRunModel.summary_date != summary_date,
-                    DailySummaryRunModel.status.in_(("claimed", "generating")),
+                    DailySummaryRunModel.status.in_((
+                        "claimed", "generating", "generated", "send_failed",
+                    )),
                     DailySummaryRunModel.lease_until > _coerce_utc_datetime(now),
                 ).limit(1)
             )
