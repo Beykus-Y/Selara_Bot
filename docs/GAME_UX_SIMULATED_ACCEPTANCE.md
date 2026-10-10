@@ -12,10 +12,14 @@ final seats (2, 2 and 5 respectively). Each phase exercises foreign-chat and
 stale-action rejection. Final winners and repeat-resolution denial are checked.
 
 `tests/unit/test_game_mafia_full_round_e2e.py` now walks 4, 6 and 10-player
-sampled rounds with RNG seed 0: real role assignment, every night action,
-night outcome, discussion, day vote, execution confirmation and finish/next
-night. These are three role allocations, not all special-role permutations.
-The original six-player path remains in the same parameterized test.
+sampled rounds with RNG seed 0: real role assignment, one night action per
+acting player (first valid target), night outcome, discussion, day vote,
+execution confirmation and finish/next night. The seeded allocations are
+4 players: one Mafia and three civilians; 6 players: Doctor, Commissar, two
+Mafia and two civilians; 10 players: ten roles including Красотка, Оборотень,
+Отравитель, Психолог and Телохранитель. These are three role allocations, not
+all special-role permutations. The original six-player path remains in the
+same parameterized test.
 
 Run both with the repository's frozen development dependencies:
 
@@ -39,8 +43,9 @@ All paths below are under `tests/unit/`. This set was run together with
 | Mafia sampled 4/6/10 rounds | `test_game_mafia_full_round_e2e.py` | Real GameStore, reproducible sampled roles |
 | Bunker private buttons, 6/8/12 | `test_game_bunker_keyboard_layout.py` | Actual keyboard builder, target restrictions/layout/callback bytes |
 | Blocked DM and next-player warning | `test_game_bunker_ux.py`, `test_game_mafia_night_dm_failure.py`, `test_game_warn_on_failed_dm_helper.py` | Fake Telegram Bot raising delivery errors; group warning |
-| Role recovery/deep links | `test_game_dm_deep_links.py` | Actual handlers, simulated users and Bot API |
-| Stop/reveal/rematch permissions and phase race | `test_game_gux_core_lifecycle.py` | Actual handler/store contracts, simulated callbacks |
+| Private-phase DM deep links | `test_game_dm_deep_links.py` | Keyboard builder output only: `?start=game_<id>` on private-phase DM buttons; no handler or Bot API call |
+| Stop/reveal permissions and phase race | `test_game_gux_core_lifecycle.py` | Actual handler/store contracts, simulated callbacks |
+| Rematch manager gate, cross-chat and double click | `test_game_lobby_leave_and_rematch.py` | Actual handler with fake query; run separately, not part of the 104-test set |
 | Stale Bunker/Mafia phase and timer races | `test_game_gux_bunker_mafia_guards.py` | Actual handler/store logic, simulated timer/callback context |
 | Genshin and HSR transaction sequences | `test_gacha_http_two_banner_transaction_contract.py` | Real HTTP client with stateful mock service: currency, duplicate key, paid pull, collection/profile, ownership/sale, banner isolation |
 | Gacha failures and repeated/foreign clicks | `test_text_commands_gacha_callbacks.py` | Fake service/Telegram, insufficient coins, timeout, disabled gate, subscription, animation, duplicate sale/callback |
