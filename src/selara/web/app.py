@@ -3417,14 +3417,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 )
                 for button in web_manager_buttons:
                     if button.get("callback_data", "").startswith("game:adv:"):
-                        # Existing web action router speaks the legacy
-                        # three-part action; only its web transport is
-                        # adapted, never the Telegram callback contract.
-                        button = {
-                            **button,
-                            "callback_data": f"game:advance:{game.game_id}",
-                            "variant": "primary",
-                        }
+                        # Preserve the immutable phase/round/step token from the
+                        # rendered controls. Stripping it makes stale web tabs
+                        # capable of advancing a newer game state.
+                        button = {**button, "variant": "primary"}
                     manage_buttons.append(button)
             if can_manage_games and game.status == "started":
                 # A browser click must open an explicit confirmation before
@@ -3785,18 +3781,30 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         parts = callback_data.split(":")
         versioned_games = {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"}
         round_actions = {"gbkv", "gmact", "gmvote", "gmconfirm"}
-        is_web_confirmation = (
-            len(parts) == 9 and parts[:2] == ["game", "confirm"]
-        )
+        is_web_confirmation = len(parts) == 9 and parts[:2] == ["game", "confirm"]
+        is_versioned_advance = len(parts) == 6 and parts[:2] == ["game", "adv"]
         if not is_web_confirmation and (
-            len(parts) not in {3, 4, 5}
+            len(parts) not in {3, 4, 5, 6}
             or (len(parts) == 4 and parts[0] not in versioned_games | round_actions)
             or (len(parts) == 5 and parts[0] != "gbkr")
+            or (len(parts) == 6 and not is_versioned_advance)
         ):
             return False, "Некорректные параметры игрового действия."
 
         prefix = parts[0]
         payload = parts[-1]
+        if is_versioned_advance:
+            _, _, callback_game_id, expected_phase, expected_round_raw, expected_step_raw = parts
+            if (
+                callback_game_id != game.game_id
+                or not expected_round_raw.isdecimal()
+                or not expected_step_raw.isdecimal()
+                or game.status != "started"
+                or game.phase != expected_phase
+                or game.round_no != int(expected_round_raw)
+                or game_router_module._manager_advance_step(game) != int(expected_step_raw)
+            ):
+                return False, "Действие устарело. Обновите страницу игры."
         if prefix in versioned_games and prefix != "gquiz":
             if len(parts) != 4 or not parts[2].isdigit():
                 return False, "Старая игровая кнопка. Обновите страницу."
@@ -3942,7 +3950,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return False, "Неизвестная настройка игры."
 
         if prefix == "game":
-            action = parts[1]
+            action = "advance" if is_versioned_advance else parts[1]
             if action == "join":
                 updated_game, status = await GAME_STORE.join(game_id=game.game_id, user_id=user.telegram_user_id, user_label=actor_label)
                 if updated_game is None:
@@ -4110,6 +4118,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 return False, "Раскрытие ролей требует подтверждения с актуальной страницы."
 
             if action == "advance":
+                if not is_versioned_advance:
+                    return False, "Старая кнопка управления. Обновите страницу игры."
                 if game.status != "started":
                     return False, "Игра уже завершена."
                 if game.kind == "quiz":
@@ -4120,6 +4130,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         economy_repo=economy_repo,
                         force=True,
                         triggered_by_auto=False,
+                        expected_question_index=int(parts[5]),
                     )
                     return (error is None), (error or "Вопрос закрыт и обработан.")
                 if game.kind == "bredovukha":
@@ -4161,7 +4172,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return False, "Сейчас нет шага для переключения."
                 if game.kind == "bunker":
                     if game.phase == "bunker_reveal":
-                        updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(game_id=game.game_id)
+                        updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
+                            game_id=game.game_id, expected_reveal_cursor=int(parts[5]),
+                        )
                         if updated_game is None:
                             return False, "Игра не найдена."
                         if error or result is None:
