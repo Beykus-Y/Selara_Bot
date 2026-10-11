@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from selara.presentation.game_state import GameStore, GroupGame
+from selara.presentation.game_state import GameStore, GroupGame, RuntimeGameStore
 
 ui = importlib.import_module("selara.presentation.handlers.game.router")
 
@@ -202,3 +202,66 @@ async def test_stale_restore_snapshot_cannot_replace_a_new_mafia_timer():
         assert not current_timer.cancelled()
     finally:
         ui._cancel_phase_timer(game.game_id)
+
+
+@pytest.mark.asyncio
+async def test_runtime_store_snapshots_transition_before_slow_redis_sync(monkeypatch):
+    backend = GameStore()
+    game = _active_game(kind="mafia", phase="day_discussion")
+    backend._by_id[game.game_id] = game
+    runtime = RuntimeGameStore(backend=backend)
+    sync_entered, resume_sync = asyncio.Event(), asyncio.Event()
+
+    async def delayed_redis_sync(*args, **kwargs):
+        sync_entered.set()
+        await resume_sync.wait()
+
+    monkeypatch.setattr(runtime, "_hydrate_for_call", AsyncMock())
+    monkeypatch.setattr(runtime, "_game_ids_to_sync", AsyncMock(return_value=[game.game_id]))
+    monkeypatch.setattr(runtime, "_sync_cached_state", delayed_redis_sync)
+    monkeypatch.setattr(runtime, "_publish_after_call", AsyncMock())
+
+    task = asyncio.create_task(
+        runtime.mafia_open_day_vote(game_id=game.game_id, expected_round_no=game.round_no)
+    )
+    try:
+        await asyncio.wait_for(sync_entered.wait(), timeout=2)
+        assert game.phase == "day_vote"
+        original_started_at = game.phase_started_at
+        async with backend._lock_game(game.game_id):
+            game.phase = "night"
+            game.phase_started_at = datetime.now(timezone.utc)
+        resume_sync.set()
+        transition = await asyncio.wait_for(task, timeout=2)
+        current, error = transition
+        assert error is None and current is game and current.phase == "night"
+        assert ui._phase_version_from_transition(transition, game) == (
+            "mafia", "day_vote", 2, original_started_at,
+        )
+    finally:
+        resume_sync.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.asyncio
+async def test_quiz_rechecks_phase_after_delayed_persisted_take(monkeypatch):
+    game = _active_game(kind="quiz", phase="freeplay")
+    game.quiz_current_question_index = 1
+
+    class DelayedStore:
+        async def take_quiz_feed_message_id(self, **kwargs):
+            # The lock already accepted Q2, but Redis sync let Q3 win.
+            game.quiz_current_question_index = 2
+            return True, None
+
+        async def get_game(self, game_id):
+            return game
+
+    monkeypatch.setattr(ui, "GAME_STORE", DelayedStore())
+    bot = SimpleNamespace(send_message=AsyncMock(), delete_message=AsyncMock())
+    await ui._sync_quiz_feed_message(
+        bot, game, question_no=2, expected_question_index=1,
+    )
+    bot.send_message.assert_not_awaited()
+    bot.delete_message.assert_not_awaited()
