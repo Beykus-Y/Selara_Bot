@@ -299,3 +299,36 @@ async def test_gameboard_recovery_reports_absent_game(monkeypatch):
     )
     await game_router.game_board_command(msg, bot=bot(), chat_settings=settings())
     assert "нет активной игры" in msg.answer.await_args.args[0]
+
+
+
+@pytest.mark.asyncio
+async def test_telegram_quiz_stop_uses_atomic_feed_id_not_unlocked_snapshot(monkeypatch):
+    # Review #255: a publisher can commit its ID after the callback begins
+    # but before GameStore.finish acquires the per-game lock.
+    store = GameStore()
+    edit, feed = prepare(monkeypatch, store)
+    game = await create_started(store, kind="quiz")
+    assert game.quiz_feed_message_id is None
+    real_finish = store.finish
+
+    async def publish_just_before_finish(**kwargs):
+        published = await store.set_quiz_feed_message_id(game_id=game.game_id, message_id=919)
+        assert published is not None
+        return await real_finish(**kwargs)
+
+    monkeypatch.setattr(store, "finish", publish_just_before_finish)
+    confirmation = game_router._build_lifecycle_confirmation_keyboard(
+        game=game, action="stop", issued_at=int(time()),
+    )
+    data = callbacks(confirmation)[0]
+    b = bot()
+    query = Query(data=data)
+    await callback(query, bot_obj=b)
+
+    assert query.answers[-1][0] == "Игра завершена"
+    assert (await store.get_game(game.game_id)).status == "finished"
+    assert game.quiz_feed_message_id is None
+    b.delete_message.assert_awaited_once_with(chat_id=-100, message_id=919)
+    edit.assert_awaited_once()
+    feed.assert_awaited_once()
