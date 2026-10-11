@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.enums import ContentType
 from aiogram.types import BufferedInputFile, ReactionTypeEmoji
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -4053,6 +4054,11 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "Игра остановлена ведущим." if confirmed == "stop"
                     else "Игра завершена по решению ведущего."
                 )
+                # finish() clears quiz_feed_message_id on the same game instance.
+                # Preserve it before the atomic transition, but delete only after
+                # finish succeeds so a rejected stale confirmation cannot change
+                # a still-running quiz or its live question message.
+                quiz_feed_message_id = game.quiz_feed_message_id if game.kind == "quiz" else None
                 finished_game = await GAME_STORE.finish(
                     game_id=game.game_id,
                     winner_text=winner_text,
@@ -4063,8 +4069,14 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 if finished_game is None:
                     return False, "Партия уже изменилась. Действие не выполнено."
                 game_router_module._cancel_phase_timer(finished_game.game_id)
-                if finished_game.kind == "quiz":
-                    await game_router_module._sync_quiz_feed_message(bot, finished_game, question_no=None)
+                if quiz_feed_message_id is not None:
+                    try:
+                        await bot.delete_message(
+                            chat_id=finished_game.chat_id, message_id=quiz_feed_message_id,
+                        )
+                    except (TelegramBadRequest, TelegramForbiddenError):
+                        # Same best-effort semantics as the Telegram quiz-feed cleanup.
+                        pass
                 await game_router_module._safe_edit_or_send_game_board(
                     bot, finished_game, chat_settings,
                     include_reveal=(confirmed == "reveal" or finished_game.kind in {"spy", "mafia"}),
