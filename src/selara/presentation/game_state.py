@@ -6143,6 +6143,31 @@ def _event_type_for_method(name: str) -> str:
     return "game_updated"
 
 
+_PHASE_SNAPSHOT_METHODS = frozenset({
+    "start",
+    "mafia_resolve_night",
+    "mafia_open_day_vote",
+    "mafia_resolve_day_vote",
+    "mafia_resolve_execution_confirm",
+    "zlob_open_vote",
+    "zlob_resolve_round",
+    "zlob_submit_cards",
+})
+
+
+class _PhaseVersionedResult(tuple):
+    """Preserve normal tuple unpacking, plus a frozen version from before Redis I/O."""
+
+    def __new__(
+        cls,
+        result: tuple,
+        phase_version: tuple[str, str, int, datetime | None],
+    ) -> _PhaseVersionedResult:
+        instance = super().__new__(cls, result)
+        instance.phase_version = phase_version
+        return instance
+
+
 class _RecoverySupersededError(Exception):
     """A recovery attempt lost ownership of its candidate Redis runtime."""
 
@@ -7081,6 +7106,20 @@ class RuntimeGameStore:
             token = _TOUCHED_GAME_IDS.set(touched)
             try:
                 result = await attr(*args, **kwargs)
+                # Capture a phase version BEFORE Redis persistence yields. The
+                # returned GroupGame itself is a shared mutable object; after
+                # sync another callback may already have advanced its phase.
+                if (
+                    name in _PHASE_SNAPSHOT_METHODS
+                    and isinstance(result, tuple)
+                    and result
+                    and isinstance(result[0], GroupGame)
+                ):
+                    game = result[0]
+                    result = _PhaseVersionedResult(
+                        result,
+                        (game.kind, game.phase, game.round_no, game.phase_started_at),
+                    )
             finally:
                 _TOUCHED_GAME_IDS.reset(token)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
