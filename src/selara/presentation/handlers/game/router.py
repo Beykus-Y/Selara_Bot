@@ -2327,17 +2327,35 @@ async def _send_game_feed_event(
         await bot.send_message(**kwargs)
 
 
-async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int | None) -> None:
+async def _sync_quiz_feed_message(
+    bot: Bot,
+    game: GroupGame,
+    *,
+    question_no: int | None,
+    expected_question_index: int | None = None,
+) -> None:
     if game.kind != "quiz":
         return
 
-    if game.quiz_feed_message_id is not None:
+    # A transition result carries the immutable question index: a mutable
+    # GroupGame can already show a newer question after Telegram awaits.
+    question_index = (
+        expected_question_index if expected_question_index is not None
+        else question_no - 1 if question_no is not None else None
+    )
+    valid, previous_message_id = await GAME_STORE.take_quiz_feed_message_id(
+        game_id=game.game_id,
+        expected_question_index=question_index,
+        finished_only=question_no is None,
+    )
+    if not valid:
+        return
+
+    if previous_message_id is not None:
         try:
-            await bot.delete_message(chat_id=game.chat_id, message_id=game.quiz_feed_message_id)
+            await bot.delete_message(chat_id=game.chat_id, message_id=previous_message_id)
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
-        finally:
-            await GAME_STORE.set_quiz_feed_message_id(game_id=game.game_id, message_id=None)
 
     if question_no is None:
         return
@@ -2358,11 +2376,13 @@ async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int
         sent = await bot.send_message(**kwargs)
 
     recorded = await GAME_STORE.set_quiz_feed_message_id(
-        game_id=game.game_id, message_id=sent.message_id,
+        game_id=game.game_id,
+        message_id=sent.message_id,
+        expected_question_index=question_index,
     )
     if recorded is None:
-        # The game finished while Telegram was sending this question.
-        # No live question may remain attached to a finished party.
+        # Another question (or finish) won during the network send. Only
+        # delete our obsolete message, never the winning question's feed.
         try:
             await bot.delete_message(chat_id=game.chat_id, message_id=sent.message_id)
         except (TelegramBadRequest, TelegramForbiddenError):
@@ -2745,7 +2765,22 @@ def _zlob_private_grace_remaining(game: GroupGame, *, now: datetime | None = Non
     return max(0.0, (deadline - now).total_seconds())
 
 
-def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings) -> None:
+def _timer_phase_version(game: GroupGame) -> tuple[str, str, int, datetime | None]:
+    """Immutable phase identity for guarding callbacks after async I/O."""
+    return game.kind, game.phase, game.round_no, game.phase_started_at
+
+
+def _schedule_phase_timer(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    *,
+    expected_phase_version: tuple[str, str, int, datetime | None] | None = None,
+) -> None:
+    # Check and cancellation are synchronous: a superseded transition cannot
+    # replace the timer belonging to a newer phase.
+    if expected_phase_version is not None and _timer_phase_version(game) != expected_phase_version:
+        return
     _cancel_phase_timer(game.game_id)
 
     if game.status != "started":
@@ -3278,6 +3313,7 @@ async def _advance_mafia_night(
     )
     if game is None or resolution is None or error:
         return False
+    timer_phase_version = _timer_phase_version(game)
 
     note_parts: list[str] = []
     event_parts: list[str] = [f"<b>Ведущий:</b> Ночь {game.round_no} завершена."]
@@ -3332,7 +3368,7 @@ async def _advance_mafia_night(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia night finished by timer", extra={"game_id": game.game_id})
@@ -3355,6 +3391,7 @@ async def _open_mafia_day_vote(
     )
     if game is None or error:
         return False
+    timer_phase_version = _timer_phase_version(game)
 
     # No group-wide feed event here (games UX audit, Stage 3 correction #5):
     # "voting is open" is pure current state, already shown on the edited
@@ -3366,7 +3403,7 @@ async def _open_mafia_day_vote(
     note = "<b>Голосование открыто.</b> Проголосовать можно на доске или в ЛС-карточке от бота."
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
     await _notify_mafia_day_vote_private(bot, game)
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote opened by timer", extra={"game_id": game.game_id})
@@ -3390,6 +3427,7 @@ async def _resolve_mafia_day_vote(
     )
     if game is None or resolution is None or error:
         return False
+    timer_phase_version = _timer_phase_version(game)
 
     protocol_text = _format_day_vote_protocol(game, resolution)
 
@@ -3414,7 +3452,7 @@ async def _resolve_mafia_day_vote(
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
         await _sync_execution_confirm_message(bot, game, force_new=True)
-        _schedule_phase_timer(bot, game, chat_settings)
+        _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
         return True
 
     if resolution.candidate_user_id is None:
@@ -3451,7 +3489,7 @@ async def _resolve_mafia_day_vote(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
@@ -3480,6 +3518,7 @@ async def _resolve_mafia_execution_confirm(
     )
     if game is None or resolution is None or error:
         return False
+    timer_phase_version = _timer_phase_version(game)
 
     if confirm_message_id is not None:
         try:
@@ -3545,7 +3584,7 @@ async def _resolve_mafia_execution_confirm(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
@@ -3587,7 +3626,10 @@ async def _resolve_quiz_round(
         next_question_human = (resolution.next_question_index or 0) + 1
         note = f"{round_text}\n<b>Открыт вопрос {next_question_human}.</b>"
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
-        await _sync_quiz_feed_message(bot, game, question_no=next_question_human)
+        await _sync_quiz_feed_message(
+            bot, game, question_no=next_question_human,
+            expected_question_index=resolution.next_question_index,
+        )
 
     if triggered_by_auto:
         logger.debug("Quiz round resolved automatically", extra={"game_id": game.game_id, "question_index": resolution.question_index})
@@ -3656,6 +3698,7 @@ async def _open_zlob_vote_phase(
     )
     if game is None:
         return None, "Игра не найдена"
+    timer_phase_version = _timer_phase_version(game)
     if error:
         if (
             triggered_by_auto
@@ -3694,7 +3737,7 @@ async def _open_zlob_vote_phase(
         chat_settings,
         note="<b>Этап:</b> приватный выбор завершён, открыто голосование.",
     )
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards vote opened automatically", extra={"game_id": game.game_id})
     return game, None
@@ -3717,6 +3760,7 @@ async def _resolve_zlob_round(
         return game, error
     if resolution is None:
         return game, "Не удалось обработать голосование"
+    timer_phase_version = _timer_phase_version(game)
 
     round_text = _format_zlob_round_resolution(game, resolution)
     if resolution.finished:
@@ -3746,7 +3790,7 @@ async def _resolve_zlob_round(
         chat_settings,
         note="\n".join(note_parts),
     )
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
     return game, None
@@ -4865,7 +4909,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if started_game.kind == "quiz":
-            await _sync_quiz_feed_message(bot, started_game, question_no=1)
+            await _sync_quiz_feed_message(bot, started_game, question_no=1, expected_question_index=0)
             return
 
         if started_game.kind == "bredovukha":
@@ -5000,7 +5044,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 if error:
                     await query.answer(error, show_alert=False)
                     return
-                _schedule_phase_timer(bot, opened_game, chat_settings)
                 await query.answer("Голосование открыто", show_alert=False)
                 return
 
@@ -5017,8 +5060,6 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 if error:
                     await query.answer(error, show_alert=False)
                     return
-                if resolved_game is not None and resolved_game.status == "started":
-                    _schedule_phase_timer(bot, resolved_game, chat_settings)
                 await query.answer("Раунд закрыт", show_alert=False)
                 return
 
@@ -5748,6 +5789,7 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
+    timer_phase_version = _timer_phase_version(game)
     if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
@@ -5767,7 +5809,7 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         # A final early submission transitions the phase inside GameStore.
         # Replace the private-answer timer with a voting timer; simply
         # cancelling here previously left public_vote open indefinitely.
-        _schedule_phase_timer(bot, game, chat_settings)
+        _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
         await _safe_edit_or_send_game_board(
             bot,
             game,
