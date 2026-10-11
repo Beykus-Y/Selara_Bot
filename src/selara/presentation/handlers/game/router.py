@@ -2930,7 +2930,10 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
     from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
     active_games = await GAME_STORE.list_active_games()
-    timer_games = [g for g in active_games if g.status == "started" and g.kind in {"mafia", "zlobcards"}]
+    timer_games = [
+        (game, _timer_phase_version(game))
+        for game in active_games if game.status == "started" and game.kind in {"mafia", "zlobcards"}
+    ]
 
     if not timer_games:
         return
@@ -2946,9 +2949,11 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
         except Exception:
             pass
 
-        for game in timer_games:
+        for game, expected_phase_version in timer_games:
             try:
                 chat_settings = await repo.get_chat_settings(chat_id=game.chat_id)
+                if _timer_phase_version(game) != expected_phase_version:
+                    continue
                 if chat_settings is None:
                     if settings_obj is not None:
                         chat_settings = default_chat_settings(settings_obj)
@@ -2997,18 +3002,26 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
                     remaining,
                 )
 
-                # Создаём временную версию игры с уменьшенной задержкой через патч настроек
-                # Проще всего — вызвать _schedule_phase_timer с модифицированными settings
-                _cancel_phase_timer(game.game_id)
-                _schedule_phase_timer_with_remaining(bot, game, chat_settings, remaining)
+                # Re-check the snapshot before cancelling another phase's timer.
+                _schedule_phase_timer_with_remaining(
+                    bot, game, chat_settings, remaining,
+                    expected_phase_version=expected_phase_version,
+                )
             except Exception:
                 logger.exception("Failed to restore timer for game %s", game.game_id)
 
 
 def _schedule_phase_timer_with_remaining(
-    bot: Bot, game: GroupGame, chat_settings: ChatSettings, remaining_seconds: float
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    remaining_seconds: float,
+    *,
+    expected_phase_version: tuple[str, str, int, datetime | None] | None = None,
 ) -> None:
     """Запускает таймер фазы с конкретной оставшейся задержкой (используется при восстановлении)."""
+    if expected_phase_version is not None and _timer_phase_version(game) != expected_phase_version:
+        return
     _cancel_phase_timer(game.game_id)
 
     if game.status != "started":
@@ -4862,6 +4875,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer(error, show_alert=True)
             return
 
+        started_phase_version = _timer_phase_version(started_game)
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
@@ -4870,7 +4884,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             failed_role_dm = await _send_roles_to_private(bot, started_game)
 
         if started_game.kind == "mafia":
-            _schedule_phase_timer(bot, started_game, chat_settings)
+            _schedule_phase_timer(bot, started_game, chat_settings, expected_phase_version=started_phase_version)
             failed_night_dm = await _notify_mafia_night_actions(bot, started_game)
             # One combined warning for both DMs (role card + first night's
             # action prompt) instead of two separate messages -- the same
@@ -4896,7 +4910,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if started_game.kind == "zlobcards":
-            _schedule_phase_timer(bot, started_game, chat_settings)
+            _schedule_phase_timer(bot, started_game, chat_settings, expected_phase_version=started_phase_version)
             await _send_game_feed_event(
                 bot,
                 started_game,
