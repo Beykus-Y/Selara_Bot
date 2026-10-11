@@ -2253,7 +2253,7 @@ async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery,
                     disable_web_page_preview=True,
                 )
             except (TelegramBadRequest, TelegramForbiddenError):
-                log.debug("Gacha subscription link could not be posted", exc_info=True)
+                logger.debug("Gacha subscription link could not be posted", exc_info=True)
             else:
                 # Failed sends must not suppress the next eligible tap.
                 _mark_gacha_subscription_prompt_sent(chat_id=chat_id, user_id=user_id)
