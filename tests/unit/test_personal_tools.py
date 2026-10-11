@@ -569,7 +569,13 @@ async def test_fake_artifact_created_claim_is_not_presented_as_success_without_t
     assert len(llm.calls) == 1
 
 
-async def test_svg_code_dump_for_picture_request_is_corrected():
+@pytest.mark.parametrize("prompt", [
+    "сделай картинку попугая через SVG",
+    "создай изображение попугая",
+    "сделай схему работы чата",
+    "нарисуй рисунок",
+])
+async def test_svg_code_dump_for_picture_request_is_corrected(prompt: str):
     llm = ScriptedLlm(
         _response(content='Вот SVG:\\n<svg width="300" height="300"><circle r="40"/></svg>'),
         _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
@@ -579,7 +585,7 @@ async def test_svg_code_dump_for_picture_request_is_corrected():
     turn = await run_tool_dialogue(
         llm_client=llm,
         messages=[{"role": "system", "content": "s"},
-                  {"role": "user", "content": "сделай картинку попугая через SVG"}],
+                  {"role": "user", "content": prompt}],
         run=run,
     )
     assert len(llm.calls) == 3
@@ -607,3 +613,36 @@ async def test_created_but_not_sent_artifact_is_not_reported_as_success():
         llm_client=llm, messages=[{"role": "user", "content": "нарисуй картинку"}], run=run
     )
     assert turn.text == personal_tools._UNSENT_ARTIFACT_NOTICE
+
+
+
+async def test_unexecuted_get_artifact_promise_gets_one_real_retry():
+    # Edits must not stop after a plain-text "I'll fetch the previous artifact".
+    llm = ScriptedLlm(
+        _response(content="Сейчас вызову get_artifact для редактирования."),
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Инструкция прочитана, изображение пока не отправлено."),
+    )
+    run = _run(web=False, artifacts=True)
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "user", "content": "сделай изображение красивее"}],
+        run=run,
+    )
+    assert len(llm.calls) == 3
+    assert "artifacts" in run.skills_read
+    assert turn.text == "Инструкция прочитана, изображение пока не отправлено."
+
+
+@pytest.mark.parametrize("reply", [
+    "Я не вызову get_artifact без разрешения.",
+    "Плохой пример: «Сейчас вызову get_artifact».",
+    "Инструмент get_artifact используется для чтения предыдущей картинки.",
+])
+async def test_get_artifact_explanations_do_not_trigger_retries(reply: str):
+    llm = ScriptedLlm(_response(content=reply))
+    turn = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "user", "content": "как это работает?"}],
+        run=_run(web=False, artifacts=True),
+    )
+    assert len(llm.calls) == 1
+    assert turn.text == reply
