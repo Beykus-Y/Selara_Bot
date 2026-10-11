@@ -1099,3 +1099,66 @@ async def test_web_manager_buttons_preserve_step_and_reject_stale_clicks(monkeyp
     assert legacy.status_code == 400 and legacy.json()["ok"] is False
     assert current is not None and current.bunker_reveal_cursor == original_cursor + 1
     safe_edit_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_web_mafia_manager_action_fenced_after_preflight_when_phase_changes(monkeypatch):
+    """A stale web callback blocked at the transition lock must not consume the next phase."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    settings = _settings()
+    user = UserSnapshot(telegram_user_id=210, username="host", first_name="Host", last_name=None, is_bot=False)
+    state = WebRepoState(
+        settings=settings,
+        user=user,
+        manageable_groups=[_overview(-6254, "Mafia Control", bot_role="game_master")],
+        chat_settings_by_chat={-6254: default_chat_settings(settings)},
+    )
+    async with _web_client(monkeypatch, state) as (client, store, _safe_edit, _send_roles):
+        game, error = await store.create_lobby(
+            kind="mafia", chat_id=-6254, chat_title="Mafia Control",
+            owner_user_id=210, owner_label="Host", reveal_eliminated_role=True,
+        )
+        assert error is None and game is not None
+        for player in (211, 212, 213):
+            _, status = await store.join(game_id=game.game_id, user_id=player, user_label=str(player))
+            assert status == "joined"
+        started, error = await store.start(game_id=game.game_id)
+        assert error is None and started is not None
+        # Initialize the manager's next action on a real started game.
+        async with store._lock_game(game.game_id):
+            started.phase = "day_discussion"
+            started.phase_started_at = datetime.now(timezone.utc)
+
+        advance = next(
+            button.callback_data
+            for row in web_app_module.game_router_module._build_game_manager_controls(started).inline_keyboard
+            for button in row if button.callback_data.startswith("game:adv:")
+        )
+        entered, release = asyncio.Event(), asyncio.Event()
+        real_transition = store.mafia_open_day_vote
+
+        async def delayed_transition(**kwargs):
+            entered.set()
+            await release.wait()
+            return await real_transition(**kwargs)
+
+        monkeypatch.setattr(store, "mafia_open_day_vote", delayed_transition)
+        request = asyncio.create_task(client.post(
+            "/app/games/action",
+            data={"callback_data": advance},
+            headers={"accept": "application/json"},
+        ))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        # A different manager or a timer already moved to the next phase.
+        async with store._lock_game(game.game_id):
+            started.phase = "day_vote"
+            started.phase_started_at = datetime.now(timezone.utc)
+        release.set()
+        response = await asyncio.wait_for(request, timeout=2)
+
+        assert response.status_code == 400
+        assert response.json()["ok"] is False
+        assert "устарело" in response.json()["message"]
+        assert started.phase == "day_vote"
