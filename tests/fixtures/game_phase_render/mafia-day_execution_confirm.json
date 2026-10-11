@@ -38,7 +38,7 @@
       [
         {
           "text": "☠️ Закрыть казнь",
-          "callback_data": "game:adv:fixture:day_execution_confirm:2"
+          "callback_data": "game:adv:fixture:day_execution_confirm:2:0"
         }
       ],
       [
