@@ -2346,7 +2346,16 @@ async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int
         kwargs.pop("reply_to_message_id", None)
         sent = await bot.send_message(**kwargs)
 
-    await GAME_STORE.set_quiz_feed_message_id(game_id=game.game_id, message_id=sent.message_id)
+    recorded = await GAME_STORE.set_quiz_feed_message_id(
+        game_id=game.game_id, message_id=sent.message_id,
+    )
+    if recorded is None:
+        # The game finished while Telegram was sending this question.
+        # No live question may remain attached to a finished party.
+        try:
+            await bot.delete_message(chat_id=game.chat_id, message_id=sent.message_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
 
 
 def _build_private_phase_keyboard(game: GroupGame, *, actor_user_id: int) -> InlineKeyboardMarkup | None:
@@ -5107,7 +5116,10 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
         # The transition is protected by the GameStore per-game lock. A
         # concurrent click or phase switch cannot finalize the wrong state.
-        previous_quiz_feed_id = game.quiz_feed_message_id if action == "sok" and game.kind == "quiz" else None
+        # Capture quiz-feed cleanup targets under the same per-game lock as
+        # finish(); an unlocked snapshot can miss a concurrently published
+        # question. The live-question publisher also deletes late sends.
+        quiz_feed_cleanup_ids: list[int] = []
         finished_game = await GAME_STORE.finish(
             game_id=game.game_id,
             winner_text=(
@@ -5117,6 +5129,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             expected_status="started",
             expected_phase=expected_phase,
             expected_round_no=expected_round,
+            quiz_feed_cleanup_ids=quiz_feed_cleanup_ids,
         )
         if finished_game is None:
             await query.answer("Игра уже изменилась или завершена. Повторное действие не выполнено.", show_alert=True)
@@ -5132,9 +5145,9 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             )
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
-        if previous_quiz_feed_id is not None:
+        for quiz_feed_message_id in quiz_feed_cleanup_ids:
             try:
-                await bot.delete_message(chat_id=game.chat_id, message_id=previous_quiz_feed_id)
+                await bot.delete_message(chat_id=game.chat_id, message_id=quiz_feed_message_id)
             except (TelegramBadRequest, TelegramForbiddenError):
                 pass
 

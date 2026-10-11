@@ -110,6 +110,7 @@ class _FakeBotSession:
 class FakeBot:
     instances: list["FakeBot"] = []
     sent_messages: list[dict[str, object]] = []
+    deleted_messages: list[dict[str, int]] = []
 
     def __init__(self, token: str) -> None:
         self.token = token
@@ -122,6 +123,10 @@ class FakeBot:
 
     async def get_me(self):
         return SimpleNamespace(username="selara_test_bot")
+
+    async def delete_message(self, *, chat_id: int, message_id: int):
+        FakeBot.deleted_messages.append({"chat_id": chat_id, "message_id": message_id})
+        return True
 
 
 class DummySession:
@@ -153,6 +158,7 @@ async def _web_client(monkeypatch, state: WebRepoState):
 
     FakeBot.instances = []
     FakeBot.sent_messages = []
+    FakeBot.deleted_messages = []
 
     monkeypatch.setattr(web_app_module, "SqlAlchemyActivityRepository", lambda session: FakeActivityRepo(state))
     monkeypatch.setattr(web_app_module, "SqlAlchemyEconomyRepository", lambda session: FakeEconomyRepo(state))
@@ -902,3 +908,135 @@ async def test_started_game_web_cancel_requires_signed_second_step_and_is_one_sh
         assert duplicate.status_code in {400, 404}
         assert started.status == "finished"
         safe_edit.assert_awaited()
+
+
+
+@pytest.mark.asyncio
+async def test_web_confirm_stop_deletes_live_quiz_feed_after_success(monkeypatch) -> None:
+    # Review #253 P2: GameStore.finish clears the message ID in-place.
+    settings = _settings()
+    user_id, chat_id = 880, -6680
+    state = WebRepoState(
+        settings=settings,
+        user=UserSnapshot(telegram_user_id=user_id, username="quizhost",
+                          first_name="Host", last_name=None, is_bot=False),
+        manageable_groups=[_overview(chat_id, "Quiz Chat", bot_role="game_master")],
+    )
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit, _):
+        game, error = await store.create_lobby(
+            kind="quiz", chat_id=chat_id, chat_title="Quiz Chat",
+            owner_user_id=user_id, owner_label="Host", reveal_eliminated_role=True,
+        )
+        assert error is None and game is not None
+        _, status = await store.join(game_id=game.game_id, user_id=881, user_label="Guest")
+        assert status == "joined"
+        started, error = await store.start(game_id=game.game_id)
+        assert error is None and started is not None and started.status == "started"
+        await store.set_quiz_feed_message_id(game_id=game.game_id, message_id=1122)
+        assert started.quiz_feed_message_id == 1122
+
+        token = web_app_module._web_game_confirm_callback(
+            action="stop", game=started, user_id=user_id,
+            secret=settings.resolved_web_auth_secret,
+        )
+        forged = token[:-1] + ("0" if token[-1] != "0" else "1")
+        denied = await client.post(
+            "/api/miniapp/games/action", data={"callback_data": forged},
+            headers={"accept": "application/json"},
+        )
+        assert denied.status_code == 400
+        assert started.status == "started"
+        assert FakeBot.deleted_messages == []
+
+        success = await client.post(
+            "/api/miniapp/games/action", data={"callback_data": token},
+            headers={"accept": "application/json"},
+        )
+        assert success.status_code == 200 and success.json()["ok"] is True
+        assert started.status == "finished"
+        # The live quiz question is deleted even after finish() cleared the ID.
+        assert started.quiz_feed_message_id is None
+        assert FakeBot.deleted_messages == [{"chat_id": chat_id, "message_id": 1122}]
+        safe_edit.assert_awaited()
+
+        repeat = await client.post(
+            "/api/miniapp/games/action", data={"callback_data": token},
+            headers={"accept": "application/json"},
+        )
+        assert repeat.status_code in {400, 404}
+        assert FakeBot.deleted_messages == [{"chat_id": chat_id, "message_id": 1122}]
+
+
+
+@pytest.mark.asyncio
+async def test_quiz_publisher_deletes_question_sent_after_concurrent_finish(monkeypatch):
+    # A network send can return after the game was finished on another path.
+    # The late question must not be recorded on a finished game or left in chat.
+    store = GameStore()
+    game, error = await store.create_lobby(
+        kind="quiz", chat_id=-6740, chat_title="Concurrent Quiz",
+        owner_user_id=10, owner_label="Host", reveal_eliminated_role=True,
+    )
+    assert error is None and game is not None
+    _, status = await store.join(game_id=game.game_id, user_id=11, user_label="Guest")
+    assert status == "joined"
+    started, error = await store.start(game_id=game.game_id)
+    assert error is None and started is not None
+
+    monkeypatch.setattr(web_app_module.game_router_module, "GAME_STORE", store)
+    deleted = []
+
+    class DelayedBot:
+        async def send_message(self, **kwargs):
+            # Simulate the server accepting a question while another request
+            # commits a valid, atomic stop before send_message returns.
+            finished = await store.finish(
+                game_id=game.game_id, expected_status="started",
+                expected_phase=game.phase, expected_round_no=game.round_no,
+            )
+            assert finished is not None
+            return SimpleNamespace(message_id=1300)
+
+        async def delete_message(self, **kwargs):
+            deleted.append(kwargs)
+            return True
+
+    await web_app_module.game_router_module._sync_quiz_feed_message(
+        DelayedBot(), started, question_no=1,
+    )
+
+    assert started.status == "finished"
+    assert started.quiz_feed_message_id is None
+    assert deleted == [{"chat_id": -6740, "message_id": 1300}]
+    assert await store.set_quiz_feed_message_id(game_id=game.game_id, message_id=1301) is None
+
+
+@pytest.mark.asyncio
+async def test_quiz_finish_atomically_captures_feed_and_rejects_post_finish_updates():
+    store = GameStore()
+    game, error = await store.create_lobby(
+        kind="quiz", chat_id=-6741, chat_title="Quiz",
+        owner_user_id=10, owner_label="Host", reveal_eliminated_role=True,
+    )
+    assert error is None and game is not None
+    _, status = await store.join(game_id=game.game_id, user_id=11, user_label="Guest")
+    assert status == "joined"
+    started, error = await store.start(game_id=game.game_id)
+    assert error is None and started is not None
+    await store.set_quiz_feed_message_id(game_id=game.game_id, message_id=504)
+    ids: list[int] = []
+    finished = await store.finish(
+        game_id=game.game_id, expected_status="started",
+        expected_phase=game.phase, expected_round_no=game.round_no,
+        quiz_feed_cleanup_ids=ids,
+    )
+    assert finished is started and finished.status == "finished"
+    assert ids == [504] and finished.quiz_feed_message_id is None
+    # A late publisher cannot re-attach a new live-question message.
+    assert await store.set_quiz_feed_message_id(game_id=game.game_id, message_id=505) is None
+    # A stale/duplicate finish does not produce another deletion target.
+    assert await store.finish(
+        game_id=game.game_id, expected_status="started",
+        quiz_feed_cleanup_ids=ids,
+    ) is None
+    assert ids == [504]

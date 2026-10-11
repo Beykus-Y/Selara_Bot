@@ -1418,6 +1418,11 @@ class GameStore:
             game = self._by_id.get(game_id)
             if game is None:
                 return None
+            # A send can complete after another worker stopped the quiz.
+            # Never register a new live-question message on a finished game;
+            # the caller must delete the just-sent message when None is returned.
+            if message_id is not None and (game.kind != "quiz" or game.status != "started"):
+                return None
             game.quiz_feed_message_id = message_id
             return game
 
@@ -2090,6 +2095,7 @@ class GameStore:
         expected_status: str | None = None,
         expected_phase: str | None = None,
         expected_round_no: int | None = None,
+        quiz_feed_cleanup_ids: list[int] | None = None,
     ) -> GroupGame | None:
         """Finish atomically, optionally rejecting stale lifecycle confirmations.
 
@@ -2108,6 +2114,11 @@ class GameStore:
             if expected_round_no is not None and game.round_no != expected_round_no:
                 return None
 
+            # Snapshot the live quiz-feed ID *inside* this same game lock:
+            # the external Telegram delete is issued only after a committed
+            # finish. A concurrent publisher cannot insert between read/finish.
+            if quiz_feed_cleanup_ids is not None and game.quiz_feed_message_id is not None:
+                quiz_feed_cleanup_ids.append(game.quiz_feed_message_id)
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
