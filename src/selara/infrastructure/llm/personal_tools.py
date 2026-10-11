@@ -57,8 +57,13 @@ _VISUAL_REQUEST_RE = re.compile(
     r"\b(?:нарисуй|картинк\w*|изображени\w*|схем\w*|рисунк\w*|иллюстрац\w*|артефакт\w*|инфографик\w*)\b",
     re.I,
 )
+# A code word can be the SUBJECT of an image ("схема кода"), not an
+# instruction to output source code. Require an output verb for generic code
+# nouns; SVG-markup requests in either word order are explicitly code intent.
 _EXPLICIT_CODE_RE = re.compile(
-    r"\b(?:код(?:а|ом|у|е|ы|ов)?|исходник\w*|пример\s+svg|svg[-\s]*разметк\w*)\b",
+    r"\b(?:(?:покажи|выведи|напиши|пришли|дай)\b.{0,80}\b"
+    r"(?:код(?:а|ом|у|е|ы|ов)?|исходник\w*|svg[-\s]*разметк\w*|разметк\w*\s+svg)"
+    r"|(?:svg[-\s]*разметк\w*|разметк\w*\s+svg))\b",
     re.I,
 )
 _ARTIFACT_CLAIM_RE = re.compile(
@@ -73,6 +78,7 @@ _UNFULFILLED_TOOL_NOTICE = (
 # Detect only concrete promises, not explanations of tool capabilities or a refusal.
 _TOOL_PROMISE_RE = re.compile(
     r"(?:\b(?:сейчас|сразу|теперь)\b.{0,90}\b(?:вызову|запущу|прочитаю)\b"
+    r"|\b(?:я\s+)?(?:попробую|собираюсь|планирую|хочу)\s+вызвать\b"
     r"|\b(?:вызову|запущу|прочитаю)\b).{0,90}\b(?:read_skill|get_artifact|create_artifact|send_artifact)\b",
     re.IGNORECASE | re.DOTALL,
 )
